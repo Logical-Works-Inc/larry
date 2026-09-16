@@ -110,3 +110,19 @@ trace does not include the separately executed CLI subprocesses; branch/conditio
 coverage is unmeasured. An initial trace reporting command failed sorting a
 Python 3.14 non-line sentinel, then was corrected to report actual positive line
 numbers. No total-coverage or universal checker correctness claim is made.
+
+## GitHub verification boundary
+
+PR #1 is open against unprotected main in the confirmed private repository.
+Hosted runs 35040820654 and 35040872578 failed before execution (zero steps,
+runner_id 0). The check annotations contain this literal failure:
+
+> The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings
+
+`gh run view 35040872578 --repo srinji-kaggss/Rocco --log-failed` returned
+`log not found: 104620215078`; the jobs and annotation APIs established that no
+job steps started. Recovery inspection found Actions enabled and zero registered
+repository runners. No existing no-cost runner was available for this repo.
+Local checks are not relabeled as hosted CI. The workflow remains enabled and
+unchanged; no billing change, new runner service, bypass or fabricated check was
+made. Hosted CI is unresolved at the open-PR endpoint, not accepted as passing.
