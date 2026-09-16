@@ -13,11 +13,12 @@ sources: [Director conversation 2026-09-15, /AGENTS.md, /specification.md]
 
 # Scope: this repository, not another product feature
 
-Governance version 1. The Director asked for strict and self-updating governance
-in the Rocco repo being created. AGENTS.md is the operating entry point;
+Governance version 1.1. The Director asked for strict and self-updating
+governance in the Rocco repo being created. AGENTS.md is the operating entry point;
 specification.md owns product requirements; research-ledger.md owns source claims;
-log.md owns accepted directions and change evidence. README/index only navigate.
-No background policy writer, runtime governance subsystem or hook is implied.
+log.md owns accepted directions and change evidence. README, index and the
+docs/ tree navigate and summarize; they never redefine a canonical inventory
+item. No background policy writer, runtime governance subsystem or hook is implied.
 
 ## Fixed obligations and change control
 
@@ -65,7 +66,9 @@ arbitrary future agent will obey every prose instruction.
 
 ## What the executable gate checks
 
-- Expected documents, supported frontmatter structure and valid local links.
+- Expected documents, supported frontmatter structure and valid local links,
+  including the admitted docs/ tree with the same frontmatter and
+  traceability rules as the root documents.
 - Unique contiguous requirement, decision, falsifier, execution-cell and axis IDs.
 - All requirement rows bind defined decisions and falsifiers; references resolve.
 - The frozen minimum inventories cannot silently shrink; additions remain possible.
@@ -101,6 +104,7 @@ diff review is necessary, especially for changes to this contract or test gates.
 | File family | Requirement and predicted effect | Verification and unresolved limit |
 |---|---|---|
 | README/index/specification | One navigable final proposed specification, original and derived requirements plus visuals | Inventory/link/diff and renderer checks; product behavior NOT RUN |
+| docs/ tree | Final navigable structure with full OKF frontmatter and zero competing canonical sections | Gate admission, docs-tree negative controls, root-relative link checks; content is navigation, not authority |
 | research-ledger/log | Pin sources, preserve corrections, distinguish settled decisions and unknowns | Source anchors and inventory reconciliation; not exhaustive source audit |
 | AGENTS/GOVERNANCE | Strict same-change maintenance instead of stale rules or product scope creep | Structural anchors and independent review; no claim of perfect agent compliance |
 | tools/tests/workflow/CODEOWNERS | Deterministic gate, negative controls, bounded CI and human routing | Actual local/CI results and failing mutants; not enforcement without branch protection |

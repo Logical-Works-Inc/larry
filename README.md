@@ -6,21 +6,25 @@ resource: /README.md
 tags: [rocco, specification, agent-runtime]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: repository bootstrap; not runtime verification}
-status: documentation-only
+status: documentation-only-final-structure-v1.1
 stale_after: 2026-10-15
-sources: [Director decisions in conversation 2026-09-15]
+sources: [Director decisions in conversations 2026-09-15 and 2026-09-16]
 ---
 
 # Rocco
 
 Rocco is the working name for a persistent assistant with disposable workers,
 explicit authority, accountable effects and measurable learning. This private
-repository holds its specification, not an implemented or validated runtime.
+repository holds its final proposed specification, not an implemented or
+validated runtime.
 
 Start with the [specification index](index.md), the [visual specification](specification.md)
 and [source review](research-ledger.md). Repository rules are in [AGENTS.md](AGENTS.md)
 and [GOVERNANCE.md](GOVERNANCE.md); accepted directions and changes are in [log.md](log.md).
-No application, model, service, hook or benchmark runner is installed by this repository.
+The finalized structure map lives under [docs/](/docs/README.md): architecture
+overview, the dependency root ([Logicalworks-Crates](/docs/dependencies/README.md)
+first), and the evaluation structure. No application, model, service, hook or
+benchmark runner is installed by this repository.
 
 ## Deterministic repository checks
 

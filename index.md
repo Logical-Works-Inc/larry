@@ -6,7 +6,7 @@ resource: /index.md
 tags: [rocco, strategy, governance]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: source inspection; document validation recorded separately}
-status: final-proposed-v1-awaiting-architecture-approval
+status: final-proposed-v1.1-awaiting-architecture-approval
 stale_after: 2026-10-15
 sources: [Director conversation 2026-09-15]
 ---
@@ -26,7 +26,10 @@ human can accomplish more with less supervision and total computation.
    design, nine-axis targets and implementation cells.
 2. [Research and reuse ledger](research-ledger.md): inspected code, primary
     sources, external reviews, rejected claims and unresolved dependencies.
-3. [Repository governance](GOVERNANCE.md), [agent instructions](AGENTS.md), and
+3. Finalized structure: [architecture](/docs/architecture/README.md),
+   [dependency root](/docs/dependencies/README.md) and
+   [evaluation structure](/docs/evaluation/README.md).
+4. [Repository governance](GOVERNANCE.md), [agent instructions](AGENTS.md), and
    [decision/change record](log.md): strict maintenance rules and actual checks.
 
 ## Authority and scope
@@ -62,8 +65,9 @@ Logical-DB; adjustable automatic decay and user-facing tuning; private Rocco
 repository with strict self-maintaining governance. Other architecture decisions
 remain proposed, not implicitly ratified by the request to finish this document.
 
-The 70-requirement inventory preserves R01–R43 and adds R44–R70 from the
-Codex/OpenCode/OpenClaw/Letta review. There are 54 planned falsifiers, not 54 passes.
+The 78-requirement inventory preserves R01–R43, adds R44–R70 from the
+Codex/OpenCode/OpenClaw/Letta review and R71–R78 from the 2026-09-16 SOTA
+gap research. There are 62 planned falsifiers, not 62 passes.
 
 ## File-specific excellence record
 

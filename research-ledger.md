@@ -6,13 +6,16 @@ resource: /research-ledger.md
 tags: [rocco, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
-status: specification-v1-source-review-complete-runtime-unverified
+status: specification-v1.1-source-review-complete-runtime-unverified
 stale_after: 2026-10-15
 sources:
-  - Director conversation 2026-09-15
+  - Director conversations 2026-09-15 and 2026-09-16
   - https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
   - https://www.anthropic.com/engineering/multi-agent-research-system
   - https://github.com/MatrAIx-ai/MatrAIx-Persona-8B
+  - https://arxiv.org/abs/2609.00006
+  - https://modelcontextprotocol.io/specification/latest
+  - https://a2a-protocol.org/latest/
 ---
 
 # Research ledger
@@ -275,6 +278,59 @@ licenses before executing. No benchmark was downloaded or run.
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo), `089ed468cf3ed0322acc66b0211f26d9d90dbf60` | Prompt injection attacks/defenses. Finite suite coverage is not general security assurance. |
 | MatrAIx, pinned above | Persona simulation; keep satisfaction/adherence separate from verified task outcomes. |
 | Independent research tasks, lifecycle fixtures and consenting humans | Fill citation/freshness, real failure recovery and actual usability gaps; not substitutes for public comparators. |
+
+## 2026-09-16 SOTA gap research and reviewer triad
+
+Director asked for deep research against SOTA harnesses using the arXiv API
+and 9Router, then added ChatGPT/Gemini (BrowserOS) and a Claude review.
+Evidence classes: READ = inspected output this session; DOC = source claim.
+No benchmark was run; no runtime evidence exists. Dispositions below
+motivated R71–R78 and D36–D41; approval of those decisions is still pending.
+
+### Reviewer triad (architecture summaries only; no private source submitted)
+
+| Reviewer / location | Finding class | Disposition |
+|---|---|---|
+| [Gemini](https://gemini.google.com/app/6266b06c6491a709), READ via BrowserOS | reconciliation oracle per mutating adapter; compensation-of-compensation loop bound; budget-lease TTL with reclaim; speculation-to-context merge; tombstone compaction; TUI-first versus 1M-CCU latency exposure; provider saturation layer | Accepted as design counterexamples; folded into D36/D39/D40/D38 and the R-row set |
+| [ChatGPT](https://chatgpt.com/c/6aab1df5-3e08-83ea-a2be-336b0fddb49d), READ via BrowserOS; consulted its stored Rocco/Forge ratification memory | intent binding (version, parameters, preconditions, authority freshness, Zanzibar-cited); per-adapter recovery contract (AWS idempotency pattern); replay separate from live resumption (Temporal-cited); dependency/authority/evidence graphs separate; interacting-fault combined journey; 1M definitions | Accepted; folded into D36/D41 and the combined-journey falsifier E62 |
+| Claude thread `claude.ai/chat/25912676-d725-448f-8ee1-558e5ed4932f`, full text relayed by the Director | eight-point pressure test: reducer purity, reconciliation metadata, live-vs-snapshotted attenuation, reservation leaks, supersession/decay/pinning edges, speculation boundary, reducer sharding, 54-case derivation | Points 1/2/4/5a/5c/8 accepted (D36/D39/D40/D41); point 3 answered by existing effect-boundary revalidation plus a new lookup-cost obligation; points 6/7 already satisfied by D10/D22 — recorded as confirmed, not changed |
+
+### arXiv API receipts (2026-09-16, Atom API, abstract-level)
+
+| ID | Finding | Level and consequence |
+|---|---|---|
+| [2609.00006](https://arxiv.org/abs/2609.00006) | Eleven-system source anatomy: skills lead MCP in adoption (9/11 vs 8/11); no framework imports, no vector retrieval; harness became platform in 2026-H1 | READ full abstract via 9Router; motivates D37 and the hooks/divergence note in D28's favor |
+| [2609.11987](https://arxiv.org/abs/2609.11987) | Vendor-native harness pairings skew results; contamination-controlled private suite isolates the harness effect | DOC; D41/E61 |
+| [2608.27969](https://arxiv.org/abs/2608.27969) | Long-horizon coding needs composable, evidence-reconfiguring harnesses beyond static ones | DOC; background for D23/D41 |
+| [2609.01481](https://arxiv.org/abs/2609.01481) | Harness-of-harness multi-day autonomous development with continual improvement loops | DOC; bounded-learning context for D06 |
+| [2609.08258](https://arxiv.org/abs/2609.08258) | Measured agent-memory systems return and act on revoked facts at retrieval | DOC; D40/E62 revocation-enforcement falsifier |
+| [2609.14758](https://arxiv.org/abs/2609.14758) | 14.10% of tool-augmented responses assert values the unusable payload cannot support | DOC; D41/E62 post-failure honesty falsifier |
+| [2609.12345](https://arxiv.org/abs/2609.12345) | Benchmarks score final success, not error localization/recovery in parallel tool use | DOC; D41/E61 process-level scoring |
+| [2609.11677](https://arxiv.org/abs/2609.11677) | Trained runtime-harness evolution improves agents (Ecdysis) | DOC; bounds the D06 self-improvement stance |
+| [2609.13543](https://arxiv.org/abs/2609.13543) | Hours-long runs under contention surface failures short benchmarks miss (Asclepius) | DOC; C09 duration-under-contention obligation |
+| [2608.22215](https://arxiv.org/abs/2608.22215), [2608.22767](https://arxiv.org/abs/2608.22767), [2609.05510](https://arxiv.org/abs/2609.05510) | Dual-layer memory write routing; experience-amortized retrieval; months-long memory reliability engineering | DOC; background obligations for D02/D27/D33, no mechanism adopted without matched evidence |
+| [2608.26004](https://arxiv.org/abs/2608.26004), [2608.28439](https://arxiv.org/abs/2608.28439) | Context-asymmetric speculative decoding; dispatch-level instrumentation catches fabrication fidelity checks miss | DOC; background for D10/D13, no adoption claim |
+
+### Protocol and product receipts (9Router fetches and Google, 2026-09-16)
+
+| Source | Finding | Consequence |
+|---|---|---|
+| [MCP specification](https://modelcontextprotocol.io/specification/latest), READ | latest schema `2026-07-28`; JSON-RPC, per-request capability negotiation, Resources/Prompts/Tools features | D37 pins one schema revision per adapter; elicitation/sampling get explicit decisions |
+| [A2A protocol](https://a2a-protocol.org/latest/), READ | opaque agents, agent-card discovery, tiered extension governance | D37 requires an explicit compatibility/refusal boundary |
+| agentskills.io integration page, FETCH FAILED (404); llms.txt pointer retained | official Agent Skills docs exist; exact package spec not yet inspected | open follow-up: pin the skills package spec before C01 |
+| Claude Code changelog (Sept 2026), READ via BrowserOS | per-command network allowlists with sandboxing; session forking and background sessions; OTEL cost attribution incl. agent/skill/MCP/vcs tags; gateway pricing parity; MCP reconnect and deferred tool loading | R74/D38 receipts; also the lane-B baseline feature set |
+
+### Rejected or already-satisfied review claims
+
+- "Speculation may blur the propose/authorize boundary": already satisfied by
+  D10's explicit external-effect prohibition; recorded as confirmed.
+- "Single global reducer cannot scale": already answered by D22 per-scope
+  fenced owners; recorded as confirmed, no rewrite indicated.
+- "Pick live-checked or snapshotted attenuation": effect-boundary
+  revalidation plus bounded offline leases is already the Cell 04 choice;
+  the new obligation is only the parent-chain lookup cost budget.
+- Reviewer praise, external model agreement and the 90-line
+  minimum-harness scaffold are advisory only; they ratify nothing.
 
 ## Final-review disposition
 

@@ -182,6 +182,34 @@ class GovernanceTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(set(report["sha256"]), set(self.documents))
 
+    def test_docs_tree_is_admitted_and_validated(self):
+        self.assertIn("docs/README.md", self.documents)
+        self.assertTrue(validate(self.documents)["ok"])
+
+    def test_docs_tree_frontmatter_is_enforced(self):
+        docs = dict(self.documents)
+        docs["docs/dependencies/README.md"] = docs["docs/dependencies/README.md"].replace(
+            "status:", "statuz:", 1)
+        result = validate(docs)
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(any("docs/dependencies/README.md" in error
+                            and "missing frontmatter keys" in error
+                            for error in result["errors"]), result)
+
+    def test_docs_tree_undefined_reference_is_rejected(self):
+        docs = dict(self.documents)
+        docs["docs/README.md"] += "\nStray reference R99 must fail traceability.\n"
+        self.assertTrue(any("docs/README.md: undefined R references ['R99']" in error
+                            for error in validate(docs)["errors"]))
+
+    def test_docs_tree_escaping_link_is_rejected(self):
+        docs = dict(self.documents)
+        self.assertIn("](/docs/architecture/README.md)", docs["docs/README.md"])
+        docs["docs/README.md"] = docs["docs/README.md"].replace(
+            "](/docs/architecture/README.md)", "](../docs/architecture/README.md)", 1)
+        self.assertTrue(any("docs/README.md: unresolved or escaping local link" in error
+                            for error in validate(docs)["errors"]))
+
     @unittest.skipIf(sys.platform == "win32", "POSIX process-crash control; Windows remains separate")
     def test_owned_checker_crash_and_recovery(self):
         before = validate(load_documents(ROOT))["sha256"]

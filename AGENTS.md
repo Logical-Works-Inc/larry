@@ -8,7 +8,7 @@ generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: Director decisions and governing contracts}
 status: active
 stale_after: 2026-10-15
-sources: [Director conversation 2026-09-15, /GOVERNANCE.md, /specification.md]
+sources: [Director conversations 2026-09-15 and 2026-09-16, /GOVERNANCE.md, /specification.md]
 ---
 
 # Repository authority
@@ -31,6 +31,9 @@ the Director to restate an already clear request.
   pretend adapter or erased requirement. Adjustable decay/tuning stays in the spec.
 - Sentinel, Secure-Authority, Logical-DB, Nova, Moo and Logicalworks-Crates retain
   their owners. Harness sources are reference evidence, not a wholesale import.
+- Logicalworks-Crates is the core starting point for dependencies: every Rocco
+  dependency chain roots there, sibling adapters follow the order in
+  /docs/dependencies/README.md, and no component roots its graph elsewhere.
 - MatrAIx is one evaluation source. Do not modify it or substitute simulated
   satisfaction for independent task outcomes or real-human evidence.
 - Product implementation needs its separate architecture approval and proof gates.
@@ -64,9 +67,14 @@ Do not run irreversible upstream cleanup examples. Never commit credentials,
 raw private conversations or user data as fixtures. Reports should use synthetic
 inputs or bounded redacted source evidence.
 
-Every knowledge Markdown document uses the existing OKF-style frontmatter.
-Generated records remain agent-verified; do not mark them human-verified without
-the actual confirmation. Separate READ, DOC, TARGET, ESTIMATE, MEASURED, UNKNOWN
+Every knowledge Markdown document — root or under docs/ — uses the existing
+OKF-style frontmatter with the full required field set. The docs/ tree
+navigates and summarizes; it never redefines a requirement, decision,
+falsifier or execution cell defined in specification.md, and new documents
+enter only through the same structural gate. Generated records remain
+agent-verified; do not mark them human-verified without
+the actual confirmation. Separate READ, DOC, TARGET, ESTIMATE, MEASURED,
+UNKNOWN
 and NOT RUN. A diagram, passing checker, reviewer agreement or receipt is not
 runtime proof. All nine architecture axes in specification.md remain binding.
 For each edit record requirement, predicted effect, checks and unresolved claims.

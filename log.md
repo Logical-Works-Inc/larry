@@ -8,14 +8,14 @@ generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: explicit conversation decisions and source inspection}
 status: active
 stale_after: 2026-10-15
-sources: [Director conversation 2026-09-15, /specification.md, /research-ledger.md]
+sources: [Director conversations 2026-09-15 and 2026-09-16, /specification.md, /research-ledger.md]
 ---
 
 # Current specification inventory
 
-requirements: 70
-decisions: 35
-falsifiers: 54
+requirements: 78
+decisions: 41
+falsifiers: 62
 execution_cells: 13
 axes: 9
 planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50
@@ -38,6 +38,41 @@ Counts are document structure, not implemented features or passing tests.
 
 Finalizing the specification is not blanket approval of every proposed
 architecture decision, implementation work or billable benchmark execution.
+
+## 2026-09-16: final structure, dependency root and SOTA gap fold-in
+
+| Direction | Disposition |
+|---|---|
+| Create the full final repository structures, READMEs and documentation in full OKF so the package is finalized | docs/ tree created (README, architecture, dependencies, evaluation); every document carries the complete OKF field set; structural gate extended to admit and validate the tree with adversarial negative controls; governance version 1.1 |
+| Logicalworks-Crates is the core starting point for dependencies | Settled starting point recorded in AGENTS.md and /docs/dependencies/README.md with ledger-pinned revisions; D21 reuse mechanics unchanged and still pending ratification |
+| Fold the 2026-09-16 SOTA gap research into the specification | R71–R78, D36–D41 and E55–E62 added as proposed, approval pending; triad review dispositions and arXiv/protocol receipts recorded in research-ledger.md |
+
+Semantic change: specification v1.1 adds pure-authorization replay identity,
+unified reconciliation metadata, ecosystem protocol adapters (Agent Skills,
+pinned MCP revision, A2A boundary), operations telemetry with cost
+attribution and request shedding, budget leases, memory edge semantics and
+evaluation hardening. Falsifier inventory grows 54 to 62; the planned crash
+fraction stays 9/62 (above 10 percent). Every new case is allocated to an
+execution cell in Cell 11. The docs/ tree adds navigation only; no canonical
+inventory item is defined twice. No Rust files changed; no runtime, model,
+hardware or human result is implied.
+
+Authority: the Director requested the final structure, the OKF finalization
+and the Logicalworks-Crates dependency root in conversation 2026-09-16.
+External reviewer content (Gemini, ChatGPT, Claude) remains advisory.
+
+Local gate verification: `python3 tools/check_governance.py` passed with 78
+requirements, 41 decisions, 62 falsifiers, 13 execution cells and 9 axes;
+`unittest discover -s tests -v` passed 38 tests (34 prior plus 4 new
+docs-tree negative controls). `git diff --check` passed. Two intermediate
+failures were retained and repaired: the checker correctly reported log
+inventory drift while the specification was already extended (12 downstream
+test failures until counts were reconciled), and one new negative control
+first mutated a string absent from docs/README.md and then asserted a wrong
+error-message substring; the control now mutates a real link and matches the
+validator's actual "unresolved or escaping local link" message. The drift
+detection was exercised, not weakened. Mermaid rendering is NOT claimed for
+this change: no new diagrams were added, and fence checks do not render.
 
 ## Corrective lessons with concrete repair
 
