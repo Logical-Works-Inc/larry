@@ -1,0 +1,75 @@
+---
+type: Index
+title: Rocco specification index
+description: Final proposed specification v1, harness research, repository governance and falsifiable completion plan.
+resource: /index.md
+tags: [rocco, strategy, governance]
+generated: {by: opencode, at: 2026-09-15}
+verified: {by: opencode, method: source inspection; document validation recorded separately}
+status: final-proposed-v1-awaiting-architecture-approval
+stale_after: 2026-10-15
+sources: [Director conversation 2026-09-15]
+---
+
+# Rocco: a persistent assistant with an accountable runtime
+
+**Final proposed specification v1, not an approved implementation or runtime readiness claim.**
+
+The strategic bet: spend developer effort on durable intent, effect safety,
+context construction, learning and verification so that a weaker model and its
+human can accomplish more with less supervision and total computation.
+
+## Read in this order
+
+1. [Specification and completion notebook](specification.md): PRD, all source
+   requirements, candidate decisions, graph, state/failure semantics, evaluation
+   design, nine-axis targets and implementation cells.
+2. [Research and reuse ledger](research-ledger.md): inspected code, primary
+    sources, external reviews, rejected claims and unresolved dependencies.
+3. [Repository governance](GOVERNANCE.md), [agent instructions](AGENTS.md), and
+   [decision/change record](log.md): strict maintenance rules and actual checks.
+
+## Authority and scope
+
+- The Director subsequently selected the working name Rocco and explicitly
+  authorized the private `srinji-kaggss/Rocco` documentation repository. These
+  documents were moved from the Forge scratchpad; no product code was imported.
+- Preserve `forge-harness` and `forge-sdk` intact as reference implementations.
+  Do not silently repair, import, restructure or publish their engine code.
+- The Director has authorized specification finalization and repo governance. Notable
+  decisions require human approval before implementation. `approval: pending`
+  is not a veto on research or on completing this package.
+- Sentinel, Secure-Authority, Logical-DB, Nova, Moo and Logicalworks-Crates retain
+  their named responsibilities. Discover and reuse contracts; do not create
+  parallel authorities when an integration is missing.
+- The notebook consolidates the active strategy. It does not delete historical
+  requirements or rewrite old repositories as if their contents were approved.
+- Markdown cells and embedded Mermaid are the canonical notebook source. No
+  Jupyter server, Python runtime, generated website or duplicate `.ipynb` is
+  required to read it. Executable evaluation cells come after approval and are
+  explicitly NOT RUN today.
+
+## How to approve
+
+Approve or amend decisions by `D01`–`D35`, or approve the specification as a package
+with explicit exceptions. Record the exact document revision and approver;
+never infer approval from silence or a model review. Approval adopts decisions
+and targets, not claims that tests, human studies or million-user trials passed.
+
+Already settled by the Director: core + TUI first; bounded unattended work;
+adapters rather than compatibility clones; memory implementation waits for
+Logical-DB; adjustable automatic decay and user-facing tuning; private Rocco
+repository with strict self-maintaining governance. Other architecture decisions
+remain proposed, not implicitly ratified by the request to finish this document.
+
+The 70-requirement inventory preserves R01–R43 and adds R44–R70 from the
+Codex/OpenCode/OpenClaw/Letta review. There are 54 planned falsifiers, not 54 passes.
+
+## File-specific excellence record
+
+Requirement: one navigable source of current strategy without another docs maze.
+Axes: all nine are indexed by the notebook; decoupling and epistemic honesty are
+directly affected here. Predicted outcome: one entry point with explicit approval
+and governance boundaries; no competing specification in the old scratchpad.
+Verification: local link and requirement-inventory validation. Unresolved:
+human approval, implementation and all product acceptance evidence.

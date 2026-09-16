@@ -17,9 +17,25 @@ Rocco is the working name for a persistent assistant with disposable workers,
 explicit authority, accountable effects and measurable learning. This private
 repository holds its specification, not an implemented or validated runtime.
 
-The initial specification is delivered through a pull request against this
-documentation-only baseline. No application, model, service, hook or benchmark
-runner is installed by this repository.
+Start with the [specification index](index.md), the [visual specification](specification.md)
+and [source review](research-ledger.md). Repository rules are in [AGENTS.md](AGENTS.md)
+and [GOVERNANCE.md](GOVERNANCE.md); accepted directions and changes are in [log.md](log.md).
+No application, model, service, hook or benchmark runner is installed by this repository.
+
+## Deterministic repository checks
+
+Requires Python 3.11+ and its standard library only:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 tools/check_governance.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+git diff --check
+```
+
+The checker emits the current inventory and source digests; CI refreshes its
+report on every push/PR. It verifies specification structure, not product behavior.
+Tests deliberately corrupt in-memory document fixtures to prove rejection. They
+do not launch models or modify the specification.
 
 The Director selected core and TUI first, bounded unattended work, adapters rather
 than compatibility clones, and user-adjustable memory decay whose implementation
