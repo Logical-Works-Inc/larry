@@ -13,6 +13,7 @@ DOCUMENTS = (
     "README.md", "index.md", "specification.md", "research-ledger.md",
     "AGENTS.md", "GOVERNANCE.md", "log.md",
 )
+DOCS_DIRECTORY = "docs"
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 FIELDS = {
     "type", "title", "description", "resource", "tags", "generated",
@@ -199,17 +200,19 @@ def validate(documents):
 
 def load_documents(root):
     documents = {}
-    for name in DOCUMENTS:
-        path = root / name
+    docs_root = root / DOCS_DIRECTORY
+    nested = sorted(docs_root.rglob("*.md")) if docs_root.is_dir() else []
+    for path in [root / name for name in DOCUMENTS] + nested:
+        relative = path.relative_to(root).as_posix()
         if path.is_symlink():
-            raise ValueError(f"symbolic-link document is not admitted: {name}")
+            raise ValueError(f"symbolic-link document is not admitted: {relative}")
         if not path.exists():
             continue
         with path.open("rb") as source:
             content = source.read(MAX_DOCUMENT_BYTES + 1)
         if len(content) > MAX_DOCUMENT_BYTES:
-            raise ValueError(f"document exceeds byte limit: {name}")
-        documents[name] = content.decode("utf-8")
+            raise ValueError(f"document exceeds byte limit: {relative}")
+        documents[relative] = content.decode("utf-8")
     return documents
 
 

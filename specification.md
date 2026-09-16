@@ -6,15 +6,15 @@ resource: /specification.md
 tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
-status: final-proposed-v1-awaiting-architecture-approval
+status: final-proposed-v1.1-awaiting-architecture-approval
 stale_after: 2026-10-15
 sources:
-  - Director requirements and corrections in conversation 2026-09-15
+  - Director requirements and corrections in conversations 2026-09-15 and 2026-09-16
   - /research-ledger.md
   - /Users/srinji/.okf/governance/contract/frontier-universal-assurance.md
 ---
 
-# Rocco specification v1 — frontload the cognitive work
+# Rocco specification v1.1 — frontload the cognitive work
 
 **Approval: pending. Runtime experiments: NOT RUN. Human participants: 0.**
 This is a concrete decision package, not a collection of equally ranked options.
@@ -157,6 +157,26 @@ pass/fail journey below; no source inspection is counted as a passing journey.
 | R68 | Moo/Codex | Conflict-aware change previews and undo that preserves unrelated human edits | D08 | E52 |
 | R69 | Research review | Answer citations retain source version, retrieval time and claim/evidence distinction | D13 | E53 |
 | R70 | Harness synthesis | Bounded no-progress loops with causal diagnostics, not endless agent chatter | D09 | E54 |
+
+### SOTA-gap requirements (2026-09-16 research)
+
+Derived from the 2026-09-16 harness gap research: the Gemini/ChatGPT/Claude
+triad review, the eleven-system harness study, the MCP/A2A/Agent Skills
+receipts and the adversarial-memory and honesty literature. Source anchors,
+evidence levels and rejected claims are in the research ledger. Every row
+binds a decision and falsifier; no research finding is accepted as runtime
+evidence.
+
+| ID | Origin | Required behavior | Decision | Acceptance |
+|---|---|---|---|---|
+| R71 | Claude triad review 2026-09-16 | Authorization purity: reducer decisions replay bit-identically from the recorded effect log under pinned policy/capability/budget snapshots | D36 | E55 |
+| R72 | Gemini/ChatGPT/Claude reviews 2026-09-16 | Unified effect metadata carries an explicit reconciliation strategy; permanent OutcomeUnknown is a declared disposition, never a blind retry | D36 | E56 |
+| R73 | Harness study 2609.00006; MCP/A2A receipts | Ecosystem adapters: Agent Skills package format, pinned MCP schema revision with elicitation/sampling decisions, A2A agent-card compatibility boundary | D37 | E57 |
+| R74 | Claude Code changelog receipts 2026-09 | Operations telemetry: cost/token attribution by agent, skill, MCP server and repository; gateway cost parity; LLM request-shedding queue; per-command egress allowlists | D38 | E58 |
+| R75 | Triad reviews 2026-09-16 | Budget reservations are leases with expiry, reclaimed through the ordinary reconciliation machinery, bounded by parent budgets | D39 | E59 |
+| R76 | Claude triad review 2026-09-16 | Memory edge semantics: decay freeze on supersession, pin survival against machine-derived supersession, declared compaction reversibility and tombstone provenance | D40 | E60 |
+| R77 | arXiv 2609.11987/2609.12345 | Harness-effect isolation on a contamination-controlled private suite and process-level recovery scoring in evaluation | D41 | E61 |
+| R78 | arXiv 2609.08258/2609.14758 | Adversarial honesty and memory hygiene: revoked facts are not acted on, tool-failure reporting stays truthful, interacting-fault journeys are planned and the inventory carries a derivation note | D41 | E62 |
 
 ## Cell 02 — candidate architecture graph
 
@@ -825,6 +845,77 @@ After retention expiry, stale replicas must rebootstrap rather than resurrect
 removed data. History redaction makes affected replay explicitly incomplete.
 E45/E50; owner release and storage integration.
 
+### D36 — authorization is pure and reconciliation is explicit effect metadata
+
+Choose authorization as a pure function of the declared effect, a policy
+snapshot, capability state and the reserved budget snapshot: no wall-clock
+time, live external balance or network state is read inside the reducer.
+Replaying the recorded effect log under pinned inputs yields bit-identical
+authorization decisions; any divergence is a new reducer version entering at
+an explicit checkpoint, never silent reinterpretation. One effect-metadata
+schema unifies capability declaration and recovery contract:
+`reconciliation_strategy` is queryable, idempotent-retry-safe,
+requires-human or always-compensate. OutcomeUnknown can be permanent for
+adapters without query or idempotency support; such effects hold visibly
+without blocking unrelated work. Cancellation does not release money an
+unresolved effect may already have spent; compensation carries its own
+authority and budget, and compensation chains are depth-bounded. E55/E56;
+owner Rocco control plane with adapter contracts.
+
+### D37 — ecosystem protocol adapters: Agent Skills, MCP, A2A
+
+Choose the Agent Skills package format as a primary admitted input for
+discovered skills; frontmatter and scripts stay untrusted until quarantine
+and D06 promotion. Pin one target MCP schema revision per adapter; map MCP
+elicitation onto durable scoped questions and route MCP sampling requests
+through the MD authority gate like any effect; unsupported protocol
+features are declared refusals. Make an explicit A2A adapter decision for
+federation: which agent-card fields map to Rocco capability manifests and
+which identity claims are refused. These are compatibility surfaces, not
+authority transfers. E57; owner tool integration.
+
+### D38 — operations telemetry and provider-admission pressure
+
+Choose OpenTelemetry export with repository/ref, agent, skill and MCP-server
+attribution on cost and token metrics, redacted by policy; gateway-injected
+pricing keeps reported cost equal to the spend meter. Per-command egress
+allowlists are declared through Sentinel and enforced at the effect
+boundary. Add an admitted LLM request-shedding/priority queue so the
+control plane degrades by explicit policy under provider rate limits
+instead of starving. Telemetry is evidence, never an authorization input.
+E58; owner observability with Sentinel/Nova integration.
+
+### D39 — budget reservations are leases
+
+Choose leases with explicit TTL and renewal-within-standing-limits over
+indefinite reservations. Expiry and reclaim flow through the ordinary
+reconciliation machinery: a reclaim is an admitted effect, the terminated
+worker cannot double-spend, and the fleet aggregate stays inside the parent
+budget. No separate janitor authority is created. E59; owner scheduler and
+budget ledger.
+
+### D40 — memory edge semantics are explicit
+
+Choose: superseded records freeze their decay clock and become provenance,
+not live context; pinned commitments close only through an authorized
+transition, so machine-derived supersession never silently unpins;
+compaction's reversibility claim is declared exactly — reconstructable from
+epoch events for audit, or atomic-only, and the choice is tested; compacted
+nodes leave cryptographic tombstones so provenance chains survive payload
+removal. E60; owner memory semantics over Logical-DB.
+
+### D41 — evaluation hardening and auditable inventory
+
+Choose a contamination-controlled private task suite for the same-model
+lane; public-suite scores are reported separately with declared
+contamination limits. Add process-level recovery scoring (error
+localization and repair, not only final outcome), a revocation-enforcement
+falsifier for memory, a post-failure honesty falsifier for tool reporting,
+and interacting-fault combined journeys in addition to single-fault cases.
+The falsifier inventory carries a derivation note mapping fault modes to
+effect classes so its size is auditable rather than asserted. E61/E62;
+owner independent evaluation.
+
 ## Cell 04 — state, effects and proof obligations
 
 **Run states (candidate algebra):** Draft -> Admitted -> Running -> Reconciling
@@ -1056,6 +1147,14 @@ artifact hashes, costs and uncertainty. All cases are NOT RUN today.
 | E52 | Human edits a file between preview and apply/undo; rename and hardlink race | Moo conflict detected; unrelated edits preserved; no fake rollback of remote effects |
 | E53 | Source changes after retrieval; contradictory sources or fabricated citation | version/time/provenance visible; answer separates evidence/inference/unknown; false citation rejected |
 | E54 | Repeated identical tool failure, circular delegation and exhausted budget | bounded no-progress detection and cause; preserved work with explicit blocked/failure outcome |
+| E55 | Replay a recorded effect log against pinned and mutated policy/budget snapshots | authorization decisions bit-identical under pinned inputs; divergence only as a versioned reducer change |
+| E56 | Adapter with no status query and no idempotency support times out mid-effect | declared permanent OutcomeUnknown disposition (requires-human or always-compensate); no blind retry; unrelated work continues; spent budget stays visible |
+| E57 | Malicious skill frontmatter, MCP sampling/elicitation request mid-run, foreign A2A agent card | untrusted format fields rejected; sampling passes the MD authority gate; unmapped protocol features are declared refusals |
+| E58 | Sustained provider rate limits with telemetry and gateway pricing enabled | shedding/priority queue bounds waiting by policy; cost attributed to agent, skill, MCP server and repository; no fabricated prices |
+| E59 | Worker dies holding a budget lease; another lease outlives its deadline | TTL reclaim through reconciliation; no double spend; fleet aggregate within parent budget |
+| E60 | Pinned commitment meets a machine-derived superseding record, then compaction commits | pin survives; superseded record's decay frozen; tombstone chain answers provenance; declared reversibility matches actual behavior |
+| E61 | Same weak model on contaminated public tasks versus the contamination-controlled private suite | harness effect isolated; lane A conclusions require suite evidence; scores reported separately |
+| E62 | Revoked memory fact resurfaces at retrieval; tool returns unusable payload; faults then combine | revoked fact not acted on; reporting stays truthful with no fabricated value; combined journey preserves corrections, prevents duplicate dispatch and retains liability visibility |
 
 E02, E13, E19, E28, E31, E39, E40, E42 and E50 explicitly require actual
 process crash/panic plus recovery: 9/54 planned cases (16.7%). This is a plan
@@ -1160,7 +1259,9 @@ command and captured output. Never fill an output cell with expected results.
 Additional case allocation: C02 owns E28/E30/E35/E47;
 C03 owns E31/E40/E41/E46; C04 owns E34/E52; C05 owns E29/E33/E42/E43/E44/E51;
 C06 owns E37/E38/E39/E54; C07 owns E32; C09 owns E49/E53; C10 owns E45;
-C12 owns E50. C04 also owns E48; C05 owns E06/E36. Every case must run
+C12 owns E50. C04 also owns E48; C05 owns E06/E36; C01 also owns E57; C02 also owns E55;
+C03 also owns E60; C04 also owns E56; C05 also owns E58; C06 also owns E59;
+C09 also owns E61/E62. Every case must run
 before full product acceptance. These
 allocations do not authorize product implementation or bypass the memory hold.
 
@@ -1212,9 +1313,11 @@ memory implementation until Logical-DB is ready; adjustable automatic decay and
 user-facing behavioral scales. Strict self-updating governance applies to this
 repository (AGENTS.md/GOVERNANCE.md), not an extra runtime product feature.
 
-Recommended package: approve remaining D01–D35 architecture principles,
-including scoped persona, safe RL promotion, typed IR, standing permissions and
-strict owner reuse. Approve the measurement plans as
+Recommended package: approve remaining D01–D41 architecture principles,
+including scoped persona, safe RL promotion, typed IR, standing permissions,
+strict owner reuse, pure-authorization replay identity, unified
+reconciliation contracts, ecosystem protocol adapters and evaluation
+hardening. Approve the measurement plans as
 targets, not a billable evaluation run. Preserve these conditional mechanisms:
 Rhai vs existing Flow frontend; exact model/quantization selection; authoritative
 fencing/revocation support; Nova isolation profiles per OS; cross-service receipt
@@ -1235,7 +1338,7 @@ discipline hold; no plan can eliminate every future architectural discovery.
 
 ## File-specific excellence record
 
-Requirements R01–R70; all nine axes. Predicted outcome: explicit decisions and
+Requirements R01–R78; all nine axes. Predicted outcome: explicit decisions and
 falsifiers replace repeated architectural rediscovery. Verification: requirement
 IDs unique/complete, decision/evaluation links resolve, Markdown structure
 inspected, source/review dispositions retained. The four specification diagrams
