@@ -6,9 +6,10 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from tools.check_governance import load_documents, validate
+from tools.check_governance import load_documents, receipt_errors, validate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,6 +182,26 @@ class GovernanceTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertTrue(report["ok"])
         self.assertEqual(set(report["sha256"]), set(self.documents))
+
+    def test_reranker_receipts_are_present_and_valid(self):
+        self.assertEqual(receipt_errors(ROOT), [])
+
+    def test_missing_reranker_receipt_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertTrue(any("none retained" in error for error in receipt_errors(Path(temporary))))
+
+    def test_malformed_reranker_receipt_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "tools" / "receipts"
+            path.mkdir(parents=True)
+            (path / "pre.json").write_text(json.dumps({
+                "phase": "pre-exec", "model": "Qwen/Qwen3-Reranker-0.6B",
+                "revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+                "query_sha256": "x" * 64, "candidates_sha256": "y" * 64,
+                "candidate_count": 1, "top_k": 1, "results": ["forged"],
+            }))
+            self.assertTrue(any("invalid bounds or hashes" in error for error in receipt_errors(root)))
 
     def test_docs_tree_is_admitted_and_validated(self):
         self.assertIn("docs/README.md", self.documents)

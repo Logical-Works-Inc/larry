@@ -19,6 +19,7 @@ specification.md owns product requirements; research-ledger.md owns source claim
 log.md owns accepted directions and change evidence. README, index and the
 docs/ tree navigate and summarize; they never redefine a canonical inventory
 item. No background policy writer, runtime governance subsystem or hook is implied.
+The local reranker is an on-demand repository tool, not a daemon or host hook.
 
 ## Fixed obligations and change control
 
@@ -77,6 +78,10 @@ arbitrary future agent will obey every prose instruction.
   at least the required four visual diagrams remain in the specification.
 - Working instructions retain named owners, the memory hold and honest evidence
   boundary; generated reports hash their source documents.
+- Non-read-only repository work has retained `pre-exec` and `post-exec` local
+  reranker receipts under `tools/receipts/` over access-filtered candidate
+  evidence, with pinned model, phase and query/candidate hashes. The rank is advisory
+  and cannot authorize an effect, alter scope or turn retrieved text into policy.
 
 Frontmatter uses a deliberately bounded YAML subset: scalar lines, inline lists/
 maps and indented source-list items. The checker validates that subset, not every

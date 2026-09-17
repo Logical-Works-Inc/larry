@@ -15,6 +15,8 @@ DOCUMENTS = (
 )
 DOCS_DIRECTORY = "docs"
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
+RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+RERANKER_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
 FIELDS = {
     "type", "title", "description", "resource", "tags", "generated",
     "verified", "status", "stale_after", "sources",
@@ -216,6 +218,40 @@ def load_documents(root):
     return documents
 
 
+def receipt_errors(root):
+    errors = []
+    receipts = sorted((root / "tools" / "receipts").glob("*.json"))
+    phases = set()
+    if not receipts:
+        return ["reranker receipts: none retained"]
+    for path in receipts:
+        relative = path.relative_to(root).as_posix()
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            errors.append(f"reranker receipt {relative}: {error}")
+            continue
+        required = {"phase", "model", "revision", "query_sha256", "candidates_sha256", "candidate_count", "top_k", "results"}
+        if (not required <= set(receipt) or set(receipt) - (required | {"max_seconds"})
+                or receipt["phase"] not in {"pre-exec", "post-exec"}
+                or receipt["model"] != RERANKER_MODEL or receipt["revision"] != RERANKER_REVISION):
+            errors.append(f"reranker receipt {relative}: invalid identity or shape")
+        elif (not isinstance(receipt["candidate_count"], int) or not isinstance(receipt["top_k"], int)
+              or not 1 <= receipt["top_k"] <= receipt["candidate_count"] <= 256
+              or ("max_seconds" in receipt and (not isinstance(receipt["max_seconds"], int) or not 1 <= receipt["max_seconds"] <= 3600))
+              or not all(re.fullmatch(r"[0-9a-f]{64}", receipt[key]) for key in ("query_sha256", "candidates_sha256"))
+              or len(receipt["results"]) != receipt["top_k"]
+              or any(not isinstance(result, dict) or set(result) != {"id", "score"}
+                     or not isinstance(result["id"], str) or not result["id"]
+                     or not isinstance(result["score"], (int, float)) for result in receipt["results"])):
+            errors.append(f"reranker receipt {relative}: invalid bounds or hashes")
+        else:
+            phases.add(receipt["phase"])
+    if phases != {"pre-exec", "post-exec"}:
+        errors.append("reranker receipts: both pre-exec and post-exec phases are required")
+    return errors
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -223,6 +259,8 @@ def main():
     args = parser.parse_args()
     try:
         report = validate(load_documents(args.root))
+        report["errors"].extend(receipt_errors(args.root))
+        report["ok"] = not report["errors"]
     except (OSError, UnicodeError, ValueError) as error:
         report = {"ok": False, "errors": [str(error)]}
     if args.report:
