@@ -8,19 +8,49 @@ generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: explicit conversation decisions and source inspection}
 status: active
 stale_after: 2026-10-15
-sources: [Director conversations 2026-09-15 and 2026-09-16, /specification.md, /research-ledger.md]
+sources: [Director conversations 2026-09-15 through 2026-09-17, /specification.md, /research-ledger.md]
 ---
 
 # Current specification inventory
 
-requirements: 78
-decisions: 41
-falsifiers: 62
+requirements: 96
+decisions: 53
+falsifiers: 80
 execution_cells: 13
 axes: 9
-planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50
+planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
+
+## 2026-09-17: hostile-model defense and the 8B survival gate
+
+The Director required strict defense in depth against malicious or unreliable
+models, malicious authorized compositions and the untrusted internet, with Nova
+retained as sandbox owner and Secure-Authority as the authenticated capability
+owner. R79–R96, D42–D53 and E63–E80 make model obedience unnecessary for
+security, bind resolved effects at their domain owners, add compartment-scoped
+information flow, cumulative composition limits, secret/egress binding,
+collaboration isolation, revocation/recovery/update fences, exact low-friction
+consent and independent mutation oracles.
+
+The named-artifact 8B gate separates zero-violation containment from useful work:
+target at least 90% verified benign completion, no more than five percentage
+points below the matched same-model baseline, zero repeated approvals within
+unchanged authority and no stronger-model/cloud fallback. The Ryzen 3 4300U
+8 GiB and 4 GiB profiles, local-admission p95 <=50 ms and human estimate of 0–1
+routine interventions are targets, NOT RUN measurements.
+
+No Rust file changed in Rocco, Secure-Authority or Nova. No runtime, model,
+hardware, coverage, fleet or human result is claimed. The prior Wasmtime owner
+assumption was corrected before specification delivery: an engine can only be a
+Nova implementation mechanism. Failed research/browser receipts and source limits
+are retained in `research-ledger.md` rather than converted into evidence.
+
+Local document verification on the final working-tree bytes: `python3
+tools/check_governance.py` passed with 96 requirements, 53 decisions, 80
+falsifiers, 13 execution cells and 9 axes; `python3 -m unittest discover -s tests
+-v` passed 38/38 governance tests; `git diff --check` passed. The checker states
+that Mermaid rendering and runtime/model/hardware/human trials are not checked.
 
 ## 2026-09-15: settled Director directions
 
