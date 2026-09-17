@@ -232,11 +232,13 @@ def receipt_errors(root):
             errors.append(f"reranker receipt {relative}: {error}")
             continue
         required = {"phase", "model", "revision", "query_sha256", "candidates_sha256", "candidate_count", "top_k", "results"}
-        if (set(receipt) != required or receipt["phase"] not in {"pre-exec", "post-exec"}
+        if (not required <= set(receipt) or set(receipt) - (required | {"max_seconds"})
+                or receipt["phase"] not in {"pre-exec", "post-exec"}
                 or receipt["model"] != RERANKER_MODEL or receipt["revision"] != RERANKER_REVISION):
             errors.append(f"reranker receipt {relative}: invalid identity or shape")
         elif (not isinstance(receipt["candidate_count"], int) or not isinstance(receipt["top_k"], int)
               or not 1 <= receipt["top_k"] <= receipt["candidate_count"] <= 256
+              or ("max_seconds" in receipt and (not isinstance(receipt["max_seconds"], int) or not 1 <= receipt["max_seconds"] <= 3600))
               or not all(re.fullmatch(r"[0-9a-f]{64}", receipt[key]) for key in ("query_sha256", "candidates_sha256"))
               or len(receipt["results"]) != receipt["top_k"]
               or any(not isinstance(result, dict) or set(result) != {"id", "score"}

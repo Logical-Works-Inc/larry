@@ -51,6 +51,23 @@ retained under `tools/receipts/`; each evidence command uses a new receipt
 path so a prior receipt cannot be overwritten.
 These receipts prove the CLI path and ordering for this bounded sample only.
 
+## 2026-09-17: AI query workflow made executable in AGENTS.md
+
+`AGENTS.md` now gives the agent-facing local query sequence: scope and filter
+untrusted candidates, produce a unique pre-exec receipt, use rank only as
+relevance evidence, perform authorized work, retain a distinct post-exec
+receipt over final evidence, then run the actual repository checks. It names
+the local failure modes and explicitly preserves source provenance, authority,
+scope, test and human-experience boundaries.
+
+## 2026-09-17: local reranker lifecycle bounded
+
+The local reranker remains one-shot: it loads only during a query, defaults to
+a 900-second wall-clock bound (maximum 3600), writes an evidence receipt, and
+exits so operating-system process teardown reclaims model memory. A timeout is
+a loud failed query, never a silently resident model service. This is lifecycle
+semantics for the repository tool, not a measured RAM budget or hardware claim.
+
 ## 2026-09-17: hostile-model defense and the 8B survival gate
 
 The Director required strict defense in depth against malicious or unreliable
