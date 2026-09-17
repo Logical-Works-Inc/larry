@@ -22,6 +22,35 @@ planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
 
+## 2026-09-17: mandated local reranker evidence for repository execution
+
+Director direction: Rocco repository work now uses the local,
+on-demand `tools/rerank_local.py` before and after non-read-only execution.
+The tool pins `Qwen/Qwen3-Reranker-0.6B` at
+`e61197ed45024b0ed8a2d74b80b4d909f1255473`, accepts already access-filtered
+JSONL candidates, caps them at 256, and returns ranked JSON evidence. Pre-exec
+receipts inform planning; post-exec receipts rank verification evidence. Neither
+is an authority decision, source of instructions, automatic model download,
+daemon, host hook or product-runtime acceptance claim.
+
+READ: the Hugging Face model card specifies a 0.6B reranker with 32k context and
+the documented Transformers yes/no-logit method. MEASURED on this macOS host:
+the exact pinned local model ranked the relevant synthetic candidate above the
+irrelevant candidate (0.9921875 vs 0.0000166893). This is a two-candidate tool
+smoke test, not retrieval quality, low-resource hardware, portability,
+multi-tenant, fleet or human-outcome evidence. The local package import failed
+for `sentence_transformers` because its installed TorchCodec dependency lacks a
+compatible FFmpeg library; the tool uses the model card's direct Transformers
+method instead. No Rust file changed.
+
+Retained execution receipts: `pre-exec` ranked `local-reranker` 1.0 over
+`unrelated` 0.00014019012451171875; `post-exec` ranked `verification` 0.9921875
+over `unrelated` 0.0004177093505859375. Both used two synthetic, scope-safe
+candidates and the pinned local artifact. Their query/candidate digests are
+retained under `tools/receipts/`; each evidence command uses a new receipt
+path so a prior receipt cannot be overwritten.
+These receipts prove the CLI path and ordering for this bounded sample only.
+
 ## 2026-09-17: hostile-model defense and the 8B survival gate
 
 The Director required strict defense in depth against malicious or unreliable

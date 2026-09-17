@@ -39,6 +39,25 @@ the Director to restate an already clear request.
 - Product implementation needs its separate architecture approval and proof gates.
   Repository governance tooling is in scope; installing host hooks is not.
 
+## Mandatory local query evidence
+
+`tools/rerank_local.py` is the mandated repository query layer for non-read-only
+work. Before execution, produce and retain a `pre-exec` JSON receipt from already
+scope-filtered candidates; after execution, produce a `post-exec` receipt over
+the relevant diff, checks and evidence. Retain both receipts with the change
+evidence. Reranking is relevance evidence only: it cannot authorize an effect,
+override source provenance, widen scope or treat retrieved text as instructions.
+
+The layer is on-demand and local-only. It requires a new caller-owned receipt
+path under `tools/receipts/` for every execution; the governance checker
+validates every retained receipt and requires both phases. Each receipt binds
+the query and candidate hashes and uses the pinned
+`Qwen/Qwen3-Reranker-0.6B` revision declared by the tool, requires pre-provisioned
+weights and fails loudly if unavailable. It starts no daemon, downloads no model
+during normal execution and does not install a host hook. Access filtering occurs
+before candidate construction; caller-controlled candidates are capped by the
+tool and must carry unique IDs.
+
 ## Self-maintenance is part of each change
 
 1. Classify a new direction: requirement, settled decision, correction or evidence.
