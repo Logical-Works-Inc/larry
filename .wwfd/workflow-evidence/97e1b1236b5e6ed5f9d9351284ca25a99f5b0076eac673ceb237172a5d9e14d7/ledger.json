@@ -3,29 +3,7 @@
   "session_id": "ab050d78-9450-4a4b-be4a-00b4c0bc8124",
   "turn_id": "",
   "prompt_sha256": "901baa6ed5b0d7d6d5582a9c7f0387b4f104a3c0fe810167fc1f902e361516b2",
-  "scope_review": {
-    "carried_forward": [
-      "Founding request: read the Rocco documentation deeply, then read forge-harness and forge-sdk, and bring in code with discussion using logicalworks-crates properly.",
-      "Use codegraph for code discovery.",
-      "The Director's question 'Why is it not 1 repo?' and the follow-up order 'NO ITS ONE REPO. FIX IT', with both repository paths authorized.",
-      "Replacement of the first AppCUI surface with the Forge TUI look.",
-      "Use the embedded query database as well, and record that obligation in this repository's AGENTS.md.",
-      "Delivery endpoint: verified open PR, because main is unprotected (live check 2026-09-18: GET .../branches/main/protection returned 404 'Branch not protected'; GET .../rulesets returned [])."
-    ],
-    "scope_corrections_this_session": [
-      "The Director corrected a misreading: 'the embedded db' means this repository's embedded QUERY database, not a new storage dependency to admit. The query layer's own ranking settled it — AGENTS.md:46 scored 0.977 against the question, with the next candidate at 0.140.",
-      "The Director corrected the method twice: network probes (crates.io curl) were wrong; the repository's mandated local query layer is the instrument for determining implementation, before and after."
-    ],
-    "limits_not_claimed": [
-      "Hosted CI remains unresolved for this repository; the earlier recorded failure was a GitHub billing block, not a code failure. No hosted run is claimed.",
-      "The merged workspace's Linux build has never run. This machine is macOS; AppCUI's Linux closure is pure Rust in the lockfile as far as local inspection shows, which is not a build result.",
-      "The second repository's git history is not folded in. Files were copied, not filtered, so rocco-contracts' commits exist only in the untouched remote srinji-kaggss/rocco-runtime.",
-      "The local /Users/srinji/rocco-runtime clone is still on disk, superseded and not deleted. Removal was left to the Director rather than taken unilaterally.",
-      "Coverage is not re-measured. The 80.51% figure in docs/architecture/visual-pass.md predates src/theme.rs and the rewritten src/native.rs.",
-      "No human has looked at the new surface. The Forge look is verified by source-faithful rendering and real-PTY journeys only.",
-      "The workflow-evidence ledger itself and the two receipts are declared evidence, not independent proof of semantic correctness."
-    ]
-  },
+  "scope_review": "ORIGINAL REQUEST: work in this repository on its own terms — read the Rocco documentation deeply, then read code in forge-harness and forge-sdk, and bring in code with discussion, using logicalworks-crates properly. That founding request is carried forward as R1 and is why the workspace consumes lgwks_std and lgwks_deps as exact-pinned published releases through the estate facade rather than as vendored or forked copies. STEERING, in the order given: use codegraph for code discovery (R2); why is it not 1 repo, and then NO ITS ONE REPO. FIX IT, with both repository paths authorized (R3, R4, R5); I dont like the current appcui implementation, the original forge look is a lot better, I want that in appcui (R6); use the embedded db as well, and that should be in your agents.md for repo (R7, R8); and I asked you to use the query db to figure out implementation (R9). Delivery endpoint is a verified open PR, because the target branch is unprotected (R10). MEANING, stated because two terms were ambiguous and I got one wrong: 'bring in code' means implement the fixture surface in this repository against the published estate foundation, not copy code out of the reference harnesses; 'the embedded db' means this repository's embedded QUERY database — the pinned local reranker layer at tools/rerank_local.py — and not a storage dependency to admit. I initially read it as the latter, went to the network, and asked the Director a question the repository could answer; the query layer's own ranking settled it, scoring AGENTS.md's line naming that tool at 0.977 against the next candidate at 0.140. EXCLUSIONS: no backend, provider, model call, workspace mutation or persistence is implemented or implied, and every simulated path stays labelled DEMO; forge/forge-harness/forge-sdk are reference reading only and no code was imported, copied or ported from them; the dependency law permits only exact-pinned crates.io releases, so no path, git, vendor or fork edge was added; the second repository's GitHub remote was not touched; nothing was irreversibly deleted. LIMITS NOT CLAIMED: hosted CI for this repository remains unresolved (the recorded failure was a GitHub billing block, not a code failure); the merged workspace has never been built on Linux, and AppCUI's Linux closure being pure Rust in the lockfile is inspection, not a build result; rocco-contracts' git history is not folded in, so its commits live only in the untouched remote; the local /Users/srinji/rocco-runtime clone is still on disk and removal was left to the Director rather than taken unilaterally; coverage is not re-measured, and the 80.51% figure in docs/architecture/visual-pass.md predates src/theme.rs and the rewritten src/native.rs; no human has looked at the new surface, which is verified by surface rendering and real-PTY journeys only; and this ledger and its receipts are declared evidence, not independent proof of semantic correctness.",
   "verdict": "complete",
   "requirements": [
     {
