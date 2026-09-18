@@ -1,0 +1,5 @@
+# The only direct dependency is the published, self-exempt estate foundation.
+# This is not an AppCUI approval. No third-party edge is admitted here.
+[policy]
+enforce = true
+repository = "https://github.com/srinji-kaggss/Rocco"

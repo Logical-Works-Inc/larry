@@ -23,7 +23,9 @@ the Director to restate an already clear request.
 
 ## Current scope and settled decisions
 
-- Rocco is a private, documentation-first repository, not an implemented runtime.
+- Rocco is a private, documentation-first repository with an authorized native
+  AppCUI fixture-only visual pass, not an implemented backend runtime. Persistent
+  DEMO labels and zero provider/execution/workspace effects remain mandatory.
 - Core + CLI/TUI first; phone/app next; website later. Preserve all surfaces.
 - Bounded unattended work is required within standing authority, not installed now.
 - Use explicit adapters, not clones of arbitrary harness plugins or hooks.
@@ -154,6 +156,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 tools/check_governance.py
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 git diff --check
 ```
+
+For the native fixture pass also run `cargo build --bins --locked`,
+`lgwks-deps check .`, `cargo test --all-targets --locked`,
+`cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`,
+`python3 tools/test_demo_cli.py` and `python3 tools/test_native_cli.py` (POSIX
+PTY suite). Launch with `cargo run --locked --bin rocco`. Native fixture
+verification is not backend/runtime, physical-device or fleet acceptance.
 
 Do not claim Mermaid rendering from fence checks. Preview diagrams in the actual
 GitHub renderer when possible and disclose inaccessible rendering. For product

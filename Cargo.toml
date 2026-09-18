@@ -1,0 +1,24 @@
+[package]
+name = "rocco-demo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+default-run = "rocco"
+description = "Effect-free interaction fixtures for the Rocco AppCUI visual pass"
+
+[workspace]
+
+[dependencies]
+lgwks_std = { version = "=0.6.3", default-features = false, features = ["json"] }
+lgwks_deps = { version = "=0.1.8", default-features = false, features = ["appcui"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+[profile.dev]
+debug = 0
+incremental = false
