@@ -1,3 +1,14 @@
+//! Integration journeys for the fixture domain: the published JSON view, the
+//! rejection contract, and session isolation. These drive `rocco_demo`
+//! directly; the native surface has its own real-PTY suite in
+//! `tools/test_native_cli.py`.
+//!
+//! `unwrap_used` and `expect_used` are denied workspace-wide because an unwrap
+//! on a production path is a panic waiting for the wrong input. This whole
+//! crate is the test, so the denials do not apply here: a journey that cannot
+//! read the key it asserts on SHOULD fail loudly.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use lgwks_std::json::{self, Value};
 use rocco_demo::{Demo, MAX_INPUT, Rejected};
 

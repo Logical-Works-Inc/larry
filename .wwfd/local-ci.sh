@@ -21,8 +21,8 @@
 #
 # Lanes, in the order AGENTS.md lists them:
 #   build        cargo build --bins --locked
-#   tests        cargo test --all-targets --locked
-#   clippy       cargo clippy --all-targets --locked -- -D warnings
+#   tests        cargo test --workspace --all-targets --locked
+#   clippy       cargo clippy --workspace --all-targets --locked -- -D warnings
 #   fmt          cargo fmt --all -- --check
 #   governance   python3 -m unittest discover -s tests
 #   check        python3 tools/check_governance.py
@@ -43,11 +43,11 @@ step() { printf '\n\033[1mlocal-ci: %s\033[0m\n' "$*"; }
 step 'cargo build --bins --locked'
 cargo build --bins --locked
 
-step 'cargo test --all-targets --locked'
-cargo test --all-targets --locked
+step 'cargo test --workspace --all-targets --locked'
+cargo test --workspace --all-targets --locked
 
-step 'cargo clippy --all-targets --locked -- -D warnings'
-cargo clippy --all-targets --locked -- -D warnings
+step 'cargo clippy --workspace --all-targets --locked -- -D warnings'
+cargo clippy --workspace --all-targets --locked -- -D warnings
 
 step 'cargo fmt --all -- --check'
 cargo fmt --all -- --check

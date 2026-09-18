@@ -157,12 +157,55 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 git diff --check
 ```
 
-For the native fixture pass also run `cargo build --bins --locked`,
-`lgwks-deps check .`, `cargo test --all-targets --locked`,
-`cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all -- --check`,
-`python3 tools/test_demo_cli.py` and `python3 tools/test_native_cli.py` (POSIX
-PTY suite). Launch with `cargo run --locked --bin rocco`. Native fixture
-verification is not backend/runtime, physical-device or fleet acceptance.
+For the Rust workspace also run `cargo build --bins --locked`,
+`lgwks-deps check .`, `cargo test --workspace --all-targets --locked`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`,
+`cargo fmt --all -- --check`, `python3 tools/test_demo_cli.py` and
+`python3 tools/test_native_cli.py` (POSIX PTY suite). Launch with
+`cargo run --locked --bin rocco`. Native fixture verification is not
+backend/runtime, physical-device or fleet acceptance.
+
+`.wwfd/local-ci.sh` runs those same lanes in that order and writes the local-CI
+receipt the push guard reads. It is a mirror, not a substitute: if this list
+changes, that script changes with it. It writes the receipt only when every
+lane exits 0, and it names the head it attested to.
+
+## Workspace and dependency law
+
+`crates/rocco-contracts` and the root `rocco-demo` package are one workspace
+with one lockfile, one lint set and one register. There is no second repository.
+
+The foundation is Rust `std` plus `lgwks_*` crates taken as exact-pinned
+crates.io releases and registered in `contract/APPROVED.toml`. These are
+controlled dependencies: no path, no git, no vendoring, no forks. A new
+third-party crate is registered with an owner, a reason and a human sign-off,
+or it is refused; `lgwks-deps check .` is the gate. Capability edges come
+through lgwks features first. Memory waits for Logical-DB readiness — no
+substitute store, no pretend adapter.
+
+Workspace lints deny `missing_docs`, forbid `unsafe_code`, and deny
+`clippy::unwrap_used`/`expect_used`/`panic`/`todo`/`unimplemented`/`dbg_macro`.
+A scoped allow is permitted only where the code is itself the test, and it must
+say why it is safe there. Never lower a lint to make a failure disappear.
+
+## Per-change obligations
+
+- This repository implements the specification; it never redefines an R, D, E,
+  C or A item. Read the affected sections before changing code.
+- Every change carries a traceability table: spec IDs addressed, what is
+  proven, and what remains NOT RUN or ESTIMATE-only.
+- Tests assert real behavior, with at least one adversarial or negative case
+  per new API. `unsafe` is forbidden, so no Miri lane is required; if that lint
+  is ever relaxed, a Miri lane becomes mandatory first.
+- Record requirement, predicted effect, checks run with exit status and
+  unresolved claims. Retain failed attempts; never relabel one.
+- Implementation may proceed by parallel subagents opening PRs in bulk, but the
+  orchestrator hardens each PR and a subagent never merges its own.
+
+Prohibited: claiming done without the gates passing in the transcript; reaching
+into the Director's other repositories without an explicit order; weakening
+lints, gates or pinned versions to make a failure disappear; installing host
+hooks, daemons or background writers from this repository.
 
 Do not claim Mermaid rendering from fence checks. Preview diagrams in the actual
 GitHub renderer when possible and disclose inaccessible rendering. For product

@@ -1,5 +1,47 @@
-# The only direct dependency is the published, self-exempt estate foundation.
-# This is not an AppCUI approval. No third-party edge is admitted here.
+# Registered dependency edges for Rocco.
+#
+# Merged 2026-09-18 from the two registers that existed while the contract
+# crate lived in a second repository (`srinji-kaggss/rocco-runtime`). This
+# file is now the only register. `srinji-kaggss/Rocco` carries the
+# specification, the fixture surface and the contract crate, and every
+# external edge they compile against is accounted for here.
+#
+# The law is the logicalworks-crates deps rule: the foundation is Rust `std`
+# plus the `lgwks_*` crates taken as exact-pinned crates.io releases. A NEW
+# third-party crate is registered here with an owner and a reason, or the
+# dependency is refused. The default answer to "can I add this crate?" is no.
+#
+# The `lgwks_*` edges are deliberately absent: lgwks_std is ladder rung 2
+# (workspace stdlib+, self-exempt) and lgwks_deps is the estate's own
+# admission storefront, so `lgwks-deps check` reports them as owned without a
+# row. The former runtime register declared all four of them anyway, in a
+# shape this tool refuses — its gate list ran only fmt/clippy/test, so the
+# register was never schema-checked there. The merge is the first time it has
+# been. The AppCUI edge is `lgwks_deps`/`appcui`, not a direct appcui
+# dependency; that storefront admission is recorded in
+# `docs/architecture/visual-pass.md`, not folded in here.
+#
+# `lgwks_bot` is catalogued in the workspace manifest but no member depends on
+# it yet, so it is not an edge and needs no row.
+
 [policy]
 enforce = true
 repository = "https://github.com/srinji-kaggss/Rocco"
+
+# The one third-party edge in the workspace. Carried from the rocco-runtime
+# admission, which recorded an owner and a reason but none of the sign-off
+# keys this schema requires; the sign-off below names that commit rather than
+# inventing a fresh approval.
+[[approved]]
+crate = "thiserror"
+tier = "boundary"
+version = "=2.0.20"
+owner = "rocco-contracts"
+capability = "error-derive"
+source = "registry"
+allowed_consumers = "rocco-contracts"
+allowed_kinds = "normal"
+reason = "derive-backed std::error::Error implementations on the C02 contract error types, which std's own error trait cannot express without hand-written boilerplate and no lgwks_std feature exposes."
+approved_by = "srinji-kaggss (Director)"
+approved_on = "2026-09-16"
+review = "https://github.com/srinji-kaggss/rocco-runtime/commit/53c751220ddef57c694647b7da14eb3b88eda1df"

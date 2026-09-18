@@ -1,3 +1,5 @@
+//! Native AppCUI launcher. Paints the fixture surface and exits when the
+//! operator quits; it performs no backend or workspace effect.
 fn main() -> std::process::ExitCode {
     if std::env::args_os().len() != 1 {
         eprintln!("DEMO: no arguments supported; F1 opens native help");

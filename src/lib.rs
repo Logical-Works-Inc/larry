@@ -91,15 +91,25 @@ impl Default for Demo {
 /// Safe rejection leaves the session unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejected {
+    /// The command exceeded [`MAX_INPUT`] bytes.
     InputBound,
+    /// The command contained a control character.
     ControlCharacter,
+    /// The command is not in the fixture's grammar.
     UnknownCommand,
+    /// `inspect N` named an event that is not revealed, or was not a number.
     InvalidAnchor,
+    /// `feedback` arrived before anything was selected to attach it to.
     NoSelection,
+    /// `continue` arrived with no owner held.
     NoHeldWork,
+    /// A different owner is held, so this one's work may not advance.
     HeldWork,
+    /// The change list is exhausted, or the scenario is empty.
     EndOfFixture,
+    /// The session already holds [`MAX_NOTES`](crate::MAX_NOTES) notes.
     NoteBound,
+    /// `feedback` carried no text.
     EmptyFeedback,
 }
 
