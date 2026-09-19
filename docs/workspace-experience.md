@@ -6,7 +6,7 @@ resource: /docs/workspace-experience.md
 tags: [architecture, experience, workspace, evidence]
 generated: {by: Codex, at: 2026-09-19}
 verified: {by: Codex, method: source inspection and final local PTY receipt}
-status: implementation-in-progress
+status: implementation-verified-locally-owner-integration-pending
 stale_after: 2026-10-19
 sources: [/specification.md, /research-ledger.md, /log.md, Director instructions 2026-09-19]
 ---
@@ -69,7 +69,7 @@ Replace unsent notes with a bounded model transport only when admission,
 cancellation and provenance work. Logical-DB owns future durable memory.
 No generic filesystem/process tool is introduced by this surface change.
 
-## ADR-W04 — A terminal workspace needs depth, not decorative telemetry
+## ADR-W04 — A terminal workspace needs depth, not decorative telemetry (superseded visually by W05)
 
 Decision: Rocco uses a dark spatial shell, a persistent work rail, large
 coloured work cards, an independent purple System attention stack, and a
@@ -94,6 +94,43 @@ shimmer/rotating cards (would turn a glanceable workspace into an attention
 demand). The accepted tradeoff is ANSI16 depth and static density over web-like
 gradients and continuous animation.
 
+## ADR-W05 — Quiet Torque: Porsche hierarchy wrapped around Jira work
+
+Decision: correct W04's initially over-coloured terminal translation. Rocco now
+uses a black baseline, gray structural lines, white reading text, and exactly
+one blue selected-work surface. Amber and red retain only warning/error meaning
+and remain paired with words. System and unselected work are outlined neutral
+surfaces, not coloured regions. The board remains Jira-like where it earns its
+place: lanes name current state, compact cards expose a next action, the rail
+keeps project context, and the fixed System stack supplies a nearby operational
+fact. It is not a Porsche showroom and it is not stock Jira.
+
+Porsche v3's monochrome semantic palette, typography hierarchy and deliberate
+motion establish the visual grammar; Atlassian supplies the Kanban/elevation
+discipline: a neutral backdrop, bordered resting cards, one raised/focused
+object, and compact textual status recognition. Apple layout guidance supplies
+the spatial rule: adjacent panes have clear roles and unrelated controls do not
+compete for the same glance. In an ANSI16 terminal, surface separation comes
+from borders, whitespace, density and type—not gradients, shadow theatre or
+colour volume. Motion stays input-triggered because the measured 8fps redraw
+trial exceeded the existing 1MiB idle-output bound; `▌` records focus changed
+by the human and never implies work is progressing.
+
+Rejected: W04's teal/magenta/green region fills because they made every panel
+ask for attention; a literal Porsche recreation because automotive luxury
+would erase operational density; unmodified Jira because enterprise defaults
+make the next decision visually ordinary. Accepted tradeoff: less ornamental
+colour and less ambient motion in exchange for a faster visual hierarchy,
+honest state and a quieter return-to-work surface.
+
+Sources: Porsche [palette migration](https://designsystem.porsche.com/v3/news/migration-guide/utilities/),
+[motion](https://designsystem.porsche.com/v3/styles/motion/) and
+[typography](https://designsystem.porsche.com/v3/styles/typography/); Atlassian
+[foundations](https://atlassian.design/foundations),
+[elevation](https://atlassian.design/foundations/elevation) and
+[motion](https://atlassian.design/foundations/motion/); Apple
+[layout guidance](https://developer.apple.com/design/human-interface-guidelines/layout).
+
 ## Research and oracle boundary
 
 READ 2026-09-19: local Codex revision
@@ -112,21 +149,35 @@ AppCUI 0.5.1 local pinned source supplies mouse events and `auto_close(false)`;
 Context7 resolution had no AppCUI library. Its unrelated Rust result was not
 used as API evidence.
 
-Local pinned Qwen oracle pre-exec receipt:
-`tools/receipts/20260919-workspace-ui-pre-exec-3.json`. It ranks board-first
-highly but assigns low relevance to typed resume: relevance is advisory,
-not permission to discard identity checks. Earlier attempts failed: framework
-Python lacked torch; Homebrew Python saw a stray empty NumPy dist-info. A
-task-owned metadata overlay exposes the actual installed 2.4.4 metadata;
-no shared package was changed or model downloaded. The final event-driven
-binary completed a 300.197-second 120x32 macOS PTY probe with 0 idle output
-bytes, 0.0% delta CPU, 7,680KiB sampled maximum RSS, 3.576ms p95 input and a
-clean reaped exit. Receipt: `docs/evidence/workspace-final-metrics.json`.
-These are local debug-build observations, not a performance proof for Ryzen,
-other terminals or fleet use. The bounded post-exec oracle ranked the
-terminal-IDE shell and truthful-colour alternatives 1.0 and interaction motion
-0.934 (`tools/receipts/20260919-workspace-ui-post-exec.json`); it is advisory
-only and changes no owner or acceptance requirement.
+Local pinned Qwen oracle is advisory only; it changes neither owner nor
+acceptance requirement. The pre-exec `porsche-jira` comparison ranked
+`quiet-torque` 1.0 above `porsche-showroom` 0.348 and `jira-default` 0.307
+(`tools/receipts/20260919-porsche-jira-pre-exec.json`). The first invocation
+exposed a real query-tool fault: a stray empty NumPy metadata directory caused
+`importlib.metadata.version("numpy")` to return `None`, although imported NumPy
+reported 2.4.4. `tools/rerank_local.py` now recovers the executing package's
+version only when metadata is unusable; six unit checks plus an actual
+no-overlay Qwen rerank passed (`20260919-query-tool-fix-post-exec.json`). No
+shared Python package, model revision or caller environment was modified.
+
+The final event-driven binary's old 300.197-second receipt is retained only as
+historical context while the visual correction is remeasured against its final
+source. Those local debug-build observations never proved Ryzen, other
+terminals, fleet scale or human acceptance.
+
+MEASURED after W05: the actual debug `rocco` binary completed a 300.361-second
+120x32 macOS PTY probe with 0 idle output bytes, 0.0% delta CPU, 8,992KiB
+sampled peak RSS, 1.052ms p95 input, 153.504ms first paint, 73.695ms
+quit-to-reap and a reaped zero exit. Receipt:
+`docs/evidence/workspace-final-metrics.json` (binary SHA-256
+`d160fe08752afad8b54cda92c102b8fde14687815077506cda7bfc178d04ae5b`). This
+measures this macOS debug binary only; it does not establish the absent Ryzen,
+other-terminal, network, fleet, human or matched-alternative evidence.
+
+Post-exec Qwen ranked the final quiet-torque candidate 1.0, standard Jira 0.563
+and a decorative Porsche-showroom candidate 0.0134
+(`tools/receipts/20260919-porsche-jira-post-exec.json`). That bounded rank is
+advisory selection pressure, not a human study or proof of visual superiority.
 
 READ 2026-09-19: Mirador’s public README documents a glanceable terminal
 dashboard with a focused panel, dimmed surrounding panels, and an explicit
@@ -191,14 +242,16 @@ superiority and absent hardware measurements cannot be inferred from that.
 - Read/spec/source/oracle: completed within the bounded source inventory above.
 - Backend reuse and typed Continue: one delegated implementation returned;
   parent integration is complete pending repository-wide verification.
-- Frontend board/work/context and truth view: implemented; visual and sustained
-  runtime receipts are being refreshed against the final source.
-- Real journeys and local repository gates: completed; nine-axis production
-  evidence and the verified PR endpoint remain outstanding.
+- Frontend board/work/context and truth view: W05 implementation, native PTY
+  journey and rendered fixture review completed locally; only task-owned demo
+  data is exercised.
+- Real repository gates: must be rerun after W05 and the query-tool repair.
+  Nine-axis production evidence remains outstanding.
 - Required endpoint: verified open PR (live main unprotected and no rulesets
   observed this session); no merge inferred from local success.
 
 Owned resources: one frontend process per test (finish/kill verified by PTY
-harness), bounded session-only UI buffers, task-owned reranker metadata overlay
-(agent removes by Trash after both post-exec queries), finite receipt files
-retained with this revision. No service or port is introduced.
+harness), bounded session-only UI buffers, finite receipt files retained with
+this revision. The now-unneeded task-local metadata overlay was moved to Trash
+after the query-tool repair verified no caller overlay is needed. No service or
+port is introduced.

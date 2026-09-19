@@ -1,0 +1,45 @@
+id: return-to-work
+actor: returning-human
+job: Recover the one work item needing attention and safely resume its context without mistaking fixture state for live orchestration.
+prior_knowledge:
+  - Knows Rocco is a terminal workspace, but has forgotten the previous stopping point.
+  - Does not know internal adapter, fixture, or persistence implementation details.
+start:
+  installation: existing local binary
+  state: fresh terminal; Moo and model disconnected
+success:
+  visible_outcome: The human identifies a next action, opens the selected work, sees the refused Continue outcome, leaves an unsent note, and returns home with that draft intact during the session.
+states:
+  - name: overview
+    expectation: One focused card, lanes, and the System stack show where attention belongs without ambient status activity.
+  - name: work
+    expectation: Opening a card requests Continue through the real coordinator and the Human plus AI pane preserves context without inventing a reply.
+  - name: truth
+    expectation: Synthetic information and the path to live owner-backed state are explicit.
+  - name: recovered
+    expectation: Escape returns to the board and work switching does not leak drafts between cards.
+invariants:
+  - A fixture never displays as a real Moo admission, model reply, Running outcome, or completed effect.
+  - Exactly one selected work card receives a blue surface; other layout surfaces remain neutral.
+  - Warning and error color always has an adjacent textual meaning.
+  - No idle animation, polling, network operation, or background work is implied by the screen.
+  - Returning home and changing work preserves only the current session draft and makes session loss on exit visible.
+trust_boundaries:
+  - Continue may request the typed coordinator but cannot authorize an effect without Moo.
+  - The local note is unsent and disposable; it is not durable memory or a model prompt.
+recovery_contracts:
+  - Escape returns Home without silently starting or cancelling work.
+  - A fresh process starts an explicit empty session rather than restoring fabricated continuity.
+  - Truth view names fixture fields and the owner-backed path required to replace them.
+agent_contracts:
+  - Missing Moo returns AwaitingDependency and never a synthetic running or completed state.
+  - Repeated Continue requests remain bounded, inspectable, and effect-free while the adapter is absent.
+probes:
+  - id: board-to-refused-continue
+    action: Launch the binary in a clean PTY, press Enter, and observe Awaiting Moo with no success state.
+  - id: truth-before-trust
+    action: Open truth from Home and verify fixture labels plus the owner-backed path before returning.
+  - id: draft-isolation
+    action: Leave a draft, switch cards, return, and verify the draft is local to its selected card.
+  - id: idle-honesty
+    action: Hold a 120x32 PTY idle for five minutes and verify zero unsolicited output and a reaped exit.

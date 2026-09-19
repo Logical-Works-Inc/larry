@@ -39,6 +39,37 @@ SVG was instead converted locally and visually inspected as a static render;
 that establishes presentation only. Actual POSIX PTY rendering, input and
 mouse events remain separately testable.
 
+### 2026-09-19 Porsche-wrapped Jira correction and local query repair
+
+READ: Porsche Design System v3 palette migration, typography and motion pages;
+Atlassian foundations, elevation and motion pages; and Apple HIG layout guidance.
+Their common design consequence is not a visual brand transplant: use neutral
+surfaces for structure, reserve one focal elevation/selection, apply colour to
+meaningful feedback, and separate adjacent jobs spatially. W05 therefore
+replaces the prior coloured-region terminal pass with "Quiet Torque": ANSI16
+black/gray/white structure, blue selection, and text-labelled amber/red only.
+Porsche showroom mimicry and untouched Jira were rejected as respectively too
+ornamental and too generic for the return-to-work job. Source URLs are retained
+in ADR-W05; source claims are design inputs, not user-study evidence.
+
+MEASURED: the local Qwen reranker initially failed in its own import path when a
+stray empty NumPy metadata directory yielded no declared version. Imported NumPy
+was 2.4.4. `rerank_local.py` now falls back to that imported package version only
+for unusable NumPy metadata, before Transformers validates dependencies. Six
+unit tests and an actual no-overlay rerank passed; pre/post receipts are
+`20260919-porsche-jira-pre-exec.json` and
+`20260919-query-tool-fix-post-exec.json`. This repair makes the query tool
+portable across that metadata inconsistency; it does not make Qwen an authority
+on product truth or visual quality.
+
+MEASURED after the W05 implementation: the final local post-exec comparison
+ranked quiet-torque 1.0, Jira-default 0.5625 and Porsche-showroom 0.0134
+(`20260919-porsche-jira-post-exec.json`). The actual macOS debug binary also
+completed its five-minute 120x32 PTY measurement with 0 idle output bytes and
+0.0% delta CPU; exact timing/RSS and binary hash are in the final metrics
+receipt. Neither result proves visual acceptance, portable performance or
+frontier superiority.
+
 ## 2026-09-17 native visual pass receipts
 
 READ: published AppCUI 0.5.1 README lists Tab, TreeView, ListView, splitters,

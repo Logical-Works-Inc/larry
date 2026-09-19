@@ -49,7 +49,7 @@ def main():
     started = time.monotonic()
     terminal = Terminal()
     try:
-        terminal.expect("Your workspace")
+        terminal.expect("Everything else stays quiet")
         launch_ms = (time.monotonic() - started) * 1000
         drain(terminal, 0.1)
         latencies = []
@@ -60,7 +60,7 @@ def main():
             latencies.append((time.monotonic() - started) * 1000)
             drain(terminal, 0.05)
             terminal.send("\x1b")
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             drain(terminal, 0.05)
         initial = sample(terminal.child)
         samples = [initial]

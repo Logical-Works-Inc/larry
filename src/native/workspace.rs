@@ -131,17 +131,19 @@ impl Default for Workspace {
     }
 }
 
-// AppCUI arrives through the estate storefront in ANSI16 mode. These are
-// deliberate terminal-IDE surfaces, not claims of 24-bit fidelity: a dark
-// shell establishes depth; green is focus, magenta is System, amber still
-// means synthetic/needs-attention and always has a textual label too.
+// AppCUI arrives through the estate storefront in ANSI16 mode. "Quiet torque"
+// translates Porsche's monochrome hierarchy and Atlassian's elevation roles
+// into terminal facts: black is the shared default surface, gray is structure,
+// blue names the one focused work item, and warning/error colours retain their
+// operational meaning. There are no decorative region fills.
 const SHELL: Color = Color::Black;
-const RAIL: Color = Color::DarkBlue;
-const PANEL: Color = Color::Teal;
-const FOCUS_PANEL: Color = Color::DarkGreen;
-const SYSTEM_PANEL: Color = Color::Magenta;
+const RAIL: Color = SHELL;
+const PANEL: Color = SHELL;
+const FOCUS_PANEL: Color = Color::DarkBlue;
+const SYSTEM_PANEL: Color = SHELL;
 const INK: Color = Color::White;
-const SOFT: Color = Color::Silver;
+const SOFT: Color = Color::Gray;
+const FOCUS: Color = Color::Blue;
 
 fn fill(surface: &mut Surface, x: i32, y: i32, width: i32, height: i32, background: Color) {
     if width <= 0 || height <= 0 {
@@ -301,10 +303,7 @@ impl Workspace {
     }
 
     fn motion_mark(&self) -> &'static str {
-        ["▁", "▃", "▅", "▇", "█", "▇", "▅"]
-            .get(self.motion as usize)
-            .copied()
-            .unwrap_or("▏")
+        if self.motion > 0 { "▌" } else { "·" }
     }
 
     fn sidebar(&self, surface: &mut Surface, height: i32) {
@@ -312,6 +311,9 @@ impl Workspace {
             return;
         }
         fill(surface, 0, 2, 27, height - 2, RAIL);
+        for y in 2..height {
+            ink!(surface, 26, y, 1, "│", SOFT, RAIL, false);
+        }
         ink!(surface, 2, 4, 23, "WORKSPACE", SOFT, RAIL, true);
         ink!(surface, 2, 6, 23, "▣  Home", INK, RAIL, true);
         line(surface, 2, 8, 23, SOFT, RAIL);
@@ -322,9 +324,6 @@ impl Workspace {
                 break;
             }
             let active = self.selected == index;
-            if active {
-                fill(surface, 1, y - 1, 25, 2, FOCUS_PANEL);
-            }
             ink!(
                 surface,
                 2,
@@ -335,8 +334,8 @@ impl Workspace {
                     if active { self.motion_mark() } else { "·" },
                     index + 1
                 ),
-                if active { INK } else { SOFT },
-                if active { FOCUS_PANEL } else { RAIL },
+                if active { FOCUS } else { SOFT },
+                RAIL,
                 active,
             );
             ink!(
@@ -351,7 +350,7 @@ impl Workspace {
                     _ => "Bounded input",
                 },
                 if active { INK } else { SOFT },
-                if active { FOCUS_PANEL } else { RAIL },
+                RAIL,
                 active,
             );
         }
@@ -498,7 +497,7 @@ impl Workspace {
             x,
             3,
             body_width,
-            "Your workspace",
+            "Workspace",
             INK,
             body_background,
             true,
@@ -508,7 +507,7 @@ impl Workspace {
             x,
             4,
             body_width,
-            "A live-looking workspace should not make you guess what is live.",
+            "See the decision that needs you. Everything else stays quiet.",
             SOFT,
             body_background,
             false,
@@ -556,7 +555,7 @@ impl Workspace {
             }
             let selected = index == self.selected;
             let background = if selected { FOCUS_PANEL } else { PANEL };
-            let border = if selected { INK } else { SOFT };
+            let border = if selected { FOCUS } else { SOFT };
             shell_card!(
                 surface,
                 card_x,
@@ -620,7 +619,7 @@ impl Workspace {
                 10,
                 "ROCCO / SYSTEM",
                 SYSTEM_PANEL,
-                INK,
+                SOFT,
             );
             ink!(
                 surface,
@@ -695,7 +694,7 @@ impl Workspace {
                 "FOCUS  {}  ·  Enter opens + requests Continue",
                 self.cards[self.selected].title
             ),
-            ACCENT,
+            FOCUS,
             SHELL,
             true,
         );
@@ -725,8 +724,8 @@ impl Workspace {
             body_width,
             height - 6,
             "TRUTH / DEMO BOUNDARY",
-            SYSTEM_PANEL,
-            INK,
+            SHELL,
+            SOFT,
         );
         let lines = [
             "Where this demo tells a story",
@@ -763,7 +762,7 @@ impl Workspace {
                 body_width - 4,
                 line,
                 INK,
-                SYSTEM_PANEL,
+                SHELL,
                 i == 0 || i == 1 || i == 4 || i == 7,
             );
         }
@@ -773,8 +772,8 @@ impl Workspace {
             height - 2,
             body_width - 4,
             "↑ ↓ scroll · Esc / t Back · no state changed",
-            ACCENT,
-            SYSTEM_PANEL,
+            FOCUS,
+            SHELL,
             true,
         );
         if width >= 120 && height >= 32 {
@@ -826,7 +825,7 @@ impl Workspace {
                 "HUMAN + AI"
             },
             SHELL,
-            MI,
+            SOFT,
         );
         let rows = if ui.help {
             [
@@ -886,7 +885,7 @@ impl Workspace {
                 8,
                 "ROCCO / SYSTEM",
                 SYSTEM_PANEL,
-                INK,
+                SOFT,
             );
             let (priority, detail) = match ui.demo.work {
                 Work::Held { .. } => ("Feedback held · DEMO", "Your anchor stays selected"),
@@ -1144,6 +1143,7 @@ impl InputApp for Workspace {
             RAIL,
             false,
         );
+        line(surface, 0, 2, width, SOFT, SHELL);
         ink!(
             surface,
             width - 23,
@@ -1303,7 +1303,7 @@ mod tests {
         let ui = Workspace::default();
         for (width, height) in [(50, 12), (80, 24), (104, 25), (120, 32), (160, 48)] {
             let text = paint(&ui, width, height);
-            assert!(text.contains("Your workspace"));
+            assert!(text.contains("Workspace"));
             assert!(text.contains("DEMO DATA"));
             assert!(!text.contains("AI · not connected"));
         }
@@ -1321,7 +1321,7 @@ mod tests {
         let work = paint(&ui, 120, 32);
         command(&mut ui, "/truth");
         let truth = paint(&ui, 120, 32);
-        assert!(home.contains("Your workspace"));
+        assert!(home.contains("Workspace"));
         assert!(work.contains("fixture-01"));
         assert!(truth.contains("PATH TO LIVE"));
         // Optional evidence output from the actual cell renderer. This is
@@ -1350,6 +1350,26 @@ mod tests {
                 write_scene_svg(&mut file, &scene, 120, 32);
             }
         }
+    }
+
+    #[test]
+    fn quiet_torque_keeps_depth_neutral_and_focus_singular() {
+        let ui = Workspace::default();
+        let surface = scene(&ui, 120, 32);
+        let mut colors = Vec::new();
+        for y in 0..32 {
+            for x in 0..120 {
+                colors.push(surface.char(x, y).unwrap().background);
+            }
+        }
+
+        assert!(colors.contains(&FOCUS_PANEL));
+        assert!(!colors.contains(&Color::Teal));
+        assert!(!colors.contains(&Color::Magenta));
+        assert!(!colors.contains(&Color::DarkGreen));
+        assert_eq!(surface.char(30, 7).unwrap().background, FOCUS_PANEL);
+        assert_eq!(surface.char(62, 7).unwrap().background, SHELL);
+        assert_eq!(surface.char(97, 4).unwrap().background, SHELL);
     }
 
     #[test]

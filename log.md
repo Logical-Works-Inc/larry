@@ -64,6 +64,43 @@ shell and truthful-colour candidates 1.0 and interaction-driven motion 0.934
 pressure only: PTY measurements, source owners and the acceptance table remain
 the controlling evidence.
 
+## 2026-09-19: Quiet Torque correction and query-tool recovery
+
+Director correction: the first high-fidelity terminal pass used too much colour
+and caused visual fatigue. W04's teal work, green focus and purple System
+regions are superseded by ADR-W05: black baseline, gray structure, white
+content, one blue selected-work surface, and amber/red only for text-labelled
+operational warning/error. Porsche v3 gives the monochrome hierarchy and
+purposeful-motion premise; Atlassian gives neutral Kanban/elevation roles; Apple
+layout supplies adjacent-pane and grouping discipline. The accepted result is
+Porsche wrapped around Jira—not a showroom and not a stock Jira board. The
+input-only focus marker remains because the prior 8fps redraw experiment failed
+the 1MiB idle-output constraint.
+
+MEASURED query-tool failure and repair: the local Qwen query process first
+failed because a stray empty `numpy-*.dist-info` directory made
+`importlib.metadata.version("numpy")` return `None` despite imported NumPy
+reporting 2.4.4. `tools/rerank_local.py` now recovers that package version only
+when metadata is unusable, before Transformers imports. The regression suite
+adds both fallback and healthy-metadata cases; an actual Qwen rerank then
+completed with no caller metadata overlay. The overlay was task-owned and moved
+to Trash after that proof; no shared Python package was changed. The reranker
+is a bounded advisory selector, never a design authority or orchestration path.
+
+MEASURED W05 UI receipt: the actual debug binary completed a 300.361-second
+120x32 PTY run with 0 idle bytes, 0.0% delta CPU, 8,992KiB sampled peak RSS,
+1.052ms p95 input, 153.504ms first paint, 73.695ms quit-to-reap and a clean
+reaped exit. New Home/Work/Truth SVG previews were visually inspected; they are
+faithful cell-render evidence, not terminal screenshots or user-study evidence.
+The Qwen post-exec rank was quiet-torque 1.0, Jira-default 0.563 and showroom
+0.0134; it is advisory only. The prior colourful SVG and metric files remain
+historical and are not used as W05 evidence.
+
+The first refreshed PTY pass also rejected a weak test oracle: "Workspace"
+appears in a work title and was therefore not sufficient evidence that Escape
+had returned Home. The native journey now waits for the Home-only strapline
+"Everything else stays quiet"; no product behavior or acceptance was weakened.
+
 ## 2026-09-18: mac-safe keys and default terminal background
 
 Director corrections: F-keys do not work on macOS, run an accessibility pass,

@@ -73,7 +73,7 @@ class NativeJourneys(unittest.TestCase):
     def test_native_draw_input_panes_hold_continue_and_exit(self):
         terminal = Terminal()
         try:
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             terminal.send("\r")
             terminal.expect("Awaiting Moo")
             for command, expected in [
@@ -100,7 +100,7 @@ class NativeJourneys(unittest.TestCase):
     def test_native_crash_and_fresh_terminal_recovery(self):
         terminal = Terminal()
         try:
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             terminal.send("\r")
             terminal.expect("Awaiting Moo")
             terminal.send("/changes\r")
@@ -113,7 +113,7 @@ class NativeJourneys(unittest.TestCase):
             terminal.close()
         recovered = Terminal()
         try:
-            recovered.expect("Your workspace")
+            recovered.expect("Everything else stays quiet")
             recovered.send("q")
             self.assertEqual(recovered.finish(), 0)
         finally:
@@ -122,22 +122,22 @@ class NativeJourneys(unittest.TestCase):
     def test_board_truth_mouse_and_draft_recovery(self):
         terminal = Terminal()
         try:
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             terminal.send("t")
             terminal.expect("SYNTHETIC DATA")
             terminal.send("t")
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             # Real xterm SGR mouse input, 1-based coordinates inside card 1.
             terminal.send("\x1b[<0;6;10M\x1b[<0;6;10m")
             terminal.expect("Awaiting Moo")
             terminal.send("remember this")
             terminal.expect("remember this")
             terminal.send("\x1b")
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             terminal.send("2")
             terminal.expect("Workspace handoff")
             terminal.send("\x1b")
-            terminal.expect("Your workspace")
+            terminal.expect("Everything else stays quiet")
             terminal.send("1")
             terminal.expect("remember this")
             terminal.send("\x15/quit\r")

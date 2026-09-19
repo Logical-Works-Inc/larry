@@ -1,0 +1,11 @@
+id: rocco-workspace
+actors:
+  - returning-human
+  - rocco-system
+  - bounded-ai
+promise: A returning human can see what needs attention, resume one work item, and distinguish fixture presentation from real authority.
+non_goals:
+  - Simulating Moo execution, model replies, or persistent memory.
+  - Requiring a chat-first prompt to recover context.
+visual_contract: "Quiet Torque: neutral operational structure, one blue focus surface, and semantic warning/error color only."
+truth_boundary: Fixture data is visibly labeled and Continue is refused until Moo supplies an authenticated owner receipt.
