@@ -4,8 +4,10 @@
 //! command/event/effect/terminal contract, the finite run-state model, the
 //! pure-authorization replay surface and the authority model — as governed
 //! by the private specification repository `srinji-kaggss/Rocco` (IDs R/D/E/C/A
-//! refer to that inventory). This crate is stateless: persistence waits for
-//! Logical-DB readiness and never enters here as a substitute store.
+//! refer to that inventory). The contract algebra is pure; the workspace
+//! coordinator owns only bounded disposable projections and retry identities.
+//! Persistence waits for Logical-DB readiness and never enters here as a
+//! substitute store.
 //!
 //! Module map:
 //!
@@ -28,6 +30,8 @@
 //!   pinned inputs replay bit-identically; mutated inputs diverge only as
 //!   explicit findings (R71, D36, E55; P5 remains a proof obligation).
 //! - [`error`] — every typed failure variant the contract surface returns.
+//! - [`workspace`] — bounded workspace projections and the shared Continue
+//!   dispatch boundary, with an explicit unavailable Moo owner disposition.
 //!
 //! Serialization is available through the crate's `serde` cargo feature
 //! (on by default), which rides the `lgwks_std/json` edge — the full serde
@@ -45,6 +49,7 @@ pub mod event;
 pub mod ids;
 pub mod replay;
 pub mod state;
+pub mod workspace;
 
 /// Crate version as declared in Cargo.toml.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

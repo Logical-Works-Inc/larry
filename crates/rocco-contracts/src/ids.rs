@@ -114,6 +114,10 @@ define_id!(
     RunId
 );
 define_id!(
+    /// Identifies a Moo-owned workspace, distinct from a run or tenant.
+    WorkspaceId
+);
+define_id!(
     /// Identifies a worker process holding delegated, attenuated authority
     /// (Cell 04 authority equation; D07 standing authority).
     WorkerId

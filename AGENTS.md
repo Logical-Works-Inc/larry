@@ -23,9 +23,11 @@ the Director to restate an already clear request.
 
 ## Current scope and settled decisions
 
-- Rocco is a private, documentation-first repository with an authorized native
-  AppCUI fixture-only visual pass, not an implemented backend runtime. Persistent
-  DEMO labels and zero provider/execution/workspace effects remain mandatory.
+- Rocco is a private, specification-led repository. The Director's 2026-09-19
+  authorization adds a board-first native workspace and a bounded backend slice
+  with selective prior-harness reuse. See /docs/workspace-experience.md for ADRs.
+  Synthetic data stays visibly DEMO; orchestration may not be fabricated.
+  The current disconnected demo executes no provider or workspace effects.
 - Core + CLI/TUI first; phone/app next; website later. Preserve all surfaces.
 - Bounded unattended work is required within standing authority, not installed now.
 - Use explicit adapters, not clones of arbitrary harness plugins or hooks.
@@ -38,7 +40,7 @@ the Director to restate an already clear request.
   /docs/dependencies/README.md, and no component roots its graph elsewhere.
 - MatrAIx is one evaluation source. Do not modify it or substitute simulated
   satisfaction for independent task outcomes or real-human evidence.
-- Product implementation needs its separate architecture approval and proof gates.
+- Product implementation beyond that authorized slice needs architecture approval and proof gates.
   Repository governance tooling is in scope; installing host hooks is not.
 
 ## Mandatory local query evidence

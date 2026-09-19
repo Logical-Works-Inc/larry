@@ -26,6 +26,22 @@ overview, the dependency root ([Logicalworks-Crates](/docs/dependencies/README.m
 first), and the evaluation structure. No application, model, service, hook or
 benchmark runner is installed by this repository.
 
+## Try the workspace demo
+
+```sh
+cargo run --locked --bin rocco
+```
+
+Start on the Kanban board. Click a card, press its number, or select it and
+press Enter to open work and request Continue. Escape returns Home with the
+draft intact. Chat occupies its own pane; Tab and `/files`, `/agents`,
+`/changes` expose context. `/next` and `/inspect` exercise synthetic changes.
+`/continue` uses the typed owner boundary; `/fixture-continue` only releases
+a demo feedback hold. `t` on Home or `/truth` in work explains every simulation.
+Ctrl-C quits. Notes are unsent and session-only; no model or Moo owner is
+connected, so nothing actually starts. The [workspace ADRs](/docs/workspace-experience.md)
+record source research, truthful integration path and unfulfilled product gates.
+
 ## Deterministic repository checks
 
 Requires Python 3.11+ and its standard library only:

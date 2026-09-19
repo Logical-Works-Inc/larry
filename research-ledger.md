@@ -20,6 +20,25 @@ sources:
 
 # Research ledger
 
+## 2026-09-19 board-first workspace and selective backend reuse
+
+READ: bounded Codex, Cline, OpenCode, AppCUI and Forge/Moo source inventory and
+design dispositions are recorded in [workspace ADRs](/docs/workspace-experience.md).
+Codex separates thread resume from turn start; this led to identity-bound
+Continue without claiming execution. Cline's welcome prompt was rejected for
+this entry point; OpenCode's independently scoped context panel was retained.
+The backend agent adapted Forge's baseline/fence guard with MIT notice, not
+its synthetic Moo allocator. CodeGraph source receipts and test boundaries are
+in `crates/rocco-contracts/WORKSPACE-EVIDENCE.md`. No sibling was edited.
+
+The local query layer was used before implementation and again at the routing
+pivot. Initial Python failures and the isolated metadata repair are retained
+in the ADRs; a model's relevance rank never overrides source or scope. Native
+computer-use terminal control was refused, so it was not bypassed. The emitted
+SVG was instead converted locally and visually inspected as a static render;
+that establishes presentation only. Actual POSIX PTY rendering, input and
+mouse events remain separately testable.
+
 ## 2026-09-17 native visual pass receipts
 
 READ: published AppCUI 0.5.1 README lists Tab, TreeView, ListView, splitters,

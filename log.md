@@ -22,6 +22,48 @@ planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
 
+## 2026-09-19: board-first workspace and visual-fidelity correction
+
+Director correction: the earlier mockup looked like a drawing. Rocco must be a
+lightweight terminal workspace for a human, Rocco the System and an AI: start
+with Kanban state, open work as Continue, retain dedicated chat without making
+the whole page chat, and make disconnected fixture data visibly honest.
+
+Decision: retain AppCUI and the single terminal binary, but replace the sparse
+transparent composition with an ANSI16 spatial shell: work rail, teal task
+cards, green focus, purple System attention stack, and a distinct Human + AI
+pane. The counterpart is an input-driven focus response, not an idle loop.
+This is informed by READ-only study of local Codex/Cline/OpenCode/Forge source
+and public Mirador/Euporie/Socktop/Awesome TUIs material; no external source
+code was copied. The full decision and rejected alternatives are ADR-W01–W04
+in `docs/workspace-experience.md`.
+
+MEASURED failure and repair: an AppCUI 8fps frame experiment emitted more than
+the existing 1MiB idle PTY bound in under 30 seconds at 120x32. It was removed
+instead of loosening the limit. The independently input-driven debug binary
+then completed a 300.197-second actual 120x32 macOS PTY probe: 0 idle output
+bytes, sampled max RSS 7,680KiB, delta CPU 0.0%, p95 input 3.576ms, first
+paint 18.716ms and quit-to-reap 75.058ms; receipt
+`docs/evidence/workspace-final-metrics.json`. This is a host-specific
+measurement, not a Ryzen, fleet or web-runtime assertion. Static SVG output
+was converted and visually inspected locally after native terminal control was
+denied; this is presentation evidence, not orchestration, human-acceptance or
+cross-platform proof.
+
+Truth contract: all board cards, activities, diffs and fixture feedback state
+`DEMO DATA`; the truth view names the real future owners. The typed Continue
+coordinator refuses with `Awaiting Moo` when Moo is absent; it does not create
+a Running/Completed fiction. Session-only notes stay visibly local and unsent.
+The remaining nine-axis limits remain those stated in the ADR; no load,
+multi-tenant, Linux/Windows/Ryzen, persistence, real Moo/model or human study
+has been claimed.
+
+The bounded local post-exec reranker independently ranked the terminal-IDE
+shell and truthful-colour candidates 1.0 and interaction-driven motion 0.934
+(`tools/receipts/20260919-workspace-ui-post-exec.json`). It is advisory design
+pressure only: PTY measurements, source owners and the acceptance table remain
+the controlling evidence.
+
 ## 2026-09-18: mac-safe keys and default terminal background
 
 Director corrections: F-keys do not work on macOS, run an accessibility pass,

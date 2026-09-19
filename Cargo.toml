@@ -73,6 +73,7 @@ unimplemented = "deny"
 dbg_macro = "deny"
 
 [dependencies]
+rocco-contracts = { path = "crates/rocco-contracts" }
 lgwks_std = { workspace = true, features = ["json"] }
 lgwks_deps = { workspace = true, features = ["appcui"] }
 

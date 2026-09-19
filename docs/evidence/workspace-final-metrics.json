@@ -1,0 +1,92 @@
+{
+  "scope": "macOS actual debug binary, 120x32 PTY, synthetic data, disconnected Moo/model",
+  "binary_sha256": "1affcf7f1cc1bcba2e043b5da2bd2602782c2473bb39139a383ae6b00497be3f",
+  "first_paint_ms": 18.7160829664208,
+  "input_samples_ms": [
+    2.6305830106139183,
+    2.909041999373585,
+    1.5638750046491623,
+    1.2939170119352639,
+    1.8758330261334777,
+    1.1870419839397073,
+    2.2353749955073,
+    1.5279590152204037,
+    1.6334159881807864,
+    0.9361249976791441,
+    1.8353329505771399,
+    2.8899169992655516,
+    1.8030839855782688,
+    1.4626249903813004,
+    3.6387910367920995,
+    1.3288329937495291,
+    1.862625009380281,
+    3.5757500445470214,
+    1.1682920157909393,
+    1.805791980586946
+  ],
+  "input_p50_ms": 1.8044379830826074,
+  "input_p95_ms": 3.5757500445470214,
+  "idle_seconds": 300.1966747919796,
+  "idle_cpu_percent": 0.0,
+  "sampled_max_rss_kib": 7680,
+  "idle_output_bytes": 0,
+  "resource_samples": [
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 7680
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 6576
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 6576
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5328
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5312
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5200
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5184
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5184
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5168
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5184
+    },
+    {
+      "cpu_seconds": 0.04,
+      "rss_kib": 5184
+    }
+  ],
+  "quit_to_exit_ms": 75.0581250176765,
+  "exit_code": 0,
+  "child_reaped": true,
+  "unknown": [
+    "physical Ryzen3",
+    "other OS/architecture",
+    "peak RSS between samples",
+    "main-thread task duration",
+    "network trace",
+    "fleet load",
+    "human acceptance",
+    "matched alternatives"
+  ]
+}

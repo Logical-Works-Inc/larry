@@ -15,10 +15,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target/debug/rocco"
 ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
-# Runaway-output bound. Measured 2026-09-18: the ten-command hold/Continue
-# journey emits ~566 KiB total (~5.5 KiB per event-driven repaint, idle
-# ~3 KiB/s), so 1 MiB leaves headroom while a spew loop still trips it
-# within a second. A crash closes the PTY and fails distinctly above.
+# Runaway-output bound. A 2026-09-19 8fps frame-loop trial crossed this limit
+# in under 30 seconds on the same PTY and was removed; the input-driven build
+# is remeasured in docs/evidence/workspace-final-metrics.json. A crash closes
+# the PTY and fails distinctly above rather than being mistaken for quietness.
 OUTPUT_BOUND = 1024 * 1024
 
 
@@ -37,7 +37,7 @@ class Terminal:
         while text.encode() not in ANSI.sub(b"", fragment):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([self.master], [], [], remaining)[0]:
-                raise AssertionError(f"missing {text!r}; output={ANSI.sub(b'', fragment)!r}")
+                raise AssertionError(f"missing {text!r}; final output={ANSI.sub(b'', fragment)[-12000:]!r}")
             chunk = os.read(self.master, 65536)
             if not chunk:
                 raise AssertionError("terminal closed before expected output")
@@ -73,17 +73,20 @@ class NativeJourneys(unittest.TestCase):
     def test_native_draw_input_panes_hold_continue_and_exit(self):
         terminal = Terminal()
         try:
-            terminal.expect("Safe fixture")
+            terminal.expect("Your workspace")
+            terminal.send("\r")
+            terminal.expect("Awaiting Moo")
             for command, expected in [
-                ("/folders\r", "Files [fixture]"),
-                ("/agents\r", "Agents [fixture]"),
-                ("/changes\r", "▸ Changes"),
+                ("/folders\r", "FILES / fixture"),
+                ("/agents\r", "AGENTS / fixture"),
+                ("/changes\r", "CHANGES / fixture"),
                 ("/next\r", "src/retry.rs:12"),
                 ("/inspect\r", "fixture-01"),
                 ("/feedback keep bounded\r", "HELD clone 1"),
                 ("/next\r", "fixture-02"),
                 ("/next\r", "HeldWork"),
-                ("/continue\r", "no backend action executed"),
+                ("/continue\r", "Awaiting Moo"),
+                ("/fixture-continue\r", "no backend action executed"),
                 ("/next\r", "fixture-03"),
                 ("/scenario empty\r", "No changes yet"),
             ]:
@@ -97,9 +100,11 @@ class NativeJourneys(unittest.TestCase):
     def test_native_crash_and_fresh_terminal_recovery(self):
         terminal = Terminal()
         try:
-            terminal.expect("Safe fixture")
+            terminal.expect("Your workspace")
+            terminal.send("\r")
+            terminal.expect("Awaiting Moo")
             terminal.send("/changes\r")
-            terminal.expect("▸ Changes")
+            terminal.expect("CHANGES / fixture")
             terminal.send("/next\r")
             terminal.expect("src/retry.rs:12")
             terminal.child.kill()
@@ -108,11 +113,37 @@ class NativeJourneys(unittest.TestCase):
             terminal.close()
         recovered = Terminal()
         try:
-            recovered.expect("Safe fixture")
-            recovered.send("/quit\r")
+            recovered.expect("Your workspace")
+            recovered.send("q")
             self.assertEqual(recovered.finish(), 0)
         finally:
             recovered.close()
+
+    def test_board_truth_mouse_and_draft_recovery(self):
+        terminal = Terminal()
+        try:
+            terminal.expect("Your workspace")
+            terminal.send("t")
+            terminal.expect("SYNTHETIC DATA")
+            terminal.send("t")
+            terminal.expect("Your workspace")
+            # Real xterm SGR mouse input, 1-based coordinates inside card 1.
+            terminal.send("\x1b[<0;6;10M\x1b[<0;6;10m")
+            terminal.expect("Awaiting Moo")
+            terminal.send("remember this")
+            terminal.expect("remember this")
+            terminal.send("\x1b")
+            terminal.expect("Your workspace")
+            terminal.send("2")
+            terminal.expect("Workspace handoff")
+            terminal.send("\x1b")
+            terminal.expect("Your workspace")
+            terminal.send("1")
+            terminal.expect("remember this")
+            terminal.send("\x15/quit\r")
+            self.assertEqual(terminal.finish(), 0)
+        finally:
+            terminal.close()
 
 
 if __name__ == "__main__":

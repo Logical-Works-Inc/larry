@@ -50,6 +50,14 @@ and real PTY gates; every simulated action remains visibly DEMO and may not
 execute providers, shell commands or workspace changes. Preserve the original
 product acceptance inventory rather than equating fixture tests with it.
 
+Director authorization 2026-09-19 expands that slice to a board-first workspace
+and selected backend contracts, with exactly one backend delegate and selective
+prior-harness reuse. Moo still owns workspace claims. Synthetic data is allowed
+only with visible provenance and its live integration path; orchestration may
+not be simulated. The disconnected demo creates no external effects. The ADRs
+in [workspace experience](/docs/workspace-experience.md) preserve this boundary,
+the memory hold and every product acceptance axis.
+
 ```mermaid
 flowchart TD
   Trigger["Director decision, source drift, test failure or counterexample"] --> Classify["Classify scope and authority; preserve original intent"]
