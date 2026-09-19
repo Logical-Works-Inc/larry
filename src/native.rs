@@ -88,6 +88,10 @@ const MAX_LOG: usize = 512;
 /// Run the native demo. All fixture actions remain in memory.
 pub fn run() -> Result<(), appcui::system::Error> {
     App::input_app(workspace::Workspace::default())
+        // AppCUI defaults to Termios on macOS, which cannot receive mouse
+        // events. The already-admitted CrossTerm backend enables the rail's
+        // explicit pointer affordance without changing workspace semantics.
+        .backend(appcui::backend::Type::CrossTerm)
         .title("Rocco workspace — DEMO DATA")
         .auto_close(false)
         .run()

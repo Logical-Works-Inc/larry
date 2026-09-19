@@ -21,6 +21,7 @@ states:
 invariants:
   - A fixture never displays as a real Moo admission, model reply, Running outcome, or completed effect.
   - Exactly one selected work card receives a blue surface; other layout surfaces remain neutral.
+  - Each rail work row has one visible selected surface and a two-line click target that opens the same Continue path as a board card.
   - Warning and error color always has an adjacent textual meaning.
   - No idle animation, polling, network operation, or background work is implied by the screen.
   - Returning home and changing work preserves only the current session draft and makes session loss on exit visible.
@@ -37,6 +38,8 @@ agent_contracts:
 probes:
   - id: board-to-refused-continue
     action: Launch the binary in a clean PTY, press Enter, and observe Awaiting Moo with no success state.
+  - id: rail-click-to-continue
+    action: Click an unselected rail work row in a clean PTY and observe its work title plus the same missing-Moo refusal.
   - id: truth-before-trust
     action: Open truth from Home and verify fixture labels plus the owner-backed path before returning.
   - id: draft-isolation

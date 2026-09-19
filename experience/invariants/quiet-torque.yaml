@@ -3,6 +3,7 @@ scope: native AppCUI workspace
 rules:
   - Black is the shared baseline surface; gray communicates boundaries and secondary hierarchy.
   - White carries primary reading content; blue identifies the sole selected work surface and focus affordance.
+  - The selected rail row has a visible two-line hit area; clicking it follows the same Continue path as selecting a board card.
   - Amber and red are reserved for operational warning or error and must be accompanied by text.
   - Teal, magenta, and green cannot be used as decorative region fills.
   - Motion is input-triggered only and cannot represent background execution, connection, or model activity.

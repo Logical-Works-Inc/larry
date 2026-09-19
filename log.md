@@ -101,6 +101,34 @@ appears in a work title and was therefore not sufficient evidence that Escape
 had returned Home. The native journey now waits for the Home-only strapline
 "Everything else stays quiet"; no product behavior or acceptance was weakened.
 
+## 2026-09-19: rail affordance and macOS pointer correction
+
+Director feedback was specific: the board was intuitive without research, but
+the work rail did not look clickable and its layout felt unnaturally detached.
+READ source confirmed the behavioral side: rail rows had no mouse handler.
+The correction gives only the selected two-line rail row a compact blue focus
+surface, leading marker and `click / Enter to open` affordance; all resting
+rows stay neutral. Pressing that target uses the same typed Continue route as
+a board card and therefore still refuses honestly with `Awaiting Moo`.
+
+MEASURED repair: AppCUI's macOS default is Termios, whose own capability table
+excludes mouse support. The binary now chooses the already-admitted CrossTerm
+backend, which enables mouse capture. A real 120x32 POSIX PTY test sends an
+SGR click into rail row three and observes both its selected work and the
+missing-Moo refusal. The test harness was upgraded from ANSI stripping to a
+small cursor-addressed screen model because CrossTerm correctly emits delta
+paints; pretending its raw escape stream was contiguous text would be a weak
+oracle. Forge influenced only the quiet selected-row grammar—one focus surface
+and a leading marker—not copied Ratatui code or a new dependency.
+
+MEASURED W06 receipt: the mouse-enabled macOS debug binary completed a
+300.124-second 120x32 PTY probe with 0 idle bytes, 0.0% delta CPU, 7,824KiB
+sampled peak RSS, 0.892ms p95 input, 216.412ms first paint, 59.635ms
+quit-to-reap and a clean reaped exit. Binary SHA-256:
+`c7c2882f7a186521e6b46424bd3417f92000e54470a6d44e3905d1d9d1b47968`.
+This is local debug/PTy evidence, not portable performance, live Moo, or a
+human study.
+
 ## 2026-09-18: mac-safe keys and default terminal background
 
 Director corrections: F-keys do not work on macOS, run an accessibility pass,

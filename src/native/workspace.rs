@@ -144,6 +144,16 @@ const SYSTEM_PANEL: Color = SHELL;
 const INK: Color = Color::White;
 const SOFT: Color = Color::Gray;
 const FOCUS: Color = Color::Blue;
+const RAIL_WIDTH: i32 = 27;
+const RAIL_ITEM_X: i32 = 1;
+const RAIL_ITEM_WIDTH: i32 = 24;
+const RAIL_ITEM_Y: i32 = 11;
+const RAIL_ITEM_HEIGHT: i32 = 2;
+
+fn rail_item_y(index: usize) -> i32 {
+    let index = index.min(i32::MAX as usize) as i32;
+    RAIL_ITEM_Y.saturating_add(index.saturating_mul(RAIL_ITEM_HEIGHT))
+}
 
 fn fill(surface: &mut Surface, x: i32, y: i32, width: i32, height: i32, background: Color) {
     if width <= 0 || height <= 0 {
@@ -310,48 +320,60 @@ impl Workspace {
         if height < 12 {
             return;
         }
-        fill(surface, 0, 2, 27, height - 2, RAIL);
+        fill(surface, 0, 2, RAIL_WIDTH, height - 2, RAIL);
         for y in 2..height {
-            ink!(surface, 26, y, 1, "│", SOFT, RAIL, false);
+            ink!(surface, RAIL_WIDTH - 1, y, 1, "│", SOFT, RAIL, false);
         }
         ink!(surface, 2, 4, 23, "WORKSPACE", SOFT, RAIL, true);
         ink!(surface, 2, 6, 23, "▣  Home", INK, RAIL, true);
         line(surface, 2, 8, 23, SOFT, RAIL);
         ink!(surface, 2, 10, 23, "WORK IN VIEW", SOFT, RAIL, true);
         for (index, _) in self.cards.iter().enumerate() {
-            let y = 12 + index as i32 * 3;
-            if y + 1 >= height - 3 {
+            let y = rail_item_y(index);
+            if y + RAIL_ITEM_HEIGHT > height - 3 {
                 break;
             }
             let active = self.selected == index;
+            let background = if active { FOCUS_PANEL } else { RAIL };
+            if active {
+                fill(
+                    surface,
+                    RAIL_ITEM_X,
+                    y,
+                    RAIL_ITEM_WIDTH,
+                    RAIL_ITEM_HEIGHT,
+                    background,
+                );
+            }
             ink!(
                 surface,
-                2,
-                y - 1,
-                22,
+                RAIL_ITEM_X + 1,
+                y,
+                RAIL_ITEM_WIDTH - 2,
                 &format!(
-                    "{} {:02}",
-                    if active { self.motion_mark() } else { "·" },
-                    index + 1
+                    "{} {:02}  {}",
+                    if active { "▌" } else { " " },
+                    index + 1,
+                    match index {
+                        0 => "Review retry",
+                        1 => "Workspace handoff",
+                        2 => "Calmer project home",
+                        _ => "Bounded input",
+                    }
                 ),
-                if active { FOCUS } else { SOFT },
-                RAIL,
+                if active { INK } else { SOFT },
+                background,
                 active,
             );
             ink!(
                 surface,
-                5,
-                y,
-                19,
-                match index {
-                    0 => "Review retry",
-                    1 => "Workspace handoff",
-                    2 => "Project home",
-                    _ => "Bounded input",
-                },
-                if active { INK } else { SOFT },
-                RAIL,
-                active,
+                RAIL_ITEM_X + 5,
+                y + 1,
+                RAIL_ITEM_WIDTH - 6,
+                if active { "click / Enter to open" } else { "" },
+                if active { FOCUS } else { SOFT },
+                background,
+                false,
             );
         }
         if height >= 28 {
@@ -371,7 +393,7 @@ impl Workspace {
                 2,
                 height - 2,
                 23,
-                "t  truth & data source",
+                "click a work item · t truth",
                 SOFT,
                 RAIL,
                 false,
@@ -1080,6 +1102,20 @@ impl InputApp for Workspace {
             } else if !self.entered && !self.truth && height < 20 && (5..9).contains(&data.y) {
                 self.selected = (data.y - 5) as usize;
                 self.enter();
+            } else if !self.entered
+                && !self.truth
+                && width >= 92
+                && data.x >= RAIL_ITEM_X
+                && data.x < RAIL_ITEM_X + RAIL_ITEM_WIDTH
+                && data.y >= RAIL_ITEM_Y
+            {
+                if let Ok(selected) = usize::try_from((data.y - RAIL_ITEM_Y) / RAIL_ITEM_HEIGHT)
+                    && selected < self.cards.len()
+                    && data.y < rail_item_y(selected).saturating_add(RAIL_ITEM_HEIGHT)
+                {
+                    self.selected = selected;
+                    self.enter();
+                }
             } else if !self.entered && !self.truth && data.y >= 6 && data.y < 21 {
                 let rail = if width >= 92 { 27 } else { 0 };
                 let x = rail + 2;
@@ -1177,7 +1213,6 @@ impl InputApp for Workspace {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
 
     fn paint(ui: &Workspace, width: u32, height: u32) -> String {
@@ -1195,7 +1230,7 @@ mod tests {
         (0..height as i32)
             .map(|y| {
                 (0..width as i32)
-                    .map(|x| surface.char(x, y).unwrap().code)
+                    .map(|x| surface.char(x, y).map_or(' ', |cell| cell.code))
                     .collect::<String>()
                     + "\n"
             })
@@ -1231,17 +1266,31 @@ mod tests {
             .replace('>', "&gt;")
     }
 
-    fn write_scene_svg(file: &mut std::fs::File, surface: &Surface, width: u32, height: u32) {
+    fn scene_cell(surface: &Surface, x: i32, y: i32) -> std::io::Result<&Character> {
+        surface.char(x, y).ok_or_else(|| {
+            std::io::Error::other(format!("rendered scene has no cell at ({x}, {y})"))
+        })
+    }
+
+    fn write_scene_svg(
+        file: &mut std::fs::File,
+        surface: &Surface,
+        width: u32,
+        height: u32,
+    ) -> std::io::Result<()> {
         use std::io::Write;
         const CELL_W: i32 = 9;
         const CELL_H: i32 = 18;
-        writeln!(file, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1120\" height=\"650\" viewBox=\"0 0 1120 650\"><rect width=\"1120\" height=\"650\" fill=\"#0b1020\"/>").unwrap();
+        writeln!(
+            file,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1120\" height=\"650\" viewBox=\"0 0 1120 650\"><rect width=\"1120\" height=\"650\" fill=\"#0b1020\"/>"
+        )?;
         for y in 0..height as i32 {
             let mut start = 0;
             while start < width as i32 {
-                let background = surface.char(start, y).unwrap().background;
+                let background = scene_cell(surface, start, y)?.background;
                 let mut end = start + 1;
-                while end < width as i32 && surface.char(end, y).unwrap().background == background {
+                while end < width as i32 && scene_cell(surface, end, y)?.background == background {
                     end += 1;
                 }
                 writeln!(
@@ -1251,20 +1300,19 @@ mod tests {
                     8 + y * CELL_H,
                     (end - start) * CELL_W,
                     svg_color(background)
-                )
-                .unwrap();
+                )?;
                 start = end;
             }
             let mut x = 0;
             while x < width as i32 {
-                let cell = surface.char(x, y).unwrap();
+                let cell = scene_cell(surface, x, y)?;
                 let foreground = cell.foreground;
                 let background = cell.background;
                 let flags = cell.flags;
                 let mut text = String::new();
                 let mut end = x;
                 while end < width as i32 {
-                    let next = surface.char(end, y).unwrap();
+                    let next = scene_cell(surface, end, y)?;
                     if next.foreground != foreground
                         || next.background != background
                         || next.flags != flags
@@ -1280,12 +1328,23 @@ mod tests {
                     } else {
                         ""
                     };
-                    writeln!(file, "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"Menlo,monospace\" font-size=\"14\" xml:space=\"preserve\"{weight}>{}</text>", 16 + x * CELL_W, 22 + y * CELL_H, svg_color(foreground), svg_escape(&text)).unwrap();
+                    writeln!(
+                        file,
+                        "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"Menlo,monospace\" font-size=\"14\" xml:space=\"preserve\"{weight}>{}</text>",
+                        16 + x * CELL_W,
+                        22 + y * CELL_H,
+                        svg_color(foreground),
+                        svg_escape(&text)
+                    )?;
                 }
                 x = end;
             }
         }
-        writeln!(file, "<text x=\"16\" y=\"625\" fill=\"#a9b5c9\" font-family=\"sans-serif\" font-size=\"12\">Actual AppCUI cell-render preview; not a Terminal screenshot. ANSI16 palette shown faithfully.</text></svg>").unwrap();
+        writeln!(
+            file,
+            "<text x=\"16\" y=\"625\" fill=\"#a9b5c9\" font-family=\"sans-serif\" font-size=\"12\">Actual AppCUI cell-render preview; not a Terminal screenshot. ANSI16 palette shown faithfully.</text></svg>"
+        )?;
+        Ok(())
     }
 
     fn press(ui: &mut Workspace, code: KeyCode) {
@@ -1296,6 +1355,15 @@ mod tests {
         ui.cards[ui.selected].session.input = text.into();
         ui.cards[ui.selected].session.command_mode = true;
         press(ui, KeyCode::Enter);
+    }
+
+    fn click(ui: &mut Workspace, x: i32, y: i32) {
+        ui.on_mouse_event(&MouseEvent::Pressed(MouseEventData {
+            x,
+            y,
+            button: MouseButton::Left,
+            modifier: KeyModifier::None,
+        }));
     }
 
     #[test]
@@ -1342,12 +1410,14 @@ mod tests {
             ] {
                 let path =
                     std::path::PathBuf::from(&directory).join(format!("workspace-{name}.svg"));
-                let mut file = std::fs::OpenOptions::new()
+                let file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(path)
-                    .unwrap();
-                write_scene_svg(&mut file, &scene, 120, 32);
+                    .open(path);
+                assert!(file.is_ok(), "capture path must be newly created");
+                if let Ok(mut file) = file {
+                    assert!(write_scene_svg(&mut file, &scene, 120, 32).is_ok());
+                }
             }
         }
     }
@@ -1356,20 +1426,49 @@ mod tests {
     fn quiet_torque_keeps_depth_neutral_and_focus_singular() {
         let ui = Workspace::default();
         let surface = scene(&ui, 120, 32);
-        let mut colors = Vec::new();
+        let mut colors = Vec::with_capacity(120 * 32);
         for y in 0..32 {
             for x in 0..120 {
-                colors.push(surface.char(x, y).unwrap().background);
+                let background = surface.char(x, y).map(|cell| cell.background);
+                assert!(
+                    background.is_some(),
+                    "the 120x32 render must own every cell"
+                );
+                if let Some(background) = background {
+                    colors.push(background);
+                }
             }
         }
 
+        assert_eq!(colors.len(), 120 * 32);
         assert!(colors.contains(&FOCUS_PANEL));
         assert!(!colors.contains(&Color::Teal));
         assert!(!colors.contains(&Color::Magenta));
         assert!(!colors.contains(&Color::DarkGreen));
-        assert_eq!(surface.char(30, 7).unwrap().background, FOCUS_PANEL);
-        assert_eq!(surface.char(62, 7).unwrap().background, SHELL);
-        assert_eq!(surface.char(97, 4).unwrap().background, SHELL);
+        assert_eq!(
+            surface.char(30, 7).map(|cell| cell.background),
+            Some(FOCUS_PANEL)
+        );
+        assert_eq!(surface.char(62, 7).map(|cell| cell.background), Some(SHELL));
+        assert_eq!(surface.char(97, 4).map(|cell| cell.background), Some(SHELL));
+    }
+
+    #[test]
+    fn rail_rows_are_visible_targets_for_the_same_continue_path_as_cards() {
+        let mut ui = Workspace::default();
+        ui.size.set((120, 32));
+        click(&mut ui, RAIL_ITEM_X + 3, rail_item_y(2) + 1);
+
+        assert_eq!(ui.selected, 2);
+        assert!(ui.entered);
+        let selected = scene(&ui, 120, 32);
+        assert_eq!(
+            selected
+                .char(RAIL_ITEM_X + 1, rail_item_y(2))
+                .map(|cell| cell.background),
+            Some(FOCUS_PANEL)
+        );
+        assert!(paint(&ui, 120, 32).contains("Awaiting Moo · nothing started"));
     }
 
     #[test]
@@ -1383,8 +1482,11 @@ mod tests {
             command(&mut ui, text);
             assert!(matches!(ui.cards[0].session.demo.work, Work::Held { .. }));
             assert_eq!(
-                ui.coordinator.board().get(ui.cards[0].run).unwrap().state(),
-                RunState::AwaitingAuthority
+                ui.coordinator
+                    .board()
+                    .get(ui.cards[0].run)
+                    .map(|record| record.state()),
+                Some(RunState::AwaitingAuthority)
             );
         }
         press(&mut ui, KeyCode::F5);
@@ -1460,8 +1562,11 @@ mod tests {
         ui.enter();
         assert!(ui.cards[3].dispatch.starts_with("Not continued:"));
         assert_eq!(
-            ui.coordinator.board().get(ui.cards[3].run).unwrap().state(),
-            RunState::Completed
+            ui.coordinator
+                .board()
+                .get(ui.cards[3].run)
+                .map(|record| record.state()),
+            Some(RunState::Completed)
         );
     }
 

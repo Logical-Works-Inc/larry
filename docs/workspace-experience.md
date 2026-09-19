@@ -131,6 +131,48 @@ Sources: Porsche [palette migration](https://designsystem.porsche.com/v3/news/mi
 [motion](https://atlassian.design/foundations/motion/); Apple
 [layout guidance](https://developer.apple.com/design/human-interface-guidelines/layout).
 
+## ADR-W06 — Rail rows are controls, not prose
+
+Observed: the Director could navigate the workspace without research, but the
+rail screenshot did not look clickable. Source inspection established the
+matching behavioral defect: the rail had no mouse route at all. The small blue
+number was therefore decorative rather than a legible hit target.
+
+Decision: each work item owns a compact two-line, 24-cell rail target. The one
+selected item gets the same dark-blue focus surface used by the selected board
+card, a blue leading marker, and explicit `click / Enter to open` copy. A
+pointer press anywhere in that target selects work and invokes the same typed
+Continue coordinator as card selection; it still reaches `Awaiting Moo` when
+Moo is absent. Resting rows remain neutral. Blue means current selection;
+amber remains the explicit disconnected/demo warning; no green success state
+is manufactured.
+
+The click must work on the Director's macOS terminal, not only in an event
+unit test. AppCUI's documented macOS default is the Termios backend, which
+does not receive mouse events; the runtime now selects its already-admitted
+CrossTerm backend, which enables mouse capture. The POSIX PTY test now
+emulates cursor-addressed terminal output and sends an SGR click through that
+backend. This proves the actual launch/input route locally; it does not prove
+other terminals or human acceptance.
+
+Read local Forge `forge-tui/src/theme.rs` and `render.rs`: its selected list
+uses a single slate-light surface and a leading highlight symbol while the
+rest remains quiet. Rocco adopts that interaction grammar, not Forge's
+Ratatui source or dependencies. Rejected: making every row blue, a hover
+animation, or a toolbar—the first recreates the colour fatigue the Director
+rejected; the others add attention and runtime work without clarifying action.
+Accepted tradeoff: one small, stable selection surface is less spectacular than
+a web control, but it is natural in a terminal and maps directly to action.
+
+MEASURED after W06: the mouse-enabled debug `rocco` binary completed a
+300.124-second 120x32 macOS PTY probe with 0 idle output bytes, 0.0% delta
+CPU, 7,824KiB sampled peak RSS, 0.892ms p95 input, 216.412ms first paint,
+59.635ms quit-to-reap, and a reaped zero exit. Receipt:
+`docs/evidence/workspace-final-metrics.json` (binary SHA-256
+`c7c2882f7a186521e6b46424bd3417f92000e54470a6d44e3905d1d9d1b47968`). This
+is a measurement of this local macOS debug binary only; Ryzen, other
+terminals, networks, fleet behavior and human acceptance remain unknown.
+
 ## Research and oracle boundary
 
 READ 2026-09-19: local Codex revision
@@ -160,10 +202,9 @@ version only when metadata is unusable; six unit checks plus an actual
 no-overlay Qwen rerank passed (`20260919-query-tool-fix-post-exec.json`). No
 shared Python package, model revision or caller environment was modified.
 
-The final event-driven binary's old 300.197-second receipt is retained only as
-historical context while the visual correction is remeasured against its final
-source. Those local debug-build observations never proved Ryzen, other
-terminals, fleet scale or human acceptance.
+W05's prior receipt is historical context only. The current W06 metric receipt
+names the mouse-enabled binary above. Neither local debug-build observation
+proves Ryzen, other terminals, fleet scale or human acceptance.
 
 MEASURED after W05: the actual debug `rocco` binary completed a 300.361-second
 120x32 macOS PTY probe with 0 idle output bytes, 0.0% delta CPU, 8,992KiB
@@ -242,7 +283,7 @@ superiority and absent hardware measurements cannot be inferred from that.
 - Read/spec/source/oracle: completed within the bounded source inventory above.
 - Backend reuse and typed Continue: one delegated implementation returned;
   parent integration is complete pending repository-wide verification.
-- Frontend board/work/context and truth view: W05 implementation, native PTY
+- Frontend board/work/context and truth view: W06 implementation, native PTY
   journey and rendered fixture review completed locally; only task-owned demo
   data is exercised.
 - Real repository gates: must be rerun after W05 and the query-tool repair.

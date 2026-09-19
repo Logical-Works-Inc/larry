@@ -70,6 +70,34 @@ completed its five-minute 120x32 PTY measurement with 0 idle output bytes and
 receipt. Neither result proves visual acceptance, portable performance or
 frontier superiority.
 
+### 2026-09-19 rail affordance and terminal backend correction
+
+READ: local AppCUI 0.5.1 `backend.rs` documents Termios as the macOS default
+and limits mouse support to Windows/NCurses; its CrossTerm implementation
+enables mouse capture and decodes terminal pointer events. The user-facing
+consequence was independently reproduced: injected SGR pointer bytes rendered
+as input under Termios. Rocco now selects CrossTerm from the already-admitted
+AppCUI package, rather than claiming an event-handler unit test made the macOS
+terminal clickable.
+
+READ: local Forge `forge-tui/src/theme.rs` and `render.rs` place selection on
+one small slate-light list surface with a leading highlight symbol. Rocco
+reimplements that calm control grammar in AppCUI with an ANSI blue focus row;
+no Ratatui code, dependency, or broad colour palette was copied. MEASURED: the
+native 120x32 PTY journey sends an SGR click to rail row three and reaches its
+work plus the honest missing-Moo refusal. Its cursor-addressed output is
+emulated in the test harness so delta painting is interpreted as a screen, not
+mistaken for contiguous text. This remains local terminal evidence, not a
+cross-terminal or human study result.
+
+MEASURED W06: the mouse-enabled macOS debug binary completed the fresh
+300.124-second 120x32 PTY probe with 0 idle bytes, 0.0% CPU delta, 7,824KiB
+sampled peak RSS, 0.892ms p95 input, a clean reaped exit, and SHA-256
+`c7c2882f7a186521e6b46424bd3417f92000e54470a6d44e3905d1d9d1b47968`.
+The exact input distribution and scope limits are retained in
+`docs/evidence/workspace-final-metrics.json`; no result transfers to Ryzen,
+other terminals, fleet load, or human preference.
+
 ## 2026-09-17 native visual pass receipts
 
 READ: published AppCUI 0.5.1 README lists Tab, TreeView, ListView, splitters,
