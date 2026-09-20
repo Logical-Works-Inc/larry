@@ -1,0 +1,1 @@
+{"phase":"pre-exec","model":"Qwen/Qwen3-Reranker-0.6B","revision":"e61197ed45024b0ed8a2d74b80b4d909f1255473","query_sha256":"f9ef8d9798799dcea0a619d9eb1cdfd7d0af5a3880d58b2e74e252b60b1a95cf","candidates_sha256":"0ab0559c866ace1a7e209dac01423505b077b6333a3fea9a39d0582cf647605e","candidate_count":1,"top_k":1,"max_seconds":900,"results":[{"id":"scope","score":0.056396484375}]}

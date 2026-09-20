@@ -43,6 +43,13 @@ No certification, universal correctness or fastest-possible claim is implied.
 
 ## Self-updating control loop
 
+Director-authorized visual pass 1 (2026-09-17) adds a native AppCUI fixture
+surface consuming the published Logical Works storefront. This does not lift
+the backend or memory-readiness boundaries. AGENTS.md lists the separate Rust
+and real PTY gates; every simulated action remains visibly DEMO and may not
+execute providers, shell commands or workspace changes. Preserve the original
+product acceptance inventory rather than equating fixture tests with it.
+
 ```mermaid
 flowchart TD
   Trigger["Director decision, source drift, test failure or counterexample"] --> Classify["Classify scope and authority; preserve original intent"]

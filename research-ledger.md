@@ -20,6 +20,27 @@ sources:
 
 # Research ledger
 
+## 2026-09-17 native visual pass receipts
+
+READ: published AppCUI 0.5.1 README lists Tab, TreeView, ListView, splitters,
+TextArea and Canvas. Its `src/system/builders/input_app_builder.rs:7–17`
+documents input-driven custom drawing without periodic ticks. This selected
+InputApp for quiet chrome rather than a dense stock-window layout. The same
+source defines key repaint and close semantics; real PTY journeys exercise it.
+No full editor is inferred from TextArea. Local RAG returned no AppCUI hits;
+Context7 returned unrelated libraries, not usable AppCUI evidence.
+
+READ/MEASURED: canonical estate admission in PR #7 records the explicit
+Director AppCUI choice and estate-use instruction. No cryptographic human
+signature is required by the inspected policy; the earlier extra-signoff claim
+was wrong. After explicit release-continuation authorization, publish uploaded
+`lgwks_deps` 0.1.8 from 822307da2c7adefccd09b449af2998c75deea42b. Fresh Cargo
+download confirmed `appcui` and Rocco pins that published artifact, not a path.
+Source: https://crates.io/crates/lgwks_deps/0.1.8 and
+https://github.com/srinji-kaggss/logicalworks-crates/pull/7.
+The native view and tests use that real dependency; backend and workspace
+effects remain simulated/absent as inventoried in the visual-pass document.
+
 ## Evidence semantics
 
 READ = inspected source/output, not exercised runtime. DOC = source authors'

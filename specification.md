@@ -594,6 +594,18 @@ TUI plus iOS phone are candidate support targets, all untested here. Native
 platform affordances use adapters; no forced lowest-common-denominator UX.
 E20; owner presentation, no separate phone run engine.
 
+Director-authorized visual pass 1, 2026-09-17: a native AppCUI terminal mockup
+consuming the published Logical Works storefront, with quiet REPL default,
+compact header/footer, optional folder drawer and narrow vertical agent rail,
+conversation/events, fixture diffs and file/line/trace inspection. Anchored
+feedback holds affected owner work; Continue remembers its anchor. Agents are
+parent/owner plus clone delegates, not peers. Telemetry is contextual, never a
+permanent dashboard. Every simulated path stays visibly DEMO; no backend,
+provider execution or workspace mutation is authorized by a fixture action.
+Navigation/input/toggles must be genuinely interactive. The simulation and
+future-owner inventory is retained in `/docs/architecture/visual-pass.md`;
+this visual authorization does not relax E20/E22 or runtime acceptance.
+
 ### D20 — typed workflow IR; Rhai is a candidate authoring frontend
 
 Choose a versioned bounded workflow graph with explicit inputs, effects, retry,
