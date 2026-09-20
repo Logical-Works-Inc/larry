@@ -5,10 +5,11 @@ description: Sibling reuse contracts, license audit, ecosystem protocol boundari
 resource: /docs/dependencies/ADAPTER-MANIFEST.md
 tags: [rocco, adapters, licenses, dependencies, evidence, c01]
 generated: {by: opencode, at: 2026-09-16}
-verified: {by: opencode, method: read sibling and lgwks Cargo.toml license fields, rocco-runtime contract/APPROVED.toml and pinned-revision presence checks, ledger receipts and specification Cell 11 allocation lines; no integration executed}
+updated: {by: agent:claude-code, at: 2026-09-18, note: one-repo consolidation corrected the consumption section}
+verified: {by: opencode, method: read sibling and lgwks Cargo.toml license fields, contract/APPROVED.toml and pinned-revision presence checks, ledger receipts and specification Cell 11 allocation lines; no integration executed}
 status: active
-stale_after: 2026-10-16
-sources: [/specification.md, /research-ledger.md, /docs/dependencies/README.md, sibling Cargo.toml manifests read 2026-09-16, rocco-runtime contract/APPROVED.toml read 2026-09-16]
+stale_after: 2026-10-18
+sources: [/specification.md, /research-ledger.md, /docs/dependencies/README.md, sibling Cargo.toml manifests read 2026-09-16, contract/APPROVED.toml read 2026-09-18, `lgwks-deps check .` run 2026-09-18]
 ---
 
 # C01 adapter/API/source-license manifest
@@ -57,8 +58,9 @@ READ this session from `/Users/srinji/logicalworks-crates/crates/*/Cargo.toml`
 | lgwks_ast | 0.1.3 | Apache-2.0 |
 | lgwks_deps | 0.1.7 | Apache-2.0 |
 
-All four versions match the controlled-dep releases registered in the
-rocco-runtime admission gate (see Runtime consumption). Foundation surfaces
+All four versions match the controlled-dep releases named by the workspace
+manifest and, where registered, by the in-repo admission gate (see In-workspace
+consumption). Foundation surfaces
 per D21: `std`, `lgwks_std`, `lgwks_bot`, `lgwks_deps`, with `lgwks_ast` as
 the existing parser. No vendored twin, no dual engine, no copied tree; missing
 sibling semantics are integration work in the sibling owner.
@@ -103,22 +105,37 @@ therefore owns E57; the same note assigns E32 to C07 and keeps every
 allocation subordinate to the rule that these allocations do not authorize
 product implementation or bypass the memory hold.
 
-## Runtime consumption
+## In-workspace consumption
 
-- srinji-kaggss/rocco-runtime consumes the lgwks crates as exact-pinned
-  crates.io releases (`=`) — no path deps, no git deps, no vendoring, no
-  forks (READ, rocco-runtime AGENTS.md 2026-09-16).
-- `contract/APPROVED.toml` (READ at rocco-runtime commit `1154959`) registers:
-  lgwks_std `=0.6.3` (features `["json"]`), lgwks_bot `=0.3.2`, lgwks_deps
-  `=0.1.7` with `default_features = false`; each with owner
-  `logicalworks-crates` and a reason. New third-party crates are registered
-  there with an owner and a reason or refused; capability edges come through
-  lgwks features first.
-- Disclosure: the APPROVED.toml file read this session registers
-  std/bot/deps only; lgwks_ast 0.1.3 is observed at that version in the
-  upstream Cargo.toml (READ) and named by D21 as the existing parser, but is
-  not yet a registered row in APPROVED.toml as read. Recording that gap is
-  the manifest's job; closing it belongs to rocco-runtime.
+CORRECTED 2026-09-18: the second repository no longer exists. The contract
+crate and the fixture surface are one workspace at the root of this repository
+(one `Cargo.toml`, one `Cargo.lock`, one lint set, one `contract/APPROVED.toml`).
+The paragraph this section replaces described a separate `srinji-kaggss/
+rocco-runtime` repository and a register read at its commit `1154959`; both are
+superseded, and the version and key names it recorded no longer match.
+
+- READ 2026-09-18, `contract/APPROVED.toml` in this repository, validated by
+  `lgwks-deps check .` (exit 0, "1 semantic approvals, every authored external
+  edge is owned"). The register holds `[policy]` and exactly one `[[approved]]`
+  row: `thiserror =2.0.20`, tier `boundary`, owner `rocco-contracts`,
+  capability `error-derive`, allowed consumer `rocco-contracts`.
+- The `lgwks_*` edges carry no row by design: `lgwks_std` is ladder rung 2
+  (workspace stdlib+, self-exempt) and `lgwks_deps` is the estate's own
+  admission storefront, so the checker reports both as owned without one. The
+  former runtime register declared all four in a shape this checker refuses and
+  was never schema-checked against it; the merge is the first time it has been.
+  Two of its keys (`features`, `default_features`) do not exist in this schema.
+- The manifest pins the crates as exact releases (`=`), declares no path, git,
+  vendor or fork edge, and the workspace declares `lgwks_bot =0.3.2` in the
+  catalog with no member depending on it yet — a catalog entry is not an edge.
+- Disclosure, still open: `lgwks_ast` 0.1.3 is observed at that version in the
+  upstream Cargo.toml (READ) and named by D21 as the existing parser, but it is
+  not a dependency of any member here and has no register row. That is correct
+  while nothing depends on it; it becomes a registration obligation the moment
+  something does.
+- `lgwks_deps` moved `=0.1.7` → `=0.1.8` in the merge, because 0.1.8 is the
+  published release carrying the `appcui` feature the native surface builds
+  against. The register records that correction.
 - forge/forge-harness/forge-sdk remain reference reading only — Director
   correction 2026-09-16 (known hidden bugs): never imported, copied or
   ported. Other agent harnesses are likewise reference only.

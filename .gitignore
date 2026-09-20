@@ -1,3 +1,7 @@
+# Merged 2026-09-18 from both former repositories' ignore files.
 __pycache__/
 *.pyc
 /target/
+Cargo.lock.bak
+*.swp
+.DS_Store

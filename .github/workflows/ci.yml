@@ -1,0 +1,61 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The Rust lanes, carried over from the rocco-runtime workflow, widened to
+  # the merged workspace: `--workspace` now covers rocco-demo and
+  # rocco-contracts together.
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # The specification and governance lanes, carried over from Rocco's
+  # workflow. Action SHAs are pinned here because this job ran that way
+  # before the merge; the rust job above keeps its tag refs for the same
+  # reason. Neither convention was changed by merging the two files.
+  governance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Check specification and governance
+        run: python3 tools/check_governance.py --report > "$RUNNER_TEMP/rocco-governance.json"
+      - name: Exercise positive and negative controls
+        if: always()
+        run: python3 -m unittest discover -s tests -v
+      - name: Check whitespace
+        if: always()
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$(git hash-object -t tree /dev/null)"
+          fi
+          git diff --check "$BASE_SHA" HEAD
+      - name: Retain structural evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rocco-governance-${{ github.sha }}
+          path: ${{ runner.temp }}/rocco-governance.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1398,6 +1398,12 @@ impl InputApp for Native {
 
 #[cfg(test)]
 mod tests {
+    // `unwrap_used` is denied workspace-wide because an unwrap on a production
+    // path is a panic waiting for the wrong input. These are the surface
+    // probes: `Surface::char` returns `None` only outside the surface, and a
+    // test that indexes outside the surface it just sized SHOULD fail loudly.
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use crate::theme::TOKENS;
 

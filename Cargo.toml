@@ -1,24 +1,90 @@
 [package]
 name = "rocco-demo"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.98"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 default-run = "rocco"
 description = "Effect-free interaction fixtures for the Rocco AppCUI visual pass"
 
 [workspace]
+# One repository, one workspace. `crates/rocco-contracts` was previously the
+# whole of a second repository (`srinji-kaggss/rocco-runtime`) whose manifest
+# declared this same crate set; it is a member here instead. The root package
+# is an implicit member.
+members = ["crates/rocco-contracts"]
+# Edition 2024 selects resolver 3; stated explicitly because the merged
+# workspace previously ran under resolver 2 on the runtime side.
+resolver = "3"
 
-[dependencies]
-lgwks_std = { version = "=0.6.3", default-features = false, features = ["json"] }
-lgwks_deps = { version = "=0.1.8", default-features = false, features = ["appcui"] }
+# Rocco — the specification repository, which also carries the fixture
+# implementation and the contract crate it governs. Dependency foundation:
+# Rust std + logicalworks-crates releases from crates.io, exact-pinned.
+# Every additional third-party edge is registered in contract/APPROVED.toml
+# or it does not compile its way into this workspace.
 
-[lints.rust]
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/srinji-kaggss/Rocco"
+# The real floor, and it is the library's: lgwks_std 0.6.3 declares
+# `rust-version = "1.98"` and edition 2024. The rocco-contracts manifest
+# formerly declared 1.85, which was never satisfiable against that
+# dependency — the merge corrects a false claim rather than raising a real
+# requirement.
+rust-version = "1.98"
+
+[workspace.dependencies]
+# Estate foundation (crates.io releases; exact pins = controlled deps).
+# Capability features are opted into per crate. `default-features = false` is
+# stated here rather than per member: cargo ignores a member's
+# `default-features` when the workspace declaration omits it, so leaving it
+# out would silently keep defaults on. lgwks_std's only default feature is
+# the empty `core` marker, so this changes no behaviour.
+lgwks_std = { version = "=0.6.3", default-features = false }
+# Catalogued but currently unused by any member: the async runner edge is
+# registered for the first crate that needs it, and the register records that
+# admission. A catalog entry is not a compile edge.
+lgwks_bot = { version = "=0.3.2" }
+# The dependency-admission storefront. rocco-demo opts into `appcui`; the
+# previously recorded 0.1.7 predates that feature, so the pin is corrected to
+# the published 0.1.8 that the visual pass actually builds against.
+lgwks_deps = { version = "=0.1.8", default-features = false }
+thiserror = "=2.0.20"
+
+# The stricter of the two former lint sets, applied to the whole workspace.
+# A member opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
+missing_docs = "deny"
 unsafe_code = "forbid"
 
-[lints.clippy]
-all = "warn"
+[workspace.lints.clippy]
+# The group must sit at a lower priority than the individual lints below, or
+# cargo refuses the manifest: it will not guess which of two lints at the same
+# priority wins. `-1` keeps the group beneath the explicit denies.
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[dependencies]
+lgwks_std = { workspace = true, features = ["json"] }
+lgwks_deps = { workspace = true, features = ["appcui"] }
+
+[lints]
+workspace = true
 
 [profile.dev]
 debug = 0
 incremental = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
