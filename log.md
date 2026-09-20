@@ -22,6 +22,315 @@ planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
 
+## 2026-09-20: the CI gate is given a runner — it had never once run
+
+Director direction: "LOCAL RUNNER". Both workflows requested `ubuntu-latest`, and
+no run in this repository's history had ever been assigned a runner: 61 workflow
+runs are recorded, all 61 concluded failure, and not one executed a step. The
+jobs were created and completed in about two seconds with an empty `steps` array
+while the job log returned `BlobNotFound`. Actions is enabled and the repository
+is private, so this reads as an account-level runner or spending-limit
+condition — not a defect in the workflow text, and not something the repository
+can repair from inside.
+
+The estate already answers this. Every sibling repository runs a self-hosted
+runner on this machine, each installed as a user LaunchAgent under
+`~/Library/LaunchAgents`, and their workflows ask for it with
+`runs-on: [self-hosted, macOS, ARM64]`. Rocco was the only repository without
+one. A runner is now registered to this repository as `rocco-macos-arm64`
+(labels `self-hosted, macOS, ARM64` plus the repository label), installed the
+same way, and both workflows ask for it.
+
+Semantic change, stated rather than hidden: the lane now proves the workspace on
+macOS/ARM64. It does not claim Linux coverage — it never had any, because it
+never ran. This is a limit, not a gain.
+
+Two commands were also aligned with the standard they appear to enforce. The rust
+job ran `cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo test --workspace` — no `--locked`, no `--all-targets` — so it checked a
+different thing from the lane set AGENTS.md declares and `.wwfd/local-ci.sh`
+mirrors. That divergence was invisible while the job could not start, and would
+become a false green the moment it could, so both commands now carry `--locked`
+and `--all-targets`. This tightens the gate; nothing was loosened, and no check
+was disabled to make a failure disappear.
+
+Affected IDs: none added. R01–R96, D01–D53, E01–E80, C00–C12 and A1–A9 are
+unchanged; the inventory stays 96/53/80/13/9. This is delivery tooling, not a
+requirement, a decision or a falsifier, and it is not recorded as one.
+
+Evidence: `bash .wwfd/local-ci.sh` at `e0a576f` — every declared lane passed and
+the receipt names that commit; `cargo test --workspace --all-targets --locked`
+164 passed, 0 failed; `lgwks-deps check .` exit 0 with no new edge;
+`python3 tools/check_governance.py` PASS on 96/53/80/13/9; 55 python tests OK.
+The runner reports `online` with labels `self-hosted, macOS, ARM64,
+rocco-macos-arm64`, read from `gh api repos/.../actions/runners`. Reranker
+receipts `tools/receipts/20260920-ci-local-runner-{pre,post}-exec.json`.
+
+Unresolved, and not claimed: the workflow still runs a **subset** of the lanes
+AGENTS.md declares. `cargo build --bins --locked`, `lgwks-deps check .`,
+`tools/test_demo_cli.py`, `tools/test_native_cli.py` and `git diff --check` run in
+the local mirror and not in CI, so "CI green" is weaker than "local-CI green" and
+must not be read as the latter. The runner is one machine sharing this host with
+the development environment: it is not a fleet, not a second platform, and not
+portable evidence. Hosted runners remain unavailable and were not pursued. The
+delivery protocol's "unprotected target: stop at a verified open PR" line is
+unchanged by this entry; whether it should be amended is the Director's call.
+
+## 2026-09-20: hardening pass — three counterexamples, and the witness the journal lacks
+
+Director direction: find real defects in the C02/E71 slices by adversarial
+reading, fix each at its lowest invariant, and add falsifiers that would fail
+if the property broke. No churn: only defects and the tests that catch them.
+
+Three defects were found, all real, and each is now fixed with a falsifier.
+The hardening commits land on `feat/dispatch-fence`, on top of the stack, and
+never by rebasing a fix to a lower layer.
+
+**1. Recovery was impossible for a legal journal.** `restore` derived each
+run's tenant from the first reserved intent, so a run the journal names but
+which reserved nothing — a submission the reducer denied, a steering command,
+a cancellation that arrived before any work — made restore fail with
+`RunNotTracked`, and with it the whole journal. That inverts the error's own
+documented meaning ("the journal never named this run") and breaks the one
+recovery story this slice claims: state is a fold over recorded facts (D04).
+The fix reads the tenant from the run's own recorded events:
+`ProjectionBackend::run_tenant`, backed by a `tenant` field on `RunView` that
+is fixed by the run's first recorded event, so a later event cannot
+re-attribute a run either. Falsifier:
+`a_run_that_reserved_no_effect_does_not_block_restore`.
+
+**2. A proposal could declare its own tenant.** `WorkProposal.tenant` was
+documented as "re-validated against the envelope's tenant rather than trusted
+from the body", but nothing validated it: `admit_work` recorded the *body's*
+declared tenant into the durable `EffectIntent`. That is a caller-declared
+security fact reaching a durable record, which D42 forbids, and it compounded
+defect 1 — a restored runtime re-attributed the run to the declared tenant.
+The fix is the one already used for the admission epoch: the tenant is an
+argument to `WorkProposal::intent`, read from the runtime's own run table,
+never a value the proposal supplies. Falsifier:
+`e63_a_proposal_cannot_declare_its_own_tenant`, which submits an envelope for
+tenant 1 carrying a body claiming tenant 2 and asserts the recorded intent,
+the receipt and the restored run table all say tenant 1.
+
+**3. An observation resolved an effect that provably never left the process.**
+This corrects the reasoning the entry below records, and it is the reason this
+entry exists. That entry concluded that a fenced first dispatch is
+*indistinguishable from a crash in the dispatch window* because `EventKind`
+has no "dispatched" fact, and therefore that the runtime must query such an
+effect and take the answer. The premise is half true. The *journal* cannot
+tell the two apart, but the running process can: a refused reach calls no
+owner at all, so `LiveEffect::sent` stays false, while a reservation restored
+from a crash is deliberately restored as possibly-sent and keeps its full
+treatment. The unused witness cost real money: with the offline bound spent
+and a queryable effect, an endpoint answering `Succeeded` to a status query
+about an effect it was never asked to perform produced a terminal receipt
+reading `Succeeded` and carried the run to `Completed` — a manufactured
+success for an effect that provably never happened, which is exactly what R88
+forbids and what the module doc promised could not occur ("a refused reach
+calls no owner, records no outcome and publishes no receipt").
+
+The repair is one witness, set in one place. `LiveEffect::sent` is set when a
+mutating reach is actually taken and by `restore` for every recorded
+reservation; `settle` records an observed outcome but withholds the
+disposition when nothing was ever sent, and `is_reconcilable` keeps such an
+effect open so the refusal stays reported rather than settling into a
+disposition no reach earned. The status query itself stays ungated — the
+already-dispatched treatment D48 names is untouched, and a restored effect
+still resolves from its endpoint's answer. Falsifier:
+`e71_an_observation_cannot_resolve_an_effect_that_was_never_sent`, which
+asserts the endpoint is queried, is never dispatched, that no tick in the
+effect's life publishes a receipt, and that the run stays `Reconciling`.
+
+Two further items were examined and are **not** changed here, deliberately.
+The `revoked` set on `RevocationFence` is unbounded, and that is a deliberate
+fail-closed choice: evicting a withdrawn operation would re-authorize it, and
+the fence documents that withdrawal is one-way for the fence's life. It is
+recorded as a bound the host owns by advancing the epoch (D49's anti-rollback
+territory) rather than being papered over. Separately, an effect whose outcome
+was recorded and whose *receipt* write was refused (a full journal between the
+two writes) is not re-attempted after restore, because `is_reconcilable`
+treats a resolved observation as closed. It fails closed — no receipt, no
+invented disposition — and is left visible here rather than repaired without a
+decision, since re-attempting it means re-querying an owner for an event the
+journal already holds.
+
+**Hosted CI, recorded precisely because the page must not overstate what was
+verified.** This repository has 61 recorded workflow runs and every one
+concluded `failure`; no run has ever passed, and none has ever executed a step.
+The jobs are created and complete in about two seconds with an empty `steps`
+array, and the job log returns `BlobNotFound`, so no step ran and no log was
+ever produced. Actions is enabled and the repository is private, which makes
+this an account-level runner or spending-limit condition rather than a defect
+in this code — the same signature the earlier entry recorded for PR #1's runs.
+Nothing about it was disabled, edited or weakened to make a check green, and no
+attempt was made to repair the account-level cause. Every gate this change
+claims is a local lane, and the tracker says so.
+
+Authority: Director's hardening order, 2026-09-20. Affected: C02, E71, E63
+(partially), D42, D48, R88, R72. Evidence: 164 workspace tests pass (161
+before; three added), clippy `-D warnings` clean, `cargo fmt --check` clean,
+`lgwks-deps check .` OK with no new edge, governance inventory 96/53/80/13/9
+PASS with 55 python tests OK, local-CI receipt naming the head. Unresolved:
+E63 and E65 remain NOT RUN as acceptance cases, so C02's exit gate is still
+unmet and the tracker still says so; no independent review; the two items
+above are recorded, not repaired.
+
+## 2026-09-20: dispatch-time freshness — the second half of authorization
+
+Director direction: do not import code from the sibling repositories; work the
+next step from the specification and the recorded issues; deliver it in one
+pass at the repository's Rust standard.
+
+Semantic change: D48 splits authorization in two and requires the split to stay
+visible — "a pure reproducible reducer plus separately authenticated freshness
+at dispatch". The reducer already existed and its replay was already proven.
+The freshness half did not exist at all: `gate::revalidate_at_boundary` was
+written but never called, and there was no revocation fence, no security epoch
+and no offline bound anywhere in the runtime. That is E71, and it is now
+implemented.
+
+`SecurityEpoch` is a monotone newtype in `rocco-contracts::authority`. It has no
+decrement and no subtraction: the only movement it offers is `successor` and
+`later_of`, both upward, which is what makes a replayed old device, grant or
+policy snapshot a non-event instead of an authorization. `EffectIntent` carries
+the `admission_epoch` its reservation was recorded under, so the recovery
+contract D48 asks to be persisted before dispatch is in the journal. The epoch
+is an argument to `WorkProposal::intent`, never a field of the proposal: a
+command cannot declare the security generation it is admitted under, so a
+hostile generator cannot name one that outlives a revocation (D42, E63).
+
+`RevocationFence` holds three facts — the epoch, the withdrawn operations and
+the offline exposure bound — and reads no clock. It is host-owned live state,
+never folded from the journal and never recorded as a decision, so replay stays
+bit-identical while freshness stays current. It is consulted from exactly one
+place, `Runtime::reach_owner`, which both lifecycle paths funnel through, and it
+gates **mutating** reaches only. A status query is deliberately not fenced: an
+effect already dispatched when revocation landed must still be resolvable, or
+revocation would leave a real external effect permanently unlabelled. That is
+the "already-dispatched treatment" D48 requires, and it is enforced by shape
+rather than by convention. A refused reach calls no owner, records no outcome,
+publishes no receipt and moves no run state — the effect stays visibly open,
+which is the only truthful state for one that was reserved and never sent.
+
+Two design consequences were found by tests rather than by reasoning, and both
+are now pinned. First, a fenced first dispatch is *indistinguishable from a
+crash in the dispatch window*, because `EventKind` still has no "not
+dispatched" fact; the runtime therefore queries such an effect and never
+re-dispatches one whose strategy is not retry-safe. Second, an earlier
+formulation excluded fenced effects from reconciliation, which would have made
+the refusal silent — the effect would sit open forever with nothing in the tick
+report saying why. Leaving it in costs one pure check per open effect per tick
+and keeps the refusal visible.
+
+Affected IDs: none added. R01–R96, D01–D53, E01–E80, C00–C12 and A1–A9 are
+unchanged; the inventory stays 96/53/80/13/9. This implements R87, D48 and E71
+and redefines nothing.
+
+Evidence: 29 new tests, 161 total (was 132). E71 is carried by 15 integration
+falsifiers in `crates/rocco-runtime/tests/fence.rs`, 11 unit tests in
+`crates/rocco-runtime/src/fence.rs` and 3 in `rocco-contracts::authority`,
+covering revocation during queue, the ordering between the durable intent and
+the owner call, partition, sleep, clock rollback, a replayed older snapshot,
+epoch exhaustion, epoch exhaustion at the runtime boundary, the retry-versus-
+query asymmetry, restore across a generation change, a zero bound, and the
+reservation a fenced effect holds. `cargo build --bins --locked` passed;
+`cargo test --workspace --all-targets --locked` passed 161;
+`cargo clippy --workspace --all-targets --locked -- -D warnings` passed;
+`cargo fmt --all -- --check` passed; `lgwks-deps check .` returned `OK . — 1
+semantic approvals, every authored external edge is owned` with **no new
+registered edge**; `python3 tools/check_governance.py` PASS on 96/53/80/13/9;
+`python3 -m unittest discover -s tests` passed 55; `git diff --check` clean.
+Reranker receipts `tools/receipts/20260920-dispatch-fence-pre-exec.json` and
+`-post-exec.json`. Hosted CI has not run for this change.
+
+Unresolved, and not claimed: no authenticated authority source supplies the
+fence. Its facts are host-asserted in this slice, exactly as policy, capability
+and validity are pinned, so the revocation *mechanism* is proven and the
+*provenance* of revocation facts is not integrated. A fenced effect keeps its
+reserved budget, because the reservation precedes the fence by design and
+releasing it would need a journal fact the closed vocabulary does not have; the
+direction fails closed and is pinned by a test. `gate::revalidate_at_boundary`
+remains uncalled: it is the grant-level check, and no `Grant` is threaded
+through the runtime yet — a different work package, not silently absorbed into
+this one. The offline bound is a declared Cell 05-style number equal to one
+tick's worth of admissions, not a measured exposure figure. E63 and E65 are
+still NOT RUN as acceptance cases, so the C02 exit gate is not met.
+
+## 2026-09-20: the runtime, implemented — the lowest invariant
+
+Director direction: work on the lowest invariant, the runtime, based on Bevy;
+the existing frontend is a mockup and will change. Director decisions this turn:
+build the projection seam now and admit a Bevy backend on later sign-off; defer
+the question of whether an ECS world may ever hold authority; take the full C02
+runtime slice; update specification, this log, a new runtime ADR and the
+dependency register.
+
+Semantic change: `crates/rocco-runtime` is a new workspace member and the first
+code in this repository that drives the C02 contract algebra rather than
+describing it. It is a deterministic, bounded tick over an append-only journal:
+admission with identity-based duplicate suppression, the pure authorization gate
+of D36 with its pinned snapshots recorded alongside each decision, durable intent
+written before dispatch, observe and reconcile with the permanent unknown of
+R72, a bounded retry budget tracked separately from a bounded reconciliation
+budget, cancellation that completes only once owned work has stopped, immutable
+terminal receipts, and restoration by re-folding the journal.
+
+Design decision recorded as ADR-R01–R06 in `docs/architecture/runtime.md`. The
+load-bearing one: the journal is authoritative and the projection is a fold over
+it (D04 taken literally), which is what makes replay cheap and recovery a
+re-fold. The closed `EventKind` vocabulary was deliberately **not** extended with
+an "EffectDispatched" fact, because a crash inside the dispatch window is
+genuinely ambiguous and the vocabulary's silence encodes that.
+
+Affected IDs: none added. R01–R96, D01–D53, E01–E80, C00–C12 and A1–A9 are
+unchanged; the inventory stays 96/53/80/13/9. The runtime is recorded as an
+implementation of C02, not a new decision, and the two open questions it raises
+are recorded in Cell 12 as open rather than ratified.
+
+Evidence: `cargo build --bins --locked` passed; `cargo test --workspace
+--all-targets --locked` passed 131 tests (57 + 12 `rocco-contracts`, 30 + 6
+`rocco-demo`, 2 + 8 + 16 `rocco-runtime`); `cargo clippy --workspace
+--all-targets --locked -- -D warnings` passed; `cargo fmt --all -- --check`
+passed; `lgwks-deps check .` returned `OK . — 1 semantic approvals, every
+authored external edge is owned`, with **no new registered edge**;
+`python3 tools/check_governance.py` PASS on 96/53/80/13/9; `python3 -m unittest
+discover -s tests` passed 47; `git diff --check` clean. Reranker receipts
+`tools/receipts/20260920-runtime-core-pre-exec.json` and `-post-exec.json`.
+Hosted CI has not run for this change.
+
+The three invariants the runtime is built to refuse the alternative of: nothing
+is dispatched without a durable intent and a recorded authorization; state is a
+fold over recorded facts and never a source of truth; and every recorded
+authorization re-derives bit-identically from its own pinned inputs, with a
+decision-changing mutation surfacing an explicit divergence rather than passing
+silently.
+
+Unresolved, and not claimed: no canonical owner is integrated — the only
+`EffectOwner` implementations are the deterministic `owner::fixture` doubles and
+nothing contacts Moo, Sentinel, Nova, Logical-DB, Secure-Authority or a network;
+the journal is in memory, so recovery-from-a-journal-in-hand is claimed and
+survival of a process death is not; P1–P8 remain proof obligations and are
+falsified by tests, not discharged by proof; compensation is handled but never
+produced, so `RolledBack` is unreachable in this slice; policy, capability and
+validity snapshots are pinned for the runtime's lifetime, so D26 activation is
+unimplemented; a denial records the run's `Fail` transition but not its reason,
+because the closed vocabulary has no place for it. Retry and reconciliation
+exhaustion leave an effect visibly unresolved with no escalation policy — honest
+and fail-closed, but a policy is owed.
+
+Dependency: `bevy_ecs` is **not** admitted and is not an edge. The admission
+request is recorded as a comment in `contract/APPROVED.toml` with the row text
+ready to sign or refuse; an unsigned row carrying a Director's name would be a
+fabricated approval, which is the exact failure that register prevents.
+Independent research on Bevy 0.19.1 is folded into the ADR: `bevy_ecs` standalone
+is 117 crates and 13.6 s cold rather than the facade's 672 and 130 s, and it is
+deterministic run-to-run by default because `multi_threaded` is not in its
+default features — but Bevy's own documentation declines to guarantee ordering,
+ambiguity detection is off by default, `FixedUpdate` is wall-clock driven, entity
+ids are explicitly not stable across runs, and a major breaking release lands
+roughly every four months. That research independently reaches the same split
+this work package implements. The ECS-authority question itself stays open.
+
 ## 2026-09-19: board-first workspace and visual-fidelity correction
 
 Director correction: the earlier mockup looked like a drawing. Rocco must be a

@@ -27,6 +27,7 @@
 //!   [`SupersedingResolution`] that references the original receipt's
 //!   digest (Cell 04: superseding resolution, not an in-place rewrite).
 
+use crate::authority::SecurityEpoch;
 use crate::ids::{ContentDigest, EffectId, OperationId, RunId, TenantId};
 
 #[cfg(feature = "serde")]
@@ -101,6 +102,14 @@ pub enum RetryPolicy {
 /// that a crash after reservation leaves durable evidence that the effect
 /// may have happened — which is exactly why an ambiguous crash can never
 /// be treated as "did not happen".
+///
+/// The intent is also the *recovery contract* D48 requires to be persisted
+/// before dispatch: [`EffectIntent::admission_epoch`] records the authority
+/// generation the reservation was admitted under, which is what a restored
+/// runtime needs in order to know whether that reservation still stands.
+/// The epoch is supplied by the runtime's dispatch fence, never by the
+/// proposal being admitted — a command cannot declare the security facts of
+/// its own admission (D42, E63).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
@@ -116,6 +125,10 @@ pub struct EffectIntent {
     pub tenant: TenantId,
     /// The declared unified reconciliation metadata (R72).
     pub strategy: ReconciliationStrategy,
+    /// The authority generation this reservation was admitted under
+    /// (R87, D48). An effect is dispatchable only while it is still at that
+    /// generation; see `rocco_runtime::fence`.
+    pub admission_epoch: SecurityEpoch,
 }
 
 /// The observed outcome of a dispatched effect.
@@ -349,6 +362,7 @@ mod tests {
             run: run(),
             tenant: tenant(),
             strategy,
+            admission_epoch: SecurityEpoch::INITIAL,
         }
     }
 

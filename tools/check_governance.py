@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -252,6 +253,29 @@ def receipt_errors(root):
     return errors
 
 
+def tracker_errors(root):
+    """Check the progress tracker through its generator.
+
+    The tracker is a render of `tools/tracker/tracker.json`, so the gate asks
+    the generator rather than reimplementing it: there is exactly one
+    definition of what the page should say. A tracker that has drifted from
+    its data, or whose cell inventory no longer matches specification.md,
+    fails here instead of quietly going stale.
+    """
+    script = root / "tools" / "tracker" / "generate.py"
+    if not script.is_file():
+        return ["progress tracker: tools/tracker/generate.py is missing"]
+    spec = importlib.util.spec_from_file_location("rocco_tracker_generate", script)
+    if spec is None or spec.loader is None:
+        return ["progress tracker: generator is not loadable"]
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return list(module.tracker_errors(root))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        return [f"progress tracker: {error}"]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -260,6 +284,7 @@ def main():
     try:
         report = validate(load_documents(args.root))
         report["errors"].extend(receipt_errors(args.root))
+        report["errors"].extend(tracker_errors(args.root))
         report["ok"] = not report["errors"]
     except (OSError, UnicodeError, ValueError) as error:
         report = {"ok": False, "errors": [str(error)]}

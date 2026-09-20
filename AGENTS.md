@@ -147,6 +147,13 @@ worker remains. Warm-up means a slower one-shot invocation, not retained RAM.
    generated counts/digests against the exact final bytes. Fix failures, not gates.
 6. Every future implementation change must update its requirement/design/test
    traceability and retain failed attempts. New counterexamples extend acceptance.
+7. Update the progress tracker whenever a change moves a cell, a falsifier or
+   the head. `tools/tracker/tracker.json` is its only hand-maintained file; run
+   `python3 tools/tracker/generate.py` to re-render `tools/tracker/index.html`.
+   The checker fails if that page is not the exact render of the data, if the
+   cell inventory has drifted from specification.md, or if a listed falsifier
+   id is not in specification.md. Its percentages are ESTIMATE and are never
+   acceptance evidence.
 
 This is mandatory upkeep by the working agent, not an autonomous daemon rewriting
 policy. CI automatically regenerates a read-only report of current structure and
@@ -199,8 +206,26 @@ lane exits 0, and it names the head it attested to.
 
 ## Workspace and dependency law
 
-`crates/rocco-contracts` and the root `rocco-demo` package are one workspace
-with one lockfile, one lint set and one register. There is no second repository.
+The root `rocco-demo` package, `crates/rocco-contracts` and
+`crates/rocco-runtime` are one workspace with one lockfile, one lint set and
+one register. There is no second repository.
+
+Members have distinct jobs and must not absorb each other's:
+
+- `rocco-contracts` is the pure C02 algebra — the finite run-state model, the
+  authorization reducer, the effect and receipt types. It owns no state, reads
+  no clock and performs no I/O; a behaviour that needs any of those does not
+  belong in it.
+- `rocco-runtime` drives that algebra: the bounded journal, the deterministic
+  tick, the gate, the effect lifecycle and replay. It is headless and depends
+  on no renderer. Its effect boundary is the `EffectOwner` trait and the only
+  implementations in-tree are the deterministic `owner::fixture` doubles — no
+  sibling owner is contacted and no network is reached. Naming a sibling here
+  would also defeat the negative control that proves the governance anchors
+  below are load-bearing, so the roster stays in exactly one place.
+- `rocco-demo` is the fixture surface. Synthetic data stays visibly DEMO and
+  fake orchestration is not authorized, so it never becomes the runtime's
+  evidence.
 
 The foundation is Rust `std` plus `lgwks_*` crates taken as exact-pinned
 crates.io releases and registered in `contract/APPROVED.toml`. These are
@@ -214,6 +239,44 @@ Workspace lints deny `missing_docs`, forbid `unsafe_code`, and deny
 `clippy::unwrap_used`/`expect_used`/`panic`/`todo`/`unimplemented`/`dbg_macro`.
 A scoped allow is permitted only where the code is itself the test, and it must
 say why it is safe there. Never lower a lint to make a failure disappear.
+
+### Runtime invariants — do not relax these to make a change easier
+
+Three properties hold `rocco-runtime` up. Each has a falsifier in
+`crates/rocco-runtime/tests/`; changing one is a specification change, not a
+refactor.
+
+1. **The journal is authoritative.** State is a fold over recorded facts.
+   Nothing may read live state as a source of truth, and a projection must stay
+   discardable and re-derivable.
+2. **Nothing is dispatched without a durable intent, a recorded
+   authorization and current freshness.** The intent is written before the
+   owner is called and carries the pinned inputs and the decision. `EventKind`
+   is closed and has no "dispatched" fact — do not add one to make recovery
+   more convenient. An effect that crashed mid-dispatch is genuinely ambiguous,
+   and the vocabulary's silence is what encodes that. Recording a decision is
+   also not the same as being entitled to act on it later: the dispatch fence
+   re-checks the security epoch, the withdrawn operations and the offline
+   exposure bound after the reservation is durable and before the owner is
+   reached. It gates mutating reaches only — a status query must stay open, or
+   an effect already dispatched when revocation landed could never be resolved.
+   Keeping that query open is not the same as believing its answer. The journal
+   cannot tell a refused first dispatch from a crash inside the dispatch window,
+   but the live effect table can, because a refused reach calls no owner: an
+   endpoint's answer resolves an effect the runtime sent, and resolves nothing
+   about one it never sent. Do not drop that witness — without it a status
+   answer can publish a success receipt for an effect that provably never
+   happened, which is the fail-open direction this invariant exists to close.
+3. **Replay is bit-identical.** Each authorization is recorded with its own
+   pinned snapshots. A divergence must surface as an explicit finding, never as
+   a silent pass.
+
+Two related rules: the tick's stage order and the `BTreeMap`-only collection
+choice are determinism requirements, not style — an unordered collection or a
+wall-clock read inside a decision breaks replay. And no parallel iteration of
+the fold, whatever backend implements `ProjectionBackend`. The fence holds
+counters and sets and no duration, for the same reason: a clock read there
+would let elapsed time extend authority.
 
 ## Per-change obligations
 

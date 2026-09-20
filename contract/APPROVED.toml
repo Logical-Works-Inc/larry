@@ -45,3 +45,35 @@ reason = "derive-backed std::error::Error implementations on the C02 contract er
 approved_by = "srinji-kaggss (Director)"
 approved_on = "2026-09-16"
 review = "https://github.com/srinji-kaggss/rocco-runtime/commit/53c751220ddef57c694647b7da14eb3b88eda1df"
+
+# ── PENDING ADMISSION — NOT APPROVED, NOT AN EDGE ────────────────────────────
+#
+# `bevy_ecs` is requested by the Director's 2026-09-20 direction ("work on the
+# lowest invariant, the runtime, based on Bevy") and is deliberately NOT
+# entered as an [[approved]] row above, because the sign-off keys that schema
+# requires would have to be invented to do so. A row carrying a Director's name
+# without the Director's approval is the exact failure this register prevents.
+#
+# Nothing compiles against `bevy_ecs` today. `crates/rocco-runtime` is built on
+# Rust `std`, `lgwks_std` and `rocco-contracts` only, and `lgwks-deps check .`
+# confirms no new authored external edge. The runtime reads state through
+# `ProjectionBackend`, so admitting Bevy later is an added implementation behind
+# that trait, not a rewrite — see docs/architecture/runtime.md, ADR-R06.
+#
+# To admit, uncomment the block below, fill `approved_by` and `approved_on`
+# with the actual sign-off and date, and move it above the [policy] table. To
+# refuse, delete this comment block; the runtime does not depend on the answer.
+#
+# [[approved]]
+# crate = "bevy_ecs"
+# tier = "boundary"
+# version = "=<pin at admission>"
+# owner = "rocco-runtime"
+# capability = "ecs-projection-backend"
+# source = "registry"
+# allowed_consumers = "rocco-runtime"
+# allowed_kinds = "normal"
+# reason = "optional deterministic ECS backend behind the ProjectionBackend seam for the runtime's run/effect view; not required by the journal-authoritative design, which is std-only."
+# approved_by = "<Director sign-off>"
+# approved_on = "<date>"
+# review = "<link to the admission decision>"
