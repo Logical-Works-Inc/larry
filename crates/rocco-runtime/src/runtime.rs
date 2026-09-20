@@ -1,0 +1,889 @@
+//! The runtime: one deterministic tick, one authoritative journal.
+//!
+//! The tick is a fixed sequence of stages, in this order and no other:
+//!
+//! 1. **sample** — read the observed instant exactly once, and use that one
+//!    value for every authorization made in the tick (E30);
+//! 2. **admit** — duplicate-suppress each ready command, record its
+//!    acceptance, drive the run-state algebra, then gate, reserve, dispatch
+//!    and record the outcome;
+//! 3. **reconcile** — for every effect whose journal position is still
+//!    `Reserved`, ask its owner what happened. This is where a resumed run
+//!    and an ambiguous outcome both land;
+//! 4. **cancel** — complete a cancellation only once every owned effect has
+//!    stopped or reconciled. Cancellation requested is not cancellation
+//!    completed.
+//!
+//! Every stage is bounded by an explicit constant, every collection is a
+//! `BTreeMap` or an insertion-ordered `Vec`, and nothing consults the wall
+//! clock except stage 1.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::time::SystemTime;
+
+use rocco_contracts::authority::BudgetUnit;
+use rocco_contracts::command::{Command, CommandAcceptance, CommandKind};
+use rocco_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
+use rocco_contracts::event::{Event, EventKind};
+use rocco_contracts::ids::{CommandId, OperationId, RunId, TenantId};
+use rocco_contracts::replay::{
+    BudgetSnapshot, CapabilitySnapshot, DenialReason, EffectRequest, PinnedInputs, PolicySnapshot,
+    ValiditySnapshot,
+};
+use rocco_contracts::state::{RunState, TransitionEvent};
+
+use crate::error::RuntimeError;
+use crate::journal::{Journal, JournalEntry};
+use crate::owner::EffectOwner;
+use crate::payload::{
+    CommandAcceptedPayload, IntentPayload, OutcomePayload, ReceiptPayload, TransitionPayload,
+    WorkProposal,
+};
+use crate::projection::{EffectPhase, ProjectionBackend};
+use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK, MAX_RUNS_PER_TICK, MAX_TRACKED_RUNS};
+
+/// The runtime's configuration: the pinned snapshots and the bounds.
+///
+/// The policy, capability and validity snapshots are host-supplied and pinned
+/// for the runtime's lifetime in this slice. A later work package replaces
+/// them with live, versioned snapshots activated at safe boundaries (D26);
+/// the runtime already threads them as inputs rather than reading them from
+/// ambient state, so that change is a wiring change and not a rewrite.
+#[derive(Debug, Clone)]
+pub struct RuntimeSettings {
+    /// The pinned policy snapshot.
+    pub policy: PolicySnapshot,
+    /// The pinned capability snapshot.
+    pub capabilities: CapabilitySnapshot,
+    /// The pinned authority-validity snapshot.
+    pub validity: ValiditySnapshot,
+    /// The unit the run budget is denominated in.
+    pub unit: BudgetUnit,
+    /// The initially reserved budget.
+    pub initial_budget: u64,
+    /// The journal entry ceiling.
+    pub journal_capacity: usize,
+    /// The run-table ceiling.
+    pub run_capacity: usize,
+    /// How many ready commands one tick may admit.
+    pub max_runs_per_tick: usize,
+}
+
+impl RuntimeSettings {
+    /// Settings with the specification's Cell 05 default bounds.
+    #[must_use]
+    pub fn with_defaults(
+        policy: PolicySnapshot,
+        capabilities: CapabilitySnapshot,
+        validity: ValiditySnapshot,
+        unit: BudgetUnit,
+        initial_budget: u64,
+    ) -> Self {
+        Self {
+            policy,
+            capabilities,
+            validity,
+            unit,
+            initial_budget,
+            journal_capacity: crate::MAX_JOURNAL_ENTRIES,
+            run_capacity: MAX_TRACKED_RUNS,
+            max_runs_per_tick: MAX_RUNS_PER_TICK,
+        }
+    }
+}
+
+/// What one tick did, in stage order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TickReport {
+    admitted: Vec<CommandId>,
+    duplicates: Vec<CommandId>,
+    authorized: Vec<OperationId>,
+    denied: Vec<(OperationId, DenialReason)>,
+    outcomes: Vec<(OperationId, EffectOutcome)>,
+    reconciled: Vec<OperationId>,
+    receipts: Vec<TerminalReceipt>,
+}
+
+impl TickReport {
+    /// Commands admitted for the first time this tick.
+    #[must_use]
+    pub fn admitted(&self) -> &[CommandId] {
+        &self.admitted
+    }
+
+    /// Commands recognised as idempotent replays; the reducer did not fold
+    /// them twice (E28).
+    #[must_use]
+    pub fn duplicates(&self) -> &[CommandId] {
+        &self.duplicates
+    }
+
+    /// Effects the gate authorized this tick.
+    #[must_use]
+    pub fn authorized(&self) -> &[OperationId] {
+        &self.authorized
+    }
+
+    /// Effects the gate denied, with the deterministic first-failing reason.
+    #[must_use]
+    pub fn denied(&self) -> &[(OperationId, DenialReason)] {
+        &self.denied
+    }
+
+    /// Outcomes observed this tick.
+    #[must_use]
+    pub fn outcomes(&self) -> &[(OperationId, EffectOutcome)] {
+        &self.outcomes
+    }
+
+    /// Effects reconciled this tick.
+    #[must_use]
+    pub fn reconciled(&self) -> &[OperationId] {
+        &self.reconciled
+    }
+
+    /// Terminal receipts published this tick.
+    #[must_use]
+    pub fn receipts(&self) -> &[TerminalReceipt] {
+        &self.receipts
+    }
+
+    /// Whether the tick changed nothing.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.admitted.is_empty()
+            && self.authorized.is_empty()
+            && self.denied.is_empty()
+            && self.reconciled.is_empty()
+            && self.receipts.is_empty()
+    }
+}
+
+/// A run the runtime is tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunLive {
+    tenant: TenantId,
+}
+
+/// An effect the runtime has reserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveEffect {
+    intent: EffectIntent,
+    /// How many times the owner has been asked to *perform* the effect. Bounded
+    /// by `MAX_EFFECT_ATTEMPTS` for strategies that declare retry safe.
+    dispatches: u8,
+    /// How many times the owner has been asked *what happened*. Bounded
+    /// separately, because reconciliation is not retry: a crash must not stop
+    /// a queryable effect from ever being queried.
+    reconciliations: u8,
+    /// The tick the effect was dispatched in. Reconciliation may not run in
+    /// that same tick: an effect is only `Unknown` because time passed, so
+    /// querying an endpoint in the instant it was called would be a fabricated
+    /// timeout rather than an observed one.
+    dispatched_at_tick: u64,
+}
+
+/// The Rocco runtime.
+#[derive(Debug)]
+pub struct Runtime<P, O, C> {
+    journal: Journal,
+    projection: P,
+    owner: O,
+    clock: C,
+    ready: VecDeque<Command>,
+    settings: RuntimeSettings,
+    remaining_budget: u64,
+    runs: BTreeMap<RunId, RunLive>,
+    live: BTreeMap<OperationId, LiveEffect>,
+    tick_count: u64,
+}
+
+impl<P, O, C> Runtime<P, O, C>
+where
+    P: ProjectionBackend + Default,
+    O: EffectOwner,
+    C: crate::clock::Clock,
+{
+    /// A runtime with an empty journal and empty projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::RunLimitReached`] when the run capacity is
+    /// zero, which would make every run untrackable.
+    pub fn new(settings: RuntimeSettings, owner: O, clock: C) -> Result<Self, RuntimeError> {
+        let projection = P::default();
+        let journal = Journal::new(settings.journal_capacity)?;
+        if settings.run_capacity == 0 {
+            return Err(RuntimeError::RunLimitReached { capacity: 0 });
+        }
+        let remaining_budget = settings.initial_budget;
+        Ok(Self {
+            journal,
+            projection,
+            owner,
+            clock,
+            ready: VecDeque::new(),
+            settings,
+            remaining_budget,
+            runs: BTreeMap::new(),
+            live: BTreeMap::new(),
+            tick_count: 0,
+        })
+    }
+
+    /// Queues a command for admission. Queuing is not acceptance: the command
+    /// enters the journal only when a tick admits it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::ReadyWorkFull`] when the ready queue is at its
+    /// bound. The caller must drain a tick; the runtime never silently drops
+    /// a submission (Cell 05).
+    pub fn submit(&mut self, command: Command) -> Result<(), RuntimeError> {
+        if self.ready.len() >= MAX_READY_WORK {
+            return Err(RuntimeError::ReadyWorkFull {
+                capacity: MAX_READY_WORK,
+            });
+        }
+        self.ready.push_back(command);
+        Ok(())
+    }
+
+    /// The authoritative journal.
+    #[must_use]
+    pub const fn journal(&self) -> &Journal {
+        &self.journal
+    }
+
+    /// The current projection.
+    #[must_use]
+    pub const fn projection(&self) -> &P {
+        &self.projection
+    }
+
+    /// The owner boundary, for assertions in tests.
+    #[must_use]
+    pub const fn owner(&self) -> &O {
+        &self.owner
+    }
+
+    /// Consumes the runtime and returns its journal.
+    ///
+    /// This is the hand-off point to a durable store: the journal is the whole
+    /// state, so persisting it is persisting the runtime. Durable persistence
+    /// is Logical-DB's and the memory hold is intact — this method moves bytes
+    /// between two in-memory values and claims nothing about surviving a
+    /// process.
+    #[must_use]
+    pub fn into_journal(self) -> Journal {
+        self.journal
+    }
+
+    /// How many ticks have run.
+    #[must_use]
+    pub const fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+
+    /// The budget still unreserved.
+    #[must_use]
+    pub const fn remaining_budget(&self) -> u64 {
+        self.remaining_budget
+    }
+
+    /// Runs one bounded, deterministic tick.
+    ///
+    /// # Errors
+    ///
+    /// Propagates every typed refusal from the stages below.
+    pub fn tick(&mut self) -> Result<TickReport, RuntimeError> {
+        // The tick counter advances before any stage runs, so the stages agree
+        // on which tick they are in and the reconciliation gate below can
+        // compare against it.
+        self.tick_count = self.tick_count.saturating_add(1);
+        let at = self.clock.now();
+        let mut report = TickReport::default();
+        self.pump_ready(at, &mut report)?;
+        self.pump_reconciliation(at, &mut report)?;
+        self.pump_cancellation(&mut report)?;
+        Ok(report)
+    }
+
+    // ── stage 2: admit, gate, reserve, dispatch, observe ────────────────────
+
+    fn pump_ready(&mut self, at: SystemTime, report: &mut TickReport) -> Result<(), RuntimeError> {
+        let budget = self.settings.max_runs_per_tick;
+        for _ in 0..budget {
+            let Some(command) = self.ready.pop_front() else {
+                return Ok(());
+            };
+            let id = command.id();
+            let tenant = command.tenant();
+            let kind = command.content().kind();
+            let payload = command.content().payload().to_vec();
+
+            let acceptance = self.journal.accept_command(command)?;
+            if acceptance == CommandAcceptance::DuplicateReplay {
+                report.duplicates.push(id);
+                continue;
+            }
+            report.admitted.push(id);
+            self.record_command_accepted(id, tenant, kind, &payload)?;
+
+            match kind {
+                CommandKind::Submit => self.admit_work(tenant, &payload, at, report)?,
+                CommandKind::Cancel => self.request_cancellation(tenant, &payload)?,
+                CommandKind::Steer => {
+                    // Steering is recorded at a safe boundary; the command's
+                    // acceptance is the durable fact this slice owns.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_work(
+        &mut self,
+        tenant: TenantId,
+        payload: &[u8],
+        at: SystemTime,
+        report: &mut TickReport,
+    ) -> Result<(), RuntimeError> {
+        let proposal: WorkProposal = lgwks_std::json::from_slice(payload)?;
+        let run = proposal.run;
+        // Admissibility is decided from the runtime's own run table, never
+        // inferred from the projection: recording the command already created
+        // a run view, so a projection-based check would read `Draft` and skip
+        // the admission step.
+        let is_new = !self.runs.contains_key(&run);
+        self.track_run(run, tenant)?;
+
+        if is_new {
+            self.advance(run, TransitionEvent::Admit)?;
+        }
+        self.advance(run, TransitionEvent::Start)?;
+        self.advance(run, TransitionEvent::EnterReconciling)?;
+
+        if self.projection.effect_count(run) >= MAX_EFFECTS_PER_RUN {
+            return Err(RuntimeError::EffectLimitReached {
+                run,
+                capacity: MAX_EFFECTS_PER_RUN,
+            });
+        }
+        if self.live.contains_key(&proposal.operation) {
+            return Err(RuntimeError::DuplicateOperation {
+                operation: proposal.operation,
+            });
+        }
+
+        let pinned = self.pinned_inputs(&proposal, at);
+        let authorization = match crate::gate::authorize(&pinned) {
+            Ok(record) => record,
+            Err(RuntimeError::Denied { operation, reason }) => {
+                report.denied.push((operation, reason));
+                self.advance(run, TransitionEvent::Fail)?;
+                return Ok(());
+            }
+            Err(other) => return Err(other),
+        };
+
+        // Reservation: the intent is durable *before* the effect can leave,
+        // and the budget is deducted against the same pinned snapshot that was
+        // just recorded, so replay re-derives the identical decision.
+        let intent = proposal.intent();
+        self.record_intent(run, intent, authorization)?;
+        self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
+        report.authorized.push(intent.operation);
+        self.live.insert(
+            intent.operation,
+            LiveEffect {
+                intent,
+                dispatches: 0,
+                reconciliations: 0,
+                dispatched_at_tick: self.tick_count,
+            },
+        );
+
+        self.dispatch(run, intent, at, report)
+    }
+
+    fn dispatch(
+        &mut self,
+        run: RunId,
+        intent: EffectIntent,
+        at: SystemTime,
+        report: &mut TickReport,
+    ) -> Result<(), RuntimeError> {
+        if self.projection.effect_phase(intent.operation) != Some(EffectPhase::Reserved) {
+            return Err(RuntimeError::IntentNotDurable {
+                operation: intent.operation,
+            });
+        }
+        if let Some(live) = self.live.get_mut(&intent.operation) {
+            live.dispatches = live.dispatches.saturating_add(1);
+        }
+        let outcome = self.owner.dispatch(&intent, at);
+        report.outcomes.push((intent.operation, outcome));
+        self.settle(run, intent, outcome, report)
+    }
+
+    fn settle(
+        &mut self,
+        run: RunId,
+        intent: EffectIntent,
+        outcome: EffectOutcome,
+        report: &mut TickReport,
+    ) -> Result<(), RuntimeError> {
+        self.record_outcome(run, intent, outcome)?;
+        let Ok(disposition) = crate::projection::resolve(&intent, outcome) else {
+            // Left open on purpose: the strategy requires a status query or a
+            // bounded retry, and the effect stays in `Reconciling` (R72, E56).
+            return Ok(());
+        };
+        // A cancelling run still records what its in-flight effects did — the
+        // evidence is retained — but it may not walk on to `Completed`.
+        // Cancellation drains owned work; it does not become a success.
+        let cancelling = self.projection.run_state(run) == Some(RunState::Cancelling);
+        match disposition {
+            TerminalDisposition::Succeeded | TerminalDisposition::Compensated => {
+                if cancelling {
+                    self.publish_receipt(run, intent, disposition, report)?;
+                    return Ok(());
+                }
+                self.advance(run, TransitionEvent::VerificationPassed)?;
+                self.advance(run, TransitionEvent::EnterFinalizing)?;
+                self.publish_receipt(run, intent, disposition, report)?;
+                self.advance(run, TransitionEvent::Complete)?;
+            }
+            TerminalDisposition::Failed => {
+                self.publish_receipt(run, intent, disposition, report)?;
+                self.advance(run, TransitionEvent::Fail)?;
+            }
+            TerminalDisposition::UnknownPermanent => {
+                self.publish_receipt(run, intent, disposition, report)?;
+                self.advance(run, TransitionEvent::ObserveUnknownOutcome)?;
+            }
+        }
+        Ok(())
+    }
+
+    // ── stage 3: reconcile ──────────────────────────────────────────────────
+
+    fn pump_reconciliation(
+        &mut self,
+        at: SystemTime,
+        report: &mut TickReport,
+    ) -> Result<(), RuntimeError> {
+        let open: Vec<OperationId> = self
+            .live
+            .iter()
+            .filter(|(operation, live)| self.is_reconcilable(**operation, live))
+            .map(|(operation, _)| *operation)
+            .collect();
+
+        for operation in open {
+            let Some(live) = self.live.get(&operation).copied() else {
+                continue;
+            };
+            report.reconciled.push(operation);
+            let outcome = self.reconcile_one(&live, operation, at);
+            let run = live.intent.run;
+            self.settle(run, live.intent, outcome, report)?;
+        }
+        Ok(())
+    }
+
+    /// The one owner interaction an open effect is entitled to.
+    ///
+    /// The declared strategy decides it, and the choice is recorded in the
+    /// journal like any other outcome:
+    ///
+    /// - `IdempotentRetrySafe` with budget left re-dispatches, reusing the
+    ///   stable operation ID so a supporting endpoint can deduplicate;
+    /// - `Queryable` asks what happened;
+    /// - a strategy that authorizes neither — `RequiresHuman`,
+    ///   `AlwaysCompensate` — cannot be queried and cannot be retried, so the
+    ///   only truthful outcome is `Unknown`. The journal proves the effect was
+    ///   reserved and cannot prove it never ran, so this resolves to a
+    ///   permanent unknown rather than an invented success or failure (R72, E56).
+    fn reconcile_one(
+        &mut self,
+        live: &LiveEffect,
+        operation: OperationId,
+        at: SystemTime,
+    ) -> EffectOutcome {
+        match live.intent.strategy.retry_policy() {
+            rocco_contracts::effect::RetryPolicy::Bounded { max_attempts }
+                if live.dispatches < max_attempts =>
+            {
+                if let Some(entry) = self.live.get_mut(&operation) {
+                    entry.dispatches = entry.dispatches.saturating_add(1);
+                }
+                self.owner.dispatch(&live.intent, at)
+            }
+            rocco_contracts::effect::RetryPolicy::Bounded { .. } => {
+                // Budget spent. The effect stays visibly unresolved.
+                EffectOutcome::Unknown { operation }
+            }
+            rocco_contracts::effect::RetryPolicy::QueryUntilResolved => {
+                if let Some(entry) = self.live.get_mut(&operation) {
+                    entry.reconciliations = entry.reconciliations.saturating_add(1);
+                }
+                self.owner.reconcile(&live.intent, at)
+            }
+            rocco_contracts::effect::RetryPolicy::None => EffectOutcome::Unknown { operation },
+        }
+    }
+
+    /// Whether an effect is still open *and* still within its interaction
+    /// budget.
+    ///
+    /// An effect is open when the journal leaves it `Reserved` — a crash, or a
+    /// dispatch whose outcome was never recorded — or when it has an observed
+    /// outcome that its declared strategy refuses to resolve (R72, E56).
+    ///
+    /// The budget is the bound that keeps reconciliation from becoming an
+    /// unbounded loop (Cell 05). Once it is spent the effect is left visibly
+    /// unresolved: no receipt, no invented success, no silent failure. The
+    /// escalation policy above that is a later work package's, and this
+    /// function deliberately does not paper over its absence.
+    fn is_reconcilable(&self, operation: OperationId, live: &LiveEffect) -> bool {
+        if live.dispatched_at_tick >= self.tick_count {
+            return false;
+        }
+        if live.reconciliations >= rocco_contracts::effect::MAX_EFFECT_ATTEMPTS {
+            return false;
+        }
+        let open = match self.projection.effect_phase(operation) {
+            Some(EffectPhase::Reserved) => true,
+            Some(EffectPhase::Observed { outcome }) => {
+                crate::projection::resolve(&live.intent, outcome).is_err()
+            }
+            Some(EffectPhase::Reconciled { .. }) | None => false,
+        };
+        if !open {
+            return false;
+        }
+        // A retry-based strategy stops interacting once its dispatch budget is
+        // spent, rather than spinning on an effect it may no longer touch.
+        match live.intent.strategy.retry_policy() {
+            rocco_contracts::effect::RetryPolicy::Bounded { max_attempts } => {
+                live.dispatches < max_attempts
+            }
+            rocco_contracts::effect::RetryPolicy::QueryUntilResolved
+            | rocco_contracts::effect::RetryPolicy::None => true,
+        }
+    }
+
+    // ── stage 4: cancellation ───────────────────────────────────────────────
+
+    fn request_cancellation(
+        &mut self,
+        tenant: TenantId,
+        payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let proposal: WorkProposal = lgwks_std::json::from_slice(payload)?;
+        let run = proposal.run;
+        self.track_run(run, tenant)?;
+        if self
+            .projection
+            .run_state(run)
+            .is_some_and(RunState::is_terminal)
+        {
+            return Ok(());
+        }
+        self.advance(run, TransitionEvent::RequestCancellation)?;
+        Ok(())
+    }
+
+    fn pump_cancellation(&mut self, report: &mut TickReport) -> Result<(), RuntimeError> {
+        let cancelling: Vec<RunId> = self
+            .runs
+            .keys()
+            .copied()
+            .filter(|run| self.projection.run_state(*run) == Some(RunState::Cancelling))
+            .collect();
+
+        for run in cancelling {
+            let still_open = self.live.values().any(|live| {
+                live.intent.run == run
+                    && matches!(
+                        self.projection.effect_phase(live.intent.operation),
+                        Some(EffectPhase::Reserved)
+                    )
+            });
+            if still_open {
+                continue;
+            }
+            // Cancellation completes only with zero receipts for the run's
+            // open work, so no partial external effect is left unlabelled.
+            let _ = report;
+            self.advance(run, TransitionEvent::FinishCancellation)?;
+        }
+        Ok(())
+    }
+
+    // ── journal writers ─────────────────────────────────────────────────────
+
+    fn track_run(&mut self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {
+        if !self.runs.contains_key(&run) && self.runs.len() >= self.settings.run_capacity {
+            return Err(RuntimeError::RunLimitReached {
+                capacity: self.settings.run_capacity,
+            });
+        }
+        self.runs.entry(run).or_insert(RunLive { tenant });
+        Ok(())
+    }
+
+    fn pinned_inputs(&self, proposal: &WorkProposal, at: SystemTime) -> PinnedInputs {
+        PinnedInputs {
+            request: EffectRequest {
+                operation: proposal.operation,
+                required_scopes: proposal.required_scopes.clone(),
+                cost: proposal.cost,
+                unit: proposal.unit,
+                observed_at: at,
+            },
+            policy: self.settings.policy.clone(),
+            budget: BudgetSnapshot {
+                remaining: self.remaining_budget,
+                unit: self.settings.unit,
+            },
+            capabilities: self.settings.capabilities.clone(),
+            validity: self.settings.validity,
+        }
+    }
+
+    fn record_command_accepted(
+        &mut self,
+        command: CommandId,
+        tenant: TenantId,
+        kind: CommandKind,
+        payload: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let decoded: WorkProposal = lgwks_std::json::from_slice(payload)?;
+        let payload = CommandAcceptedPayload {
+            command,
+            run: decoded.run,
+            kind,
+        };
+        let bytes = lgwks_std::json::to_vec(&payload)?;
+        let run = decoded.run;
+        self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
+    }
+
+    fn record_transition(
+        &mut self,
+        run: RunId,
+        event: TransitionEvent,
+        from: RunState,
+        to: RunState,
+    ) -> Result<(), RuntimeError> {
+        let tenant = self.tenant_of(run)?;
+        let payload = TransitionPayload { event, from, to };
+        let bytes = lgwks_std::json::to_vec(&payload)?;
+        self.record_event(tenant, run, EventKind::StateTransition, bytes)
+    }
+
+    fn record_intent(
+        &mut self,
+        run: RunId,
+        intent: EffectIntent,
+        authorization: rocco_contracts::replay::ReplayRecord,
+    ) -> Result<(), RuntimeError> {
+        let tenant = self.tenant_of(run)?;
+        let payload = IntentPayload {
+            intent,
+            authorization,
+        };
+        let bytes = lgwks_std::json::to_vec(&payload)?;
+        self.record_event(tenant, run, EventKind::EffectIntentRecorded, bytes)
+    }
+
+    fn record_outcome(
+        &mut self,
+        run: RunId,
+        intent: EffectIntent,
+        outcome: EffectOutcome,
+    ) -> Result<(), RuntimeError> {
+        let tenant = self.tenant_of(run)?;
+        let payload = OutcomePayload { intent, outcome };
+        let bytes = lgwks_std::json::to_vec(&payload)?;
+        self.record_event(tenant, run, EventKind::EffectOutcomeRecorded, bytes)
+    }
+
+    fn publish_receipt(
+        &mut self,
+        run: RunId,
+        intent: EffectIntent,
+        disposition: TerminalDisposition,
+        report: &mut TickReport,
+    ) -> Result<(), RuntimeError> {
+        if self
+            .projection
+            .receipts()
+            .iter()
+            .any(|receipt| receipt.operation() == intent.operation)
+        {
+            return Err(RuntimeError::ReceiptAlreadyPublished {
+                operation: intent.operation,
+            });
+        }
+        let receipt =
+            TerminalReceipt::publish(intent.operation, run, self.tenant_of(run)?, disposition);
+        let payload = ReceiptPayload { receipt };
+        let bytes = lgwks_std::json::to_vec(&payload)?;
+        self.record_event(
+            self.tenant_of(run)?,
+            run,
+            EventKind::TerminalReceiptPublished,
+            bytes,
+        )?;
+        report.receipts.push(receipt);
+        Ok(())
+    }
+
+    fn record_event(
+        &mut self,
+        tenant: TenantId,
+        run: RunId,
+        kind: EventKind,
+        payload: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let sequence = self.journal.next_sequence(run)?;
+        let event = Event::new(
+            tenant,
+            run,
+            sequence,
+            Vec::new(),
+            kind,
+            payload.into_boxed_slice(),
+        )?;
+        self.journal.record(event)?;
+        let stored = match self.journal.last() {
+            Some(JournalEntry::Event(recorded)) => recorded,
+            Some(JournalEntry::Command(_)) | None => return Ok(()),
+        };
+        self.projection.apply(stored)
+    }
+
+    fn advance(&mut self, run: RunId, event: TransitionEvent) -> Result<RunState, RuntimeError> {
+        let from = self.projection.run_state(run).unwrap_or(RunState::Draft);
+        let to = rocco_contracts::state::transition(from, event)?;
+        self.record_transition(run, event, from, to)?;
+        Ok(to)
+    }
+
+    fn tenant_of(&self, run: RunId) -> Result<TenantId, RuntimeError> {
+        self.runs
+            .get(&run)
+            .map(|live| live.tenant)
+            .ok_or(RuntimeError::RunNotTracked { run })
+    }
+}
+
+/// Rebuilds a projection purely from a journal (D04).
+///
+/// This is the whole recovery story in this slice: state is a fold over
+/// recorded facts, so restoring it is `rebuild` and nothing else. No live
+/// runtime state is consulted.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError::Codec`] for an undecodable payload and
+/// [`RuntimeError::FoldDivergence`] when a recorded transition disagrees with
+/// the pure algebra.
+pub fn replay<P: ProjectionBackend>(
+    projection: &mut P,
+    journal: &Journal,
+) -> Result<(), RuntimeError> {
+    projection.rebuild(journal)
+}
+
+/// Restores a runtime from a recorded journal, consulting no live state.
+///
+/// The projection is rebuilt by folding, and the live effect table is
+/// reconstructed from the recorded intents. Every effect the journal leaves in
+/// [`EffectPhase::Reserved`] is restored with its bounded retry budget already
+/// spent: the journal proves the effect was reserved, and cannot prove it was
+/// never dispatched, so a crash consumes the budget rather than resetting it.
+/// That direction is deliberate — the alternative fails open, and a
+/// reconciliation strategy that is *not* retry-based (status query, human, or
+/// compensation) is unaffected either way.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError::Codec`] or [`RuntimeError::FoldDivergence`] from
+/// the rebuild, and [`RuntimeError::RunNotTracked`] for a recorded intent
+/// whose run the journal never named.
+pub fn restore<P, O, C>(
+    settings: RuntimeSettings,
+    owner: O,
+    clock: C,
+    journal: Journal,
+) -> Result<Runtime<P, O, C>, RuntimeError>
+where
+    P: ProjectionBackend + Default,
+    O: EffectOwner,
+    C: crate::clock::Clock,
+{
+    // The recorded history is kept as it is; only the ceiling moves, so a
+    // journal that filled up mid-effect can still record the reconciliation it
+    // exists to perform.
+    let journal = journal.reopen(settings.journal_capacity)?;
+
+    let mut projection = P::default();
+    projection.rebuild(&journal)?;
+
+    let mut runs: BTreeMap<RunId, RunLive> = BTreeMap::new();
+    let mut live: BTreeMap<OperationId, LiveEffect> = BTreeMap::new();
+    let mut reserved_budget: u64 = 0;
+
+    for record in projection.authorizations() {
+        reserved_budget = reserved_budget.saturating_add(record.pinned.request.cost);
+    }
+    for intent in projection.intents() {
+        let phase = projection.effect_phase(intent.operation);
+        // A reservation with no recorded outcome may already have reached the
+        // endpoint, and the journal cannot prove otherwise, so restoration
+        // spends the *dispatch* budget rather than resetting it. Reconciliation
+        // budget is untouched: asking what happened is not retrying.
+        let dispatches = match phase {
+            Some(EffectPhase::Reserved) => rocco_contracts::effect::MAX_EFFECT_ATTEMPTS,
+            Some(EffectPhase::Observed { .. } | EffectPhase::Reconciled { .. }) | None => 0,
+        };
+        live.insert(
+            intent.operation,
+            LiveEffect {
+                intent: *intent,
+                dispatches,
+                reconciliations: 0,
+                // Zero, so a restored effect is reconcilable on the first tick
+                // rather than waiting a tick for a dispatch that already
+                // happened before the crash.
+                dispatched_at_tick: 0,
+            },
+        );
+    }
+    for run in projection.run_ids() {
+        let tenant = live
+            .values()
+            .find(|entry| entry.intent.run == run)
+            .map(|entry| entry.intent.tenant)
+            .ok_or(RuntimeError::RunNotTracked { run })?;
+        runs.insert(run, RunLive { tenant });
+    }
+
+    Ok(Runtime {
+        journal,
+        projection,
+        owner,
+        clock,
+        ready: VecDeque::new(),
+        remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
+        settings,
+        runs,
+        live,
+        tick_count: 0,
+    })
+}

@@ -14,7 +14,7 @@ description = "Effect-free interaction fixtures for the Rocco AppCUI visual pass
 # whole of a second repository (`srinji-kaggss/rocco-runtime`) whose manifest
 # declared this same crate set; it is a member here instead. The root package
 # is an implicit member.
-members = ["crates/rocco-contracts"]
+members = ["crates/rocco-contracts", "crates/rocco-runtime"]
 # Edition 2024 selects resolver 3; stated explicitly because the merged
 # workspace previously ran under resolver 2 on the runtime side.
 resolver = "3"
