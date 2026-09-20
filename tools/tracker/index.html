@@ -310,7 +310,7 @@
 
 <script>
 var DATA = {
-  "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED.",
+  "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED. `head` names the commit whose state the figures describe, NOT the current tip: requiring it to equal HEAD would demand a new commit per commit and regress forever. Bump it only when the figures are re-measured at a new commit.",
   "axes_total": 9,
   "basis": {
     "before": 37.5,
@@ -578,7 +578,7 @@ var DATA = {
     "Logical Works · specification-led · " + N + " execution cells";
   document.getElementById("lede").textContent = DATA.lede;
   var meta = document.getElementById("meta");
-  [["head", DATA.head], ["measured", DATA.measured],
+  [["figures describe", DATA.head], ["measured", DATA.measured],
    ["branch", DATA.branch], ["local-CI", DATA.receipt]].forEach(function(pair){
     var s = document.createElement("span");
     s.appendChild(document.createTextNode(pair[0] + " "));
