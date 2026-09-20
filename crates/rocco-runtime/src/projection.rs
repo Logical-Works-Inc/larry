@@ -20,7 +20,7 @@ use rocco_contracts::effect::{
     EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt, terminal_disposition,
 };
 use rocco_contracts::event::{Event, EventKind};
-use rocco_contracts::ids::{OperationId, RunId};
+use rocco_contracts::ids::{OperationId, RunId, TenantId};
 use rocco_contracts::replay::ReplayRecord;
 use rocco_contracts::state::{RunState, TransitionEvent, transition};
 
@@ -76,6 +76,16 @@ pub trait ProjectionBackend {
     /// The current state of `run`.
     fn run_state(&self, run: RunId) -> Option<RunState>;
 
+    /// The tenant `run` was recorded under, as the *event* carried it.
+    ///
+    /// This is the run's tenant for every purpose, including recovery: it is
+    /// the value the runtime wrote into the run's own records, not a value
+    /// inferred from an effect intent (whose `tenant` is declared by the
+    /// submitting proposal). Restoration rebuilds the run table from this, so
+    /// a run whose recorded history reserved no effect is still attributable
+    /// to its tenant (D04, D42).
+    fn run_tenant(&self, run: RunId) -> Option<TenantId>;
+
     /// How many runs the view tracks.
     fn run_count(&self) -> usize;
 
@@ -107,6 +117,7 @@ pub trait ProjectionBackend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunView {
     state: RunState,
+    tenant: Option<TenantId>,
     last_sequence: Option<rocco_contracts::event::EventSequence>,
     effects: BTreeMap<OperationId, EffectPhase>,
     commands: usize,
@@ -116,6 +127,7 @@ impl Default for RunView {
     fn default() -> Self {
         Self {
             state: RunState::Draft,
+            tenant: None,
             last_sequence: None,
             effects: BTreeMap::new(),
             commands: 0,
@@ -128,6 +140,12 @@ impl RunView {
     #[must_use]
     pub const fn state(&self) -> RunState {
         self.state
+    }
+
+    /// The tenant the run's recorded events carry, if any event named it.
+    #[must_use]
+    pub const fn tenant(&self) -> Option<TenantId> {
+        self.tenant
     }
 
     /// The last recorded sequence for the run.
@@ -262,6 +280,11 @@ impl FoldProjection {
             });
         }
         let view = self.runs.entry(run).or_default();
+        // First-wins: the run's tenant is the one its earliest recorded event
+        // carried. A later event cannot re-attribute a run that is already
+        // known, so a journal that names two tenants for one run keeps the one
+        // the run was created under rather than flipping to the newest claim.
+        view.tenant.get_or_insert(event.tenant());
         view.last_sequence = Some(event.sequence());
         Ok(view)
     }
@@ -293,6 +316,10 @@ impl ProjectionBackend for FoldProjection {
 
     fn run_state(&self, run: RunId) -> Option<RunState> {
         self.runs.get(&run).map(|view| view.state)
+    }
+
+    fn run_tenant(&self, run: RunId) -> Option<TenantId> {
+        self.runs.get(&run).and_then(RunView::tenant)
     }
 
     fn run_count(&self) -> usize {

@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use rocco_contracts::authority::{Scope, SecurityEpoch};
-use rocco_contracts::command::Command;
-use rocco_contracts::effect::{EffectOutcome, ReconciliationStrategy};
+use rocco_contracts::command::{Command, CommandContent, CommandKind};
+use rocco_contracts::effect::{EffectOutcome, MAX_EFFECT_ATTEMPTS, ReconciliationStrategy};
 use rocco_contracts::event::EventKind;
 use rocco_contracts::ids::{OperationId, RunId, TenantId};
 use rocco_contracts::replay::ValiditySnapshot;
@@ -27,8 +27,8 @@ use rocco_runtime::runtime::{Runtime, RuntimeSettings, restore};
 use rocco_runtime::{FenceError, FenceRefusal, RevocationFence};
 
 use support::{
-    TestRuntime, command_id, epoch, operation, proposal, run, runtime_with, settings, submit,
-    tenant,
+    TestRuntime, assert_state, command_id, epoch, operation, proposal, run, runtime_with, settings,
+    submit, succeeded, tenant,
 };
 
 /// A clock the test moves by hand, so that "time passed" and "the clock ran
@@ -521,6 +521,87 @@ fn e71_a_proposal_cannot_declare_its_own_admission_epoch() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// The tenant a run belongs to is the one the runtime recorded for that run,
+/// never the one the proposal body declares, so a hostile generator cannot
+/// record an effect — or re-attribute a run after restore — to a tenant it
+/// does not own (D42, E63).
+///
+/// This is the same rule as the admission epoch below: the body's `tenant`
+/// field is a declaration like any other, and the runtime consults its own
+/// run table instead. The envelope tenant and the body's claim are different
+/// here on purpose, which is the only way the two sources can be told apart.
+#[test]
+fn e63_a_proposal_cannot_declare_its_own_tenant() -> Result<(), Box<dyn std::error::Error>> {
+    // The envelope says tenant 1. The body claims tenant 2.
+    let body = proposal(
+        run(1),
+        tenant(2),
+        operation(1),
+        &[Scope::FileRead],
+        5,
+        ReconciliationStrategy::Queryable,
+    );
+    let payload = lgwks_std::json::to_vec(&body)?;
+    let envelope = Command::new(
+        command_id(1),
+        tenant(1),
+        Vec::new(),
+        CommandContent::new(CommandKind::Submit, payload.into_boxed_slice()),
+    )?;
+
+    let mut rt = runtime_with(
+        ScriptedOwner::scripted([succeeded(operation(1))]),
+        &[Scope::FileRead],
+        &[Scope::FileRead],
+        100,
+    )?;
+    rt.submit(envelope)?;
+    let tick = rt.tick()?;
+    assert_eq!(tick.authorized(), &[operation(1)]);
+
+    assert_eq!(
+        rt.projection()
+            .intents()
+            .first()
+            .map(|intent| intent.tenant),
+        Some(tenant(1)),
+        "the durable intent carries the run's recorded tenant, not the body's claim"
+    );
+    let receipts = rt.projection().receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts
+            .first()
+            .map(rocco_contracts::effect::TerminalReceipt::tenant),
+        Some(tenant(1))
+    );
+
+    // A restart must not re-attribute the run to the declared tenant: the
+    // restored run table is the same table the journal recorded.
+    let journal = rt.into_journal();
+    let restored: TestRuntime = restore(
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100),
+        ScriptedOwner::new(),
+        FixedClock::new(epoch()),
+        journal,
+    )?;
+    let receipt = rocco_contracts::effect::TerminalReceipt::publish(
+        operation(3),
+        run(1),
+        restored
+            .projection()
+            .run_tenant(run(1))
+            .ok_or("the restored run must carry a tenant")?,
+        rocco_contracts::effect::TerminalDisposition::Succeeded,
+    );
+    assert_eq!(
+        receipt.tenant(),
+        tenant(1),
+        "the restored run table attributes the run to the tenant the journal recorded"
+    );
+    Ok(())
+}
+
 /// A restored runtime brings each effect's admission epoch back with it, so a
 /// host whose authority has moved on recovers with those effects already fenced
 /// instead of re-dispatching them on a decision that no longer stands
@@ -638,6 +719,106 @@ fn e71_a_fenced_effect_keeps_its_reservation_and_that_is_a_known_limit()
             }
         })
     );
+    Ok(())
+}
+
+/// An endpoint's answer is evidence about an effect this runtime actually
+/// sent, and about nothing else. An effect whose only reach was refused never
+/// left the process, so the status answer that follows — `Succeeded` here,
+/// which is the worst case — cannot resolve it, cannot publish a receipt and
+/// cannot carry the run to `Completed`.
+///
+/// The journal cannot tell a refused reach from a crash inside the dispatch
+/// window, and this test exists because the *runtime* can: a refused reach
+/// calls no owner, so the live effect table still reads "never sent", while a
+/// restored reservation is restored as possibly-sent and keeps its full
+/// treatment. Reading the endpoint's answer as truth here would manufacture
+/// success for an effect that provably never happened (D42, R88).
+#[test]
+fn e71_an_observation_cannot_resolve_an_effect_that_was_never_sent()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The offline bound is spent, so the only reach this effect ever gets is
+    // the refused one: `dispatch` is never called on the owner.
+    let mut rt: TestRuntime = Runtime::new(
+        settings_at(SecurityEpoch::INITIAL, 0),
+        // The endpoint answers "succeeded" to the status query.
+        ScriptedOwner::scripted([succeeded(operation(1))]),
+        FixedClock::new(epoch()),
+    )?;
+    rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
+
+    let refused = rt.tick()?;
+    assert_eq!(
+        refused.fenced(),
+        &[(
+            operation(1),
+            FenceRefusal::OfflineExposureExhausted { bound: 0 }
+        )]
+    );
+    assert_eq!(
+        rt.owner().dispatched(),
+        &[],
+        "the mutating reach was refused, so the effect never left the process"
+    );
+    assert_eq!(
+        rt.projection().effect_phase(operation(1)),
+        Some(EffectPhase::Reserved)
+    );
+
+    // The next tick queries the endpoint. The query itself is the
+    // already-dispatched treatment and stays open; what it may not do is
+    // become the effect's disposition.
+    let next = rt.tick()?;
+    assert_eq!(next.reconciled(), &[operation(1)]);
+    assert_eq!(
+        rt.owner().reconciled(),
+        &[operation(1)],
+        "the status query is still sent, so the refusal stays visible"
+    );
+    assert_eq!(
+        rt.owner().dispatched(),
+        &[],
+        "and the dispatch still never happens"
+    );
+    assert_eq!(next.receipts(), &[], "no reach earned a receipt");
+    assert_eq!(
+        next.receipts().len(),
+        0,
+        "an effect that never left this process is not receipted as a success"
+    );
+    assert_state(rt.projection(), run(1), RunState::Reconciling)?;
+    assert_eq!(
+        rt.projection().effect_phase(operation(1)),
+        Some(EffectPhase::Observed {
+            outcome: succeeded(operation(1))
+        }),
+        "the answer is recorded as what the owner said, and resolves nothing"
+    );
+
+    // It stays open and reported for as long as the reconciliation budget
+    // allows, so a host that leaves the fence shut watches the effect stay
+    // unresolved rather than lose sight of it.
+    for rest in 1..MAX_EFFECT_ATTEMPTS {
+        let tick = rt.tick()?;
+        assert_eq!(tick.reconciled(), &[operation(1)], "query {rest}");
+        assert_eq!(tick.receipts(), &[]);
+    }
+    assert_eq!(
+        rt.owner().reconciled().len(),
+        usize::from(MAX_EFFECT_ATTEMPTS),
+        "the query budget is spent and bounded, not unbounded"
+    );
+
+    // Budget spent: quiet, and still unresolved rather than resolved wrongly.
+    let quiet = rt.tick()?;
+    assert_eq!(quiet.reconciled(), &[]);
+    assert_eq!(quiet.receipts(), &[]);
+    assert_eq!(
+        rt.projection().receipts().len(),
+        0,
+        "no tick in the effect's lifetime publishes a receipt for it"
+    );
+    assert_state(rt.projection(), run(1), RunState::Reconciling)?;
     Ok(())
 }
 

@@ -423,3 +423,49 @@ fn the_journal_refuses_an_out_of_order_append() -> Result<(), Box<dyn std::error
     assert_eq!(journal.len(), 1);
     Ok(())
 }
+
+/// Every journal the runtime can produce is restorable, because recovery is a
+/// re-fold and nothing else (D04). A run whose recorded history reserved no
+/// effect — a submission the reducer denied, a steer, or a cancel that arrived
+/// before any work — is still a run the journal names, and restore must not
+/// confuse "the journal never named this run" with "this run reserved
+/// nothing".
+#[test]
+fn a_run_that_reserved_no_effect_does_not_block_restore() -> Result<(), Box<dyn std::error::Error>>
+{
+    // The policy permits nothing, so the reducer denies and the run is
+    // tracked by its own transitions with no intent at all.
+    let mut rt = runtime_with(ScriptedOwner::new(), &[], &[Scope::FileRead], 100)?;
+    let body = proposal(
+        run(1),
+        tenant(1),
+        operation(1),
+        &[Scope::FileRead],
+        5,
+        ReconciliationStrategy::Queryable,
+    );
+    rt.submit(submit(command_id(1), &body)?)?;
+    let tick = rt.tick()?;
+    assert_eq!(tick.denied().len(), 1);
+    assert_eq!(tick.authorized(), &[], "no effect was reserved");
+
+    let journal = rt.into_journal();
+    let mut probe = FoldProjection::default();
+    probe.rebuild(&journal)?;
+    assert_eq!(probe.run_ids(), vec![run(1)], "the journal names the run");
+    assert!(probe.intents().is_empty(), "and reserved no effect for it");
+
+    let restored: TestRuntime = restore(
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100),
+        ScriptedOwner::new(),
+        rocco_runtime::clock::FixedClock::new(epoch()),
+        journal,
+    )?;
+
+    assert_eq!(
+        restored.projection().run_ids(),
+        vec![run(1)],
+        "the restored runtime tracks every run the journal named"
+    );
+    Ok(())
+}

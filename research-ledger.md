@@ -20,6 +20,58 @@ sources:
 
 # Research ledger
 
+## 2026-09-20 hardening pass: what the rules required of a witness
+
+READ: the estate's Rust rule corpus at `~/.agents/skills/rust-skills/rules/`.
+The rules that shaped this pass, and what each changed:
+`anti-unwrap-abuse` and `err-typed-domain-error` (no new panic path: every new
+refusal is a typed value, and the new projection accessor returns `Option`
+rather than panicking on an absent run); `proj-pub-crate-internal` (the new
+`LiveEffect::sent` witness and the `RunView` tenant stay private, reachable
+only through the read-only `ProjectionBackend` accessor); `type-newtype-ids`
+and `api-newtype-safety` (the run's tenant is a `TenantId` throughout — the
+type is what made "which tenant did we actually record" a question the
+compiler could answer, and the answer was the defect); `mem-avoid-alloc` (the
+`run_tenant` accessor borrows from the existing `BTreeMap` instead of
+collecting a parallel tenant map, and recovery still allocates nothing
+per-tick). One rule was consciously traded against another:
+`mem-bounded-collections` argues every collection needs a hard ceiling, and the
+fence's `revoked` set has none. The trade is deliberate and recorded rather
+than silently accepted — evicting a withdrawn operation re-authorizes it, so
+the bound is the host advancing the epoch, which is D49's anti-rollback
+territory, not a local eviction policy.
+
+READ: the OSS prior art this pass leaned on is not a repository but a pattern
+the runtime already used, applied twice more. The estate's own admission-epoch
+rule — a security fact the caller declares is made an *argument* the runtime
+supplies, never a field the proposal is trusted for — was generalised to the
+tenant, and the same shape ("the journal cannot carry this fact, so the live
+process must") produced the `sent` witness. The alternative considered and
+rejected for the tenant was a typed refusal of a mismatched body: it would
+have surfaced the hostile input loudly but left the declaration consulted,
+where the argument form removes it from the trusted path entirely, which is
+what D42 asks for. The alternative considered and rejected for the witness was
+exhausting a retry budget on a fenced first dispatch; that fails *open* in the
+opposite direction, because a genuine first dispatch after re-authentication
+would then be suppressed.
+
+The local query layer was run before the work and again after. It was used to
+order inspection, never as evidence that a passage was correct — and in this
+pass the oracle's ranked candidates agreed with the code reading on all three
+defects, while the defects themselves were established by failing tests, not by
+the ranking.
+
+The three findings and their repairs are recorded in `log.md`. The one worth
+carrying forward as a lesson rather than a diff is the third: an earlier pass
+concluded, in this same file, that a fenced first dispatch was
+indistinguishable from a crash in the dispatch window, and that conclusion was
+recorded as a *known limit* and pinned by a test. It was wrong, and the error
+was not in the reasoning about `EventKind` — which is closed and has no
+"dispatched" fact, exactly as stated — but in stopping there. "The journal
+cannot tell" is not "the system cannot tell". The live table had the witness
+the whole time; the cost of not noticing was a path that receipted a success
+for an effect that provably never happened.
+
 ## 2026-09-20 dispatch-time freshness: rules loaded and oracle read
 
 READ: the estate's Rust rule corpus at `~/.agents/skills/rust-skills/rules/`

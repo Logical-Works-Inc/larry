@@ -210,6 +210,18 @@ struct RunLive {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LiveEffect {
     intent: EffectIntent,
+    /// Whether this effect may have reached its owner. Set when a mutating
+    /// reach is actually taken, and set by [`restore`] for every recorded
+    /// reservation, because the journal proves the effect was reserved and
+    /// cannot prove it was never sent.
+    ///
+    /// This is the witness the journal does not carry. `EventKind` has no
+    /// "dispatched" fact, so a journal alone cannot tell a refused reach from
+    /// a crash inside the dispatch window; the live table can, because a
+    /// refused reach calls no owner at all and this flag is set only on a call
+    /// that happened. It is what keeps an endpoint's answer from being read as
+    /// evidence about an effect that never left the process.
+    sent: bool,
     /// How many times the owner has been asked to *perform* the effect. Bounded
     /// by `MAX_EFFECT_ATTEMPTS` for strategies that declare retry safe.
     dispatches: u8,
@@ -465,11 +477,14 @@ where
         // and the budget is deducted against the same pinned snapshot that was
         // just recorded, so replay re-derives the identical decision.
         //
-        // The admission epoch comes from the fence, never from the proposal:
-        // a command cannot declare the security generation it is admitted
-        // under, so a hostile generator cannot name one that outlives a
-        // revocation (D42, E63).
-        let intent = proposal.intent(self.fence.epoch());
+        // The admission epoch comes from the fence and the tenant from the run
+        // table, never from the proposal: a command cannot declare the security
+        // generation it is admitted under or the tenant it is admitted for, so
+        // a hostile generator cannot name a generation that outlives a
+        // revocation, or record an effect — or re-attribute a run after a
+        // restart — to a tenant it does not own (D42, E63).
+        let tenant = self.tenant_of(run)?;
+        let intent = proposal.intent(tenant, self.fence.epoch());
         self.record_intent(run, intent, authorization)?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
@@ -477,6 +492,9 @@ where
             intent.operation,
             LiveEffect {
                 intent,
+                // Nothing has reached the owner yet: the reservation is
+                // durable, and the reach that follows is what sets this.
+                sent: false,
                 dispatches: 0,
                 reconciliations: 0,
                 dispatched_at_tick: self.tick_count,
@@ -507,7 +525,11 @@ where
             return Ok(());
         };
         report.outcomes.push((intent.operation, outcome));
-        self.settle(run, intent, outcome, report)
+        let sent = self
+            .live
+            .get(&intent.operation)
+            .is_some_and(|live| live.sent);
+        self.settle(run, intent, outcome, sent, report)
     }
 
     /// The single point at which the runtime reaches the owner.
@@ -539,6 +561,13 @@ where
                 }
                 if let Some(live) = self.live.get_mut(&intent.operation) {
                     live.dispatches = live.dispatches.saturating_add(1);
+                    // The reach below is about to happen, so this effect may
+                    // now have reached its owner. This is the only place the
+                    // flag is set for a live effect, and it is set before the
+                    // call rather than after: a call that panicked or was lost
+                    // still may have happened, and the answer to a later status
+                    // query about it is therefore evidence.
+                    live.sent = true;
                 }
                 // The reach happens without the authority source having been
                 // re-contacted, so it consumes offline authority. Spending it
@@ -556,14 +585,29 @@ where
         }
     }
 
+    /// Records an observed outcome and, when it may terminate the effect,
+    /// publishes the disposition.
+    ///
+    /// `sent` is the caller's answer to "may this effect have reached its
+    /// owner" — the witness the journal cannot carry. An outcome observed for
+    /// an effect that was never sent is recorded, because the owner did report
+    /// it, but it resolves nothing: an endpoint's answer is evidence about an
+    /// effect this runtime dispatched, and no answer about an effect whose
+    /// only reach was refused can be evidence that the effect happened. The
+    /// effect therefore stays visibly open rather than being handed a
+    /// disposition it never earned (D42, R88).
     fn settle(
         &mut self,
         run: RunId,
         intent: EffectIntent,
         outcome: EffectOutcome,
+        sent: bool,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         self.record_outcome(run, intent, outcome)?;
+        if !sent {
+            return Ok(());
+        }
         let Ok(disposition) = crate::projection::resolve(&intent, outcome) else {
             // Left open on purpose: the strategy requires a status query or a
             // bounded retry, and the effect stays in `Reconciling` (R72, E56).
@@ -623,7 +667,11 @@ where
             };
             report.reconciled.push(operation);
             let run = live.intent.run;
-            self.settle(run, live.intent, outcome, report)?;
+            // `live` was copied before the reach, so the witness is re-read
+            // from the table the reach updated: a retry that actually happened
+            // has set it, and a reach the fence refused has not.
+            let sent = self.live.get(&operation).is_some_and(|live| live.sent);
+            self.settle(run, live.intent, outcome, sent, report)?;
         }
         Ok(())
     }
@@ -693,7 +741,13 @@ where
         let open = match self.projection.effect_phase(operation) {
             Some(EffectPhase::Reserved) => true,
             Some(EffectPhase::Observed { outcome }) => {
-                crate::projection::resolve(&live.intent, outcome).is_err()
+                // An observation resolves an effect only when this runtime
+                // actually sent it. When it did not — every mutating reach was
+                // refused — the outcome resolves nothing, so the effect stays
+                // open and keeps being reported rather than settling into a
+                // disposition no reach earned. The reconciliation budget below
+                // still bounds how long that can go on.
+                crate::projection::resolve(&live.intent, outcome).is_err() || !live.sent
             }
             Some(EffectPhase::Reconciled { .. }) | None => false,
         };
@@ -966,8 +1020,8 @@ pub fn replay<P: ProjectionBackend>(
 /// # Errors
 ///
 /// Returns [`RuntimeError::Codec`] or [`RuntimeError::FoldDivergence`] from
-/// the rebuild, and [`RuntimeError::RunNotTracked`] for a recorded intent
-/// whose run the journal never named.
+/// the rebuild, and [`RuntimeError::RunNotTracked`] for a run the projection
+/// tracks but recorded no tenant for.
 pub fn restore<P, O, C>(
     settings: RuntimeSettings,
     owner: O,
@@ -1008,6 +1062,13 @@ where
             intent.operation,
             LiveEffect {
                 intent: *intent,
+                // The journal proves the effect was reserved and cannot prove
+                // it was never sent, so every restored effect counts as
+                // possibly-sent — including one that merely read as `Reserved`
+                // because a crash landed inside the dispatch window. The
+                // alternative fails open, and the direction here is the same
+                // one the dispatch budget below already takes.
+                sent: true,
                 dispatches,
                 reconciliations: 0,
                 // Zero, so a restored effect is reconcilable on the first tick
@@ -1018,10 +1079,17 @@ where
         );
     }
     for run in projection.run_ids() {
-        let tenant = live
-            .values()
-            .find(|entry| entry.intent.run == run)
-            .map(|entry| entry.intent.tenant)
+        // The tenant comes from the run's own recorded events, never from a
+        // reserved intent. An intent's `tenant` is *declared* by the proposal
+        // that reserved it, and inferring a run's tenant from it would both
+        // re-attribute the run to a declaration and fail outright for a run
+        // whose recorded history reserved nothing — a denied submission, a
+        // steering command, or a cancellation that arrived before any work.
+        // Both are wrong for the same reason: recovery is a re-fold of what
+        // the runtime recorded (D04), not a reconstruction from what a
+        // submitter claimed (D42).
+        let tenant = projection
+            .run_tenant(run)
             .ok_or(RuntimeError::RunNotTracked { run })?;
         runs.insert(run, RunLive { tenant });
     }

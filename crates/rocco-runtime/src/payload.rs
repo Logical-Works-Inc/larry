@@ -39,8 +39,15 @@ use rocco_contracts::state::{RunState, TransitionEvent};
 pub struct WorkProposal {
     /// The run the work belongs to.
     pub run: RunId,
-    /// The tenant the run belongs to. Re-validated against the envelope's
-    /// tenant rather than trusted from the body.
+    /// The tenant the body claims the run belongs to.
+    ///
+    /// A declaration, and one the runtime does not consult: the run's tenant
+    /// is read from the runtime's own run table, exactly as the admission
+    /// epoch is read from the dispatch fence, so a hostile generator cannot
+    /// record an effect — or re-attribute a run after a restart — to a tenant
+    /// it does not own (D42, E63). The field stays because the body is the
+    /// caller's declaration of its own intent, not because the runtime trusts
+    /// it.
     pub tenant: TenantId,
     /// The stable operation identity presented to the endpoint.
     pub operation: OperationId,
@@ -55,26 +62,29 @@ pub struct WorkProposal {
 }
 
 impl WorkProposal {
-    /// The intent this proposal reserves, admitted under `admission_epoch`.
+    /// The intent this proposal reserves, for `tenant`, admitted under
+    /// `admission_epoch`.
     ///
     /// The local effect identity is derived from the stable operation
     /// identity, so the two are never accidentally swapped and a resumed run
     /// reconstructs the same local identity it recorded.
     ///
-    /// `admission_epoch` is an argument rather than a field of this type on
-    /// purpose. Every other value here is *declared* by the work and then
-    /// checked by the gate; the epoch is not declarable at all. It comes from
-    /// the runtime's dispatch fence — protected state — so a hostile
-    /// generator composing this payload cannot choose the security
-    /// generation it is admitted under, and cannot name a generation that
-    /// would survive a revocation it should not survive (D42, E63).
+    /// `tenant` and `admission_epoch` are arguments rather than fields of this
+    /// type on purpose, and for the same reason. Every other value here is
+    /// *declared* by the work and then checked by the gate; neither the
+    /// security generation nor the run's tenant is declarable at all. Both
+    /// come from protected runtime state — the dispatch fence and the run
+    /// table — so a hostile generator composing this payload cannot choose the
+    /// security generation it is admitted under, and cannot name a generation
+    /// that would survive a revocation it should not survive, or a tenant it
+    /// does not own (D42, E63).
     #[must_use]
-    pub fn intent(&self, admission_epoch: SecurityEpoch) -> EffectIntent {
+    pub fn intent(&self, tenant: TenantId, admission_epoch: SecurityEpoch) -> EffectIntent {
         EffectIntent {
             id: EffectId::from_bytes(*self.operation.as_bytes()),
             operation: self.operation,
             run: self.run,
-            tenant: self.tenant,
+            tenant,
             strategy: self.strategy,
             admission_epoch,
         }
