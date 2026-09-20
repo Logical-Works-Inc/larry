@@ -5,3 +5,6 @@ __pycache__/
 Cargo.lock.bak
 *.swp
 .DS_Store
+
+# graphify AST cache: derived build artifact, never source
+graphify-out/cache/

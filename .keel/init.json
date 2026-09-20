@@ -1,0 +1,38 @@
+{
+  "proposal": {
+    "schema": "keel.init/v1",
+    "root": "/Users/srinji/rocco",
+    "mode": "manual",
+    "state": "awaiting-human-signoff",
+    "proposed_difficulty": null,
+    "machine": {
+      "operating_system": "macos",
+      "architecture": "aarch64",
+      "logical_cpus": 15,
+      "memory_bytes": 25769803776,
+      "available_storage_bytes": 128444854272
+    },
+    "manifests": [],
+    "runner_parallelism": 4,
+    "heavy_gates": "complete-graph-deferred-by-profile-policy",
+    "knowledge": "unavailable-no-local-index",
+    "config": {
+      "path": "/Users/srinji/rocco/keel.toml",
+      "action": "pending-human-signoff-not-written"
+    },
+    "artifacts": [],
+    "missing": [
+      "no Cargo manifest detected",
+      "toolchain is not pinned; the host default will be used",
+      "human sign-off is required before init can write the generated pipeline",
+      "keel.toml remains advisory; the authoritative plan is .keel/lanes.toml",
+      "runner fleet is undeclared; no runner availability is being claimed",
+      "pipeline generation refused: no Cargo manifest detected; init cannot generate a runnable pipeline"
+    ]
+  },
+  "proposal_blake3": "cc042934c73730851a94e42a353b8969681f6970c5d9d8ecb5dce6323d33502f",
+  "approved_by": null,
+  "approved_at_unix_seconds": null,
+  "approval_method": null,
+  "approved_digest": null
+}

@@ -1,0 +1,596 @@
+{
+  ".wwfd/local-ci.sh": {
+    "mtime": 1789747922.9766684,
+    "seen": 1789918737.433729,
+    "ast_hash": "b26cc12e23a32b00ae16017d0d981ed2",
+    "semantic_hash": "b26cc12e23a32b00ae16017d0d981ed2"
+  },
+  ".wwfd/workflow-evidence/97e1b1236b5e6ed5f9d9351284ca25a99f5b0076eac673ceb237172a5d9e14d7/ledger.json": {
+    "mtime": 1789748903.0572,
+    "seen": 1789918737.4337869,
+    "ast_hash": "c93e8ceca76b1ad6ff48fb7cd6c022a5",
+    "semantic_hash": "c93e8ceca76b1ad6ff48fb7cd6c022a5"
+  },
+  "Cargo.toml": {
+    "mtime": 1789829046.0114064,
+    "seen": 1789918737.433789,
+    "ast_hash": "56d89ee5401b9e925372a312b4bfaba9",
+    "semantic_hash": "56d89ee5401b9e925372a312b4bfaba9"
+  },
+  "architecture/rocco-forge-spec/examples/change-packet.json": {
+    "mtime": 1789602295.6176612,
+    "seen": 1789918737.43379,
+    "ast_hash": "f036498db8d3e35189a5af37066e4337",
+    "semantic_hash": "f036498db8d3e35189a5af37066e4337"
+  },
+  "architecture/rocco-forge-spec/machine/capability-manifest.schema.json": {
+    "mtime": 1789602295.617798,
+    "seen": 1789918737.433791,
+    "ast_hash": "4ecc8a07439494c76df09ea1e1203dc5",
+    "semantic_hash": "4ecc8a07439494c76df09ea1e1203dc5"
+  },
+  "architecture/rocco-forge-spec/machine/change-packet.schema.json": {
+    "mtime": 1789602295.6178842,
+    "seen": 1789918737.433792,
+    "ast_hash": "effeaa1e5981a8675a42858fe05b04fb",
+    "semantic_hash": "effeaa1e5981a8675a42858fe05b04fb"
+  },
+  "architecture/rocco-forge-spec/machine/contracts.json": {
+    "mtime": 1789602295.6179612,
+    "seen": 1789918737.433793,
+    "ast_hash": "ac36fd55eb4f582a8dcc8b6b80ce6869",
+    "semantic_hash": "ac36fd55eb4f582a8dcc8b6b80ce6869"
+  },
+  "crates/rocco-contracts/Cargo.toml": {
+    "mtime": 1789747578.1547914,
+    "seen": 1789918737.433794,
+    "ast_hash": "a482d6f3707dc71fa3abab5d11ecce61",
+    "semantic_hash": "a482d6f3707dc71fa3abab5d11ecce61"
+  },
+  "crates/rocco-contracts/src/authority.rs": {
+    "mtime": 1789747544.3446653,
+    "seen": 1789918737.433794,
+    "ast_hash": "644d93fc9788bca0e0d15301d3a4e4dc",
+    "semantic_hash": "644d93fc9788bca0e0d15301d3a4e4dc"
+  },
+  "crates/rocco-contracts/src/command.rs": {
+    "mtime": 1789747544.3431,
+    "seen": 1789918737.433795,
+    "ast_hash": "84eeb652bca9b23bbe74efeea5eef5ae",
+    "semantic_hash": "84eeb652bca9b23bbe74efeea5eef5ae"
+  },
+  "crates/rocco-contracts/src/effect.rs": {
+    "mtime": 1789747544.3438704,
+    "seen": 1789918737.4337962,
+    "ast_hash": "c0af9e44962b3075b0542b5711d5abbd",
+    "semantic_hash": "c0af9e44962b3075b0542b5711d5abbd"
+  },
+  "crates/rocco-contracts/src/error.rs": {
+    "mtime": 1789747544.3428197,
+    "seen": 1789918737.4337971,
+    "ast_hash": "8ae96cb4cb0fd744707784b241e67097",
+    "semantic_hash": "8ae96cb4cb0fd744707784b241e67097"
+  },
+  "crates/rocco-contracts/src/event.rs": {
+    "mtime": 1789747544.3436158,
+    "seen": 1789918737.4337971,
+    "ast_hash": "43fee43f198690d67d050c4ad3f4387f",
+    "semantic_hash": "43fee43f198690d67d050c4ad3f4387f"
+  },
+  "crates/rocco-contracts/src/ids.rs": {
+    "mtime": 1789828682.7470033,
+    "seen": 1789918737.4337978,
+    "ast_hash": "e3b500a42898e66dd2f4bdf85fdbbca5",
+    "semantic_hash": "e3b500a42898e66dd2f4bdf85fdbbca5"
+  },
+  "crates/rocco-contracts/src/lib.rs": {
+    "mtime": 1789828898.065109,
+    "seen": 1789918737.4337978,
+    "ast_hash": "0434e1ae96aac979e4dba58606931925",
+    "semantic_hash": "0434e1ae96aac979e4dba58606931925"
+  },
+  "crates/rocco-contracts/src/replay.rs": {
+    "mtime": 1789747544.345038,
+    "seen": 1789918737.433799,
+    "ast_hash": "c80f5a25706a7318c9082865ee812b3f",
+    "semantic_hash": "c80f5a25706a7318c9082865ee812b3f"
+  },
+  "crates/rocco-contracts/src/state.rs": {
+    "mtime": 1789747544.3441315,
+    "seen": 1789918737.433799,
+    "ast_hash": "0cee29fbd5252225c25378830b85c328",
+    "semantic_hash": "0cee29fbd5252225c25378830b85c328"
+  },
+  "crates/rocco-contracts/src/workspace.rs": {
+    "mtime": 1789828697.6302428,
+    "seen": 1789918737.4338,
+    "ast_hash": "61327c23041e68df5761cfed3d2f3f5a",
+    "semantic_hash": "61327c23041e68df5761cfed3d2f3f5a"
+  },
+  "crates/rocco-contracts/tests/workspace.rs": {
+    "mtime": 1789828819.1487,
+    "seen": 1789918737.433801,
+    "ast_hash": "27e0b320db3e1c6325df49a99e229787",
+    "semantic_hash": "27e0b320db3e1c6325df49a99e229787"
+  },
+  "docs/evidence/workspace-final-metrics.json": {
+    "mtime": 1789835377.324078,
+    "seen": 1789918737.433802,
+    "ast_hash": "9f53f3db87a243e757e6fa954227d2b8",
+    "semantic_hash": "9f53f3db87a243e757e6fa954227d2b8"
+  },
+  "src/bin/rocco.rs": {
+    "mtime": 1789747613.5652792,
+    "seen": 1789918737.433802,
+    "ast_hash": "4f3123ef9ac3b84cd35ac2146fabd54f",
+    "semantic_hash": "4f3123ef9ac3b84cd35ac2146fabd54f"
+  },
+  "src/lib.rs": {
+    "mtime": 1789747605.0970395,
+    "seen": 1789918737.433803,
+    "ast_hash": "d1b852fba3f120e33aac553194f66238",
+    "semantic_hash": "d1b852fba3f120e33aac553194f66238"
+  },
+  "src/main.rs": {
+    "mtime": 1789682775.6745129,
+    "seen": 1789918737.433805,
+    "ast_hash": "db749955c1a7c52e9df6fc5f5fd3144f",
+    "semantic_hash": "db749955c1a7c52e9df6fc5f5fd3144f"
+  },
+  "src/native.rs": {
+    "mtime": 1789834836.9727294,
+    "seen": 1789918737.4338062,
+    "ast_hash": "7f35c431cc7ad020e597573b44ac04e4",
+    "semantic_hash": "7f35c431cc7ad020e597573b44ac04e4"
+  },
+  "src/native/workspace.rs": {
+    "mtime": 1789835432.7651906,
+    "seen": 1789918737.4338062,
+    "ast_hash": "fe8a1e8b98beac454805d354109946b0",
+    "semantic_hash": "fe8a1e8b98beac454805d354109946b0"
+  },
+  "src/theme.rs": {
+    "mtime": 1789746541.999712,
+    "seen": 1789918737.4338071,
+    "ast_hash": "6f3c397f245ba296502053d71cdaef73",
+    "semantic_hash": "6f3c397f245ba296502053d71cdaef73"
+  },
+  "tests/demo.rs": {
+    "mtime": 1789747654.0355568,
+    "seen": 1789918737.4338078,
+    "ast_hash": "a2ac03c2e4dc83dd88b495516b7d8aca",
+    "semantic_hash": "a2ac03c2e4dc83dd88b495516b7d8aca"
+  },
+  "tests/test_governance.py": {
+    "mtime": 1789680910.4354742,
+    "seen": 1789918737.4338078,
+    "ast_hash": "bdb34c19e01b152fb03ec8c0f5c4f542",
+    "semantic_hash": "bdb34c19e01b152fb03ec8c0f5c4f542"
+  },
+  "tests/test_rerank_local.py": {
+    "mtime": 1789832954.5351522,
+    "seen": 1789918737.4338088,
+    "ast_hash": "54ac29145e8f9dfd5c4ee4545dc36bfd",
+    "semantic_hash": "54ac29145e8f9dfd5c4ee4545dc36bfd"
+  },
+  "tools/check_governance.py": {
+    "mtime": 1789680910.4358902,
+    "seen": 1789918737.4338088,
+    "ast_hash": "566bc42ad15d5fac1debec39cae22247",
+    "semantic_hash": "566bc42ad15d5fac1debec39cae22247"
+  },
+  "tools/probe_workspace.py": {
+    "mtime": 1789833411.5629985,
+    "seen": 1789918737.43381,
+    "ast_hash": "98e576030bceda76a3fa82a72147bc6c",
+    "semantic_hash": "98e576030bceda76a3fa82a72147bc6c"
+  },
+  "tools/receipts/20260917-agent-workflow-pre-exec.json": {
+    "mtime": 1789680910.4360754,
+    "seen": 1789918737.433811,
+    "ast_hash": "da21878db479bef32c6ed915b27a48d9",
+    "semantic_hash": "da21878db479bef32c6ed915b27a48d9"
+  },
+  "tools/receipts/20260917-appcui-admission-post-exec.json": {
+    "mtime": 1789684623.2414448,
+    "seen": 1789918737.433811,
+    "ast_hash": "35ff7aa935c8f635cf0a8d6bef277bdd",
+    "semantic_hash": "35ff7aa935c8f635cf0a8d6bef277bdd"
+  },
+  "tools/receipts/20260917-appcui-admission-pre-exec.json": {
+    "mtime": 1789683221.010249,
+    "seen": 1789918737.433812,
+    "ast_hash": "343f96d528f6fd9ecd07f3c895f8a7ae",
+    "semantic_hash": "343f96d528f6fd9ecd07f3c895f8a7ae"
+  },
+  "tools/receipts/20260917-final-boundaries-post-exec.json": {
+    "mtime": 1789680910.4362178,
+    "seen": 1789918737.433812,
+    "ast_hash": "bea16f5452c30309e332325b8fde07d8",
+    "semantic_hash": "bea16f5452c30309e332325b8fde07d8"
+  },
+  "tools/receipts/20260917-final-boundaries-pre-exec.json": {
+    "mtime": 1789680910.4363375,
+    "seen": 1789918737.433813,
+    "ast_hash": "f3ff0f4e053d1ac1a6325b40937f195b",
+    "semantic_hash": "f3ff0f4e053d1ac1a6325b40937f195b"
+  },
+  "tools/receipts/20260917-lifecycle-final-post-exec.json": {
+    "mtime": 1789680910.4365008,
+    "seen": 1789918737.433814,
+    "ast_hash": "8e589548de59b99949b6d63e9ac13bed",
+    "semantic_hash": "8e589548de59b99949b6d63e9ac13bed"
+  },
+  "tools/receipts/20260917-lifecycle-final-pre-exec.json": {
+    "mtime": 1789680910.4366486,
+    "seen": 1789918737.433814,
+    "ast_hash": "213bd3ad4f4d7a0d2e23c019736a9c10",
+    "semantic_hash": "213bd3ad4f4d7a0d2e23c019736a9c10"
+  },
+  "tools/receipts/20260917-lifecycle-pre-exec.json": {
+    "mtime": 1789680910.4367692,
+    "seen": 1789918737.433815,
+    "ast_hash": "1bda6a6b3a1fddac288d69233657c2c1",
+    "semantic_hash": "1bda6a6b3a1fddac288d69233657c2c1"
+  },
+  "tools/receipts/20260917-receipt-compatibility-post-exec.json": {
+    "mtime": 1789680910.4369893,
+    "seen": 1789918737.433815,
+    "ast_hash": "7a322baa972612b604efcbe92cee5ae2",
+    "semantic_hash": "7a322baa972612b604efcbe92cee5ae2"
+  },
+  "tools/receipts/20260917-receipt-compatibility-pre-exec.json": {
+    "mtime": 1789680910.4371514,
+    "seen": 1789918737.433816,
+    "ast_hash": "fb7755ff80d316828346b7349cbc1800",
+    "semantic_hash": "fb7755ff80d316828346b7349cbc1800"
+  },
+  "tools/receipts/20260917-receipt-validation-post-exec.json": {
+    "mtime": 1789680910.4373121,
+    "seen": 1789918737.433816,
+    "ast_hash": "5245a097ef0b9399a9dc8dab543a5b7e",
+    "semantic_hash": "5245a097ef0b9399a9dc8dab543a5b7e"
+  },
+  "tools/receipts/20260917-receipt-validation-pre-exec.json": {
+    "mtime": 1789680910.4374368,
+    "seen": 1789918737.4338171,
+    "ast_hash": "e9b6e8aac7fb32de71bb493f51c5cfd9",
+    "semantic_hash": "e9b6e8aac7fb32de71bb493f51c5cfd9"
+  },
+  "tools/receipts/20260917-visual-fixtures-post-exec.json": {
+    "mtime": 1789683063.918764,
+    "seen": 1789918737.433824,
+    "ast_hash": "2cfaf43a74d52040124843f5c11099db",
+    "semantic_hash": "2cfaf43a74d52040124843f5c11099db"
+  },
+  "tools/receipts/20260917-visual-fixtures-pre-exec.json": {
+    "mtime": 1789682619.813353,
+    "seen": 1789918737.433825,
+    "ast_hash": "67255a3e6d5ca388493be09572d9a339",
+    "semantic_hash": "67255a3e6d5ca388493be09572d9a339"
+  },
+  "tools/receipts/20260918-forge-look-post-exec.json": {
+    "mtime": 1789747193.2455919,
+    "seen": 1789918737.433825,
+    "ast_hash": "f26956a74626ab4c9580ed4620c7358f",
+    "semantic_hash": "f26956a74626ab4c9580ed4620c7358f"
+  },
+  "tools/receipts/20260918-forge-look-pre-exec.json": {
+    "mtime": 1789747130.5713575,
+    "seen": 1789918737.433826,
+    "ast_hash": "15cb3015b1e4944fd139d8054a59b94c",
+    "semantic_hash": "15cb3015b1e4944fd139d8054a59b94c"
+  },
+  "tools/receipts/20260918-one-repo-post-exec.json": {
+    "mtime": 1789748004.8286357,
+    "seen": 1789918737.4338272,
+    "ast_hash": "76d0e1314d03e8721ca52dfea9725480",
+    "semantic_hash": "76d0e1314d03e8721ca52dfea9725480"
+  },
+  "tools/receipts/20260918-one-repo-pre-exec.json": {
+    "mtime": 1789747962.5517035,
+    "seen": 1789918737.4338272,
+    "ast_hash": "623ffd483e9e1e21f571deea69be513a",
+    "semantic_hash": "623ffd483e9e1e21f571deea69be513a"
+  },
+  "tools/receipts/20260918-query-db-impl-post-exec.json": {
+    "mtime": 1789748733.0653856,
+    "seen": 1789918737.433828,
+    "ast_hash": "2212bd38ca5726ddb37530e0c342e5f1",
+    "semantic_hash": "2212bd38ca5726ddb37530e0c342e5f1"
+  },
+  "tools/receipts/20260918-query-db-impl-pre-exec.json": {
+    "mtime": 1789748618.749558,
+    "seen": 1789918737.433828,
+    "ast_hash": "288d2d75652ed16430bcc15664f97b4b",
+    "semantic_hash": "288d2d75652ed16430bcc15664f97b4b"
+  },
+  "tools/receipts/20260918-rocco-raccoon-post-exec.json": {
+    "mtime": 1789733695.024934,
+    "seen": 1789918737.433836,
+    "ast_hash": "9924a81516c548bcecb0dbf108ee5d5a",
+    "semantic_hash": "9924a81516c548bcecb0dbf108ee5d5a"
+  },
+  "tools/receipts/20260918-rocco-raccoon-pre-exec.json": {
+    "mtime": 1789731399.435754,
+    "seen": 1789918737.433837,
+    "ast_hash": "4c0e394a9ce768f2a55a8920c67fbd9c",
+    "semantic_hash": "4c0e394a9ce768f2a55a8920c67fbd9c"
+  },
+  "tools/receipts/20260918-tui-a11y-post-exec.json": {
+    "mtime": 1789690640.2218704,
+    "seen": 1789918737.433843,
+    "ast_hash": "edf77e3c162de20b68cf6b75e4cbed50",
+    "semantic_hash": "edf77e3c162de20b68cf6b75e4cbed50"
+  },
+  "tools/receipts/20260918-tui-a11y-pre-exec.json": {
+    "mtime": 1789690257.6966836,
+    "seen": 1789918737.4338439,
+    "ast_hash": "09736107818daefecb310c57eb59db0a",
+    "semantic_hash": "09736107818daefecb310c57eb59db0a"
+  },
+  "tools/receipts/20260918-tui-redesign-pre-exec.json": {
+    "mtime": 1789690062.0676425,
+    "seen": 1789918737.4338439,
+    "ast_hash": "0c631a9a53cc0f561931ac25a9fce85f",
+    "semantic_hash": "0c631a9a53cc0f561931ac25a9fce85f"
+  },
+  "tools/receipts/20260918-vector-db-pre-exec.json": {
+    "mtime": 1789748226.5421383,
+    "seen": 1789918737.433845,
+    "ast_hash": "da8c5fd0bf845cabd310e2c3a4249996",
+    "semantic_hash": "da8c5fd0bf845cabd310e2c3a4249996"
+  },
+  "tools/receipts/20260919-backend-workspace-post-exec.json": {
+    "mtime": 1789829062.7294595,
+    "seen": 1789918737.433845,
+    "ast_hash": "cf5841515cd534a303203371651c4500",
+    "semantic_hash": "cf5841515cd534a303203371651c4500"
+  },
+  "tools/receipts/20260919-backend-workspace-pre-exec-3.json": {
+    "mtime": 1789828556.1761642,
+    "seen": 1789918737.433846,
+    "ast_hash": "f819b1a6b0e4370a58335279c5dbe9e8",
+    "semantic_hash": "f819b1a6b0e4370a58335279c5dbe9e8"
+  },
+  "tools/receipts/20260919-porsche-jira-post-exec.json": {
+    "mtime": 1789833814.1542528,
+    "seen": 1789918737.433847,
+    "ast_hash": "938c9af28330f7e79d678d13637cf7bd",
+    "semantic_hash": "938c9af28330f7e79d678d13637cf7bd"
+  },
+  "tools/receipts/20260919-porsche-jira-pre-exec.json": {
+    "mtime": 1789832886.908875,
+    "seen": 1789918737.433847,
+    "ast_hash": "567b6fa10f827a358ed107e83b393c12",
+    "semantic_hash": "567b6fa10f827a358ed107e83b393c12"
+  },
+  "tools/receipts/20260919-query-tool-fix-post-exec.json": {
+    "mtime": 1789832993.7862575,
+    "seen": 1789918737.4338481,
+    "ast_hash": "4008016c235bbc14cbd392214e6aa00f",
+    "semantic_hash": "4008016c235bbc14cbd392214e6aa00f"
+  },
+  "tools/receipts/20260919-workspace-ui-post-exec.json": {
+    "mtime": 1789831707.3214726,
+    "seen": 1789918737.4338481,
+    "ast_hash": "1ce70efa40a422f534241372be62d1de",
+    "semantic_hash": "1ce70efa40a422f534241372be62d1de"
+  },
+  "tools/receipts/20260919-workspace-ui-pre-exec-3.json": {
+    "mtime": 1789828769.01776,
+    "seen": 1789918737.433849,
+    "ast_hash": "f85596a5cf3b6294fac2297573f0b3eb",
+    "semantic_hash": "f85596a5cf3b6294fac2297573f0b3eb"
+  },
+  "tools/receipts/20260919-workspace-ui-routing-pre-exec.json": {
+    "mtime": 1789829372.7096825,
+    "seen": 1789918737.433849,
+    "ast_hash": "e49e16dde6b33b85330853f17fb58684",
+    "semantic_hash": "e49e16dde6b33b85330853f17fb58684"
+  },
+  "tools/receipts/20260919-workspace-visual-fidelity-pre-exec.json": {
+    "mtime": 1789830465.2074897,
+    "seen": 1789918737.43385,
+    "ast_hash": "110e29db4f6d5e1ea8c4cbb29cdd50c2",
+    "semantic_hash": "110e29db4f6d5e1ea8c4cbb29cdd50c2"
+  },
+  "tools/receipts/post-exec.json": {
+    "mtime": 1789680910.4375699,
+    "seen": 1789918737.43385,
+    "ast_hash": "3e8f4d749c55fe7775af5ca266f7a8c8",
+    "semantic_hash": "3e8f4d749c55fe7775af5ca266f7a8c8"
+  },
+  "tools/receipts/pre-exec.json": {
+    "mtime": 1789680910.4377332,
+    "seen": 1789918737.4338508,
+    "ast_hash": "c9ee2d10b18baa1a148ee0e828206726",
+    "semantic_hash": "c9ee2d10b18baa1a148ee0e828206726"
+  },
+  "tools/rerank_local.py": {
+    "mtime": 1789832954.5340526,
+    "seen": 1789918737.4338508,
+    "ast_hash": "0570d39190cda179286618e359337451",
+    "semantic_hash": "0570d39190cda179286618e359337451"
+  },
+  "tools/rocco_pixel.py": {
+    "mtime": 1789733579.0774963,
+    "seen": 1789918737.433852,
+    "ast_hash": "55bfa44267b7a9f2fe1466c788360163",
+    "semantic_hash": "55bfa44267b7a9f2fe1466c788360163"
+  },
+  "tools/test_demo_cli.py": {
+    "mtime": 1789682938.9458783,
+    "seen": 1789918737.433852,
+    "ast_hash": "7936611620219f63be82c5929dd0528b",
+    "semantic_hash": "7936611620219f63be82c5929dd0528b"
+  },
+  "tools/test_native_cli.py": {
+    "mtime": 1789834914.59973,
+    "seen": 1789918737.433853,
+    "ast_hash": "fffcff2a3d6bf6b6d86c81cd1c62f38f",
+    "semantic_hash": "fffcff2a3d6bf6b6d86c81cd1c62f38f"
+  },
+  ".github/workflows/governance.yml": {
+    "mtime": 1789602295.615932,
+    "seen": 1789918737.433853,
+    "ast_hash": "5b31ab1a31790019307300a7fb5dadc9",
+    "semantic_hash": "5b31ab1a31790019307300a7fb5dadc9"
+  },
+  "AGENTS.md": {
+    "mtime": 1789829620.8585467,
+    "seen": 1789918737.4338539,
+    "ast_hash": "f32f5a3657431cb5c1f76682d260aee1",
+    "semantic_hash": "f32f5a3657431cb5c1f76682d260aee1"
+  },
+  "GOVERNANCE.md": {
+    "mtime": 1789829502.2140303,
+    "seen": 1789918737.433855,
+    "ast_hash": "47c40895ca52e508aa319841ebcf3ae4",
+    "semantic_hash": "47c40895ca52e508aa319841ebcf3ae4"
+  },
+  "README.md": {
+    "mtime": 1789829620.8599486,
+    "seen": 1789918737.433855,
+    "ast_hash": "469866855ebb88e67e0e838f778a1b58",
+    "semantic_hash": "469866855ebb88e67e0e838f778a1b58"
+  },
+  "architecture/rocco-forge-spec/README.md": {
+    "mtime": 1789602295.6168933,
+    "seen": 1789918737.433856,
+    "ast_hash": "da64e87f8a72728cd16aaddb50f0387c",
+    "semantic_hash": "da64e87f8a72728cd16aaddb50f0387c"
+  },
+  "architecture/rocco-forge-spec/docs/01-source-review.md": {
+    "mtime": 1789602295.6170423,
+    "seen": 1789918737.433857,
+    "ast_hash": "c064d7f8ad6e2467c6c68d5fe2d7596d",
+    "semantic_hash": "c064d7f8ad6e2467c6c68d5fe2d7596d"
+  },
+  "architecture/rocco-forge-spec/docs/02-contracts.md": {
+    "mtime": 1789602295.6171644,
+    "seen": 1789918737.433857,
+    "ast_hash": "c7b7066798a52d254b26701bc654806e",
+    "semantic_hash": "c7b7066798a52d254b26701bc654806e"
+  },
+  "architecture/rocco-forge-spec/docs/03-protocol-and-proof.md": {
+    "mtime": 1789602295.6172738,
+    "seen": 1789918737.4338582,
+    "ast_hash": "179d0add55dba1b36ab6211635f5bcd3",
+    "semantic_hash": "179d0add55dba1b36ab6211635f5bcd3"
+  },
+  "architecture/rocco-forge-spec/docs/04-fleet-efficiency.md": {
+    "mtime": 1789602295.6173618,
+    "seen": 1789918737.4338582,
+    "ast_hash": "5b1c8e029c1588dbac152f74c0c0cbf9",
+    "semantic_hash": "5b1c8e029c1588dbac152f74c0c0cbf9"
+  },
+  "architecture/rocco-forge-spec/docs/05-change-and-delivery.md": {
+    "mtime": 1789602295.6174412,
+    "seen": 1789918737.433859,
+    "ast_hash": "ce5b8cb56fbc415b319320f6cd262271",
+    "semantic_hash": "ce5b8cb56fbc415b319320f6cd262271"
+  },
+  "architecture/rocco-forge-spec/docs/06-evolution-envelope.md": {
+    "mtime": 1789602295.6175508,
+    "seen": 1789918737.433859,
+    "ast_hash": "b4367ece5f7a3f87494b64fcef162e11",
+    "semantic_hash": "b4367ece5f7a3f87494b64fcef162e11"
+  },
+  "crates/rocco-contracts/WORKSPACE-EVIDENCE.md": {
+    "mtime": 1789829144.6171112,
+    "seen": 1789918737.43386,
+    "ast_hash": "9dd67f462b2273292c3a9c91deabb9f9",
+    "semantic_hash": "9dd67f462b2273292c3a9c91deabb9f9"
+  },
+  "docs/README.md": {
+    "mtime": 1789602295.6182656,
+    "seen": 1789918737.43386,
+    "ast_hash": "7731b5484eab2e9810f041fbb5716db5",
+    "semantic_hash": "7731b5484eab2e9810f041fbb5716db5"
+  },
+  "docs/architecture/README.md": {
+    "mtime": 1789602295.6184633,
+    "seen": 1789918737.433861,
+    "ast_hash": "4761dba8d13313ef43563584a2d660e0",
+    "semantic_hash": "4761dba8d13313ef43563584a2d660e0"
+  },
+  "docs/architecture/visual-pass.md": {
+    "mtime": 1789747153.0068061,
+    "seen": 1789918737.433867,
+    "ast_hash": "375ad074050a9712c936a08b319d7253",
+    "semantic_hash": "375ad074050a9712c936a08b319d7253"
+  },
+  "docs/dependencies/ADAPTER-MANIFEST.md": {
+    "mtime": 1789747900.028057,
+    "seen": 1789918737.433867,
+    "ast_hash": "a40114569c0a53928058dfc347e6b3f9",
+    "semantic_hash": "a40114569c0a53928058dfc347e6b3f9"
+  },
+  "docs/dependencies/README.md": {
+    "mtime": 1789602295.6186464,
+    "seen": 1789918737.433868,
+    "ast_hash": "df29c8801bfc353c918d163c8d2251dc",
+    "semantic_hash": "df29c8801bfc353c918d163c8d2251dc"
+  },
+  "docs/evaluation/README.md": {
+    "mtime": 1789602295.6188507,
+    "seen": 1789918737.4338691,
+    "ast_hash": "26a97070efec8937e55a623df48e73c9",
+    "semantic_hash": "26a97070efec8937e55a623df48e73c9"
+  },
+  "docs/workspace-experience.md": {
+    "mtime": 1789835409.851062,
+    "seen": 1789918737.4338691,
+    "ast_hash": "56d2a4bf5e144dee2941f62828b693d8",
+    "semantic_hash": "56d2a4bf5e144dee2941f62828b693d8"
+  },
+  "experience/charter.yaml": {
+    "mtime": 1789833887.1735053,
+    "seen": 1789918737.43387,
+    "ast_hash": "c87187fe072c63293b434d0373b1a0c0",
+    "semantic_hash": "c87187fe072c63293b434d0373b1a0c0"
+  },
+  "experience/invariants/quiet-torque.yaml": {
+    "mtime": 1789834508.675326,
+    "seen": 1789918737.43387,
+    "ast_hash": "a96173c80385d1418f149ef3580a0c4f",
+    "semantic_hash": "a96173c80385d1418f149ef3580a0c4f"
+  },
+  "experience/journeys/return-to-work.yaml": {
+    "mtime": 1789834508.6604543,
+    "seen": 1789918737.433871,
+    "ast_hash": "297a3dc87fc2afa3a2b6af3a7fb219af",
+    "semantic_hash": "297a3dc87fc2afa3a2b6af3a7fb219af"
+  },
+  "index.md": {
+    "mtime": 1789602295.619028,
+    "seen": 1789918737.433871,
+    "ast_hash": "573e17ef8829136a7be223b359fc77fc",
+    "semantic_hash": "573e17ef8829136a7be223b359fc77fc"
+  },
+  "docs/evidence/workspace-home.svg": {
+    "mtime": 1789835045.4963088,
+    "seen": 1789918737.433872,
+    "ast_hash": "a4121ec88f163de0b836e703c3280d30",
+    "semantic_hash": "a4121ec88f163de0b836e703c3280d30"
+  },
+  "docs/evidence/workspace-truth.svg": {
+    "mtime": 1789835045.5116599,
+    "seen": 1789918737.433872,
+    "ast_hash": "4b591abeec3faf055bf0cd74adb57058",
+    "semantic_hash": "4b591abeec3faf055bf0cd74adb57058"
+  },
+  "docs/evidence/workspace-work.svg": {
+    "mtime": 1789835045.5021982,
+    "seen": 1789918737.433873,
+    "ast_hash": "c593b9685f29ab16d171d1b3dd350317",
+    "semantic_hash": "c593b9685f29ab16d171d1b3dd350317"
+  },
+  "docs/rocco-mascot.svg": {
+    "mtime": 1789733599.8764915,
+    "seen": 1789918737.433873,
+    "ast_hash": "ea1a4e53bc92447a71a18ccadac7a4d9",
+    "semantic_hash": "ea1a4e53bc92447a71a18ccadac7a4d9"
+  }
+}
