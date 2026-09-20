@@ -361,3 +361,64 @@ fn outcome_carries_the_operation_it_describes() {
     let outcome: EffectOutcome = succeeded(intent.operation);
     assert_eq!(outcome.operation(), OperationId::from_bytes([3; 16]));
 }
+
+/// The journal's order is total and checked, and that is what makes the fold's
+/// order well-defined.
+///
+/// This is not a formality. A fold over an unordered collection would make the
+/// projection depend on iteration order, and the ECS this runtime keeps a seam
+/// for states outright that its query iteration order is not guaranteed —
+/// with parallel iteration the order is not merely unspecified but genuinely
+/// raced. Refusing an out-of-order append is what keeps the fold a pure
+/// function of a totally ordered log rather than of a scheduler's whims.
+#[test]
+fn the_journal_refuses_an_out_of_order_append() -> Result<(), Box<dyn std::error::Error>> {
+    use rocco_contracts::error::SequenceError;
+    use rocco_contracts::event::EventSequence;
+
+    let mut journal = Journal::new(64)?;
+    let first = Event::new(
+        tenant(1),
+        run(1),
+        EventSequence::FIRST,
+        Vec::new(),
+        EventKind::StateTransition,
+        lgwks_std::json::to_vec(&TransitionPayload {
+            event: TransitionEvent::Admit,
+            from: RunState::Draft,
+            to: RunState::Admitted,
+        })?
+        .into_boxed_slice(),
+    )?;
+    journal.record(first)?;
+
+    // Sequence 2 skips the gap-free successor, 1.
+    let skipping = Event::new(
+        tenant(1),
+        run(1),
+        EventSequence::new(2),
+        Vec::new(),
+        EventKind::StateTransition,
+        lgwks_std::json::to_vec(&TransitionPayload {
+            event: TransitionEvent::Start,
+            from: RunState::Admitted,
+            to: RunState::Running,
+        })?
+        .into_boxed_slice(),
+    )?;
+
+    let result = journal.record(skipping);
+
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Sequence(SequenceError::Gap {
+                expected: 1,
+                got: 2
+            }))
+        ),
+        "a gap in the sequence must be refused, got {result:?}"
+    );
+    assert_eq!(journal.len(), 1);
+    Ok(())
+}

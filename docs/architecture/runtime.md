@@ -134,6 +134,21 @@ recorded here so they are not rediscovered later:
 - **Hidden state exists that replay cannot see**: `Local<T>` — including the
   `MessageCursor` behind the 0.19 rename of `EventReader` to `MessageReader` —
   change-detection ticks, and in-flight `Commands` buffers.
+- **Parallel query iteration is not orderable, and the ECS documentation says so
+  obliquely.** `Query::iter` states that "iteration order is not guaranteed";
+  `par_iter`/`par_iter_mut` turn that from an unspecified-but-stable archetype
+  order into genuine thread-race order. The Bevy cheatbook page on parallel
+  iteration, checked 2026-09-20, states no determinism rule for queries at all —
+  its only ordering remark is that `par_read` makes event order "undefined".
+  A backend that folded an aggregate in a parallel query loop would break replay
+  in precisely the way this runtime exists to prevent.
+
+The guard that makes this a non-issue today is that the journal's order is
+*total and checked*, not merely conventional: an append that skips a sequence
+number is refused, and a falsifier in `tests/determinism.rs` proves it. The fold
+therefore consumes a totally ordered log rather than a scheduler's iteration
+order. Any admitted ECS backend must preserve that property, and must not
+parallel-iterate the fold.
 
 A `bevy_ecs` projection would therefore have to be a single-threaded,
 ambiguity-erroring, explicitly ordered view whose contents are always
