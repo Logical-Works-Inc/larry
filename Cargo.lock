@@ -859,6 +859,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rocco-runtime"
+version = "0.1.0"
+dependencies = [
+ "lgwks_std",
+ "rocco-contracts",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,228 @@
+{
+  "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED. `head` names the commit whose state the figures describe, NOT the current tip: requiring it to equal HEAD would demand a new commit per commit and regress forever. Bump it only when the figures are re-measured at a new commit. `branch` names the delivery those figures were measured for, for the same reason: a count like `N ahead of origin` moves with every push and cannot stay true, so it is not recorded here.",
+  "head": "3954685",
+  "measured": "2026-09-20",
+  "branch": "main · delivered in PR stack #13",
+  "receipt": "local-CI: every declared lane passed",
+  "lede": "Rocco is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",
+  "falsifier_total": 80,
+  "axes_total": 9,
+  "cells": [
+    {
+      "id": "C00",
+      "job": "Approval & frozen acceptance",
+      "pct": 0,
+      "st": "serious",
+      "blocked": "Director approval record (E24)",
+      "why": "The specification exists. The approval record that freezes acceptance v1.2 does not, and implicit approval is not permitted."
+    },
+    {
+      "id": "C01",
+      "job": "Owner & adapter manifest",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "Sibling owner snapshots",
+      "why": "The EffectOwner seam now exists in rocco-runtime, but no adapter, API or licence manifest is produced."
+    },
+    {
+      "id": "C02",
+      "job": "Command, effect & state model",
+      "pct": 59,
+      "st": "warning",
+      "blocked": "E63/E65 as acceptance cases, independent review",
+      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. A hardening pass then found and repaired three defects in the same slice — recovery refused a journal naming a run that reserved nothing, a proposal body could declare its own tenant, and an observation could resolve an effect this process never sent — each with a local falsifier. Two of the eight falsifiers are still not run and no independent review has happened."
+    },
+    {
+      "id": "C03",
+      "job": "Memory & context epochs",
+      "pct": 0,
+      "st": "serious",
+      "blocked": "Logical-DB readiness — hard hold",
+      "why": "No substitute store and no pretend adapter are permitted, so this cell cannot begin."
+    },
+    {
+      "id": "C04",
+      "job": "Real authorized effect",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "Nova / Moo / Secure-Authority",
+      "why": "Nothing in the runtime contacts a real owner. The only in-tree implementations are deterministic fixtures."
+    },
+    {
+      "id": "C05",
+      "job": "Caller sample & TUI",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "C03 / C04",
+      "why": "The AppCUI surface is a mockup and is expected to change."
+    },
+    {
+      "id": "C06",
+      "job": "Delegation & federation",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "—",
+      "why": ""
+    },
+    {
+      "id": "C07",
+      "job": "Workflow IR & skills",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "Audited existing Flow",
+      "why": ""
+    },
+    {
+      "id": "C08",
+      "job": "Corrections & learning",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "C04, immutable trials",
+      "why": ""
+    },
+    {
+      "id": "C09",
+      "job": "Evaluation & human pilot",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "C04, frozen workloads",
+      "why": ""
+    },
+    {
+      "id": "C10",
+      "job": "Phone & continuity",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "C04 / C05",
+      "why": ""
+    },
+    {
+      "id": "C11",
+      "job": "Fleet, portability, soak",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "Measured shard capacity",
+      "why": ""
+    },
+    {
+      "id": "C12",
+      "job": "Release & acceptance",
+      "pct": 0,
+      "st": "todo",
+      "blocked": "All required cells",
+      "why": ""
+    }
+  ],
+  "falsifiers": [
+    {
+      "id": "E55",
+      "st": "good",
+      "t": "Replay a recorded effect log against pinned and mutated policy and budget snapshots",
+      "e": "Proven by two local tests: recorded authorizations replay bit-identically, and each decision is re-checked against its own budget snapshot."
+    },
+    {
+      "id": "E28",
+      "st": "warning",
+      "t": "Crash after durable input admission before acknowledgement; retry and steer during a tool",
+      "e": "Partial. Identity dedup is proven; the crash-before-acknowledgement case is not, and no correction is promoted at a safe boundary."
+    },
+    {
+      "id": "E30",
+      "st": "warning",
+      "t": "Concurrent questions, expired approval, answer after cancellation, no interactive client",
+      "e": "Partial. An expired grant is refused at the effect boundary. Concurrent questions and the no-interactive-client case are uncovered."
+    },
+    {
+      "id": "E35",
+      "st": "warning",
+      "t": "Publish during catch-up; slow consumer overflows; stale or cross-tenant cursor",
+      "e": "Partial. Sequencing is gap-free and a full journal backpressures admission. There is no cursor, no resync and no page bound."
+    },
+    {
+      "id": "E47",
+      "st": "warning",
+      "t": "Unsupported protocol version, absent capability, headless question and overload",
+      "e": "Partial. Absent capability and overload bounds are covered. No protocol-version negotiation exists."
+    },
+    {
+      "id": "E63",
+      "st": "todo",
+      "t": "Hostile generator emits malformed structures, forged identities, labels and grants",
+      "e": "Not run as an acceptance case. No hostile generator has been pointed at the runtime. Two local falsifiers do cover the forged-security-declaration shape: a proposal cannot declare its own admission epoch, and it cannot declare its own tenant now that the tenant is read from the runtime's run table. That is a narrow slice of E63, not the case."
+    },
+    {
+      "id": "E65",
+      "st": "todo",
+      "t": "Swap resource, recipient, payload, adapter, schema or policy epoch between display, admission and dispatch",
+      "e": "Not run. The display-versus-dispatch bind is not yet exercised, since there is no display path. The tenant half of the swap has moved: a proposal body can no longer substitute a tenant between admission and the durable intent, which is one of the swaps this case names."
+    },
+    {
+      "id": "E71",
+      "st": "warning",
+      "t": "Revoke during queue, dispatch, partition, sleep and clock rollback",
+      "e": "Partial, and further than before. The dispatch fence and the offline exposure bound exist and 28 local tests falsify them — 17 integration tests in tests/fence.rs plus 11 unit tests on the fence type itself, with the fence-facing cases in the lifecycle and determinism suites alongside: revocation while queued, the ordering between the durable intent and the owner call, partition, sleep, clock rollback, a replayed older snapshot, epoch exhaustion, and the retry-versus-query asymmetry. The earlier pass concluded a refused first dispatch was indistinguishable from a crash inside the dispatch window and recorded that as a known limit; that was half wrong. The journal cannot tell the two apart, but the live effect table can, because a refused reach calls no owner. That witness is now used: an endpoint's answer can no longer resolve an effect this process never sent, so a status query about a never-performed effect can no longer publish a Succeeded receipt or complete the run. Not covered: no authenticated authority source supplies the fence, so its facts are host-asserted in this slice."
+    }
+  ],
+  "basis": {
+    "rows": [
+      {
+        "part": "Typed command/event/effect/terminal contract",
+        "weight": 30,
+        "complete": 100
+      },
+      {
+        "part": "Finite state model, executable end to end",
+        "weight": 25,
+        "complete": 90
+      },
+      {
+        "part": "Its eight falsifiers run as acceptance cases",
+        "weight": 30,
+        "complete": 22
+      },
+      {
+        "part": "Adversarial model check + independent review",
+        "weight": 15,
+        "complete": 0
+      }
+    ],
+    "before": 37.5,
+    "note": "Before the runtime landed, C02 sat at 37.5% on this same basis — the contract and the falsifier tally were already in place, but nothing sequenced commands into events into effects."
+  },
+  "footer": [
+    "The repository went from <em>specification only</em> to <em>specification plus one cell's runtime</em>, and the runtime has since grown its second half: authorization was reproducible at admission and is now also <em>fresh</em> at dispatch. That was E71, and it was the last of C02's eight falsifiers still recorded as entirely unimplemented.",
+    "C02 is still not done. Two of its eight falsifiers, E63 and E65, remain NOT RUN as acceptance cases, and none of it has had an independent review or a model check. Two decisions stay open with the Director: whether an ECS world may ever hold authority, and whether to sign the <code>bevy_ecs</code> row in <code>contract/APPROVED.toml</code>."
+  ],
+  "evidence": {
+    "measured": [
+      "cargo test --workspace --all-targets --locked: 164 pass, 0 fail (161 before the hardening pass)",
+      "clippy -D warnings: clean",
+      "cargo fmt --all -- --check: clean",
+      "lgwks-deps check .: OK, no new edge",
+      "governance inventory 96/53/80/13/9: PASS",
+      "55 python tests: OK",
+      "local-CI receipt names the head",
+      "hardening pass: 3 defects found by adversarial reading, each fixed with a falsifier that fails if the property breaks",
+      "self-hosted runner rocco-macos-arm64: online, labels self-hosted/macOS/ARM64, read from gh api repos/.../actions/runners"
+    ],
+    "estimate": [
+      "every percentage on this page",
+      "C02 at 59%, project at 4.5%",
+      "the +2.6 point delta",
+      "weights in the basis table"
+    ],
+    "notrun": [
+      "any falsifier as a hosted acceptance case",
+      "E63 and E65 in particular",
+      "independent review of C02",
+      "model checking; P1–P8 unproved",
+      "a real owner; no network is reached",
+      "an authenticated authority source supplying the fence",
+      "GitHub-hosted CI, permanently and for cause: 61 workflow runs are recorded, all 61 concluded failure, and no run has ever produced a step — the jobs are created and completed in about two seconds with an empty steps array while the job log returns BlobNotFound. Actions is enabled and the repository is private, so this is an account-level runner or spending-limit condition, not a defect in the code. This repository now has its own self-hosted runner and both workflows target it, so the lanes execute; but CI still covers a subset of the lanes AGENTS.md declares — no cargo build, no lgwks-deps check, no CLI or PTY suite, no whitespace check — so a green CI is weaker than a green local-CI and must not be read as one. The runner is a single machine sharing the development host: not a fleet, not a second platform, not portable evidence."
+    ],
+    "unknown": [
+      "durability across process death — the journal is in memory",
+      "whether an ECS world may ever hold authority"
+    ]
+  }
+}

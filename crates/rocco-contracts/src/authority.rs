@@ -22,6 +22,7 @@
 //!   depth <= 3); an attenuated grant with no surviving scopes is refused
 //!   rather than minted empty.
 
+use core::fmt;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -33,6 +34,87 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 
 /// Maximum delegation depth (Cell 05: depth <= 3).
 pub const MAX_DELEGATION_DEPTH: u8 = 3;
+
+/// A monotone generation of the authority state (R87, D48, E71).
+///
+/// The epoch is revocation's **linearization point**. Everything admitted
+/// while the authority stood at epoch `N` belongs to generation `N`; moving
+/// the fence to a later epoch withdraws all of it at one total-order point,
+/// with no per-effect reconciliation and no window in which two effects
+/// admitted either side of the change can be compared as if they were the
+/// same decision.
+///
+/// The type is deliberately *monotone*. It has no decrement, no arithmetic
+/// and no constructor that lowers a fence — the only movement this type
+/// offers is [`SecurityEpoch::successor`] and [`SecurityEpoch::later_of`],
+/// both of which only ever go up. That is the whole anti-replay rule for
+/// the epoch: a replayed old device, grant or policy snapshot reports an
+/// epoch the fence has already passed, and is absorbed rather than obeyed,
+/// so stale evidence can never independently authorize execution (E71).
+///
+/// The number is not a version and not a clock. It carries no unit, it moves
+/// only by explicit host action, and it never moves because time passed —
+/// which is precisely why a rolled-back clock extends nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+pub struct SecurityEpoch(u64);
+
+impl SecurityEpoch {
+    /// The generation an authority source starts at.
+    pub const INITIAL: Self = Self(0);
+
+    /// The generation a raw value names.
+    ///
+    /// Constructing an epoch is not a claim that it is current: only the
+    /// authority source and the dispatch fence decide that.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// The raw generation number.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+
+    /// The next generation, or `None` when the space is exhausted.
+    ///
+    /// `None` rather than a wrap: a wrapped epoch would alias a withdrawn
+    /// generation with a live one, which is the exact confusion the type
+    /// exists to prevent.
+    #[must_use]
+    pub const fn successor(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(next) => Some(Self(next)),
+            None => None,
+        }
+    }
+
+    /// The later of two generations.
+    ///
+    /// This is the anti-replay rule in one function. Raising a fence to
+    /// whatever the authority source reports, and never lowering it to what
+    /// an older snapshot reports, is what makes a replayed snapshot a
+    /// non-event instead of an authorization.
+    #[must_use]
+    pub const fn later_of(self, other: Self) -> Self {
+        if self.0 >= other.0 { self } else { other }
+    }
+
+    /// Whether this generation is strictly later than `floor`.
+    #[must_use]
+    pub const fn is_later_than(self, floor: Self) -> bool {
+        self.0 > floor.0
+    }
+}
+
+impl fmt::Display for SecurityEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "epoch {}", self.0)
+    }
+}
 
 /// One capability the estate can grant.
 ///
@@ -670,5 +752,49 @@ mod tests {
             validate_at_effect_boundary(&grant, Scope::FileWrite, 100, &policy, epoch_plus(500)),
             Ok(())
         );
+    }
+
+    #[test]
+    fn e71_a_security_epoch_only_ever_moves_forward() {
+        let start = SecurityEpoch::INITIAL;
+        assert_eq!(start.value(), 0);
+        let next = crate::test_support::expect_ok_opt(start.successor());
+        assert_eq!(next.value(), 1);
+        assert!(next.is_later_than(start));
+        assert!(!start.is_later_than(next));
+        assert!(
+            !start.is_later_than(start),
+            "an epoch is not later than itself"
+        );
+        // There is no decrement and no subtraction: the only movement the
+        // type offers goes up, which is what makes a rolled-back clock or a
+        // replayed old snapshot unable to restore withdrawn authority.
+        assert_eq!(start.later_of(next), next, "the later epoch wins");
+        assert_eq!(next.later_of(start), next, "and an older one never wins");
+        assert_eq!(next.later_of(next), next);
+    }
+
+    #[test]
+    fn e71_epoch_exhaustion_is_typed_never_wrapped() {
+        let last = SecurityEpoch::new(u64::MAX);
+        assert_eq!(
+            last.successor(),
+            None,
+            "a wrapped epoch would alias history"
+        );
+        assert_eq!(last.later_of(SecurityEpoch::new(0)), last);
+    }
+
+    #[test]
+    fn e71_a_replayed_older_epoch_is_absorbed_not_obeyed() {
+        // The authority source has advanced to 9. An attacker replays the
+        // device snapshot from generation 4. The fence's own value is the
+        // later of the two, so the replay changes nothing.
+        let current = SecurityEpoch::new(9);
+        let replayed = SecurityEpoch::new(4);
+        assert_eq!(current.later_of(replayed), current);
+        // And the direction that does matter: a genuine advance revokes.
+        let advance = SecurityEpoch::new(10);
+        assert!(current.later_of(advance).is_later_than(current));
     }
 }

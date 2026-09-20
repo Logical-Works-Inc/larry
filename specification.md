@@ -319,6 +319,28 @@ OutcomeUnknown is deliberately not drawn as automatic retry or success. Failed
 and unresolved outcomes retain evidence and can end a run with unmet obligations;
 the diagram does not require compensation to succeed or imply universal reversal.
 
+### Implementation status: the runtime exists (2026-09-20)
+
+`crates/rocco-runtime` implements the control flow above as a deterministic,
+bounded tick over an authoritative journal. This is an implementation record,
+not a new decision: no requirement, decision, falsifier or execution cell is
+added, and the inventory stays 96/53/80/13/9.
+
+Implemented: admission with identity-based duplicate suppression; the pure
+authorization gate of D36, with the pinned snapshots recorded alongside each
+decision so the decision stays replayable (E55); durable intent written before
+dispatch; observe, reconcile and the permanent unknown of R72; a bounded
+retry budget kept separate from a bounded reconciliation budget; cancellation
+that completes only once owned work has stopped; immutable terminal receipts;
+and restoration by re-folding the journal.
+
+Not implemented, and not claimed: no canonical owner is integrated, the journal
+is in memory with no durability claim, and the effect-boundary re-validation
+exists but is not yet driven by a live authority source. ADR-R05 in
+`docs/architecture/runtime.md` records the deliberate open question of whether
+an ECS world may ever hold authority; ADR-R06 records that the `bevy_ecs`
+dependency is pending sign-off and is not an edge.
+
 ## Cell 03 — notable decisions and rejected alternatives
 
 Each D row has a falsifier in Cell 09. Director-settled directions are identified
@@ -1533,6 +1555,17 @@ translation, immediate offline revocation, lossless compaction, deterministic
 LLM regeneration, demographic realism, human satisfaction or production
 reliability. Future enhancements are cheaper only if this contract and evidence
 discipline hold; no plan can eliminate every future architectural discovery.
+
+### Open architecture question recorded 2026-09-20
+
+**Is an ECS world ever authoritative, or always a view?** The Director deferred
+this on 2026-09-20 rather than settling it. It is recorded here as open, not
+ratified, and no implementation settled it by accident: the implemented runtime
+reads state only through a projection seam and treats the journal as
+authoritative, which is the D04-literal reading and is reversible if the
+question is later answered the other way. The `bevy_ecs` dependency admission
+that would make an ECS backend possible is likewise pending Director sign-off
+and is not an edge in the dependency register.
 
 ## File-specific excellence record
 
