@@ -1,6 +1,6 @@
 {
   "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED. `head` names the commit whose state the figures describe, NOT the current tip: requiring it to equal HEAD would demand a new commit per commit and regress forever. Bump it only when the figures are re-measured at a new commit.",
-  "head": "1ff2148",
+  "head": "783575d",
   "measured": "2026-09-20",
   "branch": "main · 22 ahead of origin, unpushed",
   "receipt": "local-CI: every declared lane passed",
@@ -30,7 +30,7 @@
       "pct": 59,
       "st": "warning",
       "blocked": "E63/E65 as acceptance cases, independent review",
-      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. Two of the eight falsifiers are still not run and no independent review has happened."
+      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. A hardening pass then found and repaired three defects in the same slice — recovery refused a journal naming a run that reserved nothing, a proposal body could declare its own tenant, and an observation could resolve an effect this process never sent — each with a local falsifier. Two of the eight falsifiers are still not run and no independent review has happened."
     },
     {
       "id": "C03",
@@ -148,27 +148,43 @@
       "id": "E63",
       "st": "todo",
       "t": "Hostile generator emits malformed structures, forged identities, labels and grants",
-      "e": "Not run. No hostile generator has been pointed at the runtime."
+      "e": "Not run as an acceptance case. No hostile generator has been pointed at the runtime. Two local falsifiers do cover the forged-security-declaration shape: a proposal cannot declare its own admission epoch, and it cannot declare its own tenant now that the tenant is read from the runtime's run table. That is a narrow slice of E63, not the case."
     },
     {
       "id": "E65",
       "st": "todo",
       "t": "Swap resource, recipient, payload, adapter, schema or policy epoch between display, admission and dispatch",
-      "e": "Not run. The display-versus-dispatch bind is not yet exercised, since there is no display path."
+      "e": "Not run. The display-versus-dispatch bind is not yet exercised, since there is no display path. The tenant half of the swap has moved: a proposal body can no longer substitute a tenant between admission and the durable intent, which is one of the swaps this case names."
     },
     {
       "id": "E71",
       "st": "warning",
       "t": "Revoke during queue, dispatch, partition, sleep and clock rollback",
-      "e": "Partial, and much further than before. The dispatch fence and the offline exposure bound now exist and 29 local tests falsify them: revocation while queued, the ordering between the durable intent and the owner call, partition, sleep, clock rollback, a replayed older snapshot, epoch exhaustion, and the retry-versus-query asymmetry. Not covered: no authenticated authority source supplies the fence, so its facts are host-asserted in this slice."
+      "e": "Partial, and further than before. The dispatch fence and the offline exposure bound exist and 28 local tests falsify them — 17 integration tests in tests/fence.rs plus 11 unit tests on the fence type itself, with the fence-facing cases in the lifecycle and determinism suites alongside: revocation while queued, the ordering between the durable intent and the owner call, partition, sleep, clock rollback, a replayed older snapshot, epoch exhaustion, and the retry-versus-query asymmetry. The earlier pass concluded a refused first dispatch was indistinguishable from a crash inside the dispatch window and recorded that as a known limit; that was half wrong. The journal cannot tell the two apart, but the live effect table can, because a refused reach calls no owner. That witness is now used: an endpoint's answer can no longer resolve an effect this process never sent, so a status query about a never-performed effect can no longer publish a Succeeded receipt or complete the run. Not covered: no authenticated authority source supplies the fence, so its facts are host-asserted in this slice."
     }
   ],
   "basis": {
     "rows": [
-      { "part": "Typed command/event/effect/terminal contract", "weight": 30, "complete": 100 },
-      { "part": "Finite state model, executable end to end", "weight": 25, "complete": 90 },
-      { "part": "Its eight falsifiers run as acceptance cases", "weight": 30, "complete": 22 },
-      { "part": "Adversarial model check + independent review", "weight": 15, "complete": 0 }
+      {
+        "part": "Typed command/event/effect/terminal contract",
+        "weight": 30,
+        "complete": 100
+      },
+      {
+        "part": "Finite state model, executable end to end",
+        "weight": 25,
+        "complete": 90
+      },
+      {
+        "part": "Its eight falsifiers run as acceptance cases",
+        "weight": 30,
+        "complete": 22
+      },
+      {
+        "part": "Adversarial model check + independent review",
+        "weight": 15,
+        "complete": 0
+      }
     ],
     "before": 37.5,
     "note": "Before the runtime landed, C02 sat at 37.5% on this same basis — the contract and the falsifier tally were already in place, but nothing sequenced commands into events into effects."
@@ -179,13 +195,14 @@
   ],
   "evidence": {
     "measured": [
-      "cargo test --workspace --all-targets --locked: 161 pass, 0 fail",
+      "cargo test --workspace --all-targets --locked: 164 pass, 0 fail (161 before the hardening pass)",
       "clippy -D warnings: clean",
       "cargo fmt --all -- --check: clean",
       "lgwks-deps check .: OK, no new edge",
       "governance inventory 96/53/80/13/9: PASS",
       "55 python tests: OK",
-      "local-CI receipt names the head"
+      "local-CI receipt names the head",
+      "hardening pass: 3 defects found by adversarial reading, each fixed with a falsifier that fails if the property breaks"
     ],
     "estimate": [
       "every percentage on this page",
@@ -200,7 +217,7 @@
       "model checking; P1–P8 unproved",
       "a real owner; no network is reached",
       "an authenticated authority source supplying the fence",
-      "hosted CI"
+      "hosted CI, and it has never once run: 61 workflow runs are recorded, all 61 concluded failure, and no run has ever produced a step — the jobs are created and complete in about two seconds with an empty steps array while the job log returns BlobNotFound. Actions is enabled and the repository is private, so this reads as an account-level runner or spending-limit condition, not a defect in the code and not something this repository can repair; the workflows are left exactly as they are."
     ],
     "unknown": [
       "durability across process death — the journal is in memory",

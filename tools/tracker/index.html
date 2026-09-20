@@ -362,7 +362,7 @@ var DATA = {
       "job": "Command, effect & state model",
       "pct": 59,
       "st": "warning",
-      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. Two of the eight falsifiers are still not run and no independent review has happened."
+      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. A hardening pass then found and repaired three defects in the same slice \u2014 recovery refused a journal naming a run that reserved nothing, a proposal body could declare its own tenant, and an observation could resolve an effect this process never sent \u2014 each with a local falsifier. Two of the eight falsifiers are still not run and no independent review has happened."
     },
     {
       "blocked": "Logical-DB readiness \u2014 hard hold",
@@ -453,13 +453,14 @@ var DATA = {
       "weights in the basis table"
     ],
     "measured": [
-      "cargo test --workspace --all-targets --locked: 161 pass, 0 fail",
+      "cargo test --workspace --all-targets --locked: 164 pass, 0 fail (161 before the hardening pass)",
       "clippy -D warnings: clean",
       "cargo fmt --all -- --check: clean",
       "lgwks-deps check .: OK, no new edge",
       "governance inventory 96/53/80/13/9: PASS",
       "55 python tests: OK",
-      "local-CI receipt names the head"
+      "local-CI receipt names the head",
+      "hardening pass: 3 defects found by adversarial reading, each fixed with a falsifier that fails if the property breaks"
     ],
     "notrun": [
       "any falsifier as a hosted acceptance case",
@@ -468,7 +469,7 @@ var DATA = {
       "model checking; P1\u2013P8 unproved",
       "a real owner; no network is reached",
       "an authenticated authority source supplying the fence",
-      "hosted CI"
+      "hosted CI, and it has never once run: 61 workflow runs are recorded, all 61 concluded failure, and no run has ever produced a step \u2014 the jobs are created and complete in about two seconds with an empty steps array while the job log returns BlobNotFound. Actions is enabled and the repository is private, so this reads as an account-level runner or spending-limit condition, not a defect in the code and not something this repository can repair; the workflows are left exactly as they are."
     ],
     "unknown": [
       "durability across process death \u2014 the journal is in memory",
@@ -508,19 +509,19 @@ var DATA = {
       "t": "Unsupported protocol version, absent capability, headless question and overload"
     },
     {
-      "e": "Not run. No hostile generator has been pointed at the runtime.",
+      "e": "Not run as an acceptance case. No hostile generator has been pointed at the runtime. Two local falsifiers do cover the forged-security-declaration shape: a proposal cannot declare its own admission epoch, and it cannot declare its own tenant now that the tenant is read from the runtime's run table. That is a narrow slice of E63, not the case.",
       "id": "E63",
       "st": "todo",
       "t": "Hostile generator emits malformed structures, forged identities, labels and grants"
     },
     {
-      "e": "Not run. The display-versus-dispatch bind is not yet exercised, since there is no display path.",
+      "e": "Not run. The display-versus-dispatch bind is not yet exercised, since there is no display path. The tenant half of the swap has moved: a proposal body can no longer substitute a tenant between admission and the durable intent, which is one of the swaps this case names.",
       "id": "E65",
       "st": "todo",
       "t": "Swap resource, recipient, payload, adapter, schema or policy epoch between display, admission and dispatch"
     },
     {
-      "e": "Partial, and much further than before. The dispatch fence and the offline exposure bound now exist and 29 local tests falsify them: revocation while queued, the ordering between the durable intent and the owner call, partition, sleep, clock rollback, a replayed older snapshot, epoch exhaustion, and the retry-versus-query asymmetry. Not covered: no authenticated authority source supplies the fence, so its facts are host-asserted in this slice.",
+      "e": "Partial, and further than before. The dispatch fence and the offline exposure bound exist and 28 local tests falsify them \u2014 17 integration tests in tests/fence.rs plus 11 unit tests on the fence type itself, with the fence-facing cases in the lifecycle and determinism suites alongside: revocation while queued, the ordering between the durable intent and the owner call, partition, sleep, clock rollback, a replayed older snapshot, epoch exhaustion, and the retry-versus-query asymmetry. The earlier pass concluded a refused first dispatch was indistinguishable from a crash inside the dispatch window and recorded that as a known limit; that was half wrong. The journal cannot tell the two apart, but the live effect table can, because a refused reach calls no owner. That witness is now used: an endpoint's answer can no longer resolve an effect this process never sent, so a status query about a never-performed effect can no longer publish a Succeeded receipt or complete the run. Not covered: no authenticated authority source supplies the fence, so its facts are host-asserted in this slice.",
       "id": "E71",
       "st": "warning",
       "t": "Revoke during queue, dispatch, partition, sleep and clock rollback"
@@ -530,7 +531,7 @@ var DATA = {
     "The repository went from \u003cem>specification only\u003c/em> to \u003cem>specification plus one cell's runtime\u003c/em>, and the runtime has since grown its second half: authorization was reproducible at admission and is now also \u003cem>fresh\u003c/em> at dispatch. That was E71, and it was the last of C02's eight falsifiers still recorded as entirely unimplemented.",
     "C02 is still not done. Two of its eight falsifiers, E63 and E65, remain NOT RUN as acceptance cases, and none of it has had an independent review or a model check. Two decisions stay open with the Director: whether an ECS world may ever hold authority, and whether to sign the \u003ccode>bevy_ecs\u003c/code> row in \u003ccode>contract/APPROVED.toml\u003c/code>."
   ],
-  "head": "1ff2148",
+  "head": "783575d",
   "lede": "Rocco is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",
   "measured": "2026-09-20",
   "receipt": "local-CI: every declared lane passed"

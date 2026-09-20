@@ -100,6 +100,18 @@ invented disposition — and is left visible here rather than repaired without a
 decision, since re-attempting it means re-querying an owner for an event the
 journal already holds.
 
+**Hosted CI, recorded precisely because the page must not overstate what was
+verified.** This repository has 61 recorded workflow runs and every one
+concluded `failure`; no run has ever passed, and none has ever executed a step.
+The jobs are created and complete in about two seconds with an empty `steps`
+array, and the job log returns `BlobNotFound`, so no step ran and no log was
+ever produced. Actions is enabled and the repository is private, which makes
+this an account-level runner or spending-limit condition rather than a defect
+in this code — the same signature the earlier entry recorded for PR #1's runs.
+Nothing about it was disabled, edited or weakened to make a check green, and no
+attempt was made to repair the account-level cause. Every gate this change
+claims is a local lane, and the tracker says so.
+
 Authority: Director's hardening order, 2026-09-20. Affected: C02, E71, E63
 (partially), D42, D48, R88, R72. Evidence: 164 workspace tests pass (161
 before; three added), clippy `-D warnings` clean, `cargo fmt --check` clean,
