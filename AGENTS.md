@@ -260,6 +260,13 @@ refactor.
    exposure bound after the reservation is durable and before the owner is
    reached. It gates mutating reaches only — a status query must stay open, or
    an effect already dispatched when revocation landed could never be resolved.
+   Keeping that query open is not the same as believing its answer. The journal
+   cannot tell a refused first dispatch from a crash inside the dispatch window,
+   but the live effect table can, because a refused reach calls no owner: an
+   endpoint's answer resolves an effect the runtime sent, and resolves nothing
+   about one it never sent. Do not drop that witness — without it a status
+   answer can publish a success receipt for an effect that provably never
+   happened, which is the fail-open direction this invariant exists to close.
 3. **Replay is bit-identical.** Each authorization is recorded with its own
    pinned snapshots. A divergence must surface as an explicit finding, never as
    a silent pass.
