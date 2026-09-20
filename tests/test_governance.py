@@ -9,7 +9,8 @@ import sys
 import tempfile
 import unittest
 
-from tools.check_governance import load_documents, receipt_errors, validate
+from tools.check_governance import load_documents, receipt_errors, tracker_errors, validate
+from tools.tracker import generate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -245,6 +246,80 @@ class GovernanceTests(unittest.TestCase):
                                    cwd=ROOT, capture_output=True, text=True, timeout=10)
         self.assertEqual(recovered.returncode, 0, recovered.stderr)
         self.assertEqual(json.loads(recovered.stdout)["sha256"], before)
+
+
+class ProgressTrackerTests(unittest.TestCase):
+    """The tracker is generated, so every failure mode is a drift.
+
+    These run against a scratch copy: a test that mutates the real tracker to
+    prove it can fail would leave the repository stale if it ever aborted.
+    """
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.root = Path(self.scratch.name)
+        (self.root / "tools" / "tracker").mkdir(parents=True)
+        for name in ("tracker.json", "template.html", "index.html", "generate.py"):
+            source = ROOT / "tools" / "tracker" / name
+            (self.root / "tools" / "tracker" / name).write_text(
+                source.read_text(encoding="utf-8"), encoding="utf-8")
+        (self.root / "specification.md").write_text(
+            (ROOT / "specification.md").read_text(encoding="utf-8"), encoding="utf-8")
+
+    def tearDown(self):
+        self.scratch.cleanup()
+
+    def data(self):
+        return json.loads((self.root / "tools" / "tracker" / "tracker.json").read_text(encoding="utf-8"))
+
+    def save(self, data):
+        (self.root / "tools" / "tracker" / "tracker.json").write_text(
+            json.dumps(data), encoding="utf-8")
+
+    def test_tracker_is_current(self):
+        self.assertEqual(tracker_errors(self.root), [])
+
+    def test_edited_data_without_regenerating_is_refused(self):
+        data = self.data()
+        data["cells"][1]["pct"] = 40
+        self.save(data)
+        errors = tracker_errors(self.root)
+        self.assertTrue(any("stale" in error for error in errors), errors)
+
+    def test_cell_inventory_drift_is_refused(self):
+        data = self.data()
+        data["cells"] = data["cells"][:-1]
+        self.save(data)
+        errors = tracker_errors(self.root)
+        self.assertTrue(any("cell inventory" in error for error in errors), errors)
+
+    def test_falsifier_not_in_specification_is_refused(self):
+        data = self.data()
+        data["falsifiers"][0]["id"] = "E99"
+        self.save(data)
+        errors = tracker_errors(self.root)
+        self.assertTrue(any("not in specification.md" in error for error in errors), errors)
+
+    def test_falsifier_total_drift_is_refused(self):
+        data = self.data()
+        data["falsifier_total"] = 79
+        self.save(data)
+        errors = tracker_errors(self.root)
+        self.assertTrue(any("falsifier_total" in error for error in errors), errors)
+
+    def test_missing_render_is_refused(self):
+        (self.root / "tools" / "tracker" / "index.html").unlink()
+        errors = tracker_errors(self.root)
+        self.assertTrue(any("is missing" in error for error in errors), errors)
+
+    def test_generated_page_matches_the_committed_one(self):
+        self.assertEqual(
+            (ROOT / "tools" / "tracker" / "index.html").read_text(encoding="utf-8"),
+            generate.build(ROOT))
+
+    def test_spec_parsers_agree_with_the_declared_inventories(self):
+        self.assertEqual(generate.spec_cell_ids(ROOT), [f"C{index:02d}" for index in range(13)])
+        self.assertEqual(len(generate.spec_falsifier_ids(ROOT)), 80)
 
 
 if __name__ == "__main__":

@@ -147,6 +147,13 @@ worker remains. Warm-up means a slower one-shot invocation, not retained RAM.
    generated counts/digests against the exact final bytes. Fix failures, not gates.
 6. Every future implementation change must update its requirement/design/test
    traceability and retain failed attempts. New counterexamples extend acceptance.
+7. Update the progress tracker whenever a change moves a cell, a falsifier or
+   the head. `tools/tracker/tracker.json` is its only hand-maintained file; run
+   `python3 tools/tracker/generate.py` to re-render `tools/tracker/index.html`.
+   The checker fails if that page is not the exact render of the data, if the
+   cell inventory has drifted from specification.md, or if a listed falsifier
+   id is not in specification.md. Its percentages are ESTIMATE and are never
+   acceptance evidence.
 
 This is mandatory upkeep by the working agent, not an autonomous daemon rewriting
 policy. CI automatically regenerates a read-only report of current structure and

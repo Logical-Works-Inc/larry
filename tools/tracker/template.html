@@ -1,0 +1,592 @@
+<title>Rocco Pizza Tracker</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Single committed world: Rocco's own ADR-W05 black-baseline terminal —
+     black ground, gray structural hairlines, white reading text, one blue
+     selected surface, amber and red reserved for warning and error. */
+  :root{
+    --ground:#0b0b0c;
+    --panel:#131316;
+    --panel-2:#17171b;
+    --rule:#2a2a30;
+    --rule-soft:#1e1e23;
+    --ink:#e8e8ea;
+    --ink-2:#b4b4bc;
+    --muted:#8b8b94;
+    --track:#63636d;
+    --accent:#3987e5;
+    --good:#0ca30c;
+    --warning:#fab219;
+    --serious:#ec835a;
+    --critical:#d03b3b;
+    --radius:10px;
+    --sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --cond:"IBM Plex Sans Condensed","IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:16px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{
+    max-width:1120px;
+    margin:0 auto;
+    padding-inline:20px;
+    padding-block:44px 72px;
+    display:flex;
+    flex-direction:column;
+    gap:44px;
+  }
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--muted);
+  }
+  h1{
+    font-family:var(--cond);
+    font-weight:700;
+    font-size:clamp(30px,6vw,46px);
+    line-height:1.05;
+    letter-spacing:-.015em;
+    margin:0;
+    text-wrap:balance;
+  }
+  h2{
+    font-family:var(--cond);
+    font-weight:700;
+    font-size:22px;
+    letter-spacing:-.005em;
+    margin:0;
+  }
+  h3{
+    font-family:var(--mono);
+    font-weight:600;
+    font-size:12px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:0;
+  }
+  p{margin:0;max-width:66ch;color:var(--ink-2)}
+  .lede{font-size:17px;color:var(--ink-2);max-width:62ch}
+  .num{font-variant-numeric:tabular-nums}
+  header{display:flex;flex-direction:column;gap:14px}
+  .meta{
+    display:flex;flex-wrap:wrap;gap:8px 20px;
+    font-family:var(--mono);font-size:12px;color:var(--muted);
+    padding-top:14px;border-top:1px solid var(--rule-soft);
+  }
+  .meta b{font-weight:500;color:var(--ink-2)}
+
+  /* ---- KPI row ---- */
+  .kpis{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+  .kpi{
+    background:var(--panel);border:1px solid var(--rule-soft);
+    border-radius:var(--radius);padding:16px 18px;
+    display:flex;flex-direction:column;gap:6px;
+  }
+  .kpi .fig{
+    font-family:var(--cond);font-weight:700;font-size:38px;line-height:1;
+    letter-spacing:-.02em;font-variant-numeric:tabular-nums;
+  }
+  .kpi.hero .fig{font-size:56px;color:var(--accent)}
+  .kpi .cap{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+  .kpi .sub{font-size:13px;color:var(--ink-2);line-height:1.4}
+  .kpi .fig .of{color:var(--muted);font-size:.6em}
+
+  /* ---- pizza ---- */
+  .pizza{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:36px;align-items:start}
+  @media (max-width:860px){.pizza{grid-template-columns:1fr;gap:26px}}
+  .chartbox{position:relative}
+  svg.pie{display:block;width:100%;height:auto;overflow:visible}
+  .wedge{cursor:pointer;outline:none}
+  .wedge .hit{fill:transparent}
+  .wedge:focus-visible .ring{stroke:var(--accent);stroke-width:2}
+  .wedge.is-hot .label{fill:var(--ink)}
+  .label{
+    font-family:var(--mono);font-size:13px;font-weight:500;
+    fill:var(--muted);letter-spacing:.02em;
+    transition:fill .12s ease;
+  }
+  .center-fig{
+    font-family:var(--cond);font-weight:700;font-size:44px;
+    fill:var(--ink);font-variant-numeric:tabular-nums;
+  }
+  .center-cap{
+    font-family:var(--mono);font-size:11px;fill:var(--muted);
+    letter-spacing:.1em;text-transform:uppercase;
+  }
+  .center-name{
+    font-family:var(--mono);font-size:12px;fill:var(--ink-2);
+  }
+
+  /* ---- legend ---- */
+  .legend{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+  .leg{
+    display:flex;align-items:center;gap:11px;
+    padding:9px 0;border-bottom:1px solid var(--rule-soft);
+    font-size:14px;
+  }
+  .leg:last-child{border-bottom:0}
+  .leg .swatch{flex:none;display:block}
+  .leg .lname{flex:1;color:var(--ink)}
+  .leg .lcount{font-family:var(--mono);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .note{
+    font-size:13px;color:var(--muted);line-height:1.5;
+    border-left:2px solid var(--rule);padding-left:12px;margin-top:6px;
+  }
+
+  /* ---- table ---- */
+  .scroll{overflow-x:auto;border:1px solid var(--rule-soft);border-radius:var(--radius);background:var(--panel)}
+  table{border-collapse:collapse;width:100%;min-width:660px;font-size:14px}
+  caption{text-align:left;padding:16px 18px 0;color:var(--muted);font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase}
+  th{
+    text-align:left;font-family:var(--mono);font-weight:500;font-size:11px;
+    letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+    padding:12px 14px;border-bottom:1px solid var(--rule);white-space:nowrap;
+  }
+  td{padding:12px 14px;border-bottom:1px solid var(--rule-soft);vertical-align:top;color:var(--ink-2)}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr{transition:background .12s ease}
+  tbody tr.is-hot{background:var(--panel-2)}
+  .cid{font-family:var(--mono);font-weight:500;color:var(--ink);white-space:nowrap}
+  .cname{color:var(--ink);white-space:nowrap}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
+  .meter{display:flex;align-items:center;gap:9px;min-width:104px}
+  .bar{position:relative;flex:1;height:6px;border-radius:3px;background:var(--track);overflow:hidden}
+  .bar span{position:absolute;inset:0 auto 0 0;border-radius:3px}
+  .pct{font-family:var(--mono);font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums;width:34px;text-align:right}
+
+  /* ---- status pill: icon + label, never colour alone ---- */
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;white-space:nowrap;
+    font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    border:1px solid var(--rule);border-radius:999px;padding:3px 10px 3px 8px;color:var(--ink-2);
+  }
+  .pill svg{flex:none;display:block}
+
+  /* ---- falsifiers ---- */
+  .fals{display:flex;flex-direction:column;gap:0;border:1px solid var(--rule-soft);border-radius:var(--radius);background:var(--panel);overflow:hidden}
+  .fr{display:grid;grid-template-columns:74px 1fr;gap:0 16px;padding:14px 18px;border-bottom:1px solid var(--rule-soft)}
+  .fr:last-child{border-bottom:0}
+  .fr .fid{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .fr .ftext{color:var(--ink-2);font-size:14px}
+  .fr .fev{grid-column:2;font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:5px}
+  @media (max-width:560px){
+    .fr{grid-template-columns:1fr;gap:8px}
+    .fr .fev{grid-column:1}
+  }
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+
+  /* ---- evidence ledger ---- */
+  .ev{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+  .evc{background:var(--panel);border:1px solid var(--rule-soft);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+  .evc .tag{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+  .evc ul{margin:0;padding-left:16px;display:flex;flex-direction:column;gap:5px}
+  .evc li{font-family:var(--mono);font-size:12px;color:var(--ink-2);line-height:1.45}
+  .t-measured{color:var(--good)}
+  .t-estimate{color:var(--warning)}
+  .t-notrun{color:var(--serious)}
+  .t-unknown{color:var(--muted)}
+  .evc[data-k="measured"]{border-left:2px solid var(--good)}
+  .evc[data-k="estimate"]{border-left:2px solid var(--warning)}
+  .evc[data-k="notrun"]{border-left:2px solid var(--serious)}
+  .evc[data-k="unknown"]{border-left:2px solid var(--track)}
+  footer{border-top:1px solid var(--rule);padding-top:18px;display:flex;flex-direction:column;gap:8px}
+  code{font-family:var(--mono);font-size:.9em;color:var(--ink);background:var(--panel-2);padding:1px 5px;border-radius:4px;border:1px solid var(--rule-soft)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow" id="eyebrow"></div>
+    <h1>Rocco Pizza Tracker</h1>
+    <p class="lede" id="lede"></p>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <section class="kpis" id="kpis" aria-label="Headline figures"></section>
+
+  <section aria-labelledby="pizza-h">
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+      <h2 id="pizza-h">Thirteen slices</h2>
+      <p>Each wedge is its own meter — the filled part is that cell's completion, the track is what is left. Hover or tab a slice to read it.</p>
+    </div>
+
+    <div class="pizza">
+      <div class="chartbox">
+        <svg class="pie" viewBox="0 0 700 700" role="img" aria-labelledby="pie-title pie-desc">
+          <title id="pie-title">Completion of Rocco's execution cells</title>
+          <desc id="pie-desc">The table below carries the same figures.</desc>
+          <g id="wedges"></g>
+          <text class="center-fig" x="350" y="342" text-anchor="middle" id="cfig"></text>
+          <text class="center-cap" x="350" y="366" text-anchor="middle" id="ccap"></text>
+          <text class="center-name" x="350" y="392" text-anchor="middle" id="cname"></text>
+        </svg>
+      </div>
+
+      <div>
+        <h3 style="margin-bottom:6px">Legend</h3>
+        <div class="legend" id="legend"></div>
+        <p class="note">Status colour never carries the meaning on its own — every slice, row and pill pairs it with a glyph and a word.</p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="ledger-h">
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+      <h2 id="ledger-h">The ledger</h2>
+      <p>Thirteen cells is past the point where colour alone can hold the meaning, so the pizza is the glance and this table is the substance.</p>
+    </div>
+    <div class="scroll">
+      <table>
+        <caption>Execution cells, specification.md Cell 11</caption>
+        <thead>
+          <tr>
+            <th scope="col">Cell</th>
+            <th scope="col">Job</th>
+            <th scope="col">State</th>
+            <th scope="col" class="num" style="width:150px">Complete</th>
+            <th scope="col">Blocked on</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="c02-h">
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+      <h2 id="c02-h">What C02 actually got</h2>
+      <p>C02 owns eight falsifiers. A mechanism that exists is not the same as a falsifier that has been run — the difference is the whole point of this section.</p>
+    </div>
+    <div class="fals" id="fals"></div>
+  </section>
+
+  <section aria-labelledby="basis-h">
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+      <h2 id="basis-h">How the headline is arrived at</h2>
+      <p>Percentages here are ESTIMATE, never MEASURED. The basis is stated so you can disagree with the arithmetic rather than with the vibe.</p>
+    </div>
+    <div class="scroll">
+      <table>
+        <caption>C02 completion basis — the only non-zero cell</caption>
+        <thead>
+          <tr>
+            <th scope="col">Part of C02</th>
+            <th scope="col" class="num" style="width:90px">Weight</th>
+            <th scope="col" class="num" style="width:110px">Complete</th>
+            <th scope="col" class="num" style="width:110px">Contributes</th>
+          </tr>
+        </thead>
+        <tbody id="basisrows"></tbody>
+      </table>
+    </div>
+    <p class="note" id="basisnote" style="margin-top:14px"></p>
+  </section>
+
+  <section aria-labelledby="ev-h">
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+      <h2 id="ev-h">What can be claimed, and how</h2>
+    </div>
+    <div class="ev" id="ev"></div>
+  </section>
+
+  <footer>
+    <h3>Where this leaves Rocco</h3>
+    <div id="footer" style="display:flex;flex-direction:column;gap:8px"></div>
+  </footer>
+
+</div>
+
+<script>
+var DATA = __TRACKER_DATA__;
+
+(function(){
+  "use strict";
+
+  var S = {
+    good:{c:"#0ca30c", label:"Done",        glyph:"check", d:"Cell complete, exit gate satisfied"},
+    warning:{c:"#fab219", label:"Partial",  glyph:"half",  d:"Work landed; the exit gate has not"},
+    serious:{c:"#ec835a", label:"Blocked",  glyph:"bar",   d:"Cannot proceed on its stated input"},
+    todo:{c:"#63636d", label:"Not started", glyph:"ring",  d:"No work begun"}
+  };
+
+  var CELLS = DATA.cells;
+  var N = CELLS.length;
+  var projectPct = CELLS.reduce(function(a,c){ return a + c.pct; }, 0) / N;
+  var started = CELLS.filter(function(c){ return c.pct > 0; }).length;
+  var C02 = CELLS.filter(function(c){ return c.id === "C02"; })[0];
+
+  function pct1(v){ return (Math.round(v * 10) / 10).toFixed(1); }
+
+  var NS = "http://www.w3.org/2000/svg";
+  function el(n, a){ var e = document.createElementNS(NS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
+  function div(cls, txt){ var d = document.createElement("div"); if (cls) d.className = cls; if (txt != null) d.textContent = txt; return d; }
+
+  function glyph(kind, color, size){
+    var s = size || 12;
+    var g = el("svg", {width:s, height:s, viewBox:"0 0 12 12", "aria-hidden":"true", focusable:"false"});
+    if (kind === "check") {
+      g.appendChild(el("circle", {cx:6, cy:6, r:5.2, fill:color}));
+      g.appendChild(el("path", {d:"M3.6 6.2 L5.3 7.9 L8.5 4.4", fill:"none", stroke:"#0b0b0c", "stroke-width":1.7, "stroke-linecap":"round", "stroke-linejoin":"round"}));
+    } else if (kind === "half") {
+      g.appendChild(el("circle", {cx:6, cy:6, r:5.2, fill:"none", stroke:color, "stroke-width":1.7}));
+      g.appendChild(el("path", {d:"M6 1.4 A4.6 4.6 0 0 1 6 10.6 Z", fill:color}));
+    } else if (kind === "bar") {
+      g.appendChild(el("circle", {cx:6, cy:6, r:5.2, fill:"none", stroke:color, "stroke-width":1.7}));
+      g.appendChild(el("path", {d:"M3.9 3.9 L8.1 8.1", stroke:color, "stroke-width":1.9, "stroke-linecap":"round"}));
+    } else {
+      g.appendChild(el("circle", {cx:6, cy:6, r:5.2, fill:"none", stroke:color, "stroke-width":1.7}));
+    }
+    return g;
+  }
+
+  /* ---------- header ---------- */
+  document.getElementById("eyebrow").textContent =
+    "Logical Works · specification-led · " + N + " execution cells";
+  document.getElementById("lede").textContent = DATA.lede;
+  var meta = document.getElementById("meta");
+  [["head", DATA.head], ["measured", DATA.measured],
+   ["branch", DATA.branch], ["local-CI", DATA.receipt]].forEach(function(pair){
+    var s = document.createElement("span");
+    s.appendChild(document.createTextNode(pair[0] + " "));
+    var b = document.createElement("b"); b.textContent = pair[1];
+    s.appendChild(b);
+    meta.appendChild(s);
+  });
+
+  /* ---------- KPIs ---------- */
+  var kpis = document.getElementById("kpis");
+  function kpi(opts){
+    var d = div("kpi" + (opts.hero ? " hero" : ""));
+    d.appendChild(div("cap", opts.cap));
+    var f = div("fig num");
+    f.appendChild(document.createTextNode(opts.fig));
+    if (opts.of) {
+      var o = document.createElement("span"); o.className = "of"; o.textContent = opts.of;
+      f.appendChild(o);
+    }
+    d.appendChild(f);
+    d.appendChild(div("sub", opts.sub));
+    kpis.appendChild(d);
+  }
+  kpi({hero:true, cap:"Project complete", fig:pct1(projectPct) + "%",
+       sub:"ESTIMATE. Mean of the " + N + " cell completions; basis shown below."});
+  kpi({cap:"Cells started", fig:String(started), of:" / " + N,
+       sub:C02 ? (C02.id + " only. Its exit gate — independent review — has not run.")
+               : "No cell has started."});
+  kpi({cap:"Falsifiers fired", fig:String(DATA.falsifiers.filter(function(f){ return f.st === "good"; }).length),
+       of:" / " + DATA.falsifier_total,
+       sub:"E55, mechanism proven by two local tests. None run as an acceptance case."});
+  kpi({cap:"Axes fulfilled", fig:"0", of:" / " + DATA.axes_total,
+       sub:"A1–A9 need real owners, real hardware and fleet scale. All still binding."});
+
+  /* ---------- pizza ---------- */
+  var CX = 350, CY = 350, RMID = 200, RW = 100;
+  var SPAN = 360 / N, GAP = 1.3, LABEL_R = 288;
+
+  function pt(r, deg){
+    var a = (deg - 90) * Math.PI / 180;
+    return [CX + r * Math.cos(a), CY + r * Math.sin(a)];
+  }
+  function arcPath(r, a0, a1){
+    var p0 = pt(r, a0), p1 = pt(r, a1);
+    var large = (a1 - a0) > 180 ? 1 : 0;
+    return "M " + p0[0].toFixed(2) + " " + p0[1].toFixed(2) +
+           " A " + r + " " + r + " 0 " + large + " 1 " + p1[0].toFixed(2) + " " + p1[1].toFixed(2);
+  }
+
+  var gW = document.getElementById("wedges");
+  var rows = document.getElementById("rows");
+  var cfig = document.getElementById("cfig");
+  var ccap = document.getElementById("ccap");
+  var cname = document.getElementById("cname");
+  var DEFAULT_CENTER = [pct1(projectPct) + "%", "project complete", "estimate, not measured"];
+
+  function setCenter(cell){
+    if (!cell) {
+      cfig.textContent = DEFAULT_CENTER[0];
+      ccap.textContent = DEFAULT_CENTER[1];
+      cname.textContent = DEFAULT_CENTER[2];
+      return;
+    }
+    cfig.textContent = cell.pct + "%";
+    ccap.textContent = cell.id + " · " + S[cell.st].label;
+    cname.textContent = cell.job;
+  }
+  setCenter(null);
+  document.getElementById("pie-desc").textContent =
+    started + " of " + N + " cells have started. The table below carries the same figures.";
+
+  CELLS.forEach(function(cell, i){
+    var a0 = i * SPAN + GAP, a1 = (i + 1) * SPAN - GAP;
+    var mid = (a0 + a1) / 2;
+    var color = S[cell.st].c;
+    var g = el("g", {class:"wedge", tabindex:"0", role:"button",
+      "aria-label": cell.id + ", " + cell.job + ", " + S[cell.st].label + ", " + cell.pct + " percent complete"});
+
+    g.appendChild(el("path", {class:"hit", d: arcPath(RMID, a0, a1), stroke:"transparent", "stroke-width":RW, fill:"none"}));
+    g.appendChild(el("path", {d: arcPath(RMID, a0, a1), stroke:"#63636d", "stroke-width":RW, fill:"none", "stroke-linecap":"butt"}));
+    if (cell.pct > 0) {
+      g.appendChild(el("path", {d: arcPath(RMID, a0, a0 + (a1 - a0) * cell.pct / 100),
+        stroke: color, "stroke-width":RW, fill:"none", "stroke-linecap":"butt"}));
+    }
+
+    var lp = pt(LABEL_R, mid), flip = mid > 90 && mid < 270;
+    var lab = el("text", {
+      class:"label", x: lp[0].toFixed(1), y: lp[1].toFixed(1),
+      "text-anchor": flip ? "end" : "start", "dominant-baseline":"middle",
+      transform: "rotate(" + ((flip ? mid + 90 : mid - 90)).toFixed(1) + " " + lp[0].toFixed(1) + " " + lp[1].toFixed(1) + ")"
+    });
+    lab.textContent = cell.id;
+    g.appendChild(lab);
+
+    var row = null;
+    function hot(on){
+      g.classList.toggle("is-hot", on);
+      if (row) row.classList.toggle("is-hot", on);
+      setCenter(on ? cell : null);
+    }
+    g.addEventListener("pointerenter", function(){ hot(true); });
+    g.addEventListener("pointerleave", function(){ hot(false); });
+    g.addEventListener("focus", function(){ hot(true); });
+    g.addEventListener("blur", function(){ hot(false); });
+
+    gW.appendChild(g);
+
+    /* ---- table row ---- */
+    var tr = document.createElement("tr");
+    row = tr;
+
+    var td1 = document.createElement("td"); td1.className = "cid"; td1.textContent = cell.id;
+    var td2 = document.createElement("td"); td2.className = "cname"; td2.textContent = cell.job;
+
+    var td3 = document.createElement("td");
+    var pill = document.createElement("span"); pill.className = "pill";
+    pill.appendChild(glyph(S[cell.st].glyph, color, 12));
+    pill.appendChild(document.createTextNode(S[cell.st].label));
+    td3.appendChild(pill);
+
+    var td4 = document.createElement("td"); td4.className = "num";
+    var m = div("meter");
+    var bar = div("bar");
+    var fill = document.createElement("span");
+    fill.style.width = cell.pct + "%";
+    fill.style.background = color;
+    bar.appendChild(fill);
+    m.appendChild(bar);
+    m.appendChild(div("pct", cell.pct + "%"));
+    td4.appendChild(m);
+
+    var td5 = document.createElement("td");
+    td5.textContent = cell.blocked;
+    if (cell.why) td5.appendChild(div(null, cell.why)).style.cssText =
+      "margin-top:5px;font-size:12.5px;color:var(--muted)";
+
+    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3); tr.appendChild(td4); tr.appendChild(td5);
+    tr.addEventListener("pointerenter", function(){ tr.classList.add("is-hot"); g.classList.add("is-hot"); setCenter(cell); });
+    tr.addEventListener("pointerleave", function(){ tr.classList.remove("is-hot"); g.classList.remove("is-hot"); setCenter(null); });
+    rows.appendChild(tr);
+  });
+
+  /* ---------- legend ---------- */
+  var counts = {};
+  CELLS.forEach(function(c){ counts[c.st] = (counts[c.st] || 0) + 1; });
+  var lg = document.getElementById("legend");
+  ["good","warning","serious","todo"].forEach(function(k){
+    var s = S[k], n = counts[k] || 0;
+    var d = div("leg");
+    var sw = glyph(s.glyph, s.c, 14);
+    sw.setAttribute("class", "swatch");
+    d.appendChild(sw);
+    var nm = div("lname");
+    var strong = document.createElement("strong");
+    strong.style.fontWeight = "500";
+    strong.textContent = s.label;
+    nm.appendChild(strong);
+    nm.appendChild(div(null, s.d)).style.cssText = "font-size:12.5px;color:var(--muted)";
+    d.appendChild(nm);
+    d.appendChild(div("lcount", n + " of " + N));
+    lg.appendChild(d);
+  });
+
+  /* ---------- falsifiers ---------- */
+  var fl = document.getElementById("fals");
+  DATA.falsifiers.forEach(function(f){
+    var s = S[f.st];
+    var r = div("fr");
+    var a = div("fid");
+    var dot = div("dot"); dot.style.background = s.c;
+    a.appendChild(dot);
+    a.appendChild(document.createTextNode(f.id));
+    r.appendChild(a);
+    r.appendChild(div("ftext", f.t));
+    r.appendChild(div("fev", f.e));
+    fl.appendChild(r);
+  });
+
+  /* ---------- basis ---------- */
+  var bt = document.getElementById("basisrows");
+  var total = 0;
+  DATA.basis.rows.forEach(function(row){
+    var c = row.weight * row.complete / 100;
+    total += c;
+    var tr = document.createElement("tr");
+    var t1 = document.createElement("td"); t1.textContent = row.part;
+    var t2 = document.createElement("td"); t2.className = "num"; t2.textContent = row.weight + "%";
+    var t3 = document.createElement("td"); t3.className = "num"; t3.textContent = row.complete + "%";
+    var t4 = document.createElement("td"); t4.className = "num"; t4.textContent = c.toFixed(1);
+    [t1,t2,t3,t4].forEach(function(td){ tr.appendChild(td); });
+    bt.appendChild(tr);
+  });
+  function totalRow(label, value){
+    var tr = document.createElement("tr");
+    var t1 = document.createElement("td"); t1.className = "cname"; t1.textContent = label;
+    var t2 = document.createElement("td"); t2.className = "num";
+    var t3 = document.createElement("td"); t3.className = "num";
+    var t4 = document.createElement("td"); t4.className = "num cid"; t4.textContent = value;
+    [t1,t2,t3,t4].forEach(function(td){ tr.appendChild(td); });
+    bt.appendChild(tr);
+  }
+  totalRow("C02 total", total.toFixed(1) + "%");
+  totalRow("C00–C12 mean = " + total.toFixed(1) + " ÷ " + N, pct1(total / N) + "%");
+
+  var note = document.getElementById("basisnote");
+  note.innerHTML = "Before the runtime landed, C02 sat at " + DATA.basis.before +
+    "% on this same basis — the contract and the falsifier tally were already in place, but nothing sequenced commands into events into effects. That is a move of <strong style='color:var(--ink)'>+" +
+    pct1(total - DATA.basis.before) + " points</strong> on the project total: one point, and it is the point everything above it stands on.";
+
+  /* ---------- evidence ---------- */
+  var ev = document.getElementById("ev");
+  [["measured","Measured — ran and passed","t-measured"],
+   ["estimate","Estimate — arithmetic, not proof","t-estimate"],
+   ["notrun","Not run","t-notrun"],
+   ["unknown","Unknown","t-unknown"]].forEach(function(spec){
+    var k = spec[0], items = DATA.evidence[k] || [];
+    var card = div("evc"); card.dataset.k = k;
+    card.appendChild(div("tag " + spec[2], spec[1]));
+    var ul = document.createElement("ul");
+    items.forEach(function(it){ var li = document.createElement("li"); li.textContent = it; ul.appendChild(li); });
+    card.appendChild(ul);
+    ev.appendChild(card);
+  });
+
+  /* ---------- footer ---------- */
+  var ft = document.getElementById("footer");
+  DATA.footer.forEach(function(p){
+    var d = document.createElement("p");
+    d.innerHTML = p;
+    ft.appendChild(d);
+  });
+})();
+</script>
