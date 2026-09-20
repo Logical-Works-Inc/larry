@@ -661,7 +661,10 @@ fn e71_a_zero_bound_stops_every_effect_permanently() -> Result<(), Box<dyn std::
         )]
     );
 
-    let _ = rt.fence_mut().authenticate(SecurityEpoch::INITIAL);
+    assert_eq!(
+        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
+        SecurityEpoch::INITIAL
+    );
     assert_eq!(
         rt.fence().offline_spent(),
         0,
