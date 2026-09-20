@@ -212,8 +212,10 @@ Members have distinct jobs and must not absorb each other's:
 - `rocco-runtime` drives that algebra: the bounded journal, the deterministic
   tick, the gate, the effect lifecycle and replay. It is headless and depends
   on no renderer. Its effect boundary is the `EffectOwner` trait and the only
-  implementations in-tree are the deterministic `owner::fixture` doubles —
-  nothing contacts Moo, Sentinel, Nova, Logical-DB or a network.
+  implementations in-tree are the deterministic `owner::fixture` doubles — no
+  sibling owner is contacted and no network is reached. Naming a sibling here
+  would also defeat the negative control that proves the governance anchors
+  below are load-bearing, so the roster stays in exactly one place.
 - `rocco-demo` is the fixture surface. Synthetic data stays visibly DEMO and
   fake orchestration is not authorized, so it never becomes the runtime's
   evidence.
