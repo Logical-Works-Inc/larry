@@ -249,12 +249,17 @@ refactor.
 1. **The journal is authoritative.** State is a fold over recorded facts.
    Nothing may read live state as a source of truth, and a projection must stay
    discardable and re-derivable.
-2. **Nothing is dispatched without a durable intent and a recorded
-   authorization.** The intent is written before the owner is called and
-   carries the pinned inputs and the decision. `EventKind` is closed and has no
-   "dispatched" fact — do not add one to make recovery more convenient. An
-   effect that crashed mid-dispatch is genuinely ambiguous, and the vocabulary's
-   silence is what encodes that.
+2. **Nothing is dispatched without a durable intent, a recorded
+   authorization and current freshness.** The intent is written before the
+   owner is called and carries the pinned inputs and the decision. `EventKind`
+   is closed and has no "dispatched" fact — do not add one to make recovery
+   more convenient. An effect that crashed mid-dispatch is genuinely ambiguous,
+   and the vocabulary's silence is what encodes that. Recording a decision is
+   also not the same as being entitled to act on it later: the dispatch fence
+   re-checks the security epoch, the withdrawn operations and the offline
+   exposure bound after the reservation is durable and before the owner is
+   reached. It gates mutating reaches only — a status query must stay open, or
+   an effect already dispatched when revocation landed could never be resolved.
 3. **Replay is bit-identical.** Each authorization is recorded with its own
    pinned snapshots. A divergence must surface as an explicit finding, never as
    a silent pass.
@@ -262,7 +267,9 @@ refactor.
 Two related rules: the tick's stage order and the `BTreeMap`-only collection
 choice are determinism requirements, not style — an unordered collection or a
 wall-clock read inside a decision breaks replay. And no parallel iteration of
-the fold, whatever backend implements `ProjectionBackend`.
+the fold, whatever backend implements `ProjectionBackend`. The fence holds
+counters and sets and no duration, for the same reason: a clock read there
+would let elapsed time extend authority.
 
 ## Per-change obligations
 

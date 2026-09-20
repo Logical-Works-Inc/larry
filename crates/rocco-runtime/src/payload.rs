@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use lgwks_std::json::serde::{Deserialize, Serialize};
-use rocco_contracts::authority::{BudgetUnit, Scope};
+use rocco_contracts::authority::{BudgetUnit, Scope, SecurityEpoch};
 use rocco_contracts::command::CommandKind;
 use rocco_contracts::effect::{
     EffectIntent, EffectOutcome, ReconciliationStrategy, TerminalReceipt,
@@ -55,19 +55,28 @@ pub struct WorkProposal {
 }
 
 impl WorkProposal {
-    /// The intent this proposal reserves.
+    /// The intent this proposal reserves, admitted under `admission_epoch`.
     ///
     /// The local effect identity is derived from the stable operation
     /// identity, so the two are never accidentally swapped and a resumed run
     /// reconstructs the same local identity it recorded.
+    ///
+    /// `admission_epoch` is an argument rather than a field of this type on
+    /// purpose. Every other value here is *declared* by the work and then
+    /// checked by the gate; the epoch is not declarable at all. It comes from
+    /// the runtime's dispatch fence — protected state — so a hostile
+    /// generator composing this payload cannot choose the security
+    /// generation it is admitted under, and cannot name a generation that
+    /// would survive a revocation it should not survive (D42, E63).
     #[must_use]
-    pub fn intent(&self) -> EffectIntent {
+    pub fn intent(&self, admission_epoch: SecurityEpoch) -> EffectIntent {
         EffectIntent {
             id: EffectId::from_bytes(*self.operation.as_bytes()),
             operation: self.operation,
             run: self.run,
             tenant: self.tenant,
             strategy: self.strategy,
+            admission_epoch,
         }
     }
 }

@@ -71,6 +71,18 @@ pub(crate) mod test_support {
             Err(err) => panic!("unexpected error: {err}"),
         }
     }
+
+    /// Extracts the `Some` value or fails the test, naming the absence.
+    ///
+    /// As [`expect_ok`]: the scoped `allow` covers only this test-only
+    /// failure path.
+    #[allow(clippy::panic)]
+    pub(crate) fn expect_ok_opt<T>(value: Option<T>) -> T {
+        match value {
+            Some(inner) => inner,
+            None => panic!("expected Some, found None"),
+        }
+    }
 }
 
 #[cfg(test)]

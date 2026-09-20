@@ -17,11 +17,24 @@
 //! Every stage is bounded by an explicit constant, every collection is a
 //! `BTreeMap` or an insertion-ordered `Vec`, and nothing consults the wall
 //! clock except stage 1.
+//!
+//! # The one place the fence is enforced
+//!
+//! Stage 2 reserves, then reaches the owner, and the reach is the only way
+//! anything leaves this process. Both lifecycle paths — a first dispatch and
+//! a retry — funnel through [`Runtime::reach_owner`], so the freshness fence
+//! (R87, D48, E71) has exactly one enforcement point and exactly one place
+//! to audit. It gates *mutating* reaches and only mutating reaches: a status
+//! query is how an effect that was already dispatched when revocation landed
+//! gets resolved, and fencing it would leave an external effect permanently
+//! unlabelled. A refused reach calls no owner, records no outcome and
+//! publishes no receipt — the effect stays visibly open, which is the only
+//! truthful state for an effect that was reserved and never sent.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::SystemTime;
 
-use rocco_contracts::authority::BudgetUnit;
+use rocco_contracts::authority::{BudgetUnit, SecurityEpoch};
 use rocco_contracts::command::{Command, CommandAcceptance, CommandKind};
 use rocco_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use rocco_contracts::event::{Event, EventKind};
@@ -33,6 +46,7 @@ use rocco_contracts::replay::{
 use rocco_contracts::state::{RunState, TransitionEvent};
 
 use crate::error::RuntimeError;
+use crate::fence::{FenceRefusal, RevocationFence};
 use crate::journal::{Journal, JournalEntry};
 use crate::owner::EffectOwner;
 use crate::payload::{
@@ -61,6 +75,13 @@ pub struct RuntimeSettings {
     pub unit: BudgetUnit,
     /// The initially reserved budget.
     pub initial_budget: u64,
+    /// The security generation the fence starts at (R87, D48). Host-supplied
+    /// like the snapshots above, and for the same reason: it is a fact about
+    /// authority, not about this process.
+    pub security_epoch: SecurityEpoch,
+    /// How many mutating reaches the fence permits before the authority
+    /// source must be re-contacted.
+    pub offline_dispatch_bound: u32,
     /// The journal entry ceiling.
     pub journal_capacity: usize,
     /// The run-table ceiling.
@@ -85,6 +106,8 @@ impl RuntimeSettings {
             validity,
             unit,
             initial_budget,
+            security_epoch: SecurityEpoch::INITIAL,
+            offline_dispatch_bound: crate::MAX_OFFLINE_DISPATCHES,
             journal_capacity: crate::MAX_JOURNAL_ENTRIES,
             run_capacity: MAX_TRACKED_RUNS,
             max_runs_per_tick: MAX_RUNS_PER_TICK,
@@ -102,6 +125,7 @@ pub struct TickReport {
     outcomes: Vec<(OperationId, EffectOutcome)>,
     reconciled: Vec<OperationId>,
     receipts: Vec<TerminalReceipt>,
+    fenced: Vec<(OperationId, FenceRefusal)>,
 }
 
 impl TickReport {
@@ -148,7 +172,24 @@ impl TickReport {
         &self.receipts
     }
 
+    /// Mutating reaches the freshness fence refused this tick, with the
+    /// first-failing reason (R87, E71).
+    ///
+    /// A fenced effect is not a failed effect. Nothing was sent, so nothing
+    /// was recorded: no outcome, no receipt and no run-state change. The
+    /// effect stays visibly open, which is the only truthful state for one
+    /// that was reserved and never dispatched.
+    #[must_use]
+    pub fn fenced(&self) -> &[(OperationId, FenceRefusal)] {
+        &self.fenced
+    }
+
     /// Whether the tick changed nothing.
+    ///
+    /// A refused reach is a non-event: it wrote no journal entry, dispatched
+    /// nothing and published nothing. A tick whose only activity was fence
+    /// refusals is therefore idle, and [`TickReport::fenced`] is where the
+    /// refusal is read.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.admitted.is_empty()
@@ -183,6 +224,19 @@ struct LiveEffect {
     dispatched_at_tick: u64,
 }
 
+/// Which way the runtime is about to reach the owner.
+///
+/// The distinction is the whole of the fence's scope, so it is a type rather
+/// than a boolean argument at the call site: `Mutate` can change the world
+/// outside this process and is fenced; `Observe` cannot and is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerReach {
+    /// Cause, or re-cause, an external change.
+    Mutate,
+    /// Ask what already happened.
+    Observe,
+}
+
 /// The Rocco runtime.
 #[derive(Debug)]
 pub struct Runtime<P, O, C> {
@@ -190,6 +244,7 @@ pub struct Runtime<P, O, C> {
     projection: P,
     owner: O,
     clock: C,
+    fence: RevocationFence,
     ready: VecDeque<Command>,
     settings: RuntimeSettings,
     remaining_budget: u64,
@@ -217,11 +272,13 @@ where
             return Err(RuntimeError::RunLimitReached { capacity: 0 });
         }
         let remaining_budget = settings.initial_budget;
+        let fence = RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound);
         Ok(Self {
             journal,
             projection,
             owner,
             clock,
+            fence,
             ready: VecDeque::new(),
             settings,
             remaining_budget,
@@ -265,6 +322,23 @@ where
     #[must_use]
     pub const fn owner(&self) -> &O {
         &self.owner
+    }
+
+    /// The live dispatch fence (R87, D48).
+    #[must_use]
+    pub const fn fence(&self) -> &RevocationFence {
+        &self.fence
+    }
+
+    /// The fence, mutably, for the authority layer that owns it.
+    ///
+    /// This is the host's control surface — withdraw an operation, advance
+    /// the epoch, re-authenticate against the authority source. The runtime
+    /// only ever *reads* the fence: withdrawal and freshness are not
+    /// decisions it is entitled to make about itself, and the two mutating
+    /// operations the runtime performs on a reach are crate-internal.
+    pub const fn fence_mut(&mut self) -> &mut RevocationFence {
+        &mut self.fence
     }
 
     /// Consumes the runtime and returns its journal.
@@ -390,7 +464,12 @@ where
         // Reservation: the intent is durable *before* the effect can leave,
         // and the budget is deducted against the same pinned snapshot that was
         // just recorded, so replay re-derives the identical decision.
-        let intent = proposal.intent();
+        //
+        // The admission epoch comes from the fence, never from the proposal:
+        // a command cannot declare the security generation it is admitted
+        // under, so a hostile generator cannot name one that outlives a
+        // revocation (D42, E63).
+        let intent = proposal.intent(self.fence.epoch());
         self.record_intent(run, intent, authorization)?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
@@ -419,12 +498,62 @@ where
                 operation: intent.operation,
             });
         }
-        if let Some(live) = self.live.get_mut(&intent.operation) {
-            live.dispatches = live.dispatches.saturating_add(1);
-        }
-        let outcome = self.owner.dispatch(&intent, at);
+        let Some(outcome) = self.reach_owner(intent, OwnerReach::Mutate, at, report) else {
+            // Fenced. The ordering is the point: the reservation above is
+            // already durable and the owner below was never called, so the
+            // effect reads as reserved — reserved, and genuinely never sent.
+            // No outcome is invented and no run state moves, because the
+            // effect did not fail; it did not happen.
+            return Ok(());
+        };
         report.outcomes.push((intent.operation, outcome));
         self.settle(run, intent, outcome, report)
+    }
+
+    /// The single point at which the runtime reaches the owner.
+    ///
+    /// Both lifecycle paths funnel through here — a first dispatch and a
+    /// retry — so the fence has exactly one enforcement point and exactly one
+    /// place to audit. `Mutate` is the only reach that can change anything
+    /// outside this process, and it is the only one the fence gates.
+    /// `Observe` must stay open: a status query is how an effect that was
+    /// already dispatched when revocation landed gets resolved, and fencing
+    /// it would leave an external effect permanently unlabelled — the
+    /// "already-dispatched treatment" D48 requires, enforced by shape rather
+    /// than by convention.
+    ///
+    /// Returns `None` when the fence refused, in which case no owner call
+    /// happened and no outcome exists to record.
+    fn reach_owner(
+        &mut self,
+        intent: EffectIntent,
+        reach: OwnerReach,
+        at: SystemTime,
+        report: &mut TickReport,
+    ) -> Option<EffectOutcome> {
+        match reach {
+            OwnerReach::Mutate => {
+                if let Err(refusal) = self.fence.check(&intent) {
+                    report.fenced.push((intent.operation, refusal));
+                    return None;
+                }
+                if let Some(live) = self.live.get_mut(&intent.operation) {
+                    live.dispatches = live.dispatches.saturating_add(1);
+                }
+                // The reach happens without the authority source having been
+                // re-contacted, so it consumes offline authority. Spending it
+                // here — rather than at the call site — is what keeps the
+                // accounting tied to an owner call that actually occurred.
+                self.fence.spend_offline();
+                Some(self.owner.dispatch(&intent, at))
+            }
+            OwnerReach::Observe => {
+                if let Some(live) = self.live.get_mut(&intent.operation) {
+                    live.reconciliations = live.reconciliations.saturating_add(1);
+                }
+                Some(self.owner.reconcile(&intent, at))
+            }
+        }
     }
 
     fn settle(
@@ -485,8 +614,14 @@ where
             let Some(live) = self.live.get(&operation).copied() else {
                 continue;
             };
+            let Some(outcome) = self.reconcile_one(&live, operation, at, report) else {
+                // A fenced retry: no owner call and no recorded outcome, so
+                // the effect is not counted as reconciled. It stays visibly
+                // open — not resolved, not failed — exactly as an effect that
+                // ran out of interaction budget does.
+                continue;
+            };
             report.reconciled.push(operation);
-            let outcome = self.reconcile_one(&live, operation, at);
             let run = live.intent.run;
             self.settle(run, live.intent, outcome, report)?;
         }
@@ -506,32 +641,33 @@ where
     ///   only truthful outcome is `Unknown`. The journal proves the effect was
     ///   reserved and cannot prove it never ran, so this resolves to a
     ///   permanent unknown rather than an invented success or failure (R72, E56).
+    ///
+    /// A retry is a mutating reach and the fence gates it; a status query is
+    /// an observation and the fence leaves it open. Returns `None` only when
+    /// the fence refused the retry.
     fn reconcile_one(
         &mut self,
         live: &LiveEffect,
         operation: OperationId,
         at: SystemTime,
-    ) -> EffectOutcome {
+        report: &mut TickReport,
+    ) -> Option<EffectOutcome> {
         match live.intent.strategy.retry_policy() {
             rocco_contracts::effect::RetryPolicy::Bounded { max_attempts }
                 if live.dispatches < max_attempts =>
             {
-                if let Some(entry) = self.live.get_mut(&operation) {
-                    entry.dispatches = entry.dispatches.saturating_add(1);
-                }
-                self.owner.dispatch(&live.intent, at)
+                self.reach_owner(live.intent, OwnerReach::Mutate, at, report)
             }
             rocco_contracts::effect::RetryPolicy::Bounded { .. } => {
                 // Budget spent. The effect stays visibly unresolved.
-                EffectOutcome::Unknown { operation }
+                Some(EffectOutcome::Unknown { operation })
             }
             rocco_contracts::effect::RetryPolicy::QueryUntilResolved => {
-                if let Some(entry) = self.live.get_mut(&operation) {
-                    entry.reconciliations = entry.reconciliations.saturating_add(1);
-                }
-                self.owner.reconcile(&live.intent, at)
+                self.reach_owner(live.intent, OwnerReach::Observe, at, report)
             }
-            rocco_contracts::effect::RetryPolicy::None => EffectOutcome::Unknown { operation },
+            rocco_contracts::effect::RetryPolicy::None => {
+                Some(EffectOutcome::Unknown { operation })
+            }
         }
     }
 
@@ -566,6 +702,14 @@ where
         }
         // A retry-based strategy stops interacting once its dispatch budget is
         // spent, rather than spinning on an effect it may no longer touch.
+        //
+        // The fence is deliberately *not* consulted here. Excluding a fenced
+        // effect from reconciliation would make the refusal silent: the effect
+        // would sit open forever with nothing in the tick report saying why.
+        // Leaving it in costs one pure check per open effect per tick, calls
+        // no owner and writes nothing, and keeps the refusal visible on every
+        // tick until the host either re-authenticates or gives up on the
+        // effect deliberately.
         match live.intent.strategy.retry_policy() {
             rocco_contracts::effect::RetryPolicy::Bounded { max_attempts } => {
                 live.dispatches < max_attempts
@@ -811,6 +955,14 @@ pub fn replay<P: ProjectionBackend>(
 /// reconciliation strategy that is *not* retry-based (status query, human, or
 /// compensation) is unaffected either way.
 ///
+/// Each restored effect keeps the admission epoch its intent recorded, and the
+/// fence starts from `settings.security_epoch`, which the host supplies. That
+/// pairing is the recovery contract D48 asks to be persisted before dispatch:
+/// a host that has since moved its authority to a later generation restores
+/// with `security_epoch` set to it, and every effect admitted below that
+/// generation comes back already fenced rather than being re-dispatched on the
+/// strength of a decision that no longer stands (E71).
+///
 /// # Errors
 ///
 /// Returns [`RuntimeError::Codec`] or [`RuntimeError::FoldDivergence`] from
@@ -879,6 +1031,7 @@ where
         projection,
         owner,
         clock,
+        fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound),
         ready: VecDeque::new(),
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
         settings,

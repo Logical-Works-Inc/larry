@@ -327,7 +327,7 @@ var DATA = {
         "weight": 25
       },
       {
-        "complete": 12,
+        "complete": 22,
         "part": "Its eight falsifiers run as acceptance cases",
         "weight": 30
       },
@@ -357,12 +357,12 @@ var DATA = {
       "why": "The EffectOwner seam now exists in rocco-runtime, but no adapter, API or licence manifest is produced."
     },
     {
-      "blocked": "Independent review + model check",
+      "blocked": "E63/E65 as acceptance cases, independent review",
       "id": "C02",
       "job": "Command, effect & state model",
-      "pct": 56,
+      "pct": 59,
       "st": "warning",
-      "why": "The typed contract is complete and now executable. Its eight falsifiers are not run as acceptance cases."
+      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. Two of the eight falsifiers are still not run and no independent review has happened."
     },
     {
       "blocked": "Logical-DB readiness \u2014 hard hold",
@@ -448,23 +448,26 @@ var DATA = {
   "evidence": {
     "estimate": [
       "every percentage on this page",
-      "C02 at 56%, project at 4.3%",
-      "the +1.4 point delta",
+      "C02 at 59%, project at 4.5%",
+      "the +2.6 point delta",
       "weights in the basis table"
     ],
     "measured": [
-      "cargo test --workspace: 132 pass, 0 fail",
+      "cargo test --workspace --all-targets --locked: 161 pass, 0 fail",
       "clippy -D warnings: clean",
-      "cargo fmt --check: clean",
-      "governance inventory 96/53/80/13/9: PASS",
+      "cargo fmt --all -- --check: clean",
       "lgwks-deps check .: OK, no new edge",
-      "local-ci.sh: receipt for 2af05c5"
+      "governance inventory 96/53/80/13/9: PASS",
+      "55 python tests: OK",
+      "local-CI receipt names the head"
     ],
     "notrun": [
-      "any falsifier as an acceptance case",
+      "any falsifier as a hosted acceptance case",
+      "E63 and E65 in particular",
       "independent review of C02",
       "model checking; P1\u2013P8 unproved",
       "a real owner; no network is reached",
+      "an authenticated authority source supplying the fence",
       "hosted CI"
     ],
     "unknown": [
@@ -517,15 +520,15 @@ var DATA = {
       "t": "Swap resource, recipient, payload, adapter, schema or policy epoch between display, admission and dispatch"
     },
     {
-      "e": "Not run. Revocation fences and the offline-authority bound are unimplemented.",
+      "e": "Partial, and much further than before. The dispatch fence and the offline exposure bound now exist and 29 local tests falsify them: revocation while queued, the ordering between the durable intent and the owner call, partition, sleep, clock rollback, a replayed older snapshot, epoch exhaustion, and the retry-versus-query asymmetry. Not covered: no authenticated authority source supplies the fence, so its facts are host-asserted in this slice.",
       "id": "E71",
-      "st": "todo",
+      "st": "warning",
       "t": "Revoke during queue, dispatch, partition, sleep and clock rollback"
     }
   ],
   "footer": [
-    "The repository went from \u003cem>specification only\u003c/em> to \u003cem>specification plus one cell's runtime\u003c/em>. The runtime is the lowest invariant, so it is the right first point to spend \u2014 but C02 is not done: its own exit gate is adversarial replay and authority model checks with independent review, and none of that has happened.",
-    "Two decisions are open with the Director: whether an ECS world may ever hold authority, and whether to sign the \u003ccode>bevy_ecs\u003c/code> row in \u003ccode>contract/APPROVED.toml\u003c/code>. Both are recorded as open rather than settled by accident."
+    "The repository went from \u003cem>specification only\u003c/em> to \u003cem>specification plus one cell's runtime\u003c/em>, and the runtime has since grown its second half: authorization was reproducible at admission and is now also \u003cem>fresh\u003c/em> at dispatch. That was E71, and it was the last of C02's eight falsifiers still recorded as entirely unimplemented.",
+    "C02 is still not done. Two of its eight falsifiers, E63 and E65, remain NOT RUN as acceptance cases, and none of it has had an independent review or a model check. Two decisions stay open with the Director: whether an ECS world may ever hold authority, and whether to sign the \u003ccode>bevy_ecs\u003c/code> row in \u003ccode>contract/APPROVED.toml\u003c/code>."
   ],
   "head": "2af05c5",
   "lede": "Rocco is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",

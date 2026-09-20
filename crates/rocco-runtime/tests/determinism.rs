@@ -8,7 +8,7 @@
 
 mod support;
 
-use rocco_contracts::authority::Scope;
+use rocco_contracts::authority::{Scope, SecurityEpoch};
 use rocco_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
 use rocco_contracts::event::{Event, EventKind};
 use rocco_contracts::ids::{ContentDigest, OperationId, RunId};
@@ -357,6 +357,7 @@ fn outcome_carries_the_operation_it_describes() {
         run: run(3),
         tenant: tenant(1),
         strategy: ReconciliationStrategy::Queryable,
+        admission_epoch: SecurityEpoch::INITIAL,
     };
     let outcome: EffectOutcome = succeeded(intent.operation);
     assert_eq!(outcome.operation(), OperationId::from_bytes([3; 16]));

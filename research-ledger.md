@@ -20,6 +20,42 @@ sources:
 
 # Research ledger
 
+## 2026-09-20 dispatch-time freshness: rules loaded and oracle read
+
+READ: the estate's Rust rule corpus at `~/.agents/skills/rust-skills/rules/`
+(265 rule files) was loaded for this change rather than cited. The rules that
+shaped it, and what each changed: `proj-pub-crate-internal` (the new module is
+private with three curated re-exports, and the fence's two mutating operations
+are `pub(crate)`, so a caller cannot pre-clear a reach or assert that a dispatch
+happened); `num-overflow-explicit` (`checked_add` for the epoch, so exhaustion
+is a typed refusal rather than a wrap that would alias a withdrawn generation
+with a live one; `saturating_add` for the exposure counter, so a wrapped count
+cannot hand back authority already spent); `pat-exhaustive-enum` (every match on
+the refusal enums is exhaustive inside the crate); `err-lowercase-msg` and
+`type-display-vs-debug` (hand-written `Display`, lowercase, no trailing
+punctuation, never delegating to `Debug`); `type-newtype-ids` (the epoch is a
+private-field newtype). One rule was deliberately not applied as an attribute:
+`type-newtype-ids` recommends `#[serde(transparent)]`, which would be a no-op
+here because a tuple newtype already serializes as its inner value — so the
+property was *proved* by a round-trip test asserting the exact string `"7"`
+instead of asserted by attribute, which is the stronger form.
+
+The local query layer was run before the work and again after. Pre-exec ranked
+D48 (1.0) and E71 (0.992) first among six scope-filtered candidates, which
+agreed with the code reading; the post-exec query ranked the tracker gate and
+this file's own change record first. Per the standing caveat, the ranking was
+used to order inspection and never as evidence that a passage was correct — the
+two design errors this change made were both found by tests, not by the oracle.
+
+READ: the sibling repositories were **not** read for code this turn, on explicit
+Director direction. The prior reuse survey stands unrevised and nothing from it
+was imported.
+
+The two findings worth carrying forward are recorded in `log.md`: a fenced first
+dispatch is indistinguishable from a crash in the dispatch window because the
+event vocabulary still has no "not dispatched" fact, and consulting the fence
+inside the reconciliation-open predicate would have made the refusal silent.
+
 ## 2026-09-19 board-first workspace and selective backend reuse
 
 READ: bounded Codex, Cline, OpenCode, AppCUI and Forge/Moo source inventory and

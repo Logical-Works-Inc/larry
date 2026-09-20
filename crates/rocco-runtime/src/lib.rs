@@ -25,6 +25,19 @@
 //!    own inputs and reports divergence explicitly rather than passing
 //!    silently.
 //!
+//! ## Freshness is not reproducibility (R87, D48, E71)
+//!
+//! Recording a decision is not the same as being entitled to act on it
+//! later, so authorization is deliberately two things. [`gate`] is the
+//! reproducible half: pure, pinned, replayable. [`RevocationFence`] is the
+//! fresh half: live host state holding the security epoch, the withdrawn
+//! operations and the offline exposure bound, consulted at the single point
+//! where an effect reaches its owner to change something. Replaying the
+//! journal re-derives the decision bit-identically; it never re-authorizes
+//! the reach. A stale epoch, a named revocation or a spent offline allowance
+//! refuses the reach and leaves the effect visibly open rather than
+//! inventing a disposition for it.
+//!
 //! ## What this crate does not claim
 //!
 //! It integrates **no** canonical owner. Effects go through
@@ -51,6 +64,10 @@
 //! - [`payload`] — the typed bodies of the closed event vocabulary.
 //! - [`projection`] — the read view, the ECS seam and the replay report.
 //! - [`gate`] — the pure authorization reducer and the boundary re-check.
+//! - [`RevocationFence`] — dispatch-time freshness: epoch, revocation,
+//!   offline bound. The module behind it is private and this crate re-exports
+//!   the three types below rather than opening a fourth namespace; the host
+//!   needs a control surface for the fence, not the ability to reach past it.
 //! - [`owner`] — the canonical-owner trait and its deterministic doubles.
 //! - [`runtime`] — the tick, its stages and the typed report.
 //! - [`error`] — every refused operation, with structured context.
@@ -65,6 +82,10 @@ pub mod owner;
 pub mod payload;
 pub mod projection;
 pub mod runtime;
+
+mod fence;
+
+pub use fence::{FenceError, FenceRefusal, RevocationFence};
 
 /// Maximum ready-work descriptors before admission applies backpressure
 /// (Cell 05: 256 descriptors, no silent drop).
@@ -84,6 +105,18 @@ pub const MAX_RUNS_PER_TICK: usize = 64;
 /// Maximum recorded effects per run.
 pub const MAX_EFFECTS_PER_RUN: usize = 64;
 
+/// Maximum mutating reaches permitted between authentications (R87, D48,
+/// E71).
+///
+/// The bound is deliberately "one tick's worth": it equals
+/// [`MAX_RUNS_PER_TICK`], the most effects a single tick can admit, so a host
+/// that authenticates once per tick never meets the bound, while a host that
+/// stops authenticating gets exactly one more tick's worth of effects out and
+/// then no more. Offline exposure is counted, never timed — a suspended
+/// process resumes with a staler fence, not a fresher one, and a rolled-back
+/// clock cannot recharge a count.
+pub const MAX_OFFLINE_DISPATCHES: u32 = 64;
+
 /// Crate version as declared in `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -102,6 +135,7 @@ mod tests {
         // this test is the place the change has to be justified.
         assert_eq!(MAX_READY_WORK, 256);
         assert_eq!(MAX_RUNS_PER_TICK, 64);
+        assert_eq!(MAX_OFFLINE_DISPATCHES as usize, MAX_RUNS_PER_TICK);
         const { assert!(MAX_EFFECTS_PER_RUN < MAX_JOURNAL_ENTRIES) };
     }
 }
