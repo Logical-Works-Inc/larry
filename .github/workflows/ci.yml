@@ -12,7 +12,19 @@ jobs:
   # the merged workspace: `--workspace` now covers rocco-demo and
   # rocco-contracts together.
   rust:
-    runs-on: ubuntu-latest
+    # This repository runs on a self-hosted runner, not a GitHub-hosted one.
+    # Every run this repository ever produced — 61 of them, across both
+    # workflows — concluded failure in about two seconds having executed no
+    # step at all: the jobs were created and never assigned a runner, which is
+    # an account-level condition rather than a defect in this file, and not
+    # something the repository can repair. `ubuntu-latest` never matched
+    # anything, so the gate had never once gated. The label set below names the
+    # machine that actually runs these lanes; every sibling repository in the
+    # estate asks for its own runner the same way.
+    #
+    # The cost is stated rather than hidden: this lane now proves the workspace
+    # on macOS/ARM64 and no longer claims Linux coverage it never had.
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -21,15 +33,20 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # `--locked --all-targets` match the lane set AGENTS.md declares and
+      # `.wwfd/local-ci.sh` mirrors. They were missing here, which mattered
+      # only once this job could actually run: without them the job checks a
+      # different thing from the standard it appears to enforce, and a green
+      # check would mean less than a reader would take it to mean.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
 
   # The specification and governance lanes, carried over from Rocco's
   # workflow. Action SHAs are pinned here because this job ran that way
   # before the merge; the rust job above keeps its tag refs for the same
   # reason. Neither convention was changed by merging the two files.
   governance:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 5
     env:
       PYTHONDONTWRITEBYTECODE: "1"
