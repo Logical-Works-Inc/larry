@@ -30,6 +30,15 @@
 //! unlabelled. A refused reach calls no owner, records no outcome and
 //! publishes no receipt — the effect stays visibly open, which is the only
 //! truthful state for an effect that was reserved and never sent.
+//!
+//! Keeping the query open is not the same as believing its answer. The
+//! journal cannot tell a refused first dispatch from a crash inside the
+//! dispatch window, but the live effect table can — a refused reach calls no
+//! owner, so `LiveEffect::sent` stays false — and it is what separates the
+//! two: an endpoint's answer resolves an effect this runtime sent, and
+//! resolves nothing about one it never sent. That is what makes the paragraph
+//! above true for the effect's whole life rather than only for the tick that
+//! refused it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::SystemTime;
