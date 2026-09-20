@@ -180,7 +180,7 @@ impl RevocationFence {
         self.offline_spent
     }
 
-    /// Every operation withdrawn by name.
+    /// Whether `operation` has been withdrawn by name.
     #[must_use]
     pub fn is_revoked(&self, operation: OperationId) -> bool {
         self.revoked.contains(&operation)
@@ -342,7 +342,11 @@ mod tests {
         // authentication, so replaying the pre-revocation state cannot
         // resurrect the effect.
         assert!(fence.advance_epoch().is_ok());
-        let _ = fence.authenticate(SecurityEpoch::new(0));
+        assert_eq!(
+            fence.authenticate(SecurityEpoch::new(0)),
+            SecurityEpoch::new(1),
+            "authentication never lowers the epoch, so the replay is absorbed"
+        );
         assert!(fence.is_revoked(operation(7)));
     }
 
@@ -407,7 +411,10 @@ mod tests {
             Err(FenceRefusal::OfflineExposureExhausted { bound: 1 })
         );
         // Only the authority source being reached recharges it.
-        let _ = fence.authenticate(SecurityEpoch::INITIAL);
+        assert_eq!(
+            fence.authenticate(SecurityEpoch::INITIAL),
+            SecurityEpoch::INITIAL
+        );
         assert_eq!(fence.check(&intent), Ok(()));
     }
 
@@ -424,7 +431,10 @@ mod tests {
             fence.check(&intent),
             Err(FenceRefusal::OfflineExposureExhausted { bound: 0 })
         );
-        let _ = fence.authenticate(SecurityEpoch::INITIAL);
+        assert_eq!(
+            fence.authenticate(SecurityEpoch::INITIAL),
+            SecurityEpoch::INITIAL
+        );
         assert_eq!(
             fence.offline_spent(),
             0,
@@ -447,7 +457,10 @@ mod tests {
             fence.check(&intent),
             Err(FenceRefusal::OfflineExposureExhausted { bound: 1 })
         );
-        let _ = fence.authenticate(SecurityEpoch::INITIAL);
+        assert_eq!(
+            fence.authenticate(SecurityEpoch::INITIAL),
+            SecurityEpoch::INITIAL
+        );
         assert_eq!(fence.check(&intent), Ok(()));
     }
 
