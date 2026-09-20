@@ -855,6 +855,7 @@ version = "0.1.0"
 dependencies = [
  "lgwks_deps",
  "lgwks_std",
+ "rocco-contracts",
 ]
 
 [[package]]

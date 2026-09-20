@@ -37,6 +37,8 @@ use crate::theme::{ACCENT, BASE, CHIP, ERR, MI, MUTED, WARN};
 use appcui::prelude::*;
 use lgwks_deps::appcui;
 
+mod workspace;
+
 /// Below this the surface degrades to a single centred notice.
 const MIN_WIDTH: i32 = 50;
 const MIN_HEIGHT: i32 = 12;
@@ -85,7 +87,14 @@ const MAX_LOG: usize = 512;
 
 /// Run the native demo. All fixture actions remain in memory.
 pub fn run() -> Result<(), appcui::system::Error> {
-    App::input_app(Native::default()).title("Rocco DEMO").run()
+    App::input_app(workspace::Workspace::default())
+        // AppCUI defaults to Termios on macOS, which cannot receive mouse
+        // events. The already-admitted CrossTerm backend enables the rail's
+        // explicit pointer affordance without changing workspace semantics.
+        .backend(appcui::backend::Type::CrossTerm)
+        .title("Rocco workspace — DEMO DATA")
+        .auto_close(false)
+        .run()
 }
 
 /// A named panel that can take input. `Input` is the transcript itself.
@@ -374,7 +383,7 @@ impl Native {
                 let (text, color) = match &self.demo.work {
                     Work::Ready => (format!("{command}{ECHO_SUFFIX}"), BASE),
                     Work::Held { owner, anchor } => (
-                        format!("HELD clone {owner} at event {anchor} · F5 continues."),
+                        format!("HELD clone {owner} at event {anchor} · DEMO hold."),
                         WARN,
                     ),
                 };
@@ -513,7 +522,7 @@ impl Native {
                 ACCENT,
                 CharFlags::None,
             )]),
-            Row::plain("  /feedback TEXT · F5 continue", MUTED),
+            Row::plain("  /feedback TEXT · fixture", MUTED),
         ];
         for note in self.demo.notes.iter().filter(|n| n.event == index + 1) {
             rows.push(Row::clipping(vec![part(
@@ -912,6 +921,12 @@ fn draw_canary(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
     );
 }
 
+/// The dashboard's border title, in Forge's `brand::DASH_TITLE` position on
+/// the left rule. Forge names its instrument panel; this names the fixture
+/// state the panel actually carries, because "flight controls" over a fixture
+/// with no telemetry and no flight would be costume.
+const DASH_TITLE: &str = " fixture state";
+
 /// Forge's `·`-divided tab bar; the active tab keeps the `▸` marker so the
 /// selection is not carried by colour alone.
 fn draw_tabs(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
@@ -970,12 +985,26 @@ fn draw_dashboard(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Nati
         inner_w >= PANEL_MIN_INNER as i32 || width < DASHBOARD_MIN_WIDTH,
         "the dashboard threshold must leave room for the narrowest panel"
     );
-    if bottom - top < 6 || inner_w < 12 {
+    if bottom - top < 7 || inner_w < 12 {
         return;
     }
-    draw_canary(surface, inner_x, top, inner_w, ui);
-    draw_tabs(surface, inner_x, top + 1, inner_w, ui);
-    let body = (top + 3, bottom);
+    // Forge titles the panel on its left border, above the canary strip
+    // (`Block::borders(LEFT).title(brand::DASH_TITLE)`). Forge's title reads
+    // "flight controls"; there is no flight here to control and no telemetry
+    // to read, so this names what the panel actually is.
+    write(surface, x, top, 1, "│", MUTED, CharFlags::None);
+    write(
+        surface,
+        inner_x,
+        top,
+        inner_w,
+        DASH_TITLE,
+        MUTED,
+        CharFlags::None,
+    );
+    draw_canary(surface, inner_x, top + 1, inner_w, ui);
+    draw_tabs(surface, inner_x, top + 2, inner_w, ui);
+    let body = (top + 4, bottom);
     let body_w = inner_w;
     let rows = match ui.dashboard_tab() {
         Focus::Changes => ui.changes_rows(),

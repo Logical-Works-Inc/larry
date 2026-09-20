@@ -606,6 +606,19 @@ Navigation/input/toggles must be genuinely interactive. The simulation and
 future-owner inventory is retained in `/docs/architecture/visual-pass.md`;
 this visual authorization does not relax E20/E22 or runtime acceptance.
 
+Director correction 2026-09-19: the entry surface is now a mini-Jira/Kanban
+workspace overview of current and recent work, not the quiet REPL landing.
+Opening a work/project card automatically invokes the equivalent of Continue
+through the shared typed coordinator and restores its context. Dedicated chat
+shares the focused workspace with separate context panels and state-selected
+telemetry cards in stable positions. Moo powers the workspace. Frontend data may
+be synthetic if the UI shows where/how and documents the path to real owners;
+fake orchestration is forbidden. ADR-W01 through ADR-W03 in
+[workspace experience](/docs/workspace-experience.md) elaborate this decision.
+The authorized backend slice is bounded projection/Continue coordination and
+selective source reuse, not permission to bypass admission or the memory hold.
+ADHD-friendly orientation is design intent, not a measured human outcome.
+
 ### D20 — typed workflow IR; Rhai is a candidate authoring frontend
 
 Choose a versioned bounded workflow graph with explicit inputs, effects, retry,

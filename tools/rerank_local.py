@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 import signal
 import sys
 from pathlib import Path
+from typing import Callable
 
 MODEL_ID = "Qwen/Qwen3-Reranker-0.6B"
 MODEL_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
@@ -21,6 +23,48 @@ MAX_INPUT_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_SECONDS = 900
 MAX_MAX_SECONDS = 3600
 INSTRUCTION = "Given a software-engineering query, retrieve relevant code and documentation passages."
+
+
+def recover_numpy_version(
+    metadata_version: Callable[[str], str], import_numpy: Callable[[], object]
+) -> str | None:
+    """Return valid NumPy metadata, falling back to the imported package.
+
+    A stray empty ``numpy-*.dist-info`` directory can make Python's metadata
+    resolver return ``None`` even while the imported NumPy package is intact.
+    Transformers validates NumPy through that resolver before model loading,
+    so recover the version from the package that will actually execute.
+    """
+    try:
+        version = metadata_version("numpy")
+    except importlib.metadata.PackageNotFoundError:
+        version = None
+    if isinstance(version, str) and version:
+        return version
+    package = import_numpy()
+    fallback = getattr(package, "__version__", None)
+    return fallback if isinstance(fallback, str) and fallback else None
+
+
+def prepare_transformers_metadata() -> None:
+    """Make a local NumPy metadata recovery visible to Transformers imports."""
+    resolved = recover_numpy_version(importlib.metadata.version, lambda: __import__("numpy"))
+    if resolved is None:
+        raise RuntimeError("NumPy is importable only without a usable version")
+    try:
+        declared = importlib.metadata.version("numpy")
+    except importlib.metadata.PackageNotFoundError:
+        declared = None
+    if declared == resolved:
+        return
+    original_version = importlib.metadata.version
+
+    def version(distribution_name: str) -> str:
+        if distribution_name.casefold().replace("_", "-") == "numpy":
+            return resolved
+        return original_version(distribution_name)
+
+    importlib.metadata.version = version
 
 
 def candidates(path: Path | None) -> list[dict[str, str]]:
@@ -56,6 +100,7 @@ def candidates(path: Path | None) -> list[dict[str, str]]:
 
 
 def score(query: str, rows: list[dict[str, str]], batch_size: int, max_seconds: int) -> list[float]:
+    prepare_transformers_metadata()
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
