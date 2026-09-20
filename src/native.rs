@@ -275,7 +275,7 @@ impl Native {
         self.push_row(
             Row::of(vec![
                 part(format!("  {mark} "), mark_color, CharFlags::Bold),
-                part(text.to_string(), color, CharFlags::None),
+                part(text.to_owned(), color, CharFlags::None),
             ]),
             false,
         );
@@ -344,10 +344,10 @@ impl Native {
                 format!("clone {owner} held at event {anchor}"),
             ),
             Work::Ready if self.demo.cursor == 0 => {
-                ("CLEAR", ACCENT, "F4 reveals the change".to_string())
+                ("CLEAR", ACCENT, "F4 reveals the change".to_owned())
             }
             Work::Ready if self.demo.cursor >= super::EVENTS.len() => {
-                ("END", MUTED, "scenario complete".to_string())
+                ("END", MUTED, "scenario complete".to_owned())
             }
             Work::Ready => (
                 "CLEAR",
@@ -938,7 +938,7 @@ fn draw_tabs(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
         let text = if is_active {
             format!("▸ {active_label}")
         } else {
-            (*label).to_string()
+            (*label).to_owned()
         };
         let used = text.chars().count() as i32;
         if cursor + used >= x + width {
@@ -1071,7 +1071,7 @@ fn draw_input(surface: &mut Surface, width: i32, y: i32, ui: &Native) {
         .collect();
     let placeholder = ui.input.is_empty() && focused;
     let shown = if placeholder {
-        "Ask anything — fixture only, nothing runs…".to_string()
+        "Ask anything — fixture only, nothing runs…".to_owned()
     } else {
         tail
     };
@@ -1153,7 +1153,7 @@ fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
     };
     let state = match held {
         Some(owner) => format!("clone {owner} held"),
-        None => "ready".to_string(),
+        None => "ready".to_owned(),
     };
     write_parts(
         surface,

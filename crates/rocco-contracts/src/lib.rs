@@ -64,7 +64,7 @@ pub(crate) mod test_support {
     ///
     /// The scoped `allow` covers only this test-only failure path;
     /// production code has no equivalent escape hatch.
-    #[allow(clippy::panic)]
+    #[expect(clippy::panic)]
     pub(crate) fn expect_ok<T, E: core::fmt::Display>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
@@ -76,7 +76,7 @@ pub(crate) mod test_support {
     ///
     /// As [`expect_ok`]: the scoped `allow` covers only this test-only
     /// failure path.
-    #[allow(clippy::panic)]
+    #[expect(clippy::panic)]
     pub(crate) fn expect_ok_opt<T>(value: Option<T>) -> T {
         match value {
             Some(inner) => inner,

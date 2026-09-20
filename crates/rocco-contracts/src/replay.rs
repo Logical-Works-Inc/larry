@@ -577,7 +577,7 @@ mod tests {
         let pinned = pinned_inputs(allowed_request(10), open_policy(), budget(50));
         let recorded = pinned.decide();
         assert_eq!(recorded, Decision::Authorized);
-        let mut mutated = pinned.clone();
+        let mut mutated = pinned;
         mutated.policy.revision = 8;
         mutated.policy.allowed_scopes = scopes(&[Scope::FileWrite]);
         let log = vec![ReplayRecord {

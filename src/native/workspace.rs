@@ -9,7 +9,7 @@ use rocco_contracts::workspace::{
     WorkVersion, WorkspaceScope,
 };
 
-use super::*;
+use super::{Native, Row, MI, MUTED, Color, Surface, Character, CharFlags, CharAttribute, BufferAccess, WARN, Focus, ERR, part, BASE, draw_mascot, Work, InputApp, Key, EventProcessStatus, KeyModifier, KeyCode, App, ModalWindowMethods, FrameApp, MouseEvent};
 
 struct Card {
     lane: &'static str,
