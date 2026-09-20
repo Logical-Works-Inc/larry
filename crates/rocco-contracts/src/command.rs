@@ -34,6 +34,7 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum CommandKind {
     /// Submit new work for admission.
     Submit,
@@ -192,6 +193,7 @@ impl Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum CommandAcceptance {
     /// First sight of this command identity; admit it for reduction.
     Initial,

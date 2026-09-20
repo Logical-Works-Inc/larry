@@ -39,6 +39,7 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum RunState {
     /// Assembled but not yet admitted.
     Draft,
@@ -143,6 +144,7 @@ impl core::fmt::Display for RunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum RollbackEvidence {
     /// Every dispatched external effect is compensated or provably never
     /// started. Only this evidence may produce `RolledBack`, and only from
@@ -156,6 +158,7 @@ pub enum RollbackEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum TransitionEvent {
     /// Admit a draft run; admission is durable, not successful.
     Admit,

@@ -16,6 +16,7 @@ use crate::state::{RunState, TransitionEvent};
 
 /// Why an identifier could not be produced or rehydrated.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum IdError {
     /// The OS entropy source refused to serve UUID generation.
     #[error("OS entropy source failed: {0}")]
@@ -31,6 +32,7 @@ pub enum IdError {
 /// pair maps to exactly one outcome, and every refusal is one of these
 /// variants (Cell 04).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TransitionError {
     /// A terminal disposition is immutable; no event may leave it. Later
     /// evidence is recorded as a superseding resolution, never as an
@@ -65,6 +67,7 @@ pub enum TransitionError {
 /// Sequence assignment is total and gap-free for accepted events
 /// (Cell 04 ordering); every violation is typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SequenceError {
     /// The `u64` sequence space is exhausted.
     #[error("event sequence space exhausted at u64::MAX")]
@@ -87,6 +90,7 @@ pub enum SequenceError {
 
 /// Why an ordering-constrained record (command or event) was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum OrderingError {
     /// Too many causal parents were supplied; the bound keeps records
     /// bounded (Cell 05 resource bounds).
@@ -108,6 +112,7 @@ pub enum OrderingError {
 /// idempotent replay; the same ID with any different content is a typed
 /// error and is never silently accepted (Cell 04 ordering).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CommandError {
     /// The CommandId was seen before with different canonical content.
     #[error(
@@ -148,6 +153,7 @@ pub enum CommandError {
 /// expiry, re-validated at the effect boundary. Expiry never consents
 /// (E30): an expired grant yields a typed refusal, not a fallback.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AuthorityError {
     /// Delegation would exceed the maximum depth (Cell 05: depth <= 3).
     #[error("delegation depth {depth} exceeds the maximum of {max}")]

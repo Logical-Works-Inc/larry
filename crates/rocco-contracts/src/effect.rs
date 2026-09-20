@@ -41,6 +41,7 @@ pub const MAX_EFFECT_ATTEMPTS: u8 = 3;
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum ReconciliationStrategy {
     /// The endpoint supports status queries: resolve unknowns by querying.
     Queryable,
@@ -84,6 +85,7 @@ impl ReconciliationStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum RetryPolicy {
     /// No retry is ever authorized for this effect.
     None,
@@ -113,6 +115,7 @@ pub enum RetryPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct EffectIntent {
     /// The local effect record identity.
     pub id: EffectId,
@@ -135,6 +138,7 @@ pub struct EffectIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum EffectOutcome {
     /// The endpoint confirmed success.
     Succeeded {
@@ -172,6 +176,7 @@ impl EffectOutcome {
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum TerminalDisposition {
     /// The effect succeeded.
     Succeeded,

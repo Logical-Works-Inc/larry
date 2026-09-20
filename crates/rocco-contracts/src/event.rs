@@ -117,6 +117,7 @@ pub const fn validate_append(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct CausalRef {
     /// The run the caused-by event belongs to.
     pub run: RunId,
@@ -131,6 +132,7 @@ pub struct CausalRef {
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum EventKind {
     /// A command was accepted (initial or idempotent replay, E28).
     CommandAccepted,

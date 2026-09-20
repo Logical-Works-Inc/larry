@@ -39,6 +39,7 @@ pub const MAX_WORK_TITLE_BYTES: usize = 256;
 
 /// Scope supplied by the authenticated host, never inferred from model text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WorkspaceScope {
     /// Tenant isolation boundary.
     pub tenant: TenantId,
@@ -48,6 +49,7 @@ pub struct WorkspaceScope {
 
 /// Owner-observed version binding; none of these fields grants authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WorkVersion {
     /// Monotonic projection revision, used to reject stale selection.
     pub revision: u64,
@@ -196,6 +198,7 @@ impl WorkBoard {
 
 /// A human Continue action, bound to the exact card the human selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ContinueRequest {
     /// Caller-retained idempotency identity; reuse unchanged on transport retry.
     pub command: CommandId,
@@ -209,6 +212,7 @@ pub struct ContinueRequest {
 
 /// Owner acknowledgement of a queued request; not proof of completed work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ContinueReceipt {
     /// Exact request accepted by the owner.
     pub request: ContinueRequest,
@@ -220,6 +224,7 @@ pub struct ContinueReceipt {
 
 /// Visible dispatch outcome, kept separate from the observed run state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContinueOutcome {
     /// No owner connection is ready; nothing was admitted or executed.
     AwaitingDependency,
@@ -248,6 +253,7 @@ pub trait MooWorkspaceAdapter {
 
 /// Honest disconnected boundary used until the real owner adapter is ready.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct MissingMooAdapter;
 
 impl MooWorkspaceAdapter for MissingMooAdapter {
@@ -357,6 +363,7 @@ impl ContinueCoordinator {
 
 /// Explicit safe failures of projection and continuation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum WorkspaceError {
     /// Wrong authenticated tenant or workspace.
     #[error("work belongs to another tenant or workspace")]

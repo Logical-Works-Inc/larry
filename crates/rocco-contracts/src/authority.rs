@@ -125,6 +125,7 @@ impl fmt::Display for SecurityEpoch {
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum Scope {
     /// Read workspace content.
     FileRead,
@@ -147,6 +148,7 @@ pub enum Scope {
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum BudgetUnit {
     /// Count of authorized requests.
     Requests,
@@ -325,6 +327,7 @@ impl Grant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct AttenuationRequest {
     /// The worker the child grant would be held by.
     pub holder: WorkerId,

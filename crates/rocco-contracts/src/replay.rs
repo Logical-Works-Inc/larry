@@ -31,6 +31,7 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct PolicySnapshot {
     /// The policy revision the decision is made under; a decision is only
     /// comparable within one revision (D18: pinned, versioned inputs).
@@ -44,6 +45,7 @@ pub struct PolicySnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct BudgetSnapshot {
     /// The remaining amount.
     pub remaining: u64,
@@ -56,6 +58,7 @@ pub struct BudgetSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct CapabilitySnapshot {
     /// The worker's capabilities.
     pub capabilities: BTreeSet<Scope>,
@@ -66,6 +69,7 @@ pub struct CapabilitySnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct ValiditySnapshot {
     /// The instant validity ends; `observed_at >= valid_until` is expired.
     pub valid_until: SystemTime,
@@ -75,6 +79,7 @@ pub struct ValiditySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct EffectRequest {
     /// The stable operation ID of the effect to dispatch.
     pub operation: crate::ids::OperationId,
@@ -93,6 +98,7 @@ pub struct EffectRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum DenialReason {
     /// Authority validity had already ended at the pinned instant (E30).
     AuthorityExpired,
@@ -129,6 +135,7 @@ pub enum DenialReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum Decision {
     /// The effect is admitted under the pinned snapshots.
     Authorized,
@@ -191,6 +198,7 @@ pub fn decide(
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct PinnedInputs {
     /// The declared effect.
     pub request: EffectRequest,
@@ -223,6 +231,7 @@ impl PinnedInputs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub struct ReplayRecord {
     /// The pinned inputs recorded with the effect.
     pub pinned: PinnedInputs,
@@ -234,6 +243,7 @@ pub struct ReplayRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
 pub enum ReplayFinding {
     /// The re-derived decision equals the recorded one.
     Match {
