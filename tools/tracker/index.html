@@ -310,7 +310,7 @@
 
 <script>
 var DATA = {
-  "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED. `head` names the commit whose state the figures describe, NOT the current tip: requiring it to equal HEAD would demand a new commit per commit and regress forever. Bump it only when the figures are re-measured at a new commit.",
+  "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED. `head` names the commit whose state the figures describe, NOT the current tip: requiring it to equal HEAD would demand a new commit per commit and regress forever. Bump it only when the figures are re-measured at a new commit. `branch` names the delivery those figures were measured for, for the same reason: a count like `N ahead of origin` moves with every push and cannot stay true, so it is not recorded here.",
   "axes_total": 9,
   "basis": {
     "before": 37.5,
@@ -338,7 +338,7 @@ var DATA = {
       }
     ]
   },
-  "branch": "main \u00b7 22 ahead of origin, unpushed",
+  "branch": "main \u00b7 delivered in PR stack #13",
   "cells": [
     {
       "blocked": "Director approval record (E24)",
@@ -460,7 +460,8 @@ var DATA = {
       "governance inventory 96/53/80/13/9: PASS",
       "55 python tests: OK",
       "local-CI receipt names the head",
-      "hardening pass: 3 defects found by adversarial reading, each fixed with a falsifier that fails if the property breaks"
+      "hardening pass: 3 defects found by adversarial reading, each fixed with a falsifier that fails if the property breaks",
+      "self-hosted runner rocco-macos-arm64: online, labels self-hosted/macOS/ARM64, read from gh api repos/.../actions/runners"
     ],
     "notrun": [
       "any falsifier as a hosted acceptance case",
@@ -469,7 +470,7 @@ var DATA = {
       "model checking; P1\u2013P8 unproved",
       "a real owner; no network is reached",
       "an authenticated authority source supplying the fence",
-      "hosted CI, and it has never once run: 61 workflow runs are recorded, all 61 concluded failure, and no run has ever produced a step \u2014 the jobs are created and complete in about two seconds with an empty steps array while the job log returns BlobNotFound. Actions is enabled and the repository is private, so this reads as an account-level runner or spending-limit condition, not a defect in the code and not something this repository can repair; the workflows are left exactly as they are."
+      "GitHub-hosted CI, permanently and for cause: 61 workflow runs are recorded, all 61 concluded failure, and no run has ever produced a step \u2014 the jobs are created and completed in about two seconds with an empty steps array while the job log returns BlobNotFound. Actions is enabled and the repository is private, so this is an account-level runner or spending-limit condition, not a defect in the code. This repository now has its own self-hosted runner and both workflows target it, so the lanes execute; but CI still covers a subset of the lanes AGENTS.md declares \u2014 no cargo build, no lgwks-deps check, no CLI or PTY suite, no whitespace check \u2014 so a green CI is weaker than a green local-CI and must not be read as one. The runner is a single machine sharing the development host: not a fleet, not a second platform, not portable evidence."
     ],
     "unknown": [
       "durability across process death \u2014 the journal is in memory",
@@ -531,7 +532,7 @@ var DATA = {
     "The repository went from \u003cem>specification only\u003c/em> to \u003cem>specification plus one cell's runtime\u003c/em>, and the runtime has since grown its second half: authorization was reproducible at admission and is now also \u003cem>fresh\u003c/em> at dispatch. That was E71, and it was the last of C02's eight falsifiers still recorded as entirely unimplemented.",
     "C02 is still not done. Two of its eight falsifiers, E63 and E65, remain NOT RUN as acceptance cases, and none of it has had an independent review or a model check. Two decisions stay open with the Director: whether an ECS world may ever hold authority, and whether to sign the \u003ccode>bevy_ecs\u003c/code> row in \u003ccode>contract/APPROVED.toml\u003c/code>."
   ],
-  "head": "783575d",
+  "head": "3954685",
   "lede": "Rocco is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",
   "measured": "2026-09-20",
   "receipt": "local-CI: every declared lane passed"
