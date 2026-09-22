@@ -5,8 +5,6 @@
 //! Moo, Sentinel, Nova or a network, and the owner is always the scripted
 //! fixture double in `rocco_runtime::owner::fixture`.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime};
 
@@ -17,7 +15,6 @@ use rocco_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use rocco_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use rocco_contracts::state::RunState;
 use rocco_runtime::clock::FixedClock;
-use rocco_runtime::error::RuntimeError;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::payload::WorkProposal;
 use rocco_runtime::projection::{FoldProjection, ProjectionBackend};
@@ -27,8 +24,10 @@ use rocco_runtime::runtime::{Runtime, RuntimeSettings};
 pub type TestRuntime = Runtime<FoldProjection, ScriptedOwner, FixedClock>;
 
 /// The pinned instant every test starts from.
-pub fn epoch() -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+pub fn epoch() -> Result<SystemTime, Box<dyn std::error::Error>> {
+    SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(1_700_000_000))
+        .ok_or_else(|| "fixture epoch is outside the platform time range".into())
 }
 
 /// A run identifier from one byte.
@@ -52,27 +51,28 @@ pub fn command_id(byte: u8) -> CommandId {
 }
 
 /// The pinned validity window the tests use: valid for an hour from [`epoch`].
-pub fn validity() -> ValiditySnapshot {
-    ValiditySnapshot {
-        valid_until: epoch() + Duration::from_secs(3_600),
-    }
+pub fn validity() -> Result<ValiditySnapshot, Box<dyn std::error::Error>> {
+    Ok(ValiditySnapshot::new(
+        epoch()?
+            .checked_add(Duration::from_secs(3_600))
+            .ok_or("fixture validity overflow")?,
+    ))
 }
 
 /// Settings allowing `allowed` under a policy that permits it, with `capable`
 /// as the worker's capabilities and `budget` requests reserved.
-pub fn settings(allowed: &[Scope], capable: &[Scope], budget: u64) -> RuntimeSettings {
-    RuntimeSettings::with_defaults(
-        PolicySnapshot {
-            revision: 1,
-            allowed_scopes: allowed.iter().copied().collect(),
-        },
-        CapabilitySnapshot {
-            capabilities: capable.iter().copied().collect(),
-        },
-        validity(),
+pub fn settings(
+    allowed: &[Scope],
+    capable: &[Scope],
+    budget: u64,
+) -> Result<RuntimeSettings, Box<dyn std::error::Error>> {
+    Ok(RuntimeSettings::with_defaults(
+        PolicySnapshot::new(1, allowed.iter().copied().collect()),
+        CapabilitySnapshot::new(capable.iter().copied().collect()),
+        validity()?,
         BudgetUnit::Requests,
         budget,
-    )
+    ))
 }
 
 /// A runtime over the scripted owner `owner`.
@@ -86,12 +86,12 @@ pub fn runtime_with(
     allowed: &[Scope],
     capable: &[Scope],
     budget: u64,
-) -> Result<TestRuntime, RuntimeError> {
-    Runtime::new(
-        settings(allowed, capable, budget),
+) -> Result<TestRuntime, Box<dyn std::error::Error>> {
+    Ok(Runtime::new(
+        settings(allowed, capable, budget)?,
         owner,
-        FixedClock::new(epoch()),
-    )
+        FixedClock::new(epoch()?),
+    )?)
 }
 
 /// A runtime whose owner has nothing scripted and therefore reports unknown
@@ -100,7 +100,7 @@ pub fn runtime_with(
 /// # Errors
 ///
 /// As [`runtime_with`].
-pub fn runtime() -> Result<TestRuntime, RuntimeError> {
+pub fn runtime() -> Result<TestRuntime, Box<dyn std::error::Error>> {
     runtime_with(
         ScriptedOwner::new(),
         &[Scope::FileRead],
@@ -118,15 +118,15 @@ pub fn proposal(
     cost: u64,
     strategy: ReconciliationStrategy,
 ) -> WorkProposal {
-    WorkProposal {
+    WorkProposal::new(
         run,
         tenant,
         operation,
-        required_scopes: scopes.iter().copied().collect::<BTreeSet<_>>(),
+        scopes.iter().copied().collect::<BTreeSet<_>>(),
         cost,
-        unit: BudgetUnit::Requests,
+        BudgetUnit::Requests,
         strategy,
-    }
+    )
 }
 
 /// A `Submit` command carrying `body`.
@@ -187,5 +187,32 @@ pub fn assert_state(
     if actual != expected {
         return Err(format!("run {run}: expected {expected}, got {actual}").into());
     }
+    Ok(())
+}
+
+/// Shared fixtures preserve command identity, cancellation and unknown outcomes.
+#[test]
+fn fixture_contracts() -> Result<(), Box<dyn std::error::Error>> {
+    let mut runtime = runtime()?;
+    let body = proposal(
+        run(1),
+        tenant(1),
+        operation(1),
+        &[Scope::FileRead],
+        1,
+        ReconciliationStrategy::Queryable,
+    );
+    assert_eq!(unknown(body.operation).operation(), body.operation);
+    let command = cancel(command_id(1), &body)?;
+    assert_eq!(command.id(), command_id(1));
+    assert_eq!(command.content().kind(), CommandKind::Cancel);
+    runtime.submit(command)?;
+    let tick = runtime.tick()?;
+    assert_eq!(tick.admitted(), &[command_id(1)]);
+    assert_eq!(
+        runtime.projection().run_state(run(1)),
+        Some(RunState::Cancelled)
+    );
+    assert_eq!(tick.receipts(), &[]);
     Ok(())
 }

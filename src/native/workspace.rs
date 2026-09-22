@@ -9,29 +9,51 @@ use rocco_contracts::workspace::{
     WorkVersion, WorkspaceScope,
 };
 
-use super::{Native, Row, MI, MUTED, Color, Surface, Character, CharFlags, CharAttribute, BufferAccess, WARN, Focus, ERR, part, BASE, draw_mascot, Work, InputApp, Key, EventProcessStatus, KeyModifier, KeyCode, App, ModalWindowMethods, FrameApp, MouseEvent};
+use super::{
+    App, BASE, CharAttribute, CharFlags, Character, Color, ERR, EventProcessStatus, Focus,
+    InputApp, Key, KeyCode, KeyModifier, MI, MUTED, MouseEvent, Native, Row, Surface, WARN, Work,
+    allocation_width, draw_mascot, index_coordinate, part, terminal_dimension,
+};
 
+/// One fixed synthetic work item and its independently owned unsent notes.
 struct Card {
+    /// Fixture board lane, not observed live progress.
     lane: &'static str,
+    /// Synthetic project label.
     project: &'static str,
+    /// Human-readable fixture title.
     title: &'static str,
+    /// Short fixture state description.
     summary: &'static str,
+    /// Suggested inspection action.
     next: &'static str,
+    /// Stable synthetic run identity.
     run: RunId,
+    /// Retained idempotency identity for repeated continuation requests.
     command: CommandId,
+    /// Disposable note editor and fixture transcript.
     session: Native,
+    /// Last actual continuation outcome, separate from fixture lane status.
     dispatch: String,
 }
 
 /// One disposable view. No timer, thread, filesystem write or network client.
 pub(super) struct Workspace {
+    /// The four authored fixture cards; no live discovery or background updates.
     cards: Vec<Card>,
+    /// Selected card index.
     selected: usize,
+    /// Whether the selected card's session is open.
     entered: bool,
+    /// Whether the explicit synthetic-data explanation is open.
     truth: bool,
+    /// Bounded row offset into the explanation.
     truth_scroll: usize,
+    /// Validates continuation against the fixture board and disconnected owner.
     coordinator: ContinueCoordinator,
+    /// Last painted terminal dimensions for pointer hit testing.
     size: Cell<(i32, i32)>,
+    /// Fixture construction failure displayed instead of a misleading board.
     setup_error: Option<String>,
     /// An input-driven focus marker. It never represents background progress
     /// or a live connection, and deliberately has no timer.
@@ -42,10 +64,10 @@ impl Default for Workspace {
     fn default() -> Self {
         // Synthetic identities are NEVER credentials; the missing adapter
         // refuses execution. Live identity must come from the authenticated host.
-        let scope = WorkspaceScope {
-            tenant: TenantId::from_bytes([1; 16]),
-            workspace: WorkspaceId::from_bytes([2; 16]),
-        };
+        let scope = WorkspaceScope::new(
+            TenantId::from_bytes([1; 16]),
+            WorkspaceId::from_bytes([2; 16]),
+        );
         let fixtures = [
             (
                 "Needs you",
@@ -84,38 +106,36 @@ impl Default for Workspace {
         let mut setup_error = None;
         let cards = fixtures
             .into_iter()
-            .enumerate()
-            .map(|(index, (lane, project, title, summary, next, state))| {
-                let run = RunId::from_bytes([index as u8 + 3; 16]);
-                let version = WorkVersion {
-                    revision: 1,
-                    baseline: ContentDigest::over(&[title.as_bytes()]),
-                    fence: 1,
-                };
-                if let Err(error) = WorkItem::new(scope, run, title, version, state)
-                    .and_then(|item| board.upsert(item))
-                {
-                    setup_error = Some(error.to_string());
-                }
-                let mut session = Native::default();
-                session.transcript.clear();
-                session.demo.folders = true;
-                session.demo.agents = true;
-                session.push_row(Row::plain("AI · not connected", MI), false);
-                session.push_row(Row::plain("Your notes stay here, unsent.", MUTED), false);
-                session.push_row(Row::plain("Session only · lost on exit.", MUTED), false);
-                Card {
-                    lane,
-                    project,
-                    title,
-                    summary,
-                    next,
-                    run,
-                    command: CommandId::from_bytes([index as u8 + 20; 16]),
-                    session,
-                    dispatch: "Not requested".into(),
-                }
-            })
+            .zip([(3_u8, 20_u8), (4, 21), (5, 22), (6, 23)])
+            .map(
+                |((lane, project, title, summary, next, state), (run_byte, command_byte))| {
+                    let run = RunId::from_bytes([run_byte; 16]);
+                    let version = WorkVersion::new(1, ContentDigest::over(&[title.as_bytes()]), 1);
+                    if let Err(error) = WorkItem::new(scope, run, title, version, state)
+                        .and_then(|item| board.upsert(item))
+                    {
+                        setup_error = Some(error.to_string());
+                    }
+                    let mut session = Native::default();
+                    session.transcript.clear();
+                    session.demo.folders = true;
+                    session.demo.agents = true;
+                    session.push_row(Row::plain("AI · not connected", MI), false);
+                    session.push_row(Row::plain("Your notes stay here, unsent.", MUTED), false);
+                    session.push_row(Row::plain("Session only · lost on exit.", MUTED), false);
+                    Card {
+                        lane,
+                        project,
+                        title,
+                        summary,
+                        next,
+                        run,
+                        command: CommandId::from_bytes([command_byte; 16]),
+                        session,
+                        dispatch: "Not requested".into(),
+                    }
+                },
+            )
             .collect();
         Self {
             cards,
@@ -136,31 +156,52 @@ impl Default for Workspace {
 // into terminal facts: black is the shared default surface, gray is structure,
 // blue names the one focused work item, and warning/error colours retain their
 // operational meaning. There are no decorative region fills.
+/// Shared neutral terminal background.
 const SHELL: Color = Color::Black;
+/// Navigation rail background.
 const RAIL: Color = SHELL;
+/// Unselected card background.
 const PANEL: Color = SHELL;
+/// The single selected card and rail highlight.
 const FOCUS_PANEL: Color = Color::DarkBlue;
+/// Disconnected-system panel background.
 const SYSTEM_PANEL: Color = SHELL;
+/// Primary foreground text.
 const INK: Color = Color::White;
+/// Secondary text and neutral borders.
 const SOFT: Color = Color::Gray;
+/// Focus accents, not execution status.
 const FOCUS: Color = Color::Blue;
+/// Total navigation rail width in terminal columns.
 const RAIL_WIDTH: i32 = 27;
+/// First clickable rail column.
 const RAIL_ITEM_X: i32 = 1;
+/// Clickable rail item width.
 const RAIL_ITEM_WIDTH: i32 = 24;
+/// First work item's rail row.
 const RAIL_ITEM_Y: i32 = 11;
+/// Number of rows occupied by each rail target.
 const RAIL_ITEM_HEIGHT: i32 = 2;
 
+/// Map a card index to its rail row, saturating outside coordinate range.
 fn rail_item_y(index: usize) -> i32 {
-    let index = index.min(i32::MAX as usize) as i32;
+    let index = i32::try_from(index).unwrap_or(i32::MAX);
     RAIL_ITEM_Y.saturating_add(index.saturating_mul(RAIL_ITEM_HEIGHT))
 }
 
+/// Paint a rectangle clipped to the owned surface, including extreme coordinates.
 fn fill(surface: &mut Surface, x: i32, y: i32, width: i32, height: i32, background: Color) {
     if width <= 0 || height <= 0 {
         return;
     }
-    for row in y.max(0)..(y + height).max(0) {
-        for column in x.max(0)..(x + width).max(0) {
+    let right = x
+        .saturating_add(width)
+        .min(i32::try_from(surface.size().width).unwrap_or(i32::MAX));
+    let bottom = y
+        .saturating_add(height)
+        .min(i32::try_from(surface.size().height).unwrap_or(i32::MAX));
+    for row in y.max(0)..bottom.max(0) {
+        for column in x.max(0)..right.max(0) {
             surface.write_char(
                 column,
                 row,
@@ -180,12 +221,13 @@ fn fill(surface: &mut Surface, x: i32, y: i32, width: i32, height: i32, backgrou
 /// site, which makes colour ownership visible in the scene code.
 macro_rules! ink {
     ($surface:expr, $x:expr, $y:expr, $width:expr, $text:expr, $foreground:expr, $background:expr, $bold:expr $(,)?) => {{
-        let (x, y, width) = ($x, $y, $width);
+        let (x, y, width): (i32, i32, i32) = ($x, $y, $width);
         let text = $text;
         let foreground = $foreground;
         let background = $background;
         if width > 0 && y >= 0 && x >= 0 {
-            let clipped: String = text.chars().take(width as usize).collect();
+            let columns = usize::try_from(width).unwrap_or(0);
+            let clipped: String = text.chars().take(columns).collect();
             $surface.write_string(
                 x,
                 y,
@@ -201,9 +243,9 @@ macro_rules! ink {
                 ),
                 false,
             );
-            if text.chars().count() > width as usize {
+            if text.chars().count() > columns {
                 $surface.write_char(
-                    x + width - 1,
+                    x.saturating_add(width).saturating_sub(1),
                     y,
                     Character::new('…', SOFT, background, CharFlags::None),
                 );
@@ -212,22 +254,24 @@ macro_rules! ink {
     }};
 }
 
+/// Draw a horizontal separator in the requested terminal colors.
 fn line(surface: &mut Surface, x: i32, y: i32, width: i32, color: Color, background: Color) {
     ink!(
         surface,
         x,
         y,
         width,
-        &"─".repeat(width.max(0) as usize),
+        &"─".repeat(usize::try_from(width.max(0)).unwrap_or(0)),
         color,
         background,
         false,
     );
 }
 
+/// Draw a bordered fixture card with an explicit background and title.
 macro_rules! shell_card {
     ($surface:expr, $x:expr, $y:expr, $width:expr, $height:expr, $title:expr, $background:expr, $border:expr $(,)?) => {{
-        let (x, y, width, height) = ($x, $y, $width, $height);
+        let (x, y, width, height): (i32, i32, i32, i32) = ($x, $y, $width, $height);
         let title = $title;
         let background = $background;
         let border = $border;
@@ -246,7 +290,7 @@ macro_rules! shell_card {
             ink!(
                 $surface,
                 x,
-                y + height - 1,
+                y.saturating_add(height).saturating_sub(1),
                 width,
                 "╰",
                 border,
@@ -256,20 +300,20 @@ macro_rules! shell_card {
             if width > 1 {
                 ink!(
                     $surface,
-                    x + 1,
-                    y + height - 1,
-                    width - 1,
-                    &"─".repeat((width - 1) as usize),
+                    x.saturating_add(1),
+                    y.saturating_add(height).saturating_sub(1),
+                    width.saturating_sub(1),
+                    &"─".repeat(usize::try_from(width.saturating_sub(1)).unwrap_or(0)),
                     border,
                     background,
                     false
                 );
             }
-            for row in y + 1..y + height - 1 {
+            for row in y.saturating_add(1)..y.saturating_add(height).saturating_sub(1) {
                 ink!($surface, x, row, 1, "│", border, background, false);
                 ink!(
                     $surface,
-                    x + width - 1,
+                    x.saturating_add(width).saturating_sub(1),
                     row,
                     1,
                     "│",
@@ -282,14 +326,22 @@ macro_rules! shell_card {
     }};
 }
 
+/// Wrap explanation text at character boundaries, splitting oversized words.
 fn wrap(line: &str, width: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     for word in line.split_whitespace() {
-        let last = rows.len() - 1;
-        if !rows[last].is_empty() && rows[last].chars().count() + 1 + word.chars().count() > width {
+        let last = rows.len().saturating_sub(1);
+        if !rows[last].is_empty()
+            && rows[last]
+                .chars()
+                .count()
+                .saturating_add(1)
+                .saturating_add(word.chars().count())
+                > width
+        {
             rows.push(String::new());
         }
-        let last = rows.len() - 1;
+        let last = rows.len().saturating_sub(1);
         if !rows[last].is_empty() {
             rows[last].push(' ');
         }
@@ -297,7 +349,7 @@ fn wrap(line: &str, width: usize) -> Vec<String> {
             if rows.last().is_some_and(|row| row.chars().count() >= width) {
                 rows.push(String::new());
             }
-            let last = rows.len() - 1;
+            let last = rows.len().saturating_sub(1);
             rows[last].push(ch);
         }
     }
@@ -305,6 +357,7 @@ fn wrap(line: &str, width: usize) -> Vec<String> {
 }
 
 impl Workspace {
+    /// Mark input-driven focus feedback without starting a timer.
     fn start_motion(&mut self) {
         // Event-driven visual feedback only. A continuous frame loop was
         // measured to exceed the terminal's 1 MiB idle-output bound in under
@@ -312,17 +365,28 @@ impl Workspace {
         self.motion = 6;
     }
 
+    /// Return the focus glyph; never a live activity indicator.
     fn motion_mark(&self) -> &'static str {
         if self.motion > 0 { "▌" } else { "·" }
     }
 
+    /// Render navigation targets using the same geometry as pointer selection.
     fn sidebar(&self, surface: &mut Surface, height: i32) {
         if height < 12 {
             return;
         }
-        fill(surface, 0, 2, RAIL_WIDTH, height - 2, RAIL);
+        fill(surface, 0, 2, RAIL_WIDTH, height.saturating_sub(2), RAIL);
         for y in 2..height {
-            ink!(surface, RAIL_WIDTH - 1, y, 1, "│", SOFT, RAIL, false);
+            ink!(
+                surface,
+                RAIL_WIDTH.saturating_sub(1),
+                y,
+                1,
+                "│",
+                SOFT,
+                RAIL,
+                false
+            );
         }
         ink!(surface, 2, 4, 23, "WORKSPACE", SOFT, RAIL, true);
         ink!(surface, 2, 6, 23, "▣  Home", INK, RAIL, true);
@@ -330,7 +394,7 @@ impl Workspace {
         ink!(surface, 2, 10, 23, "WORK IN VIEW", SOFT, RAIL, true);
         for (index, _) in self.cards.iter().enumerate() {
             let y = rail_item_y(index);
-            if y + RAIL_ITEM_HEIGHT > height - 3 {
+            if y.saturating_add(RAIL_ITEM_HEIGHT) > height.saturating_sub(3) {
                 break;
             }
             let active = self.selected == index;
@@ -347,13 +411,13 @@ impl Workspace {
             }
             ink!(
                 surface,
-                RAIL_ITEM_X + 1,
+                RAIL_ITEM_X.saturating_add(1),
                 y,
-                RAIL_ITEM_WIDTH - 2,
+                RAIL_ITEM_WIDTH.saturating_sub(2),
                 &format!(
                     "{} {:02}  {}",
                     if active { "▌" } else { " " },
-                    index + 1,
+                    index.saturating_add(1),
                     match index {
                         0 => "Review retry",
                         1 => "Workspace handoff",
@@ -367,9 +431,9 @@ impl Workspace {
             );
             ink!(
                 surface,
-                RAIL_ITEM_X + 5,
-                y + 1,
-                RAIL_ITEM_WIDTH - 6,
+                RAIL_ITEM_X.saturating_add(5),
+                y.saturating_add(1),
+                RAIL_ITEM_WIDTH.saturating_sub(6),
                 if active { "click / Enter to open" } else { "" },
                 if active { FOCUS } else { SOFT },
                 background,
@@ -377,11 +441,11 @@ impl Workspace {
             );
         }
         if height >= 28 {
-            line(surface, 2, height - 5, 23, SOFT, RAIL);
+            line(surface, 2, height.saturating_sub(5), 23, SOFT, RAIL);
             ink!(
                 surface,
                 2,
-                height - 3,
+                height.saturating_sub(3),
                 23,
                 "⊙ DEMO / disconnected",
                 WARN,
@@ -391,7 +455,7 @@ impl Workspace {
             ink!(
                 surface,
                 2,
-                height - 2,
+                height.saturating_sub(2),
                 23,
                 "click a work item · t truth",
                 SOFT,
@@ -401,30 +465,30 @@ impl Workspace {
         }
     }
 
+    /// Request continuation through the disconnected adapter, failing closed.
     fn continue_selected(&mut self) {
         let card = &self.cards[self.selected];
-        let request = ContinueRequest {
-            command: card.command,
-            scope: self.coordinator.board().scope(),
-            run: card.run,
-            expected_revision: 1,
-        };
+        let request =
+            ContinueRequest::new(card.command, self.coordinator.board().scope(), card.run, 1);
         let result = self
             .coordinator
-            .continue_work(&mut MissingMooAdapter, request);
+            .continue_work(&mut MissingMooAdapter::default(), request);
         self.cards[self.selected].dispatch = match result {
             Ok(ContinueOutcome::AwaitingDependency) => "Awaiting Moo · nothing started".into(),
             Ok(ContinueOutcome::Queued(_)) => "Owner queued · not completed".into(),
+            Ok(_) => "Not continued: unsupported owner outcome".into(),
             Err(error) => format!("Not continued: {error}"),
         };
     }
 
+    /// Open a session and request continuation without releasing a fixture hold.
     fn enter(&mut self) {
         self.entered = true;
         self.start_motion();
         self.continue_selected();
     }
 
+    /// Dispatch explicit UI commands or retain an unsent session-only note.
     fn submit(&mut self) {
         let raw = self.cards[self.selected].session.input.trim();
         let text = raw
@@ -477,7 +541,7 @@ impl Workspace {
             _ if !text.is_empty() => {
                 let ui = &mut self.cards[self.selected].session;
                 ui.input.clear();
-                ui.user_messages += 1;
+                ui.user_messages = ui.user_messages.saturating_add(1);
                 ui.push_row(
                     Row::clipping(vec![part(format!("You · {text}"), BASE, CharFlags::None)]),
                     true,
@@ -489,11 +553,11 @@ impl Workspace {
                             .transcript
                             .iter()
                             .enumerate()
-                            .skip(start + 1)
-                            .find(|(_, row)| row.starts_message)
+                            .skip(start.saturating_add(1))
+                            .find(|&(_, row)| row.starts_message)
                             .map_or(ui.transcript.len(), |(i, _)| i);
                         ui.transcript.drain(start..end);
-                        ui.user_messages -= 1;
+                        ui.user_messages = ui.user_messages.saturating_sub(1);
                     } else {
                         break;
                     }
@@ -505,14 +569,15 @@ impl Workspace {
         self.cards[self.selected].session.command_mode = false;
     }
 
+    /// Render the responsive board with explicit disconnected-demo labels.
     fn board(&self, surface: &mut Surface, width: i32, height: i32) {
-        let rail = if width >= 92 { 27 } else { 0 };
+        let rail: i32 = if width >= 92 { 27 } else { 0 };
         if rail > 0 {
             self.sidebar(surface, height);
         }
-        let x = rail + 2;
+        let x = rail.saturating_add(2);
         let right = if width >= 118 { 26 } else { 2 };
-        let body_width = width - x - right;
+        let body_width = width.saturating_sub(x).saturating_sub(right);
         let body_background = SHELL;
         ink!(
             surface,
@@ -539,12 +604,12 @@ impl Workspace {
                 ink!(
                     surface,
                     x,
-                    5 + index as i32,
+                    5_i32.saturating_add(index_coordinate(index)),
                     body_width,
                     &format!(
                         "{} {} · {}",
                         if self.selected == index { "›" } else { " " },
-                        index + 1,
+                        index.saturating_add(1),
                         card.title
                     ),
                     INK,
@@ -555,7 +620,7 @@ impl Workspace {
             ink!(
                 surface,
                 x,
-                height - 1,
+                height.saturating_sub(1),
                 body_width,
                 "1–4 open + Continue · t truth · q quit",
                 SOFT,
@@ -564,15 +629,17 @@ impl Workspace {
             );
             return;
         }
-        let columns = if body_width >= 60 { 2 } else { 1 };
-        let card_width = (body_width - (columns - 1) * 2) / columns;
-        let card_height = 7;
+        let columns: i32 = if body_width >= 60 { 2 } else { 1 };
+        let gutters = columns.saturating_sub(1).saturating_mul(2);
+        let card_width = body_width.saturating_sub(gutters).div_euclid(columns);
+        let card_height: i32 = 7;
         for (index, card) in self.cards.iter().enumerate() {
-            let column = index as i32 % columns;
-            let row = index as i32 / columns;
-            let card_x = x + column * (card_width + 2);
-            let card_y = 6 + row * (card_height + 1);
-            if card_y + card_height >= height - 4 {
+            let coordinate = index_coordinate(index);
+            let column = coordinate.rem_euclid(columns);
+            let row = coordinate.div_euclid(columns);
+            let card_x = x.saturating_add(column.saturating_mul(card_width.saturating_add(2)));
+            let card_y = 6_i32.saturating_add(row.saturating_mul(card_height.saturating_add(1)));
+            if card_y.saturating_add(card_height) >= height.saturating_sub(4) {
                 continue;
             }
             let selected = index == self.selected;
@@ -584,15 +651,15 @@ impl Workspace {
                 card_y,
                 card_width,
                 card_height,
-                &format!("{:02} / {}", index + 1, card.lane),
+                &format!("{:02} / {}", index.saturating_add(1), card.lane),
                 background,
                 border,
             );
             ink!(
                 surface,
-                card_x + 2,
-                card_y + 2,
-                card_width - 4,
+                card_x.saturating_add(2),
+                card_y.saturating_add(2),
+                card_width.saturating_sub(4),
                 card.title,
                 INK,
                 background,
@@ -600,9 +667,9 @@ impl Workspace {
             );
             ink!(
                 surface,
-                card_x + 2,
-                card_y + 3,
-                card_width - 4,
+                card_x.saturating_add(2),
+                card_y.saturating_add(3),
+                card_width.saturating_sub(4),
                 card.summary,
                 SOFT,
                 background,
@@ -610,9 +677,9 @@ impl Workspace {
             );
             ink!(
                 surface,
-                card_x + 2,
-                card_y + 5,
-                card_width - 4,
+                card_x.saturating_add(2),
+                card_y.saturating_add(5),
+                card_width.saturating_sub(4),
                 card.next,
                 INK,
                 background,
@@ -621,8 +688,8 @@ impl Workspace {
             if selected {
                 ink!(
                     surface,
-                    card_x + card_width - 4,
-                    card_y + 1,
+                    card_x.saturating_add(card_width).saturating_sub(4),
+                    card_y.saturating_add(1),
                     2,
                     self.motion_mark(),
                     INK,
@@ -632,7 +699,7 @@ impl Workspace {
             }
         }
         if width >= 118 {
-            let system_x = width - 24;
+            let system_x = width.saturating_sub(24);
             shell_card!(
                 surface,
                 system_x,
@@ -645,7 +712,7 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 5,
                 18,
                 "ATTENTION STACK",
@@ -655,7 +722,7 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 7,
                 18,
                 "Moo",
@@ -665,7 +732,7 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 8,
+                system_x.saturating_add(8),
                 7,
                 11,
                 "offline",
@@ -673,10 +740,19 @@ impl Workspace {
                 SYSTEM_PANEL,
                 false,
             );
-            ink!(surface, system_x + 2, 8, 18, "AI", SOFT, SYSTEM_PANEL, true);
             ink!(
                 surface,
-                system_x + 8,
+                system_x.saturating_add(2),
+                8,
+                18,
+                "AI",
+                SOFT,
+                SYSTEM_PANEL,
+                true
+            );
+            ink!(
+                surface,
+                system_x.saturating_add(8),
                 8,
                 11,
                 "offline",
@@ -686,7 +762,7 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 10,
                 18,
                 "Notes: session only",
@@ -696,7 +772,7 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 11,
                 18,
                 "Open truth [t]",
@@ -705,8 +781,15 @@ impl Workspace {
                 true,
             );
         }
-        let footer_y = height - 3;
-        line(surface, x, footer_y - 1, body_width, SOFT, SHELL);
+        let footer_y = height.saturating_sub(3);
+        line(
+            surface,
+            x,
+            footer_y.saturating_sub(1),
+            body_width,
+            SOFT,
+            SHELL,
+        );
         ink!(
             surface,
             x,
@@ -723,7 +806,7 @@ impl Workspace {
         ink!(
             surface,
             x,
-            footer_y + 1,
+            footer_y.saturating_add(1),
             body_width,
             "← → / Tab select   1–4 open   t truth   q quit",
             SOFT,
@@ -732,19 +815,20 @@ impl Workspace {
         );
     }
 
+    /// Explain which displayed facts are synthetic and which integrations are absent.
     fn truth_view(&self, surface: &mut Surface, width: i32, height: i32) {
-        let rail = if width >= 92 { 27 } else { 0 };
+        let rail: i32 = if width >= 92 { 27 } else { 0 };
         if rail > 0 {
             self.sidebar(surface, height);
         }
-        let x = rail + 2;
-        let body_width = width - x - 2;
+        let x = rail.saturating_add(2);
+        let body_width = width.saturating_sub(x).saturating_sub(2);
         shell_card!(
             surface,
             x,
             3,
             body_width,
-            height - 6,
+            height.saturating_sub(6),
             "TRUTH / DEMO BOUNDARY",
             SHELL,
             SOFT,
@@ -766,22 +850,24 @@ impl Workspace {
         ];
         let wrapped: Vec<String> = lines
             .iter()
-            .flat_map(|line| wrap(line, (width - 4) as usize))
+            .flat_map(|line| wrap(line, allocation_width(width.saturating_sub(4))))
             .collect();
-        let scroll = self
-            .truth_scroll
-            .min(wrapped.len().saturating_sub((height - 5) as usize));
+        let scroll = self.truth_scroll.min(
+            wrapped
+                .len()
+                .saturating_sub(allocation_width(height.saturating_sub(5))),
+        );
         for (i, line) in wrapped
             .iter()
             .skip(scroll)
-            .take((height - 5).max(0) as usize)
+            .take(allocation_width(height.saturating_sub(5)))
             .enumerate()
         {
             ink!(
                 surface,
-                x + 2,
-                i as i32 + 5,
-                body_width - 4,
+                x.saturating_add(2),
+                index_coordinate(i).saturating_add(5),
+                body_width.saturating_sub(4),
                 line,
                 INK,
                 SHELL,
@@ -790,30 +876,34 @@ impl Workspace {
         }
         ink!(
             surface,
-            x + 2,
-            height - 2,
-            body_width - 4,
+            x.saturating_add(2),
+            height.saturating_sub(2),
+            body_width.saturating_sub(4),
             "↑ ↓ scroll · Esc / t Back · no state changed",
             FOCUS,
             SHELL,
             true,
         );
         if width >= 120 && height >= 32 {
-            draw_mascot(surface, width - 28, height - 15);
+            draw_mascot(surface, width.saturating_sub(28), height.saturating_sub(15));
         }
     }
 
+    /// Render the selected session, unsent input and fixture inspection context.
     fn work(&self, surface: &mut Surface, width: i32, height: i32) {
         let card = &self.cards[self.selected];
         let ui = &card.session;
-        let rail = if width >= 110 { 27 } else { 0 };
+        let rail: i32 = if width >= 110 { 27 } else { 0 };
         if rail > 0 {
             self.sidebar(surface, height);
         }
-        let x = rail + 2;
+        let x = rail.saturating_add(2);
         let has_system = width >= 112;
         let right_width = if has_system { 29 } else { 0 };
-        let main_width = width - x - right_width - 2;
+        let main_width = width
+            .saturating_sub(x)
+            .saturating_sub(right_width)
+            .saturating_sub(2);
         let context = !has_system && ui.focus != Focus::Input;
         ink!(
             surface,
@@ -840,7 +930,7 @@ impl Workspace {
             x,
             6,
             main_width,
-            (height - 12).max(5),
+            height.saturating_sub(12).max(5),
             if context {
                 "CONTEXT / DEMO DATA"
             } else {
@@ -876,7 +966,7 @@ impl Workspace {
         } else {
             ui.transcript.iter().map(|line| line.row.clone()).collect()
         };
-        let space = (height - 15).max(0) as usize;
+        let space = allocation_width(height.saturating_sub(15));
         let start = if context {
             0
         } else {
@@ -885,12 +975,12 @@ impl Workspace {
         for (i, row) in rows.iter().skip(start).take(space).enumerate() {
             // Authored fixture rows were designed for the old panel. Reflow
             // independently from its width assertions; text still clips visibly.
-            let text: String = row.parts.iter().map(|p| p.text.as_str()).collect();
+            let text: String = row.parts.iter().map(|part| part.text.as_str()).collect();
             ink!(
                 surface,
-                x + 2,
-                8 + i as i32,
-                main_width - 4,
+                x.saturating_add(2),
+                8_i32.saturating_add(index_coordinate(i)),
+                main_width.saturating_sub(4),
                 &text,
                 INK,
                 SHELL,
@@ -898,12 +988,12 @@ impl Workspace {
             );
         }
         if has_system {
-            let system_x = width - right_width;
+            let system_x = width.saturating_sub(right_width);
             shell_card!(
                 surface,
                 system_x,
                 6,
-                right_width - 2,
+                right_width.saturating_sub(2),
                 8,
                 "ROCCO / SYSTEM",
                 SYSTEM_PANEL,
@@ -918,9 +1008,9 @@ impl Workspace {
             };
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 8,
-                right_width - 6,
+                right_width.saturating_sub(6),
                 priority,
                 WARN,
                 SYSTEM_PANEL,
@@ -928,9 +1018,9 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 10,
-                right_width - 6,
+                right_width.saturating_sub(6),
                 detail,
                 SOFT,
                 SYSTEM_PANEL,
@@ -938,9 +1028,9 @@ impl Workspace {
             );
             ink!(
                 surface,
-                system_x + 2,
+                system_x.saturating_add(2),
                 12,
-                right_width - 6,
+                right_width.saturating_sub(6),
                 "No model. No execution.",
                 INK,
                 SYSTEM_PANEL,
@@ -948,12 +1038,12 @@ impl Workspace {
             );
             if height >= 26 {
                 let context_y = 16;
-                let context_h = (height - 22).max(5);
+                let context_h = height.saturating_sub(22).max(5);
                 shell_card!(
                     surface,
                     system_x,
                     context_y,
-                    right_width - 2,
+                    right_width.saturating_sub(2),
                     context_h,
                     match ui.focus {
                         Focus::Files => "FILES / fixture",
@@ -971,15 +1061,17 @@ impl Workspace {
                 };
                 for (i, row) in context_rows
                     .iter()
-                    .take((context_h - 2).max(0) as usize)
+                    .take(allocation_width(context_h.saturating_sub(2)))
                     .enumerate()
                 {
-                    let text: String = row.parts.iter().map(|p| p.text.as_str()).collect();
+                    let text: String = row.parts.iter().map(|part| part.text.as_str()).collect();
                     ink!(
                         surface,
-                        system_x + 2,
-                        context_y + 1 + i as i32,
-                        right_width - 6,
+                        system_x.saturating_add(2),
+                        context_y
+                            .saturating_add(1)
+                            .saturating_add(index_coordinate(i)),
+                        right_width.saturating_sub(6),
                         &text,
                         SOFT,
                         PANEL,
@@ -988,7 +1080,7 @@ impl Workspace {
                 }
             }
         }
-        fill(surface, x, height - 5, main_width, 2, RAIL);
+        fill(surface, x, height.saturating_sub(5), main_width, 2, RAIL);
         let draft = if ui.input.is_empty() {
             "Leave a note… (unsent; AI disconnected)"
         } else {
@@ -996,9 +1088,9 @@ impl Workspace {
         };
         ink!(
             surface,
-            x + 1,
-            height - 4,
-            main_width - 2,
+            x.saturating_add(1),
+            height.saturating_sub(4),
+            main_width.saturating_sub(2),
             &format!("❯ {draft}"),
             INK,
             RAIL,
@@ -1007,7 +1099,7 @@ impl Workspace {
         ink!(
             surface,
             x,
-            height - 2,
+            height.saturating_sub(2),
             main_width,
             "Esc Home  ·  Tab context  ·  /continue  /next  /inspect  /truth",
             SOFT,
@@ -1017,7 +1109,7 @@ impl Workspace {
         ink!(
             surface,
             x,
-            height - 1,
+            height.saturating_sub(1),
             main_width,
             "DEMO DATA · session-only notes · no model · no execution",
             WARN,
@@ -1038,23 +1130,31 @@ impl InputApp for Workspace {
             if key.code == KeyCode::Escape || ch == 't' {
                 self.truth = false;
             } else if key.code == KeyCode::Down {
-                self.truth_scroll = (self.truth_scroll + 1).min(24);
+                self.truth_scroll = self.truth_scroll.saturating_add(1).min(24);
             } else if key.code == KeyCode::Up {
                 self.truth_scroll = self.truth_scroll.saturating_sub(1);
             }
         } else if !self.entered {
             match key.code {
                 KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
-                    self.selected = (self.selected + 1) % self.cards.len()
+                    self.selected = self.selected.saturating_add(1).rem_euclid(self.cards.len())
                 }
                 KeyCode::Left | KeyCode::Up => {
-                    self.selected = (self.selected + self.cards.len() - 1) % self.cards.len()
+                    self.selected = self
+                        .selected
+                        .saturating_add(self.cards.len())
+                        .saturating_sub(1)
+                        .rem_euclid(self.cards.len())
                 }
                 KeyCode::Enter => self.enter(),
                 _ => match ch {
                     '1'..='4' => {
-                        self.selected = (ch as u8 - b'1') as usize;
-                        self.enter();
+                        if let Some(digit) = ch.to_digit(10)
+                            && let Ok(selected) = usize::try_from(digit.saturating_sub(1))
+                        {
+                            self.selected = selected;
+                            self.enter();
+                        }
                     }
                     't' | '?' => {
                         self.truth = true;
@@ -1091,46 +1191,65 @@ impl InputApp for Workspace {
     }
 
     fn on_mouse_event(&mut self, event: &MouseEvent) -> EventProcessStatus {
-        if let MouseEvent::Pressed(data) = event {
+        if let &MouseEvent::Pressed(data) = event {
             let (width, height) = self.size.get();
-            if data.y <= 1 && data.x >= width - 22 {
+            if data.y <= 1 && data.x >= width.saturating_sub(22) {
                 self.truth = !self.truth;
             } else if self.entered && data.y == 2 && data.x < 8 {
                 self.entered = false;
-            } else if self.entered && !self.truth && data.y >= height - 4 {
+            } else if self.entered && !self.truth && data.y >= height.saturating_sub(4) {
                 self.cards[self.selected].session.focus = Focus::Input;
             } else if !self.entered && !self.truth && height < 20 && (5..9).contains(&data.y) {
-                self.selected = (data.y - 5) as usize;
+                if let Ok(selected) = usize::try_from(data.y.saturating_sub(5)) {
+                    self.selected = selected;
+                }
                 self.enter();
             } else if !self.entered
                 && !self.truth
                 && width >= 92
                 && data.x >= RAIL_ITEM_X
-                && data.x < RAIL_ITEM_X + RAIL_ITEM_WIDTH
+                && data.x < RAIL_ITEM_X.saturating_add(RAIL_ITEM_WIDTH)
                 && data.y >= RAIL_ITEM_Y
             {
-                if let Ok(selected) = usize::try_from((data.y - RAIL_ITEM_Y) / RAIL_ITEM_HEIGHT)
-                    && selected < self.cards.len()
+                if let Ok(selected) = usize::try_from(
+                    data.y
+                        .saturating_sub(RAIL_ITEM_Y)
+                        .div_euclid(RAIL_ITEM_HEIGHT),
+                ) && selected < self.cards.len()
                     && data.y < rail_item_y(selected).saturating_add(RAIL_ITEM_HEIGHT)
                 {
                     self.selected = selected;
                     self.enter();
                 }
             } else if !self.entered && !self.truth && data.y >= 6 && data.y < 21 {
-                let rail = if width >= 92 { 27 } else { 0 };
-                let x = rail + 2;
+                let rail: i32 = if width >= 92 { 27 } else { 0 };
+                let x = rail.saturating_add(2);
                 let right = if width >= 118 { 26 } else { 2 };
-                let body_width = width - x - right;
-                let count = if body_width >= 60 { 2 } else { 1 };
-                let card_width = (body_width - (count - 1) * 2) / count;
-                let offset = (data.x - x) / (card_width + 2).max(1);
-                let row = (data.y - 6) / 8;
-                let selected = row as usize * count as usize + offset as usize;
+                let body_width = width.saturating_sub(x).saturating_sub(right);
+                let count: i32 = if body_width >= 60 { 2 } else { 1 };
+                let card_width = body_width
+                    .saturating_sub(count.saturating_sub(1).saturating_mul(2))
+                    .div_euclid(count);
+                let offset = data
+                    .x
+                    .saturating_sub(x)
+                    .div_euclid(card_width.saturating_add(2).max(1));
+                let row = data.y.saturating_sub(6).div_euclid(8);
+                let selected = usize::try_from(row).ok().and_then(|row_index| {
+                    usize::try_from(count).ok().and_then(|column_count| {
+                        usize::try_from(offset).ok().map(|column| {
+                            row_index
+                                .saturating_mul(column_count)
+                                .saturating_add(column)
+                        })
+                    })
+                });
                 if data.x >= x
-                    && selected < self.cards.len()
+                    && selected.is_some_and(|card| card < self.cards.len())
                     && offset >= 0
                     && offset < count
-                    && (data.y - 6) % 8 < 7
+                    && data.y.saturating_sub(6).rem_euclid(8) < 7
+                    && let Some(selected) = selected
                 {
                     self.selected = selected;
                     self.enter();
@@ -1141,8 +1260,8 @@ impl InputApp for Workspace {
     }
 
     fn on_paint(&self, surface: &mut Surface) {
-        let width = surface.size().width.min(i32::MAX as u32) as i32;
-        let height = surface.size().height.min(i32::MAX as u32) as i32;
+        let width = terminal_dimension(surface.size().width);
+        let height = terminal_dimension(surface.size().height);
         self.size.set((width, height));
         surface.reset(Character::new(' ', INK, SHELL, CharFlags::None));
         if width < 50 || height < 12 {
@@ -1163,7 +1282,7 @@ impl InputApp for Workspace {
             surface,
             2,
             0,
-            width - 26,
+            width.saturating_sub(26),
             "◉  ROCCO  /  WORKSPACE",
             INK,
             RAIL,
@@ -1173,7 +1292,7 @@ impl InputApp for Workspace {
             surface,
             2,
             1,
-            width - 26,
+            width.saturating_sub(26),
             "You, the system, and an AI — in one place.",
             SOFT,
             RAIL,
@@ -1182,7 +1301,7 @@ impl InputApp for Workspace {
         line(surface, 0, 2, width, SOFT, SHELL);
         ink!(
             surface,
-            width - 23,
+            width.saturating_sub(23),
             0,
             21,
             "DEMO DATA  [truth ↗]",
@@ -1190,12 +1309,12 @@ impl InputApp for Workspace {
             RAIL,
             false,
         );
-        if let Some(error) = &self.setup_error {
+        if let Some(error) = self.setup_error.as_ref() {
             ink!(
                 surface,
                 2,
                 2,
-                width - 4,
+                width.saturating_sub(4),
                 &format!("Fixture setup refused: {error}"),
                 ERR,
                 SHELL,
@@ -1214,6 +1333,33 @@ impl InputApp for Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lgwks_deps::appcui::prelude::{MouseButton, MouseEventData};
+
+    #[test]
+    fn rectangle_fill_clips_extreme_bounds_and_preserves_empty_regions() -> std::io::Result<()> {
+        let mut surface = Surface::new(2, 2);
+        surface.reset(Character::new(' ', INK, SHELL, CharFlags::None));
+        fill(&mut surface, 0, 0, i32::MAX, i32::MAX, FOCUS_PANEL);
+        for y in 0..2 {
+            for x in 0..2 {
+                assert_eq!(scene_cell(&surface, x, y)?.background, FOCUS_PANEL);
+            }
+        }
+        for (x, y, width, height) in [
+            (0, 0, 0, 2),
+            (0, 0, 2, -1),
+            (i32::MAX, i32::MAX, 2, 2),
+            (i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+        ] {
+            fill(&mut surface, x, y, width, height, SHELL);
+        }
+        for y in 0..2 {
+            for x in 0..2 {
+                assert_eq!(scene_cell(&surface, x, y)?.background, FOCUS_PANEL);
+            }
+        }
+        Ok(())
+    }
 
     fn paint(ui: &Workspace, width: u32, height: u32) -> String {
         let surface = scene(ui, width, height);
@@ -1227,12 +1373,15 @@ mod tests {
     }
 
     fn cells(surface: &Surface, width: u32, height: u32) -> String {
-        (0..height as i32)
+        let terminal_height = terminal_dimension(height);
+        let terminal_width = terminal_dimension(width);
+        (0..terminal_height)
             .map(|y| {
-                (0..width as i32)
+                let mut row = (0..terminal_width)
                     .map(|x| surface.char(x, y).map_or(' ', |cell| cell.code))
-                    .collect::<String>()
-                    + "\n"
+                    .collect::<String>();
+                row.push('\n');
+                row
             })
             .collect()
     }
@@ -1285,33 +1434,36 @@ mod tests {
             file,
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1120\" height=\"650\" viewBox=\"0 0 1120 650\"><rect width=\"1120\" height=\"650\" fill=\"#0b1020\"/>"
         )?;
-        for y in 0..height as i32 {
+        let terminal_height = terminal_dimension(height);
+        let terminal_width = terminal_dimension(width);
+        for y in 0..terminal_height {
             let mut start = 0;
-            while start < width as i32 {
+            while start < terminal_width {
                 let background = scene_cell(surface, start, y)?.background;
-                let mut end = start + 1;
-                while end < width as i32 && scene_cell(surface, end, y)?.background == background {
-                    end += 1;
+                let mut end = start.saturating_add(1);
+                while end < terminal_width && scene_cell(surface, end, y)?.background == background
+                {
+                    end = end.saturating_add(1);
                 }
                 writeln!(
                     file,
                     "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{CELL_H}\" fill=\"{}\"/>",
-                    16 + start * CELL_W,
-                    8 + y * CELL_H,
-                    (end - start) * CELL_W,
+                    16i32.saturating_add(start.saturating_mul(CELL_W)),
+                    8i32.saturating_add(y.saturating_mul(CELL_H)),
+                    end.saturating_sub(start).saturating_mul(CELL_W),
                     svg_color(background)
                 )?;
                 start = end;
             }
             let mut x = 0;
-            while x < width as i32 {
+            while x < terminal_width {
                 let cell = scene_cell(surface, x, y)?;
                 let foreground = cell.foreground;
                 let background = cell.background;
                 let flags = cell.flags;
                 let mut text = String::new();
                 let mut end = x;
-                while end < width as i32 {
+                while end < terminal_width {
                     let next = scene_cell(surface, end, y)?;
                     if next.foreground != foreground
                         || next.background != background
@@ -1320,7 +1472,7 @@ mod tests {
                         break;
                     }
                     text.push(next.code);
-                    end += 1;
+                    end = end.saturating_add(1);
                 }
                 if !text.trim().is_empty() {
                     let weight = if flags == CharFlags::Bold {
@@ -1331,8 +1483,8 @@ mod tests {
                     writeln!(
                         file,
                         "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"Menlo,monospace\" font-size=\"14\" xml:space=\"preserve\"{weight}>{}</text>",
-                        16 + x * CELL_W,
-                        22 + y * CELL_H,
+                        16i32.saturating_add(x.saturating_mul(CELL_W)),
+                        22i32.saturating_add(y.saturating_mul(CELL_H)),
                         svg_color(foreground),
                         svg_escape(&text)
                     )?;
@@ -1380,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_frames_can_be_reviewed_without_terminal_app_access() {
+    fn rendered_frames_can_be_reviewed_without_terminal_app_access() -> std::io::Result<()> {
         let mut ui = Workspace::default();
         let home = paint(&ui, 120, 32);
         ui.enter();
@@ -1410,16 +1562,14 @@ mod tests {
             ] {
                 let path =
                     std::path::PathBuf::from(&directory).join(format!("workspace-{name}.svg"));
-                let file = std::fs::OpenOptions::new()
+                let mut file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(path);
-                assert!(file.is_ok(), "capture path must be newly created");
-                if let Ok(mut file) = file {
-                    assert!(write_scene_svg(&mut file, &scene, 120, 32).is_ok());
-                }
+                    .open(path)?;
+                write_scene_svg(&mut file, &scene, 120, 32)?;
             }
         }
+        Ok(())
     }
 
     #[test]

@@ -44,6 +44,18 @@ pub enum CommandKind {
     Cancel,
 }
 
+impl CommandKind {
+    /// Stable canonical digest tag; independent of Rust enum layout.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Submit => 0,
+            Self::Steer => 1,
+            Self::Cancel => 2,
+        }
+    }
+}
+
 /// The command payload plus its content identity.
 ///
 /// The BLAKE3 digest over the kind tag and payload bytes is computed at
@@ -52,8 +64,11 @@ pub enum CommandKind {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct CommandContent {
+    /// Declared reducer action.
     kind: CommandKind,
+    /// Owned canonical payload bytes.
     payload: Box<[u8]>,
+    /// Digest binding the kind and payload.
     digest: ContentDigest,
 }
 
@@ -61,7 +76,7 @@ impl CommandContent {
     /// Builds content and computes its BLAKE3 digest.
     #[must_use]
     pub fn new(kind: CommandKind, payload: Box<[u8]>) -> Self {
-        let digest = ContentDigest::over(&[&[kind as u8], &payload]);
+        let digest = ContentDigest::over(&[&[kind.tag()], &payload]);
         Self {
             kind,
             payload,
@@ -96,10 +111,15 @@ impl CommandContent {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct Command {
+    /// Caller-retained idempotency identity.
     id: CommandId,
+    /// Authenticated envelope scope.
     tenant: TenantId,
+    /// Sorted, deduplicated, bounded causal citations.
     causal_parents: Vec<CausalRef>,
+    /// Action and its canonical payload.
     content: CommandContent,
+    /// Digest binding all semantic envelope fields.
     envelope_digest: ContentDigest,
 }
 
@@ -136,6 +156,7 @@ impl Command {
         })
     }
 
+    /// Hashes the scoped envelope in stable field order.
     fn canonical_digest(
         tenant: TenantId,
         parents: &[CausalRef],
@@ -250,7 +271,6 @@ pub fn accept(
 mod tests {
     use super::*;
     use crate::ids::RunId;
-    use crate::test_support::expect_ok;
 
     fn tid(byte: u8) -> TenantId {
         TenantId::from_bytes([byte; 16])
@@ -276,32 +296,35 @@ mod tests {
         tenant: TenantId,
         payload: &[u8],
         parents: Vec<CausalRef>,
-    ) -> Command {
+    ) -> Result<Command, OrderingError> {
         let content = CommandContent::new(CommandKind::Submit, Box::from(payload));
-        expect_ok(Command::new(id, tenant, parents, content))
+        Command::new(id, tenant, parents, content)
     }
 
     #[test]
-    fn e28_first_sight_of_an_identity_is_initial_acceptance() {
-        let cmd = command(cid(1), tid(2), b"do", Vec::new());
+    fn e28_first_sight_of_an_identity_is_initial_acceptance() -> Result<(), OrderingError> {
+        let cmd = command(cid(1), tid(2), b"do", Vec::new())?;
         assert_eq!(accept(None, &cmd), Ok(CommandAcceptance::Initial));
+        Ok(())
     }
 
     #[test]
-    fn e28_identical_retry_is_idempotent_replay_not_a_second_fold() {
-        let first = command(cid(1), tid(2), b"do", vec![causal(rid(3), 4)]);
-        let retry = command(cid(1), tid(2), b"do", vec![causal(rid(3), 4)]);
+    fn e28_identical_retry_is_idempotent_replay_not_a_second_fold() -> Result<(), OrderingError> {
+        let first = command(cid(1), tid(2), b"do", vec![causal(rid(3), 4)])?;
+        let retry = command(cid(1), tid(2), b"do", vec![causal(rid(3), 4)])?;
         assert_eq!(first, retry);
         assert_eq!(
             accept(Some(&first), &retry),
             Ok(CommandAcceptance::DuplicateReplay)
         );
+        Ok(())
     }
 
     #[test]
-    fn e28_conflicting_command_retry_is_rejected_with_one_accepted_identity() {
-        let first = command(cid(1), tid(2), b"do-the-thing", Vec::new());
-        let conflicting = command(cid(1), tid(2), b"do-something-else", Vec::new());
+    fn e28_conflicting_command_retry_is_rejected_with_one_accepted_identity()
+    -> Result<(), OrderingError> {
+        let first = command(cid(1), tid(2), b"do-the-thing", Vec::new())?;
+        let conflicting = command(cid(1), tid(2), b"do-something-else", Vec::new())?;
         let outcome = accept(Some(&first), &conflicting);
         assert_eq!(
             outcome,
@@ -313,37 +336,40 @@ mod tests {
         );
         // A silent retry that changes only the causal citations is the
         // same conflict, not a fresh acceptance.
-        let redirected = command(cid(1), tid(2), b"do-the-thing", vec![causal(rid(9), 1)]);
+        let redirected = command(cid(1), tid(2), b"do-the-thing", vec![causal(rid(9), 1)])?;
         assert!(matches!(
             accept(Some(&first), &redirected),
             Err(CommandError::ConflictingRetry { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn a_retry_that_merely_reorders_causal_parents_replays_idempotently() {
+    fn a_retry_that_merely_reorders_causal_parents_replays_idempotently()
+    -> Result<(), OrderingError> {
         let first = command(
             cid(1),
             tid(2),
             b"do",
             vec![causal(rid(3), 4), causal(rid(5), 6)],
-        );
+        )?;
         let retry = command(
             cid(1),
             tid(2),
             b"do",
             vec![causal(rid(5), 6), causal(rid(3), 4)],
-        );
+        )?;
         assert_eq!(
             accept(Some(&first), &retry),
             Ok(CommandAcceptance::DuplicateReplay)
         );
+        Ok(())
     }
 
     #[test]
-    fn cross_tenant_retry_is_a_typed_refusal() {
-        let first = command(cid(1), tid(2), b"do", Vec::new());
-        let foreign = command(cid(1), tid(3), b"do", Vec::new());
+    fn cross_tenant_retry_is_a_typed_refusal() -> Result<(), OrderingError> {
+        let first = command(cid(1), tid(2), b"do", Vec::new())?;
+        let foreign = command(cid(1), tid(3), b"do", Vec::new())?;
         assert_eq!(
             accept(Some(&first), &foreign),
             Err(CommandError::TenantMismatch {
@@ -352,12 +378,13 @@ mod tests {
                 got: tid(3)
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn identity_mismatch_is_typed_never_guessed() {
-        let first = command(cid(1), tid(2), b"do", Vec::new());
-        let other = command(cid(4), tid(2), b"do", Vec::new());
+    fn identity_mismatch_is_typed_never_guessed() -> Result<(), OrderingError> {
+        let first = command(cid(1), tid(2), b"do", Vec::new())?;
+        let other = command(cid(4), tid(2), b"do", Vec::new())?;
         assert_eq!(
             accept(Some(&first), &other),
             Err(CommandError::IdentityMismatch {
@@ -365,6 +392,7 @@ mod tests {
                 incoming: cid(4)
             })
         );
+        Ok(())
     }
 
     #[test]

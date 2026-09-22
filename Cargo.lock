@@ -524,9 +524,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "0.1.8"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "664ab0e76afdaa883085d7d4e9cc1d75e3f28b267b330cd26dff9118a6fd34cc"
+checksum = "723ef46c3ba251a6fe66a27ce3e90abe3afed9f2b279b10ff722967058d36600"
 dependencies = [
  "appcui",
  "lgwks_std",
@@ -534,14 +534,15 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "0.6.3"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f1cb0d92af74f39f5d968a83cffc6e75155f67c58c8650f2f01b69aac2c408f"
+checksum = "c0c687bdb1c6b1bffbb558bee0020c079e4d39035f3ec7b7805ffec4f49b4ba1"
 dependencies = [
  "blake3",
  "getrandom",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1100,6 +1101,9 @@ name = "tracing-core"
 version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+]
 
 [[package]]
 name = "unicode-ident"

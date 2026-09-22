@@ -55,37 +55,6 @@ pub mod workspace;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    //! Shared test helpers. The workspace lints deny `unwrap`, `expect`
-    //! and `panic` everywhere, so test code surfaces unexpected
-    //! construction failures through this explicit helper instead.
-
-    /// Extracts the `Ok` value or fails the test with the error text.
-    ///
-    /// The scoped `allow` covers only this test-only failure path;
-    /// production code has no equivalent escape hatch.
-    #[expect(clippy::panic)]
-    pub(crate) fn expect_ok<T, E: core::fmt::Display>(result: Result<T, E>) -> T {
-        match result {
-            Ok(value) => value,
-            Err(err) => panic!("unexpected error: {err}"),
-        }
-    }
-
-    /// Extracts the `Some` value or fails the test, naming the absence.
-    ///
-    /// As [`expect_ok`]: the scoped `allow` covers only this test-only
-    /// failure path.
-    #[expect(clippy::panic)]
-    pub(crate) fn expect_ok_opt<T>(value: Option<T>) -> T {
-        match value {
-            Some(inner) => inner,
-            None => panic!("expected Some, found None"),
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

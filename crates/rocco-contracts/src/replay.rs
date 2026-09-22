@@ -37,7 +37,24 @@ pub struct PolicySnapshot {
     /// comparable within one revision (D18: pinned, versioned inputs).
     pub revision: u64,
     /// The scopes the policy allows at this revision.
-    pub allowed_scopes: BTreeSet<Scope>,
+    allowed_scopes: BTreeSet<Scope>,
+}
+
+impl PolicySnapshot {
+    /// Pins a policy revision and its admitted scopes.
+    #[must_use]
+    pub const fn new(revision: u64, allowed_scopes: BTreeSet<Scope>) -> Self {
+        Self {
+            revision,
+            allowed_scopes,
+        }
+    }
+
+    /// Returns the scopes admitted by this immutable policy snapshot.
+    #[must_use]
+    pub fn allowed_scopes(&self) -> &BTreeSet<Scope> {
+        &self.allowed_scopes
+    }
 }
 
 /// The pinned budget snapshot (D36 input): what remains of the run's
@@ -53,6 +70,14 @@ pub struct BudgetSnapshot {
     pub unit: BudgetUnit,
 }
 
+impl BudgetSnapshot {
+    /// Pins a remaining balance without changing its denomination.
+    #[must_use]
+    pub const fn new(remaining: u64, unit: BudgetUnit) -> Self {
+        Self { remaining, unit }
+    }
+}
+
 /// The pinned capability snapshot (D36 input): what the requesting worker
 /// is currently capable of, independent of policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +86,21 @@ pub struct BudgetSnapshot {
 #[non_exhaustive]
 pub struct CapabilitySnapshot {
     /// The worker's capabilities.
-    pub capabilities: BTreeSet<Scope>,
+    capabilities: BTreeSet<Scope>,
+}
+
+impl CapabilitySnapshot {
+    /// Pins the worker's observed capabilities.
+    #[must_use]
+    pub const fn new(capabilities: BTreeSet<Scope>) -> Self {
+        Self { capabilities }
+    }
+
+    /// Returns the capabilities observed in this immutable snapshot.
+    #[must_use]
+    pub fn capabilities(&self) -> &BTreeSet<Scope> {
+        &self.capabilities
+    }
 }
 
 /// The pinned authority-validity snapshot: the instant the backing grant
@@ -75,6 +114,14 @@ pub struct ValiditySnapshot {
     pub valid_until: SystemTime,
 }
 
+impl ValiditySnapshot {
+    /// Pins the exclusive authority expiry instant.
+    #[must_use]
+    pub const fn new(valid_until: SystemTime) -> Self {
+        Self { valid_until }
+    }
+}
+
 /// The declared effect whose admission is being decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -84,7 +131,7 @@ pub struct EffectRequest {
     /// The stable operation ID of the effect to dispatch.
     pub operation: crate::ids::OperationId,
     /// The scopes the effect requires; every one must pass.
-    pub required_scopes: BTreeSet<Scope>,
+    required_scopes: BTreeSet<Scope>,
     /// The cost the effect declares.
     pub cost: u64,
     /// The unit the cost is declared in; it must match the budget snapshot.
@@ -92,6 +139,32 @@ pub struct EffectRequest {
     /// The pinned observation instant (E30: expiry is a pinned input, so
     /// an expired approval is a typed denial, never consent by timeout).
     pub observed_at: SystemTime,
+}
+
+impl EffectRequest {
+    /// Declares an effect for validation; construction grants no authority.
+    #[must_use]
+    pub const fn new(
+        operation: crate::ids::OperationId,
+        required_scopes: BTreeSet<Scope>,
+        cost: u64,
+        unit: BudgetUnit,
+        observed_at: SystemTime,
+    ) -> Self {
+        Self {
+            operation,
+            required_scopes,
+            cost,
+            unit,
+            observed_at,
+        }
+    }
+
+    /// Returns the scopes this effect requires at admission.
+    #[must_use]
+    pub fn required_scopes(&self) -> &BTreeSet<Scope> {
+        &self.required_scopes
+    }
 }
 
 /// Why a request was denied.
@@ -166,16 +239,16 @@ pub fn decide(
         return denied(DenialReason::AuthorityExpired);
     }
     let first_refused = request
-        .required_scopes
+        .required_scopes()
         .iter()
-        .find(|scope| !policy.allowed_scopes.contains(*scope));
+        .find(|scope| !policy.allowed_scopes().contains(*scope));
     if let Some(scope) = first_refused {
         return denied(DenialReason::PolicyRefuses { scope: *scope });
     }
     let first_missing = request
-        .required_scopes
+        .required_scopes()
         .iter()
-        .find(|scope| !capabilities.capabilities.contains(*scope));
+        .find(|scope| !capabilities.capabilities().contains(*scope));
     if let Some(scope) = first_missing {
         return denied(DenialReason::CapabilityMissing { scope: *scope });
     }
@@ -213,6 +286,24 @@ pub struct PinnedInputs {
 }
 
 impl PinnedInputs {
+    /// Bundles the exact inputs used for one deterministic authorization.
+    #[must_use]
+    pub const fn new(
+        request: EffectRequest,
+        policy: PolicySnapshot,
+        budget: BudgetSnapshot,
+        capabilities: CapabilitySnapshot,
+        validity: ValiditySnapshot,
+    ) -> Self {
+        Self {
+            request,
+            policy,
+            budget,
+            capabilities,
+            validity,
+        }
+    }
+
     /// Re-derives the decision from the pinned inputs alone.
     #[must_use]
     pub fn decide(&self) -> Decision {
@@ -237,6 +328,14 @@ pub struct ReplayRecord {
     pub pinned: PinnedInputs,
     /// The decision recorded at authorization time.
     pub recorded: Decision,
+}
+
+impl ReplayRecord {
+    /// Records a decision with its original inputs for independent replay.
+    #[must_use]
+    pub const fn new(pinned: PinnedInputs, recorded: Decision) -> Self {
+        Self { pinned, recorded }
+    }
 }
 
 /// One replay finding.
@@ -270,6 +369,7 @@ pub enum ReplayFinding {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct ReplayReport {
+    /// One ordered finding for each replayed record.
     findings: Vec<ReplayFinding>,
 }
 
@@ -337,7 +437,18 @@ mod tests {
     }
 
     fn instant(secs: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+        let duration = std::time::Duration::from_secs(secs);
+        let instant = SystemTime::UNIX_EPOCH
+            .checked_add(duration)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            instant
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|error| error.to_string()),
+            Ok(duration),
+            "fixture instant must be representable"
+        );
+        instant
     }
 
     fn scopes(list: &[Scope]) -> BTreeSet<Scope> {
@@ -533,7 +644,8 @@ mod tests {
     }
 
     #[test]
-    fn e55_replay_is_bit_identical_under_pinned_snapshots() {
+    fn e55_replay_is_bit_identical_under_pinned_snapshots() -> Result<(), Box<dyn std::error::Error>>
+    {
         let log: Vec<ReplayRecord> = vec![
             allowed_request(10),
             allowed_request(50),
@@ -562,24 +674,17 @@ mod tests {
         }
         // Bit-identical is stronger than equal: the recorded and re-derived
         // decisions serialize to identical bytes.
+        #[cfg(feature = "serde")]
         for record in &log {
-            let recorded_bytes = lgwks_std::json::to_string(&record.recorded);
-            assert!(
-                recorded_bytes.is_ok(),
-                "serialize failed: {recorded_bytes:?}"
-            );
+            let recorded_bytes = lgwks_std::json::to_string(&record.recorded)?;
             let rederived = record.pinned.decide();
-            let rederived_bytes = lgwks_std::json::to_string(&rederived);
-            assert!(
-                rederived_bytes.is_ok(),
-                "serialize failed: {rederived_bytes:?}"
-            );
+            let rederived_bytes = lgwks_std::json::to_string(&rederived)?;
             assert_eq!(
-                recorded_bytes.unwrap_or_default(),
-                rederived_bytes.unwrap_or_default(),
+                recorded_bytes, rederived_bytes,
                 "recorded and re-derived decisions must be byte-identical"
             );
         }
+        Ok(())
     }
 
     #[test]

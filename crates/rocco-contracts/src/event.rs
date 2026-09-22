@@ -125,6 +125,14 @@ pub struct CausalRef {
     pub sequence: EventSequence,
 }
 
+impl CausalRef {
+    /// Identifies one already-recorded causal parent.
+    #[must_use]
+    pub const fn new(run: RunId, sequence: EventSequence) -> Self {
+        Self { run, sequence }
+    }
+}
+
 /// The vocabulary of recorded facts the reducer folds (D01).
 ///
 /// The set is closed by C02; extending it is a specification change.
@@ -146,6 +154,20 @@ pub enum EventKind {
     TerminalReceiptPublished,
 }
 
+impl EventKind {
+    /// Stable canonical digest tag; adding a tag requires a specification change.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::CommandAccepted => 0,
+            Self::StateTransition => 1,
+            Self::EffectIntentRecorded => 2,
+            Self::EffectOutcomeRecorded => 3,
+            Self::TerminalReceiptPublished => 4,
+        }
+    }
+}
+
 /// A recorded fact in a run's event log.
 ///
 /// Construction validates the causal-parent bound and canonicalizes the
@@ -155,12 +177,19 @@ pub enum EventKind {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct Event {
+    /// Tenant owning the recorded fact.
     tenant: TenantId,
+    /// Run whose journal contains the fact.
     run: RunId,
+    /// Gap-free position within the run.
     sequence: EventSequence,
+    /// Canonical bounded citations of prior facts.
     causal_parents: Vec<CausalRef>,
+    /// Closed specification vocabulary discriminator.
     kind: EventKind,
+    /// Owned bytes interpreted according to the kind.
     payload: Box<[u8]>,
+    /// Digest binding the kind tag and payload.
     payload_digest: ContentDigest,
 }
 
@@ -193,7 +222,7 @@ impl Event {
             });
         }
         let mut hasher = hash::Hasher::new();
-        hasher.update(&[kind as u8]);
+        hasher.update(&[kind.tag()]);
         hasher.update(&payload);
         let payload_digest = ContentDigest::from_blake3(hasher.finalize());
         Ok(Self {
@@ -330,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn causal_parents_are_canonicalized_sorted_and_deduplicated() {
+    fn causal_parents_are_canonicalized_sorted_and_deduplicated() -> Result<(), OrderingError> {
         let built = Event::new(
             tid(),
             rid(1),
@@ -339,11 +368,12 @@ mod tests {
             EventKind::CommandAccepted,
             Box::from(b"payload".as_slice()),
         );
-        let event = crate::test_support::expect_ok(built);
+        let event = built?;
         assert_eq!(
             event.causal_parents(),
             &[causal(rid(2), 8), causal(rid(9), 3)]
         );
+        Ok(())
     }
 
     #[test]

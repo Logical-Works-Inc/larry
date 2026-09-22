@@ -44,8 +44,11 @@ pub mod fixture {
     /// operations it was asked about.
     #[derive(Debug, Clone, Default)]
     pub struct ScriptedOwner {
+        /// Outcomes consumed in fixture order.
         scripted: VecDeque<EffectOutcome>,
+        /// Mutating calls observed by this fixture.
         dispatched: Vec<OperationId>,
+        /// Status queries observed by this fixture.
         reconciled: Vec<OperationId>,
     }
 
@@ -84,6 +87,7 @@ pub mod fixture {
             &self.reconciled
         }
 
+        /// Consumes a scripted outcome, defaulting to unknown when exhausted.
         fn next(&mut self, operation: OperationId) -> EffectOutcome {
             self.scripted
                 .pop_front()

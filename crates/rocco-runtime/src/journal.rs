@@ -26,6 +26,7 @@ use crate::error::RuntimeError;
 
 /// One recorded journal entry, in the order it was recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JournalEntry {
     /// A command identity was accepted for the first time.
     Command(Command),
@@ -41,9 +42,13 @@ pub enum JournalEntry {
 /// preference.
 #[derive(Debug, Clone)]
 pub struct Journal {
+    /// Recorded facts in append order.
     entries: Vec<JournalEntry>,
+    /// Accepted command identities mapped to entry offsets.
     command_index: BTreeMap<CommandId, usize>,
+    /// Last accepted event sequence for each run.
     last_sequence: BTreeMap<RunId, EventSequence>,
+    /// Maximum retained entries.
     capacity: usize,
 }
 
@@ -135,8 +140,8 @@ impl Journal {
     #[must_use]
     pub fn command(&self, id: CommandId) -> Option<&Command> {
         let index = *self.command_index.get(&id)?;
-        match self.entries.get(index)? {
-            JournalEntry::Command(command) => Some(command),
+        match *self.entries.get(index)? {
+            JournalEntry::Command(ref command) => Some(command),
             JournalEntry::Event(_) => None,
         }
     }
@@ -191,6 +196,7 @@ impl Journal {
         Ok(())
     }
 
+    /// Refuses an append once the configured entry bound is reached.
     fn reserve_one(&self) -> Result<(), RuntimeError> {
         if self.is_full() {
             return Err(RuntimeError::JournalFull {

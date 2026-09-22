@@ -12,15 +12,17 @@ use rocco_contracts::workspace::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn scope(tenant: u8, workspace: u8) -> WorkspaceScope {
-    WorkspaceScope {
-        tenant: TenantId::from_bytes([tenant; 16]),
-        workspace: WorkspaceId::from_bytes([workspace; 16]),
-    }
+    WorkspaceScope::new(
+        TenantId::from_bytes([tenant; 16]),
+        WorkspaceId::from_bytes([workspace; 16]),
+    )
 }
 
 fn run(number: usize) -> RunId {
     let mut bytes = [0; 16];
-    bytes[..8].copy_from_slice(&(number as u64).to_be_bytes());
+    let encoded = number.to_be_bytes();
+    let offset = 8usize.saturating_sub(encoded.len());
+    bytes[offset..8].copy_from_slice(&encoded);
     RunId::from_bytes(bytes)
 }
 
@@ -29,11 +31,7 @@ fn command(number: usize) -> CommandId {
 }
 
 fn version(revision: u64) -> WorkVersion {
-    WorkVersion {
-        revision,
-        baseline: ContentDigest::over(&[b"baseline"]),
-        fence: 7,
-    }
+    WorkVersion::new(revision, ContentDigest::over(&[b"baseline"]), 7)
 }
 
 fn item(number: usize, revision: u64, state: RunState) -> Result<WorkItem, WorkspaceError> {
@@ -53,12 +51,7 @@ fn coordinator() -> Result<ContinueCoordinator, WorkspaceError> {
 }
 
 fn request(number: usize) -> ContinueRequest {
-    ContinueRequest {
-        command: command(number),
-        scope: scope(1, 1),
-        run: run(1),
-        expected_revision: 1,
-    }
+    ContinueRequest::new(command(number), scope(1, 1), run(1), 1)
 }
 
 #[derive(Default)]
@@ -75,18 +68,18 @@ impl MooWorkspaceAdapter for RecordingOwner {
         request: ContinueRequest,
         version: WorkVersion,
     ) -> Result<ContinueOutcome, WorkspaceError> {
-        self.calls += 1;
+        self.calls = self.calls.saturating_add(1);
         if let Some(error) = self.refusal {
             return Err(error);
         }
         if let Some(current) = self.current {
             version.verify_current(current)?;
         }
-        let mut receipt = ContinueReceipt {
+        let mut receipt = ContinueReceipt::new(
             request,
             version,
-            operation: OperationId::from_bytes(*request.command.as_bytes()),
-        };
+            OperationId::from_bytes(*request.command.as_bytes()),
+        );
         if self.corrupt_receipt {
             receipt.request.scope = scope(9, 9);
         }
@@ -102,7 +95,12 @@ fn title_byte_bound_and_controls_are_enforced_at_construction() -> TestResult {
             Err(WorkspaceError::InvalidTitle)
         );
     }
-    let title = "é".repeat(MAX_WORK_TITLE_BYTES / 2);
+    let title = "é".repeat(128);
+    assert_eq!(
+        title.len(),
+        MAX_WORK_TITLE_BYTES,
+        "fixture fills the UTF-8 byte bound exactly"
+    );
     assert_eq!(
         WorkItem::new(scope(1, 1), run(1), &title, version(1), RunState::Draft)?.title(),
         title
@@ -111,7 +109,7 @@ fn title_byte_bound_and_controls_are_enforced_at_construction() -> TestResult {
         WorkItem::new(
             scope(1, 1),
             run(1),
-            &(title + "x"),
+            &format!("{title}x"),
             version(1),
             RunState::Draft
         ),
@@ -192,7 +190,7 @@ fn disconnected_continue_is_real_awaiting_dependency_not_running_or_success() ->
     let mut controller = coordinator()?;
     for _ in 0..100 {
         assert_eq!(
-            controller.continue_work(&mut MissingMooAdapter, request(1))?,
+            controller.continue_work(&mut MissingMooAdapter::default(), request(1))?,
             ContinueOutcome::AwaitingDependency
         );
         assert_eq!(
@@ -236,31 +234,19 @@ fn invalid_selection_never_reaches_the_owner() -> TestResult {
     let mut owner = RecordingOwner::default();
     for (change, error) in [
         (
-            ContinueRequest {
-                scope: scope(2, 1),
-                ..request(1)
-            },
+            ContinueRequest::new(command(1), scope(2, 1), run(1), 1),
             WorkspaceError::ScopeMismatch,
         ),
         (
-            ContinueRequest {
-                scope: scope(1, 2),
-                ..request(1)
-            },
+            ContinueRequest::new(command(1), scope(1, 2), run(1), 1),
             WorkspaceError::ScopeMismatch,
         ),
         (
-            ContinueRequest {
-                run: run(2),
-                ..request(1)
-            },
+            ContinueRequest::new(command(1), scope(1, 1), run(2), 1),
             WorkspaceError::MissingWork,
         ),
         (
-            ContinueRequest {
-                expected_revision: 0,
-                ..request(1)
-            },
+            ContinueRequest::new(command(1), scope(1, 1), run(1), 0),
             WorkspaceError::StaleWork,
         ),
     ] {
@@ -305,10 +291,7 @@ fn uncertain_or_refused_attempt_cannot_reuse_identity_for_other_content() -> Tes
         assert_eq!(
             controller.continue_work(
                 &mut owner,
-                ContinueRequest {
-                    run: run(2),
-                    ..request(1)
-                }
+                ContinueRequest::new(command(1), scope(1, 1), run(2), 1)
             ),
             Err(WorkspaceError::ConflictingRetry)
         );
@@ -326,18 +309,9 @@ fn uncertain_or_refused_attempt_cannot_reuse_identity_for_other_content() -> Tes
 #[test]
 fn owner_binding_changes_and_foreign_receipts_are_refused() -> TestResult {
     for current in [
-        WorkVersion {
-            revision: 2,
-            ..version(1)
-        },
-        WorkVersion {
-            fence: 8,
-            ..version(1)
-        },
-        WorkVersion {
-            baseline: ContentDigest::over(&[b"changed"]),
-            ..version(1)
-        },
+        version(2),
+        WorkVersion::new(1, version(1).baseline, 8),
+        WorkVersion::new(1, ContentDigest::over(&[b"changed"]), 7),
     ] {
         let mut controller = coordinator()?;
         let mut owner = RecordingOwner {
@@ -375,25 +349,22 @@ fn retry_capacity_never_silently_evicts_an_existing_identity() -> TestResult {
     let mut controller = coordinator()?;
     for number in 0..MAX_WORK_ITEMS {
         assert_eq!(
-            controller.continue_work(&mut MissingMooAdapter, request(number))?,
+            controller.continue_work(&mut MissingMooAdapter::default(), request(number))?,
             ContinueOutcome::AwaitingDependency
         );
     }
     assert_eq!(
-        controller.continue_work(&mut MissingMooAdapter, request(MAX_WORK_ITEMS)),
+        controller.continue_work(&mut MissingMooAdapter::default(), request(MAX_WORK_ITEMS)),
         Err(WorkspaceError::CapacityExceeded)
     );
     assert_eq!(
-        controller.continue_work(&mut MissingMooAdapter, request(0))?,
+        controller.continue_work(&mut MissingMooAdapter::default(), request(0))?,
         ContinueOutcome::AwaitingDependency
     );
     assert_eq!(
         controller.continue_work(
-            &mut MissingMooAdapter,
-            ContinueRequest {
-                expected_revision: 2,
-                ..request(0)
-            }
+            &mut MissingMooAdapter::default(),
+            ContinueRequest::new(command(0), scope(1, 1), run(1), 2)
         ),
         Err(WorkspaceError::ConflictingRetry)
     );
@@ -413,16 +384,12 @@ fn identical_run_and_command_ids_in_different_tenants_remain_separate() -> TestR
     )?)?;
     let mut second = ContinueCoordinator::new(second_board);
     let mut owner = RecordingOwner::default();
-    let a = first.continue_work(&mut owner, request(1))?;
-    let b = second.continue_work(
+    let first_outcome = first.continue_work(&mut owner, request(1))?;
+    let second_outcome = second.continue_work(
         &mut owner,
-        ContinueRequest {
-            scope: scope(2, 1),
-            expected_revision: 9,
-            ..request(1)
-        },
+        ContinueRequest::new(command(1), scope(2, 1), run(1), 9),
     )?;
-    assert_ne!(a, b);
+    assert_ne!(first_outcome, second_outcome);
     assert_eq!(
         first.board().get(run(1)).map(WorkItem::title),
         Some("Resume my workspace")

@@ -2,6 +2,7 @@
 use rocco_demo::{Demo, MAX_INPUT};
 use std::io::{self, BufRead, Read, Write};
 
+/// Runs the line-oriented fixture protocol over standard input and output.
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().len() != 1 {
         return Err("no arguments supported; enter help on stdin".into());
@@ -16,7 +17,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         line.clear();
         let count = input
             .by_ref()
-            .take((MAX_INPUT + 3) as u64)
+            .take(u64::try_from(MAX_INPUT.saturating_add(3))?)
             .read_until(b'\n', &mut line)?;
         if count == 0 {
             break;
@@ -46,7 +47,9 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("DEMO failed: {error}");
+            if writeln!(io::stderr().lock(), "DEMO failed: {error}").is_err() {
+                return std::process::ExitCode::FAILURE;
+            }
             std::process::ExitCode::FAILURE
         }
     }

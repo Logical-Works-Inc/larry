@@ -8,19 +8,28 @@ pub mod theme;
 
 /// Maximum command bytes, excluding the line terminator.
 pub const MAX_INPUT: usize = 4096;
+/// Maximum anchored notes retained by one disposable session.
 const MAX_NOTES: usize = 16;
 
+/// One immutable synthetic change, never an executable workspace operation.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 struct Event {
+    /// Synthetic source path displayed by the inspection pane.
     file: &'static str,
+    /// One-based source line displayed for this change.
     line: usize,
+    /// Stable fixture trace label.
     trace: &'static str,
+    /// Synthetic clone identity used by the hold boundary.
     owner: usize,
+    /// Text shown as the removed side of the fixture diff.
     before: &'static str,
+    /// Text shown as the added side of the fixture diff.
     after: &'static str,
 }
 
+/// Fixed script revealed by successive accepted `next` commands.
 const EVENTS: [Event; 3] = [
     Event {
         file: "src/retry.rs",
@@ -48,29 +57,47 @@ const EVENTS: [Event; 3] = [
     },
 ];
 
+/// Session-only feedback pinned to the originally selected change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 struct Note {
+    /// One-based fixture change number.
     event: usize,
+    /// Bounded operator feedback, never sent to a provider.
     text: String,
 }
 
+/// Whether the synthetic owner may reveal its next fixture change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 enum Work {
+    /// No owner is currently held by feedback.
     Ready,
-    Held { owner: usize, anchor: usize },
+    /// Feedback prevents this owner from advancing until explicit continuation.
+    Held {
+        /// Synthetic owner whose subsequent changes are held.
+        owner: usize,
+        /// Original one-based change number receiving the feedback.
+        anchor: usize,
+    },
 }
 
 /// A disposable synthetic session. Construction performs no I/O.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Demo {
+    /// Number of revealed entries in the fixed fixture script.
     cursor: usize,
+    /// Zero-based revealed entry selected for inspection and feedback.
     selected: Option<usize>,
+    /// Whether the explicitly empty scenario is active.
     empty: bool,
+    /// Whether the synthetic folder drawer is requested.
     folders: bool,
+    /// Whether the synthetic agent rail is requested.
     agents: bool,
+    /// Current feedback hold, independent of which entry is selected.
     work: Work,
+    /// Session-owned feedback with capacity bounded by `MAX_NOTES`.
     notes: Vec<Note>,
 }
 
@@ -90,6 +117,7 @@ impl Default for Demo {
 
 /// Safe rejection leaves the session unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Rejected {
     /// The command exceeded [`MAX_INPUT`] bytes.
     InputBound,
@@ -151,13 +179,14 @@ impl Demo {
         Ok(true)
     }
 
+    /// Parse an inspection anchor or feedback without changing state on refusal.
     fn targeted_command(&mut self, input: &str) -> Result<(), Rejected> {
         if let Some(anchor) = input.strip_prefix("inspect ") {
             let index = anchor
                 .parse::<usize>()
                 .ok()
-                .and_then(|n| n.checked_sub(1))
-                .filter(|n| *n < self.cursor)
+                .and_then(|number| number.checked_sub(1))
+                .filter(|number| *number < self.cursor)
                 .ok_or(Rejected::InvalidAnchor)?;
             self.selected = Some(index);
             Ok(())
@@ -171,6 +200,7 @@ impl Demo {
         }
     }
 
+    /// Reveal one scripted event unless its owner is held or the script ended.
     fn advance(&mut self) -> Result<(), Rejected> {
         if self.empty {
             return Err(Rejected::EndOfFixture);
@@ -180,10 +210,11 @@ impl Demo {
             return Err(Rejected::HeldWork);
         }
         self.selected = Some(self.cursor);
-        self.cursor += 1;
+        self.cursor = self.cursor.saturating_add(1);
         Ok(())
     }
 
+    /// Retain a bounded note and hold its selected synthetic owner atomically.
     fn feedback(&mut self, text: &str) -> Result<(), Rejected> {
         if text.is_empty() {
             return Err(Rejected::EmptyFeedback);
@@ -196,16 +227,17 @@ impl Demo {
             return Err(Rejected::HeldWork);
         }
         self.notes.push(Note {
-            event: index + 1,
+            event: index.saturating_add(1),
             text: text.to_owned(),
         });
         self.work = Work::Held {
             owner: EVENTS[index].owner,
-            anchor: index + 1,
+            anchor: index.saturating_add(1),
         };
         Ok(())
     }
 
+    /// Release an existing fixture hold without dispatching any real work.
     fn resume(&mut self) -> Result<(), Rejected> {
         if self.work == Work::Ready {
             return Err(Rejected::NoHeldWork);
@@ -217,7 +249,7 @@ impl Demo {
     /// Serialize the view contract through the published Logical Works JSON facade.
     /// Synthetic labels are present on every snapshot, including empty scenarios.
     pub fn snapshot(&self) -> Result<String, json::Error> {
-        let inspection = self.selected.map(|i| &EVENTS[i]);
+        let inspection = self.selected.map(|index| &EVENTS[index]);
         let value = json::json!({
             "mode": "DEMO — JSON fixture harness; native AppCUI view: cargo run --bin rocco",
             "effects": "none: no execution, providers, filesystem reads or writes",

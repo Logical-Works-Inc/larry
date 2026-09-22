@@ -86,7 +86,7 @@ pub enum FenceRefusal {
 
 impl fmt::Display for FenceRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
             Self::Revoked { operation } => {
                 write!(f, "operation {operation} was revoked by name")
             }
@@ -116,7 +116,7 @@ pub enum FenceError {
 
 impl fmt::Display for FenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
             Self::EpochExhausted => {
                 write!(f, "security epoch space is exhausted; it never wraps")
             }
@@ -135,9 +135,13 @@ impl std::error::Error for FenceError {}
 /// carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevocationFence {
+    /// Current host-authenticated security generation.
     epoch: SecurityEpoch,
+    /// Operations whose authority has been withdrawn.
     revoked: BTreeSet<OperationId>,
+    /// Maximum mutating reaches before reauthentication.
     offline_bound: u32,
+    /// Mutating reaches since authentication, saturating at the integer bound.
     offline_spent: u32,
 }
 
@@ -293,14 +297,14 @@ mod tests {
     }
 
     fn admitted_at(operation: OperationId, epoch: SecurityEpoch) -> EffectIntent {
-        EffectIntent {
-            id: EffectId::from_bytes(*operation.as_bytes()),
+        EffectIntent::new(
+            EffectId::from_bytes(*operation.as_bytes()),
             operation,
-            run: RunId::from_bytes([0x11; 16]),
-            tenant: TenantId::from_bytes([0x22; 16]),
-            strategy: ReconciliationStrategy::Queryable,
-            admission_epoch: epoch,
-        }
+            RunId::from_bytes([0x11; 16]),
+            TenantId::from_bytes([0x22; 16]),
+            ReconciliationStrategy::Queryable,
+            epoch,
+        )
     }
 
     fn fence(bound: u32) -> RevocationFence {

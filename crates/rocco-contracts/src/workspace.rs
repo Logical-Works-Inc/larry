@@ -47,6 +47,14 @@ pub struct WorkspaceScope {
     pub workspace: WorkspaceId,
 }
 
+impl WorkspaceScope {
+    /// Binds the workspace to an authenticated host-supplied tenant.
+    #[must_use]
+    pub const fn new(tenant: TenantId, workspace: WorkspaceId) -> Self {
+        Self { tenant, workspace }
+    }
+}
+
 /// Owner-observed version binding; none of these fields grants authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -60,6 +68,16 @@ pub struct WorkVersion {
 }
 
 impl WorkVersion {
+    /// Records the owner's observed revision, baseline and claim fence.
+    #[must_use]
+    pub const fn new(revision: u64, baseline: ContentDigest, fence: u64) -> Self {
+        Self {
+            revision,
+            baseline,
+            fence,
+        }
+    }
+
     /// Refuses a changed revision, baseline or fence before dispatch.
     ///
     /// # Errors
@@ -76,10 +94,15 @@ impl WorkVersion {
 /// One validated, bounded work descriptor. It is a projection, not a grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkItem {
+    /// Fixed authenticated workspace scope.
     scope: WorkspaceScope,
+    /// Stable work identity.
     run: RunId,
+    /// Validated bounded, control-free display text.
     title: Box<str>,
+    /// Owner-observed optimistic concurrency binding.
     version: WorkVersion,
+    /// Observed run state; never advanced by selection.
     state: RunState,
 }
 
@@ -136,7 +159,9 @@ impl WorkItem {
 /// Tenant/workspace-isolated, bounded projection rebuilt from its owner.
 #[derive(Debug)]
 pub struct WorkBoard {
+    /// Isolation boundary shared by every row.
     scope: WorkspaceScope,
+    /// Capacity-bounded rows in deterministic identity order.
     items: BTreeMap<RunId, WorkItem>,
 }
 
@@ -210,6 +235,24 @@ pub struct ContinueRequest {
     pub expected_revision: u64,
 }
 
+impl ContinueRequest {
+    /// Binds a human action to the exact selected snapshot.
+    #[must_use]
+    pub const fn new(
+        command: CommandId,
+        scope: WorkspaceScope,
+        run: RunId,
+        expected_revision: u64,
+    ) -> Self {
+        Self {
+            command,
+            scope,
+            run,
+            expected_revision,
+        }
+    }
+}
+
 /// Owner acknowledgement of a queued request; not proof of completed work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -220,6 +263,22 @@ pub struct ContinueReceipt {
     pub version: WorkVersion,
     /// Stable owner operation identity for reconciliation.
     pub operation: OperationId,
+}
+
+impl ContinueReceipt {
+    /// Records an owner acknowledgement; the coordinator validates its binding.
+    #[must_use]
+    pub const fn new(
+        request: ContinueRequest,
+        version: WorkVersion,
+        operation: OperationId,
+    ) -> Self {
+        Self {
+            request,
+            version,
+            operation,
+        }
+    }
 }
 
 /// Visible dispatch outcome, kept separate from the observed run state.
@@ -266,10 +325,14 @@ impl MooWorkspaceAdapter for MissingMooAdapter {
     }
 }
 
+/// Retained identity and acknowledgement for one bounded retry slot.
 #[derive(Debug)]
 struct Attempt {
+    /// Immutable request content for conflict detection.
     request: ContinueRequest,
+    /// Original baseline and fence binding.
     version: WorkVersion,
+    /// Validated owner acknowledgement, once available.
     receipt: Option<ContinueReceipt>,
 }
 
@@ -280,7 +343,9 @@ struct Attempt {
 /// across restart belongs to the owner, not this disposable view.
 #[derive(Debug)]
 pub struct ContinueCoordinator {
+    /// Disposable authenticated projection.
     board: WorkBoard,
+    /// Bounded identity history, never silently evicted.
     attempts: BTreeMap<CommandId, Attempt>,
 }
 

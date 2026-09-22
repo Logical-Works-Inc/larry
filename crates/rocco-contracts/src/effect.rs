@@ -57,19 +57,19 @@ pub enum ReconciliationStrategy {
 }
 
 impl ReconciliationStrategy {
-    /// The declared retry policy for this strategy.
+    /// The declared reconciliation action for this strategy.
     ///
     /// `RequiresHuman` and `AlwaysCompensate` never retry: an unknown
     /// outcome for them is permanent, and retry eligibility is impossible
     /// for non-idempotent effects whose outcome is unknown (Cell 04, E56).
     #[must_use]
-    pub const fn retry_policy(self) -> RetryPolicy {
+    pub const fn reconciliation_action(self) -> ReconciliationAction {
         match self {
-            Self::Queryable => RetryPolicy::QueryUntilResolved,
-            Self::IdempotentRetrySafe => RetryPolicy::Bounded {
+            Self::Queryable => ReconciliationAction::Observe,
+            Self::IdempotentRetrySafe => ReconciliationAction::RetryBounded {
                 max_attempts: MAX_EFFECT_ATTEMPTS,
             },
-            Self::RequiresHuman | Self::AlwaysCompensate => RetryPolicy::None,
+            Self::RequiresHuman | Self::AlwaysCompensate => ReconciliationAction::LeaveUnknown,
         }
     }
 
@@ -81,21 +81,25 @@ impl ReconciliationStrategy {
     }
 }
 
-/// The retry policy derived from a reconciliation strategy.
+/// The non-temporal recovery action derived from a reconciliation strategy.
+///
+/// `lgwks_std::retry::RetryPolicy` owns attempt timing, backoff, deadline and
+/// jitter. This enum deliberately owns no schedule: it selects an idempotent
+/// re-dispatch, an observation, or a permanent unknown disposition. A future
+/// owner adapter composes its chosen `lgwks_std` retry budget only for the
+/// [`Self::RetryBounded`] action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[non_exhaustive]
-pub enum RetryPolicy {
-    /// No retry is ever authorized for this effect.
-    None,
+pub enum ReconciliationAction {
+    /// No owner reach is authorized; retain the ambiguous outcome.
+    LeaveUnknown,
     /// At most `max_attempts` dispatches, reusing the stable operation ID.
-    Bounded {
+    RetryBounded {
         /// The inclusive attempt ceiling (Cell 05 default: 3).
         max_attempts: u8,
     },
-    /// Retry is replaced by status query until the endpoint resolves.
-    QueryUntilResolved,
+    /// Re-dispatch is replaced by a status query until the endpoint resolves.
+    Observe,
 }
 
 /// A reserved, recorded intent to perform one external effect.
@@ -134,6 +138,29 @@ pub struct EffectIntent {
     pub admission_epoch: SecurityEpoch,
 }
 
+impl EffectIntent {
+    /// Binds an intent to its run, tenant and runtime-supplied admission epoch.
+    /// This record does not itself authorize dispatch.
+    #[must_use]
+    pub const fn new(
+        id: EffectId,
+        operation: OperationId,
+        run: RunId,
+        tenant: TenantId,
+        strategy: ReconciliationStrategy,
+        admission_epoch: SecurityEpoch,
+    ) -> Self {
+        Self {
+            id,
+            operation,
+            run,
+            tenant,
+            strategy,
+            admission_epoch,
+        }
+    }
+}
+
 /// The observed outcome of a dispatched effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -163,10 +190,10 @@ impl EffectOutcome {
     /// The stable operation ID this outcome refers to.
     #[must_use]
     pub const fn operation(&self) -> OperationId {
-        match self {
+        match *self {
             Self::Succeeded { operation }
             | Self::Failed { operation }
-            | Self::Unknown { operation } => *operation,
+            | Self::Unknown { operation } => operation,
         }
     }
 }
@@ -188,6 +215,19 @@ pub enum TerminalDisposition {
     /// The effect was compensated through a new authorized effect; the
     /// original external state was reversed at the endpoint.
     Compensated,
+}
+
+impl TerminalDisposition {
+    /// Stable canonical receipt tag, preserving recorded digest identities.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Succeeded => 0,
+            Self::Failed => 1,
+            Self::UnknownPermanent => 2,
+            Self::Compensated => 3,
+        }
+    }
 }
 
 /// Resolves an observed outcome against the declared strategy into a
@@ -232,10 +272,15 @@ pub const fn terminal_disposition(
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct TerminalReceipt {
+    /// Operation closed by this immutable receipt.
     operation: OperationId,
+    /// Run that reserved the operation.
     run: RunId,
+    /// Tenant owning the operation.
     tenant: TenantId,
+    /// Recorded terminal result.
     disposition: TerminalDisposition,
+    /// Identity binding the receipt's semantic fields.
     digest: ContentDigest,
 }
 
@@ -256,7 +301,7 @@ impl TerminalReceipt {
             operation.as_bytes(),
             run.as_bytes(),
             tenant.as_bytes(),
-            &[disposition as u8],
+            &[disposition.tag()],
         ]);
         Self {
             operation,
@@ -319,8 +364,11 @@ impl TerminalReceipt {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct SupersedingResolution {
+    /// Original receipt identity; history is never overwritten.
     supersedes: ContentDigest,
+    /// Operation for which later evidence was received.
     operation: OperationId,
+    /// Disposition supported by the later evidence.
     disposition: TerminalDisposition,
 }
 
@@ -380,33 +428,33 @@ mod tests {
     }
 
     #[test]
-    fn r72_every_strategy_declares_its_retry_policy_and_unknown_permanence() {
+    fn r72_every_strategy_declares_its_reconciliation_action_and_unknown_permanence() {
         let cases = [
             (
                 ReconciliationStrategy::Queryable,
-                RetryPolicy::QueryUntilResolved,
+                ReconciliationAction::Observe,
                 false,
             ),
             (
                 ReconciliationStrategy::IdempotentRetrySafe,
-                RetryPolicy::Bounded {
+                ReconciliationAction::RetryBounded {
                     max_attempts: MAX_EFFECT_ATTEMPTS,
                 },
                 false,
             ),
             (
                 ReconciliationStrategy::RequiresHuman,
-                RetryPolicy::None,
+                ReconciliationAction::LeaveUnknown,
                 true,
             ),
             (
                 ReconciliationStrategy::AlwaysCompensate,
-                RetryPolicy::None,
+                ReconciliationAction::LeaveUnknown,
                 true,
             ),
         ];
         for (strategy, retry, permanent) in cases {
-            assert_eq!(strategy.retry_policy(), retry, "{strategy:?}");
+            assert_eq!(strategy.reconciliation_action(), retry, "{strategy:?}");
             assert_eq!(
                 strategy.unknown_outcome_is_permanent(),
                 permanent,
@@ -424,8 +472,8 @@ mod tests {
         );
         // It is a terminal disposition, not a retry authorization.
         assert_eq!(
-            ReconciliationStrategy::RequiresHuman.retry_policy(),
-            RetryPolicy::None
+            ReconciliationStrategy::RequiresHuman.reconciliation_action(),
+            ReconciliationAction::LeaveUnknown
         );
     }
 

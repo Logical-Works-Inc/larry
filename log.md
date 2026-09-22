@@ -22,6 +22,177 @@ planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
 
+## 2026-09-22: native layout hardening and full strict-gate recovery
+
+The native AppCUI path now represents terminal dimensions, text widths, layout
+shares, cursor motion, panel bounds and fixture indexing through explicit
+saturating or checked operations. The repair removes float layout shares,
+unchecked casts and arithmetic, stale reference patterns, an unbounded
+front-removal pattern, and undocumented private drawing helpers. Narrow and
+extreme terminal dimensions now clip deterministically rather than relying on
+implicit conversion or arithmetic behavior. SVG review helpers use the same
+checked terminal-dimension boundary.
+
+The root line driver and native launcher retain their standard-error contract
+without the forbidden print macros. The executable journey tests still observe
+their failures on standard error. Native layout tests now calculate the panel
+floor through the production integer share function, so the layout invariant
+cannot drift from the code it verifies.
+
+This completes the previously recorded demo strict-lint repair; it does not
+complete C02 or turn the fixture into an owner integration. The workspace now
+has local build/test/lint evidence, while authenticated authority, E65's
+trusted display-to-dispatch binding, real owner adapters, durability, hosted
+CI and independent acceptance remain open.
+
+The commit gate identified a duplicate `RetryPolicy` name. Rocco's old enum
+did not own delay, backoff, deadline or jitter; it selected one of three
+reconciliation actions: bounded idempotent re-dispatch, observation, or a
+permanent unknown. That is not representable by `lgwks_std::retry::RetryPolicy`,
+which owns the timing contract. The duplicate is replaced by
+`ReconciliationAction`; a real owner adapter must compose the estate retry
+budget only for its bounded re-dispatch action.
+
+Receipts: `tools/receipts/20260922-native-layout-pre-exec.json` and
+`tools/receipts/20260922-native-layout-post-exec.json`. Measured local gates:
+`cargo build --bins --locked`, `cargo test --workspace --all-targets --locked`
+(178 passed), `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+`lgwks-deps check .`, `tools/check_governance.py` (55 Python tests), both CLI
+journey suites (7 tests), `cargo fmt --all -- --check`, and `git diff --check`.
+
+## 2026-09-22: bounded E63 hostile-input runtime corpus
+
+Director direction: finish a bounded core slice from the current Rocco
+specification and live issues, using deep implementation research. Live issue
+#4 is architecture/governance-only and explicitly leaves runtime experiments
+NOT RUN, so it was not treated as authorization for a separate routing engine.
+The selected C02 slice is E63 hostile input at the public runtime boundary.
+
+The corpus submits malformed proposal bytes, a policy-forbidden scope and an
+over-budget declaration through `Runtime::submit`/`Runtime::tick`. The first
+produces `RuntimeError::Codec`; the latter two report exact deterministic
+`PolicyRefuses` and `BudgetExhausted` reasons. Each case asserts zero durable
+intent, receipt, fixture dispatch and fixture reconciliation. Malformed bytes
+are decoded before journal admission, so they consume neither journal capacity
+nor a command identity; the same command ID can later carry a valid proposal.
+An established run's tenant is also checked before journal admission, so a
+foreign cancellation leaves the journal, run state and owner-call count
+unchanged. The scope and budget cases deliberately script a success at the
+owner, proving the denied request cannot consume it. Existing E63 falsifiers
+continue to establish that a proposal cannot declare its own tenant or
+admission epoch.
+
+Research read Temporal's deterministic history/effect separation, Cedar's
+fail-closed versioned authorization input, and Kubernetes's bounded
+reconciliation mechanics. We adopt Cedar's fail-closed input treatment and
+Temporal's journal-before-effect boundary in the corpus. We reject a new Cedar
+dependency, a substitute policy database and a model-declared E65 binding:
+Secure-Authority and Logical-DB own those authorities, while an untrusted
+proposal cannot safely supply a trusted resolved resource/account/payload
+binding. E65 stays NOT RUN pending its canonical resolver/owner path.
+
+| Traceability | Proven locally | Still open |
+|---|---|---|
+| C02, E63, R79, D42 | malformed input has a typed codec refusal with zero journal admission and same-ID recovery; a foreign cancel has zero journal/state/owner mutation; forged scope/budget have exact gate denials with zero fixture-owner reach, intent and receipt | hostile model/generative corpus, forged labels/grants, authenticated authority, real owner and independent acceptance review |
+| C02, E65, R81 | unchanged | trusted resolved resource/destination/payload/adapter/schema/policy binding and a real display-to-dispatch swap journey |
+
+Receipts: `tools/receipts/20260922-c02-effect-binding-pre-exec-retry.json` and
+`tools/receipts/20260922-c02-effect-binding-post-exec.json`.
+The first pre-exec attempt using the default Python failed before receipt
+creation because it lacked NumPy; the approved already-provisioned
+`/Users/srinji/.local/bin/python` rerun completed and wrote the retained
+receipt. Scoped `cargo clippy -p rocco-runtime --test hostile_input --locked
+-- -D warnings`, `cargo test -p rocco-runtime --test hostile_input --locked`
+(4 passed), and `cargo check -p rocco-runtime --all-targets --locked` exit 0.
+The inherited root demo strict-lint failure remains outside this runtime slice;
+the final whole-workspace strict Clippy run reports 371 diagnostics in
+`src/native.rs` and `src/native/workspace.rs`. It prevents
+whole-workspace-green, local-CI, PR and delivery claims.
+
+## 2026-09-22: published estate refresh and partial strict-build repair
+
+Director direction: read the last work, load rust-skills and the anti-pattern
+digest, work next, update the Logicalworks-Crates releases from Cargo, and use
+applicable estate capabilities. The actual checkout was `416a8ac`, later than
+the previously recorded green runtime work. Its lint/non-exhaustive sweep left
+the workspace uncompilable before this change: the first `cargo check
+--workspace --all-targets --locked` exited 101, including a lint-level conflict for test panic
+suppression beneath `forbid`. This supersedes neither the historical receipts
+below nor the still-open C02 acceptance obligations.
+
+Cargo search and version-specific `cargo info` identified published
+`lgwks_std 0.6.6`, `lgwks_deps 0.1.12`, `lgwks_bot 0.4.2`, and
+`lgwks_ast 0.2.2`. The first two consumed pins and the unused bot catalog pin
+are updated. `cargo update -p lgwks_std -p lgwks_deps` exited 0 and updated
+only those two package versions; the lock also records the new tracing feature
+closure. The MSRV remains 1.98. `lgwks-deps check .` exits 0 with one semantic
+approval; no approval or lint was weakened.
+
+Reuse assessment: UUID generation, entropy, BLAKE3 hashing, JSON/serde and
+AppCUI already route through the estate and remain there on the new versions.
+Deterministic collections and clock types remain Rust std. The synchronous
+contract reducer needs neither the bot's asynchronous runtime nor a parser;
+neither dependency is added merely to increase usage. The existing admitted
+thiserror edge remains unchanged. No sibling repository was edited, no owner
+adapter connected, and the Logical-DB memory hold remains in force. Broader
+estate adoption and E63/E65 completion are not claimed.
+
+The next buildable repair removes forbidden test panic/unwrap suppressions,
+adds public constructors for non-exhaustive records, and replaces enum casts
+in canonical identities with explicit stable tags. Regression tests pin the
+same digest bytes, reject unknown wire variants, and preserve expired-authority
+denial and replay divergence. Runtime consumers now use those constructors;
+unknown authorization, command, event, retry-policy and disposition variants
+produce typed refusals, never authorization or terminal success. The runtime's
+new malformed-strategy test observes zero dispatches, authorizations and
+receipts. Journal authority, stage order and BTreeMap determinism remain intact.
+
+The demo consumer repair is **partial**. Constructor calls, missing mouse-test
+imports, test error propagation and clipped rectangle bounds are repaired, but
+its private documentation, layout arithmetic/casts, reference patterns and a
+disallowed Vec::remove still fail the strict gate. Its new boundary tests have
+not executed. The workspace must not be described as compiling or tested green.
+
+| Traceability | Proven locally | Still open |
+|---|---|---|
+| C02, D01, D04, D36 | Contract construction, stable digest tags, deterministic replay and runtime refusal regressions | Full workspace acceptance, independent C02 acceptance review and proof obligations |
+| E63, E65, E71 | Unsupported wire-strategy refusal; existing tenant/freshness regressions pass | Hostile-generator/display-to-dispatch acceptance and authenticated authority integration |
+
+Final scoped receipts from the implementation runs: contract `cargo check`,
+`cargo test`, strict `cargo clippy` and fmt all exit 0; 76 test executions with
+defaults and 73 without defaults pass. The no-default test previously tried to
+serialize unconditionally; only the JSON comparison is now feature-gated,
+while semantic replay assertions still run. Runtime check, test, strict Clippy
+and fmt exit 0, with 60 test executions passing. Demo test and Clippy exit 101
+before tests execute. Its final Clippy run reports 371 library and 355
+library-test diagnostics; counts are not a measure of progress or completeness.
+The earlier whole-workspace fmt check also failed on the native import block;
+that block was formatted, and all four changed demo files subsequently passed
+the scoped rustfmt check. `git diff --check` exits 0. The read-only reviewer
+found no actionable defect in the contract or subsequent runtime/demo diffs;
+this is source review, not independent execution or full C02 acceptance.
+
+| Axis | Evidence and limits for this partial change |
+|---|---|
+| Frontier | Known-root-cause compatibility repair; no superiority measurement |
+| Hyperscale | No fleet/load run |
+| Idiomatic | Contract/runtime strict scoped gates pass; demo remains uncompilable |
+| Generalized | Default/no-default contract suites, stable-byte and unsupported-input regressions pass; demo boundary cases unexecuted |
+| Decoupled | Public constructor consumers and typed unsupported-variant refusals exercised in runtime tests; full application gate remains open |
+| Ephemeral | Journal-in-hand replay/recovery tests pass; no process-death durability proof |
+| Portable | Local macOS ARM64 only; no other platform run |
+| Multi-tenant | Existing tenant-declaration/restoration falsifiers pass; no concurrent fleet isolation measurement |
+| Performance | No latency, allocation or comparative benchmark; no speed claim |
+
+The bounded implementation stopped without a commit or PR because the workspace
+is still red. Continue with `src/native.rs` and `src/native/workspace.rs`, then
+run every lane in AGENTS.md, including actual CLI and PTY journeys against newly
+built binaries. Do not reuse stale binaries as verification. Pre-exec receipt:
+`tools/receipts/20260922-estate-build-pre-exec.json`; post-exec receipt:
+`tools/receipts/20260922-estate-build-post-exec.json`. One attempted test-print
+patch was blocked by the library-print rule, corrected by removing those prints,
+and reapplied without bypass; compile guard reports also remained visible.
+
 ## 2026-09-20: the CI gate is given a runner — it had never once run
 
 Director direction: "LOCAL RUNNER". Both workflows requested `ubuntu-latest`, and
