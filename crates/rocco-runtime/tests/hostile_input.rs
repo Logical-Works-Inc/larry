@@ -30,11 +30,25 @@ fn hostile_submit(
     envelope_tenant: u8,
     payload: &[u8],
 ) -> Result<Command, Box<dyn std::error::Error>> {
+    hostile_command(id, envelope_tenant, CommandKind::Submit, payload)
+}
+
+/// Places arbitrary caller bytes in a valid command envelope.
+///
+/// # Errors
+///
+/// Returns a typed contract error if the envelope is structurally invalid.
+fn hostile_command(
+    id: u8,
+    envelope_tenant: u8,
+    kind: CommandKind,
+    payload: &[u8],
+) -> Result<Command, Box<dyn std::error::Error>> {
     Ok(Command::new(
         command_id(id),
         tenant(envelope_tenant),
         Vec::new(),
-        CommandContent::new(CommandKind::Submit, Box::from(payload)),
+        CommandContent::new(kind, Box::from(payload)),
     )?)
 }
 
@@ -58,8 +72,63 @@ fn e63_malformed_work_payload_is_refused_before_authorization_or_effects()
     );
     assert!(runtime.projection().intents().is_empty());
     assert!(runtime.projection().receipts().is_empty());
+    assert!(runtime.journal().is_empty());
     assert!(runtime.owner().dispatched().is_empty());
     assert!(runtime.owner().reconciled().is_empty());
+
+    let corrected = proposal(
+        run(1),
+        tenant(1),
+        operation(1),
+        &[Scope::FileRead],
+        1,
+        ReconciliationStrategy::Queryable,
+    );
+    runtime.submit(submit(command_id(1), &corrected)?)?;
+    let retried = runtime.tick()?;
+    assert_eq!(retried.admitted(), &[command_id(1)]);
+    Ok(())
+}
+
+/// An established run's tenant is authoritative over later command envelopes.
+#[test]
+fn e63_foreign_cancel_is_refused_before_journal_or_state_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = proposal(
+        run(4),
+        tenant(1),
+        operation(4),
+        &[Scope::FileRead],
+        1,
+        ReconciliationStrategy::Queryable,
+    );
+    let mut runtime = runtime_with(
+        ScriptedOwner::new(),
+        &[Scope::FileRead],
+        &[Scope::FileRead],
+        100,
+    )?;
+    runtime.submit(submit(command_id(4), &body)?)?;
+    runtime.tick()?;
+    let before_journal = runtime.journal().len();
+    let before_state = runtime.projection().run_state(run(4));
+    let before_dispatches = runtime.owner().dispatched().len();
+    let payload = lgwks_std::json::to_vec(&body)?;
+    runtime.submit(hostile_command(5, 2, CommandKind::Cancel, &payload)?)?;
+
+    let result = runtime.tick();
+
+    assert!(matches!(
+        result,
+        Err(RuntimeError::RunTenantMismatch {
+            run: rejected,
+            expected,
+            got,
+        }) if rejected == run(4) && expected == tenant(1) && got == tenant(2)
+    ));
+    assert_eq!(runtime.journal().len(), before_journal);
+    assert_eq!(runtime.projection().run_state(run(4)), before_state);
+    assert_eq!(runtime.owner().dispatched().len(), before_dispatches);
     Ok(())
 }
 

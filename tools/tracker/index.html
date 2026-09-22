@@ -508,7 +508,7 @@ var DATA = {
       "t": "Unsupported protocol version, absent capability, headless question and overload"
     },
     {
-      "e": "Partial local evidence. A deterministic hostile-input corpus submits malformed proposal bytes, a policy-forbidden scope and an over-budget declaration through the public runtime boundary. The malformed payload returns a typed codec refusal; forbidden scope and budget return their exact deterministic denial reasons. All three assert zero intent, receipt, dispatch and reconciliation. Existing falsifiers also prove a proposal cannot declare its own admission epoch or tenant. This is not a generative/model acceptance run and does not cover forged labels or grants.",
+      "e": "Partial local evidence. A deterministic hostile-input corpus submits malformed proposal bytes, a policy-forbidden scope, an over-budget declaration and a foreign-tenant cancellation through the public runtime boundary. Malformed bytes return a typed codec refusal before journal admission, then permit a valid same-ID retry. A foreign cancel leaves the journal, run state and owner calls unchanged. Scope and budget return their exact deterministic denial reasons with zero intent, receipt, dispatch and reconciliation. Existing falsifiers also prove a proposal cannot declare its own admission epoch or tenant. This is not a generative/model acceptance run and does not cover forged labels or grants.",
       "id": "E63",
       "st": "warning",
       "t": "Hostile generator emits malformed structures, forged identities, labels and grants"

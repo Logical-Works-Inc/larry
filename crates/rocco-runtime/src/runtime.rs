@@ -439,6 +439,8 @@ where
             let tenant = command.tenant();
             let kind = command.content().kind();
             let payload = command.content().payload().to_vec();
+            let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
+            self.ensure_run_tenant(proposal.run, tenant)?;
 
             let acceptance = self.journal.accept_command(command)?;
             if acceptance == CommandAcceptance::DuplicateReplay {
@@ -446,11 +448,11 @@ where
                 continue;
             }
             report.admitted.push(id);
-            self.record_command_accepted(id, tenant, kind, &payload)?;
+            self.record_command_accepted(id, tenant, kind, proposal.run)?;
 
             match kind {
-                CommandKind::Submit => self.admit_work(tenant, &payload, at, report)?,
-                CommandKind::Cancel => self.request_cancellation(tenant, &payload)?,
+                CommandKind::Submit => self.admit_work(tenant, &proposal, at, report)?,
+                CommandKind::Cancel => self.request_cancellation(tenant, proposal.run)?,
                 CommandKind::Steer => {
                     // Steering is recorded at a safe boundary; the command's
                     // acceptance is the durable fact this slice owns.
@@ -465,11 +467,10 @@ where
     fn admit_work(
         &mut self,
         tenant: TenantId,
-        payload: &[u8],
+        proposal: &WorkProposal,
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
-        let proposal: WorkProposal = lgwks_std::json::from_slice(payload)?;
         let run = proposal.run;
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection: recording the command already created
@@ -496,7 +497,7 @@ where
             });
         }
 
-        let pinned = self.pinned_inputs(&proposal, at);
+        let pinned = self.pinned_inputs(proposal, at);
         let authorization = match crate::gate::authorize(&pinned) {
             Ok(record) => record,
             Err(RuntimeError::Denied { operation, reason }) => {
@@ -816,13 +817,7 @@ where
     // ── stage 4: cancellation ───────────────────────────────────────────────
 
     /// Records cancellation for a nonterminal run.
-    fn request_cancellation(
-        &mut self,
-        tenant: TenantId,
-        payload: &[u8],
-    ) -> Result<(), RuntimeError> {
-        let proposal: WorkProposal = lgwks_std::json::from_slice(payload)?;
-        let run = proposal.run;
+    fn request_cancellation(&mut self, tenant: TenantId, run: RunId) -> Result<(), RuntimeError> {
         self.track_run(run, tenant)?;
         if self
             .projection
@@ -867,12 +862,27 @@ where
 
     /// Establishes run ownership without exceeding the run-table bound.
     fn track_run(&mut self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {
+        self.ensure_run_tenant(run, tenant)?;
         if !self.runs.contains_key(&run) && self.runs.len() >= self.settings.run_capacity {
             return Err(RuntimeError::RunLimitReached {
                 capacity: self.settings.run_capacity,
             });
         }
         self.runs.entry(run).or_insert(RunLive { tenant });
+        Ok(())
+    }
+
+    /// Refuses an envelope whose tenant differs from an established run owner.
+    fn ensure_run_tenant(&self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {
+        if let Some(live) = self.runs.get(&run)
+            && live.tenant != tenant
+        {
+            return Err(RuntimeError::RunTenantMismatch {
+                run,
+                expected: live.tenant,
+                got: tenant,
+            });
+        }
         Ok(())
     }
 
@@ -899,16 +909,10 @@ where
         command: CommandId,
         tenant: TenantId,
         kind: CommandKind,
-        payload: &[u8],
+        run: RunId,
     ) -> Result<(), RuntimeError> {
-        let decoded: WorkProposal = lgwks_std::json::from_slice(payload)?;
-        let payload = CommandAcceptedPayload {
-            command,
-            run: decoded.run,
-            kind,
-        };
+        let payload = CommandAcceptedPayload { command, run, kind };
         let bytes = lgwks_std::json::to_vec(&payload)?;
-        let run = decoded.run;
         self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
     }
 

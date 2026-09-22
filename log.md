@@ -72,10 +72,15 @@ The corpus submits malformed proposal bytes, a policy-forbidden scope and an
 over-budget declaration through `Runtime::submit`/`Runtime::tick`. The first
 produces `RuntimeError::Codec`; the latter two report exact deterministic
 `PolicyRefuses` and `BudgetExhausted` reasons. Each case asserts zero durable
-intent, receipt, fixture dispatch and fixture reconciliation. The scope and
-budget cases deliberately script a success at the owner, proving the denied
-request cannot consume it. Existing E63 falsifiers continue to establish that
-a proposal cannot declare its own tenant or admission epoch.
+intent, receipt, fixture dispatch and fixture reconciliation. Malformed bytes
+are decoded before journal admission, so they consume neither journal capacity
+nor a command identity; the same command ID can later carry a valid proposal.
+An established run's tenant is also checked before journal admission, so a
+foreign cancellation leaves the journal, run state and owner-call count
+unchanged. The scope and budget cases deliberately script a success at the
+owner, proving the denied request cannot consume it. Existing E63 falsifiers
+continue to establish that a proposal cannot declare its own tenant or
+admission epoch.
 
 Research read Temporal's deterministic history/effect separation, Cedar's
 fail-closed versioned authorization input, and Kubernetes's bounded
@@ -88,7 +93,7 @@ binding. E65 stays NOT RUN pending its canonical resolver/owner path.
 
 | Traceability | Proven locally | Still open |
 |---|---|---|
-| C02, E63, R79, D42 | malformed input has a typed codec refusal; forged scope/budget have exact gate denials; all three have zero fixture-owner reach, intent and receipt | hostile model/generative corpus, forged labels/grants, authenticated authority, real owner and independent acceptance review |
+| C02, E63, R79, D42 | malformed input has a typed codec refusal with zero journal admission and same-ID recovery; a foreign cancel has zero journal/state/owner mutation; forged scope/budget have exact gate denials with zero fixture-owner reach, intent and receipt | hostile model/generative corpus, forged labels/grants, authenticated authority, real owner and independent acceptance review |
 | C02, E65, R81 | unchanged | trusted resolved resource/destination/payload/adapter/schema/policy binding and a real display-to-dispatch swap journey |
 
 Receipts: `tools/receipts/20260922-c02-effect-binding-pre-exec-retry.json` and

@@ -12,7 +12,7 @@ use core::fmt;
 use rocco_contracts::error::{
     AuthorityError, CommandError, OrderingError, SequenceError, TransitionError,
 };
-use rocco_contracts::ids::{OperationId, RunId};
+use rocco_contracts::ids::{OperationId, RunId, TenantId};
 use rocco_contracts::replay::DenialReason;
 use rocco_contracts::state::RunState;
 
@@ -77,6 +77,15 @@ pub enum RuntimeError {
     RunNotTracked {
         /// The untracked run.
         run: RunId,
+    },
+    /// A command envelope targeted a run owned by another tenant.
+    RunTenantMismatch {
+        /// The targeted run.
+        run: RunId,
+        /// Tenant established when the run was first admitted.
+        expected: TenantId,
+        /// Tenant carried by the untrusted command envelope.
+        got: TenantId,
     },
     /// Dispatch was attempted for an effect with no durable intent on
     /// record. Reservation must be persisted *before* dispatch, so that a
@@ -163,6 +172,12 @@ impl fmt::Display for RuntimeError {
                 write!(f, "effect {operation} denied: {reason:?}")
             }
             Self::RunNotTracked { run } => write!(f, "run {run} is not tracked"),
+            Self::RunTenantMismatch { run, expected, got } => {
+                write!(
+                    f,
+                    "run {run} belongs to tenant {expected}; command carried tenant {got}"
+                )
+            }
             Self::IntentNotDurable { operation } => {
                 write!(
                     f,
@@ -212,6 +227,7 @@ impl std::error::Error for RuntimeError {
             | Self::EffectLimitReached { .. }
             | Self::Denied { .. }
             | Self::RunNotTracked { .. }
+            | Self::RunTenantMismatch { .. }
             | Self::IntentNotDurable { .. }
             | Self::DuplicateOperation { .. }
             | Self::UnresolvableOutcome { .. }
