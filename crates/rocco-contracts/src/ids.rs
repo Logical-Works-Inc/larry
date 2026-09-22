@@ -265,17 +265,17 @@ mod tests {
 
     #[test]
     fn digest_is_deterministic_over_identical_parts() {
-        let a = ContentDigest::over(&[b"kind", b"payload"]);
-        let b = ContentDigest::over(&[b"kind", b"payload"]);
-        assert_eq!(a, b);
-        assert_eq!(a.to_hex().len(), 64);
+        let first = ContentDigest::over(&[b"kind", b"payload"]);
+        let repeated = ContentDigest::over(&[b"kind", b"payload"]);
+        assert_eq!(first, repeated);
+        assert_eq!(first.to_hex().len(), 64);
     }
 
     #[test]
     fn digest_differs_over_different_parts() {
-        let a = ContentDigest::over(&[b"alpha"]);
-        let b = ContentDigest::over(&[b"beta"]);
-        assert_ne!(a, b);
+        let alpha = ContentDigest::over(&[b"alpha"]);
+        let beta = ContentDigest::over(&[b"beta"]);
+        assert_ne!(alpha, beta);
     }
 
     #[cfg(feature = "serde")]

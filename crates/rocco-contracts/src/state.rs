@@ -116,7 +116,7 @@ impl RunState {
 
 impl core::fmt::Display for RunState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let name = match self {
+        let name = match *self {
             RunState::Draft => "Draft",
             RunState::Admitted => "Admitted",
             RunState::AwaitingAuthority => "AwaitingAuthority",
@@ -215,70 +215,83 @@ pub enum TransitionEvent {
 /// rollback claim carrying partial external effects, and
 /// [`TransitionError::NotAllowed`] for an event the state does not admit.
 pub fn transition(state: RunState, event: TransitionEvent) -> Result<RunState, TransitionError> {
-    use RunState as S;
-    use TransitionEvent as E;
-
     match (state, event) {
-        (S::Draft, E::Admit) => Ok(S::Admitted),
-        (S::Draft, E::AwaitAuthority) => Ok(S::AwaitingAuthority),
-        (S::Draft, E::AwaitDependency) => Ok(S::AwaitingDependency),
-        (S::Draft, E::DetectConflict) => Ok(S::Conflict),
-        (S::Draft, E::RequestCancellation) => Ok(S::Cancelling),
+        (RunState::Draft, TransitionEvent::Admit) => Ok(RunState::Admitted),
+        (RunState::Draft, TransitionEvent::AwaitAuthority) => Ok(RunState::AwaitingAuthority),
+        (RunState::Draft, TransitionEvent::AwaitDependency) => Ok(RunState::AwaitingDependency),
+        (RunState::Draft, TransitionEvent::DetectConflict) => Ok(RunState::Conflict),
+        (RunState::Draft, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
 
-        (S::Admitted, E::Start) => Ok(S::Running),
-        (S::Admitted, E::AwaitAuthority) => Ok(S::AwaitingAuthority),
-        (S::Admitted, E::AwaitDependency) => Ok(S::AwaitingDependency),
-        (S::Admitted, E::DetectConflict) => Ok(S::Conflict),
-        (S::Admitted, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::Admitted, E::Fail) => Ok(S::Failed),
+        (RunState::Admitted, TransitionEvent::Start) => Ok(RunState::Running),
+        (RunState::Admitted, TransitionEvent::AwaitAuthority) => Ok(RunState::AwaitingAuthority),
+        (RunState::Admitted, TransitionEvent::AwaitDependency) => Ok(RunState::AwaitingDependency),
+        (RunState::Admitted, TransitionEvent::DetectConflict) => Ok(RunState::Conflict),
+        (RunState::Admitted, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
+        (RunState::Admitted, TransitionEvent::Fail) => Ok(RunState::Failed),
 
-        (S::AwaitingAuthority, E::AuthorityGranted) => Ok(S::Admitted),
-        (S::AwaitingAuthority, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::AwaitingAuthority, E::Fail) => Ok(S::Failed),
+        (RunState::AwaitingAuthority, TransitionEvent::AuthorityGranted) => Ok(RunState::Admitted),
+        (RunState::AwaitingAuthority, TransitionEvent::RequestCancellation) => {
+            Ok(RunState::Cancelling)
+        }
+        (RunState::AwaitingAuthority, TransitionEvent::Fail) => Ok(RunState::Failed),
 
-        (S::AwaitingDependency, E::DependencyReady) => Ok(S::Admitted),
-        (S::AwaitingDependency, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::AwaitingDependency, E::Fail) => Ok(S::Failed),
+        (RunState::AwaitingDependency, TransitionEvent::DependencyReady) => Ok(RunState::Admitted),
+        (RunState::AwaitingDependency, TransitionEvent::RequestCancellation) => {
+            Ok(RunState::Cancelling)
+        }
+        (RunState::AwaitingDependency, TransitionEvent::Fail) => Ok(RunState::Failed),
 
-        (S::Running, E::EnterReconciling) => Ok(S::Reconciling),
-        (S::Running, E::AwaitAuthority) => Ok(S::AwaitingAuthority),
-        (S::Running, E::AwaitDependency) => Ok(S::AwaitingDependency),
-        (S::Running, E::DetectConflict) => Ok(S::Conflict),
-        (S::Running, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::Running, E::Fail) => Ok(S::Failed),
-        (S::Running, E::ObserveUnknownOutcome) => Ok(S::OutcomeUnknown),
+        (RunState::Running, TransitionEvent::EnterReconciling) => Ok(RunState::Reconciling),
+        (RunState::Running, TransitionEvent::AwaitAuthority) => Ok(RunState::AwaitingAuthority),
+        (RunState::Running, TransitionEvent::AwaitDependency) => Ok(RunState::AwaitingDependency),
+        (RunState::Running, TransitionEvent::DetectConflict) => Ok(RunState::Conflict),
+        (RunState::Running, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
+        (RunState::Running, TransitionEvent::Fail) => Ok(RunState::Failed),
+        (RunState::Running, TransitionEvent::ObserveUnknownOutcome) => Ok(RunState::OutcomeUnknown),
 
-        (S::Reconciling, E::VerificationPassed) => Ok(S::Verifying),
-        (S::Reconciling, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::Reconciling, E::Fail) => Ok(S::Failed),
-        (S::Reconciling, E::ObserveUnknownOutcome) => Ok(S::OutcomeUnknown),
+        (RunState::Reconciling, TransitionEvent::VerificationPassed) => Ok(RunState::Verifying),
+        (RunState::Reconciling, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
+        (RunState::Reconciling, TransitionEvent::Fail) => Ok(RunState::Failed),
+        (RunState::Reconciling, TransitionEvent::ObserveUnknownOutcome) => {
+            Ok(RunState::OutcomeUnknown)
+        }
 
-        (S::Verifying, E::EnterFinalizing) => Ok(S::Finalizing),
-        (S::Verifying, E::VerificationFailed) => Ok(S::Reconciling),
-        (S::Verifying, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::Verifying, E::Fail) => Ok(S::Failed),
+        (RunState::Verifying, TransitionEvent::EnterFinalizing) => Ok(RunState::Finalizing),
+        (RunState::Verifying, TransitionEvent::VerificationFailed) => Ok(RunState::Reconciling),
+        (RunState::Verifying, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
+        (RunState::Verifying, TransitionEvent::Fail) => Ok(RunState::Failed),
 
-        (S::Finalizing, E::Complete) => Ok(S::Completed),
-        (S::Finalizing, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::Finalizing, E::Fail) => Ok(S::Failed),
+        (RunState::Finalizing, TransitionEvent::Complete) => Ok(RunState::Completed),
+        (RunState::Finalizing, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
+        (RunState::Finalizing, TransitionEvent::Fail) => Ok(RunState::Failed),
 
-        (S::Conflict, E::ResolveConflict) => Ok(S::Reconciling),
-        (S::Conflict, E::RequestCancellation) => Ok(S::Cancelling),
-        (S::Conflict, E::Fail) => Ok(S::Failed),
+        (RunState::Conflict, TransitionEvent::ResolveConflict) => Ok(RunState::Reconciling),
+        (RunState::Conflict, TransitionEvent::RequestCancellation) => Ok(RunState::Cancelling),
+        (RunState::Conflict, TransitionEvent::Fail) => Ok(RunState::Failed),
 
-        (S::Cancelling, E::FinishCancellation) => Ok(S::Cancelled),
-        (S::Cancelling, E::MarkRolledBack(RollbackEvidence::FullyCompensated)) => Ok(S::RolledBack),
-        (S::Cancelling, E::ObserveUnknownOutcome) => Ok(S::OutcomeUnknown),
+        (RunState::Cancelling, TransitionEvent::FinishCancellation) => Ok(RunState::Cancelled),
+        (
+            RunState::Cancelling,
+            TransitionEvent::MarkRolledBack(RollbackEvidence::FullyCompensated),
+        ) => Ok(RunState::RolledBack),
+        (RunState::Cancelling, TransitionEvent::ObserveUnknownOutcome) => {
+            Ok(RunState::OutcomeUnknown)
+        }
 
         // Partial external effects are never labelled rolled back: this
         // refusal takes precedence in every state, terminal or live.
-        (_, E::MarkRolledBack(RollbackEvidence::PartialExternalEffects)) => {
+        (_, TransitionEvent::MarkRolledBack(RollbackEvidence::PartialExternalEffects)) => {
             Err(TransitionError::PartialRollbackRefused { state })
         }
         // Terminal dispositions are immutable: no transition may leave them.
-        (S::Completed | S::Failed | S::RolledBack | S::Cancelled | S::OutcomeUnknown, _) => {
-            Err(TransitionError::Terminal { state })
-        }
+        (
+            RunState::Completed
+            | RunState::Failed
+            | RunState::RolledBack
+            | RunState::Cancelled
+            | RunState::OutcomeUnknown,
+            _,
+        ) => Err(TransitionError::Terminal { state }),
         (state, event) => Err(TransitionError::NotAllowed { state, event }),
     }
 }
@@ -287,53 +300,53 @@ pub fn transition(state: RunState, event: TransitionEvent) -> Result<RunState, T
 mod tests {
     use super::*;
     use TransitionError as Err;
-    use TransitionEvent as E;
+    use TransitionEvent as Event;
 
     fn all_events() -> Vec<TransitionEvent> {
         vec![
-            E::Admit,
-            E::AwaitAuthority,
-            E::AuthorityGranted,
-            E::AwaitDependency,
-            E::DependencyReady,
-            E::Start,
-            E::EnterReconciling,
-            E::VerificationPassed,
-            E::VerificationFailed,
-            E::EnterFinalizing,
-            E::Complete,
-            E::DetectConflict,
-            E::ResolveConflict,
-            E::RequestCancellation,
-            E::FinishCancellation,
-            E::Fail,
-            E::MarkRolledBack(RollbackEvidence::FullyCompensated),
-            E::MarkRolledBack(RollbackEvidence::PartialExternalEffects),
-            E::ObserveUnknownOutcome,
+            Event::Admit,
+            Event::AwaitAuthority,
+            Event::AuthorityGranted,
+            Event::AwaitDependency,
+            Event::DependencyReady,
+            Event::Start,
+            Event::EnterReconciling,
+            Event::VerificationPassed,
+            Event::VerificationFailed,
+            Event::EnterFinalizing,
+            Event::Complete,
+            Event::DetectConflict,
+            Event::ResolveConflict,
+            Event::RequestCancellation,
+            Event::FinishCancellation,
+            Event::Fail,
+            Event::MarkRolledBack(RollbackEvidence::FullyCompensated),
+            Event::MarkRolledBack(RollbackEvidence::PartialExternalEffects),
+            Event::ObserveUnknownOutcome,
         ]
     }
 
     #[test]
     fn happy_path_walks_every_stage_to_completed() {
         let steps = [
-            (RunState::Draft, E::Admit, RunState::Admitted),
-            (RunState::Admitted, E::Start, RunState::Running),
+            (RunState::Draft, Event::Admit, RunState::Admitted),
+            (RunState::Admitted, Event::Start, RunState::Running),
             (
                 RunState::Running,
-                E::EnterReconciling,
+                Event::EnterReconciling,
                 RunState::Reconciling,
             ),
             (
                 RunState::Reconciling,
-                E::VerificationPassed,
+                Event::VerificationPassed,
                 RunState::Verifying,
             ),
             (
                 RunState::Verifying,
-                E::EnterFinalizing,
+                Event::EnterFinalizing,
                 RunState::Finalizing,
             ),
-            (RunState::Finalizing, E::Complete, RunState::Completed),
+            (RunState::Finalizing, Event::Complete, RunState::Completed),
         ];
         for (from, event, to) in steps {
             assert_eq!(transition(from, event), Ok(to), "{from} + {event:?}");
@@ -353,7 +366,7 @@ mod tests {
 
     #[test]
     fn terminal_receipts_are_immutable_no_transition_leaves_completed() {
-        let partial = E::MarkRolledBack(RollbackEvidence::PartialExternalEffects);
+        let partial = Event::MarkRolledBack(RollbackEvidence::PartialExternalEffects);
         for event in all_events() {
             if event == partial {
                 continue; // dedicated test: refused with PartialRollbackRefused everywhere
@@ -378,7 +391,7 @@ mod tests {
             RunState::Cancelled,
             RunState::OutcomeUnknown,
         ];
-        let partial = E::MarkRolledBack(RollbackEvidence::PartialExternalEffects);
+        let partial = Event::MarkRolledBack(RollbackEvidence::PartialExternalEffects);
         for state in terminal {
             assert!(state.is_terminal());
             for event in all_events() {
@@ -394,26 +407,26 @@ mod tests {
     #[test]
     fn cancellation_requested_is_not_cancellation_completed() {
         assert_eq!(
-            transition(RunState::Running, E::RequestCancellation),
+            transition(RunState::Running, Event::RequestCancellation),
             Ok(RunState::Cancelling)
         );
         // Cancelling is not Cancelled, and cannot complete as if nothing
         // happened.
         assert_eq!(
-            transition(RunState::Cancelling, E::Complete),
+            transition(RunState::Cancelling, Event::Complete),
             Err(Err::NotAllowed {
                 state: RunState::Cancelling,
-                event: E::Complete
+                event: Event::Complete
             })
         );
         // Only the finished-cancellation event lands Cancelled.
         assert_eq!(
-            transition(RunState::Cancelling, E::FinishCancellation),
+            transition(RunState::Cancelling, Event::FinishCancellation),
             Ok(RunState::Cancelled)
         );
         // A live run cannot skip Cancelling and land Cancelled directly.
         assert!(matches!(
-            transition(RunState::Running, E::FinishCancellation),
+            transition(RunState::Running, Event::FinishCancellation),
             Err(Err::NotAllowed { .. })
         ));
         // Cancellation is requested from every live state.
@@ -421,7 +434,7 @@ mod tests {
             if state.is_terminal() || state == RunState::Cancelling {
                 continue;
             }
-            let outcome = transition(state, E::RequestCancellation);
+            let outcome = transition(state, Event::RequestCancellation);
             assert_eq!(
                 outcome,
                 Ok(RunState::Cancelling),
@@ -435,7 +448,7 @@ mod tests {
         for state in RunState::ALL {
             let outcome = transition(
                 state,
-                E::MarkRolledBack(RollbackEvidence::PartialExternalEffects),
+                Event::MarkRolledBack(RollbackEvidence::PartialExternalEffects),
             );
             assert_eq!(
                 outcome,
@@ -447,14 +460,14 @@ mod tests {
         assert_eq!(
             transition(
                 RunState::Cancelling,
-                E::MarkRolledBack(RollbackEvidence::FullyCompensated)
+                Event::MarkRolledBack(RollbackEvidence::FullyCompensated)
             ),
             Ok(RunState::RolledBack)
         );
         assert!(matches!(
             transition(
                 RunState::Running,
-                E::MarkRolledBack(RollbackEvidence::FullyCompensated)
+                Event::MarkRolledBack(RollbackEvidence::FullyCompensated)
             ),
             Err(Err::NotAllowed { .. })
         ));
@@ -463,11 +476,11 @@ mod tests {
     #[test]
     fn awaiting_states_return_to_admitted_when_their_gate_clears() {
         assert_eq!(
-            transition(RunState::AwaitingAuthority, E::AuthorityGranted),
+            transition(RunState::AwaitingAuthority, Event::AuthorityGranted),
             Ok(RunState::Admitted)
         );
         assert_eq!(
-            transition(RunState::AwaitingDependency, E::DependencyReady),
+            transition(RunState::AwaitingDependency, Event::DependencyReady),
             Ok(RunState::Admitted)
         );
     }
@@ -475,11 +488,11 @@ mod tests {
     #[test]
     fn conflict_resumes_through_reconciliation() {
         assert_eq!(
-            transition(RunState::Running, E::DetectConflict),
+            transition(RunState::Running, Event::DetectConflict),
             Ok(RunState::Conflict)
         );
         assert_eq!(
-            transition(RunState::Conflict, E::ResolveConflict),
+            transition(RunState::Conflict, Event::ResolveConflict),
             Ok(RunState::Reconciling)
         );
     }
@@ -487,12 +500,12 @@ mod tests {
     #[test]
     fn unknown_outcome_is_terminal_and_requires_a_superseding_resolution() {
         assert_eq!(
-            transition(RunState::Reconciling, E::ObserveUnknownOutcome),
+            transition(RunState::Reconciling, Event::ObserveUnknownOutcome),
             Ok(RunState::OutcomeUnknown)
         );
         assert!(RunState::OutcomeUnknown.is_terminal());
         assert_eq!(
-            transition(RunState::OutcomeUnknown, E::EnterReconciling),
+            transition(RunState::OutcomeUnknown, Event::EnterReconciling),
             Err(Err::Terminal {
                 state: RunState::OutcomeUnknown
             })
@@ -502,7 +515,7 @@ mod tests {
     #[test]
     fn verification_failure_returns_to_reconciliation() {
         assert_eq!(
-            transition(RunState::Verifying, E::VerificationFailed),
+            transition(RunState::Verifying, Event::VerificationFailed),
             Ok(RunState::Reconciling)
         );
     }

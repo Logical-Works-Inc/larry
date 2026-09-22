@@ -57,21 +57,29 @@ type ManualRuntime = Runtime<FoldProjection, ScriptedOwner, ManualClock>;
 
 /// Settings whose fence permits `bound` mutating reaches between
 /// authentications and stands at `at_epoch`.
-fn settings_at(at_epoch: SecurityEpoch, bound: u32) -> RuntimeSettings {
-    let mut base = settings(&[Scope::FileRead], &[Scope::FileRead], 100);
+fn settings_at(
+    at_epoch: SecurityEpoch,
+    bound: u32,
+) -> Result<RuntimeSettings, Box<dyn std::error::Error>> {
+    let mut base = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
     base.security_epoch = at_epoch;
     base.offline_dispatch_bound = bound;
-    base
+    Ok(base)
 }
 
 /// [`settings_at`] with authority validity far enough out that the E30 expiry
 /// check cannot confound a probe that deliberately moves the clock by a year.
-fn settings_that_outlive_a_year(at_epoch: SecurityEpoch, bound: u32) -> RuntimeSettings {
-    let mut base = settings_at(at_epoch, bound);
-    base.validity = ValiditySnapshot {
-        valid_until: epoch() + Duration::from_secs(10 * 365 * 24 * 3_600),
-    };
-    base
+fn settings_that_outlive_a_year(
+    at_epoch: SecurityEpoch,
+    bound: u32,
+) -> Result<RuntimeSettings, Box<dyn std::error::Error>> {
+    let mut base = settings_at(at_epoch, bound)?;
+    base.validity = ValiditySnapshot::new(
+        epoch()?
+            .checked_add(Duration::from_secs(10 * 365 * 24 * 3_600))
+            .ok_or("fixture validity overflow")?,
+    );
+    Ok(base)
 }
 
 /// A `Submit` for one file-read effect, in `run_byte`'s run.
@@ -122,9 +130,9 @@ fn open_retry_safe_effect(
     bound: u32,
 ) -> Result<(TestRuntime, OperationId), Box<dyn std::error::Error>> {
     let mut rt: TestRuntime = Runtime::new(
-        settings_at(SecurityEpoch::INITIAL, bound),
+        settings_at(SecurityEpoch::INITIAL, bound)?,
         ScriptedOwner::new(),
-        FixedClock::new(epoch()),
+        FixedClock::new(epoch()?),
     )?;
     rt.submit(work(
         1,
@@ -132,7 +140,11 @@ fn open_retry_safe_effect(
         ReconciliationStrategy::IdempotentRetrySafe,
     )?)?;
     let tick = rt.tick()?;
-    assert_eq!(tick.authorized(), &[operation(1)]);
+    assert_eq!(
+        tick.authorized(),
+        &[operation(1)],
+        "the fixture must reserve the intended operation"
+    );
     assert_eq!(
         rt.projection().effect_phase(operation(1)),
         Some(EffectPhase::Observed {
@@ -215,9 +227,9 @@ fn e71_the_fence_sits_between_the_durable_intent_and_the_owner_call()
         .journal()
         .entries()
         .iter()
-        .filter(|entry| match entry {
-            JournalEntry::Event(event) => event.kind() == EventKind::EffectIntentRecorded,
-            JournalEntry::Command(_) => false,
+        .filter(|entry| match **entry {
+            JournalEntry::Event(ref event) => event.kind() == EventKind::EffectIntentRecorded,
+            _ => false,
         })
         .count();
     assert_eq!(
@@ -268,9 +280,9 @@ fn e71_a_fenced_retry_is_a_non_event_reported_every_tick() -> Result<(), Box<dyn
 fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut rt = ManualRuntime::new(
-        settings_at(SecurityEpoch::INITIAL, 1),
+        settings_at(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
-        ManualClock::new(epoch()),
+        ManualClock::new(epoch()?),
     )?;
 
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
@@ -320,9 +332,9 @@ fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
 #[test]
 fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
 -> Result<(), Box<dyn std::error::Error>> {
-    let clock = ManualClock::new(epoch());
+    let clock = ManualClock::new(epoch()?);
     let mut rt = ManualRuntime::new(
-        settings_that_outlive_a_year(SecurityEpoch::INITIAL, 1),
+        settings_that_outlive_a_year(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
         clock.clone(),
     )?;
@@ -332,7 +344,11 @@ fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
 
     // Sleep: a year of wall time passes with no authority contact, and a fresh
     // probe is still refused.
-    clock.set(epoch() + Duration::from_secs(365 * 24 * 3_600));
+    clock.set(
+        epoch()?
+            .checked_add(Duration::from_secs(365 * 24 * 3_600))
+            .ok_or("fixture time overflow")?,
+    );
     rt.submit(work_in(
         2,
         2,
@@ -350,7 +366,11 @@ fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
 
     // Rollback: the clock runs backwards past where it started, and a second
     // fresh probe is refused just the same.
-    clock.set(epoch() - Duration::from_secs(365 * 24 * 3_600));
+    clock.set(
+        epoch()?
+            .checked_sub(Duration::from_secs(365 * 24 * 3_600))
+            .ok_or("fixture time underflow")?,
+    );
     rt.submit(work_in(
         3,
         3,
@@ -503,9 +523,9 @@ fn e71_a_proposal_cannot_declare_its_own_admission_epoch() -> Result<(), Box<dyn
     early.submit(submit(command_id(1), &body)?)?;
     early.tick()?;
     let mut late: TestRuntime = Runtime::new(
-        settings_at(SecurityEpoch::new(7), 64),
+        settings_at(SecurityEpoch::new(7), 64)?,
         ScriptedOwner::new(),
-        FixedClock::new(epoch()),
+        FixedClock::new(epoch()?),
     )?;
     late.submit(submit(command_id(1), &body)?)?;
     late.tick()?;
@@ -580,9 +600,9 @@ fn e63_a_proposal_cannot_declare_its_own_tenant() -> Result<(), Box<dyn std::err
     // restored run table is the same table the journal recorded.
     let journal = rt.into_journal();
     let restored: TestRuntime = restore(
-        settings(&[Scope::FileRead], &[Scope::FileRead], 100),
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::new(),
-        FixedClock::new(epoch()),
+        FixedClock::new(epoch()?),
         journal,
     )?;
     let receipt = rocco_contracts::effect::TerminalReceipt::publish(
@@ -613,9 +633,9 @@ fn e71_restore_fences_only_the_effects_the_new_generation_left_behind()
     let reopened = |at_epoch: SecurityEpoch| -> Result<TestRuntime, Box<dyn std::error::Error>> {
         let (original, _) = open_retry_safe_effect(64)?;
         Ok(restore(
-            settings_at(at_epoch, 64),
+            settings_at(at_epoch, 64)?,
             ScriptedOwner::new(),
-            FixedClock::new(epoch()),
+            FixedClock::new(epoch()?),
             original.into_journal(),
         )?)
     };
@@ -740,10 +760,10 @@ fn e71_an_observation_cannot_resolve_an_effect_that_was_never_sent()
     // The offline bound is spent, so the only reach this effect ever gets is
     // the refused one: `dispatch` is never called on the owner.
     let mut rt: TestRuntime = Runtime::new(
-        settings_at(SecurityEpoch::INITIAL, 0),
+        settings_at(SecurityEpoch::INITIAL, 0)?,
         // The endpoint answers "succeeded" to the status query.
         ScriptedOwner::scripted([succeeded(operation(1))]),
-        FixedClock::new(epoch()),
+        FixedClock::new(epoch()?),
     )?;
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
 
@@ -828,9 +848,9 @@ fn e71_an_observation_cannot_resolve_an_effect_that_was_never_sent()
 #[test]
 fn e71_a_zero_bound_stops_every_effect_permanently() -> Result<(), Box<dyn std::error::Error>> {
     let mut rt: TestRuntime = Runtime::new(
-        settings_at(SecurityEpoch::INITIAL, 0),
+        settings_at(SecurityEpoch::INITIAL, 0)?,
         ScriptedOwner::new(),
-        FixedClock::new(epoch()),
+        FixedClock::new(epoch()?),
     )?;
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     let refused = rt.tick()?;

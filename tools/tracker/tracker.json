@@ -1,9 +1,9 @@
 {
   "_comment": "The progress tracker's only hand-maintained file. Edit this, then run: python3 tools/tracker/generate.py. tools/check_governance.py fails if index.html is not the exact render of this file, if the cell ids drift from specification.md, or if any falsifier id below is not in specification.md's inventory. Completion percentages are ESTIMATE, never MEASURED. `head` names the commit whose state the figures describe, NOT the current tip: requiring it to equal HEAD would demand a new commit per commit and regress forever. Bump it only when the figures are re-measured at a new commit. `branch` names the delivery those figures were measured for, for the same reason: a count like `N ahead of origin` moves with every push and cannot stay true, so it is not recorded here.",
-  "head": "3954685",
-  "measured": "2026-09-20",
-  "branch": "main · delivered in PR stack #13",
-  "receipt": "local-CI: every declared lane passed",
+  "head": "416a8ac",
+  "measured": "2026-09-22",
+  "branch": "uncommitted estate/build repair atop 416a8ac",
+  "receipt": "LOCAL GREEN: workspace build/test/strict Clippy, governance and CLI journeys pass; product acceptance remains open",
   "lede": "Rocco is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",
   "falsifier_total": 80,
   "axes_total": 9,
@@ -27,10 +27,10 @@
     {
       "id": "C02",
       "job": "Command, effect & state model",
-      "pct": 59,
+      "pct": 61,
       "st": "warning",
-      "blocked": "E63/E65 as acceptance cases, independent review",
-      "why": "The algebra is complete and executable, and the runtime now enforces freshness at dispatch as well as reproducibility at admission: revocation during queue, partition, sleep, clock rollback and a replayed snapshot are all falsified locally. A hardening pass then found and repaired three defects in the same slice — recovery refused a journal naming a run that reserved nothing, a proposal body could declare its own tenant, and an observation could resolve an effect this process never sent — each with a local falsifier. Two of the eight falsifiers are still not run and no independent review has happened."
+      "blocked": "E65 acceptance, authenticated authority, independent acceptance review",
+      "why": "The 2026-09-22 repair updates published estate pins and restores the full workspace build, test and strict Clippy gates without weakening lints. The native layout path now uses checked/saturating geometry and conversion boundaries. A local E63 hostile-input corpus refuses malformed payloads, policy-forbidden scopes and over-budget declarations before any fixture-owner reach. C02's 61% is an estimate, not a newly measured completion claim; E63 remains partial, E65, authenticated authority and full product proof remain open."
     },
     {
       "id": "C03",
@@ -146,9 +146,9 @@
     },
     {
       "id": "E63",
-      "st": "todo",
+      "st": "warning",
       "t": "Hostile generator emits malformed structures, forged identities, labels and grants",
-      "e": "Not run as an acceptance case. No hostile generator has been pointed at the runtime. Two local falsifiers do cover the forged-security-declaration shape: a proposal cannot declare its own admission epoch, and it cannot declare its own tenant now that the tenant is read from the runtime's run table. That is a narrow slice of E63, not the case."
+      "e": "Partial local evidence. A deterministic hostile-input corpus submits malformed proposal bytes, a policy-forbidden scope and an over-budget declaration through the public runtime boundary. The malformed payload returns a typed codec refusal; forbidden scope and budget return their exact deterministic denial reasons. All three assert zero intent, receipt, dispatch and reconciliation. Existing falsifiers also prove a proposal cannot declare its own admission epoch or tenant. This is not a generative/model acceptance run and does not cover forged labels or grants."
     },
     {
       "id": "E65",
@@ -178,7 +178,7 @@
       {
         "part": "Its eight falsifiers run as acceptance cases",
         "weight": 30,
-        "complete": 22
+        "complete": 29
       },
       {
         "part": "Adversarial model check + independent review",
@@ -195,20 +195,18 @@
   ],
   "evidence": {
     "measured": [
-      "cargo test --workspace --all-targets --locked: 164 pass, 0 fail (161 before the hardening pass)",
-      "clippy -D warnings: clean",
-      "cargo fmt --all -- --check: clean",
-      "lgwks-deps check .: OK, no new edge",
-      "governance inventory 96/53/80/13/9: PASS",
-      "55 python tests: OK",
-      "local-CI receipt names the head",
-      "hardening pass: 3 defects found by adversarial reading, each fixed with a falsifier that fails if the property breaks",
-      "self-hosted runner rocco-macos-arm64: online, labels self-hosted/macOS/ARM64, read from gh api repos/.../actions/runners"
+      "Cargo search/info: published std 0.6.6, deps 0.1.12, bot 0.4.2; consumed pins and unused bot catalog updated",
+      "rocco-contracts: scoped check/test/strict Clippy/fmt pass; 76 default and 73 no-default test executions",
+      "rocco-runtime: scoped check/test/strict Clippy/fmt pass; 60 test executions",
+      "lgwks-deps check .: exit 0, one existing semantic approval",
+      "full workspace: cargo build --bins, 178 Rust tests, strict Clippy and fmt pass locally; native and line-driver CLI journeys pass",
+      "Source review found no actionable defect; not an independent gate execution",
+      "Historical full-workspace green receipts belong to 3954685 and earlier, not this working tree"
     ],
     "estimate": [
       "every percentage on this page",
-      "C02 at 59%, project at 4.5%",
-      "the +2.6 point delta",
+      "C02 at 61%, project at 4.6%",
+      "the +2 point estimate delta",
       "weights in the basis table"
     ],
     "notrun": [

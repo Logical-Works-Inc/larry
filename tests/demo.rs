@@ -2,59 +2,71 @@
 //! rejection contract, and session isolation. These drive `rocco_demo`
 //! directly; the native surface has its own real-PTY suite in
 //! `tools/test_native_cli.py`.
-//!
-//! `unwrap_used` and `expect_used` are denied workspace-wide because an unwrap
-//! on a production path is a panic waiting for the wrong input. This whole
-//! crate is the test, so the denials do not apply here: a journey that cannot
-//! read the key it asserts on SHOULD fail loudly.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use lgwks_std::json::{self, Value};
 use rocco_demo::{Demo, MAX_INPUT, Rejected};
 
-fn view(demo: &Demo) -> Value {
-    json::from_str(&demo.snapshot().unwrap()).unwrap()
+/// Read the public snapshot, propagating either serialization failure.
+fn view(demo: &Demo) -> Result<Value, json::Error> {
+    json::from_str(&demo.snapshot()?)
 }
 
 #[test]
-fn quiet_default_and_real_estate_serialization() {
-    let v = view(&Demo::default());
-    assert!(v["mode"].as_str().unwrap().starts_with("DEMO"));
-    assert_eq!(v["events"].as_array().unwrap().len(), 0);
-    assert!(v["agents"].is_null());
-    assert!(v["folders"].is_null());
-}
-
-#[test]
-fn hold_remembers_original_anchor_while_other_owner_advances() {
-    let mut d = Demo::default();
-    for c in ["next", "feedback bound retries", "next", "inspect 2"] {
-        d.command(c).unwrap();
-    }
-    let held = d.clone();
-    assert_eq!(d.command("feedback replace hold"), Err(Rejected::HeldWork));
-    assert_eq!(d, held);
-    assert_eq!(d.command("next"), Err(Rejected::HeldWork));
-    assert_eq!(d, held);
-    assert_eq!(view(&d)["work"]["Held"]["anchor"], 1);
-    assert_eq!(view(&d)["inspection"]["trace"], "fixture-02");
-    d.command("continue").unwrap();
-    d.command("next").unwrap();
-    assert_eq!(view(&d)["inspection"]["line"], 18);
-    assert_eq!(view(&d)["inspection"]["file"], "src/retry.rs");
-    assert_eq!(view(&d)["inspection"]["before"], "sleep(delay)");
+fn quiet_default_and_real_estate_serialization() -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = view(&Demo::default())?;
+    assert!(
+        snapshot["mode"]
+            .as_str()
+            .ok_or("mode must be a string")?
+            .starts_with("DEMO")
+    );
     assert_eq!(
-        view(&d)["inspection"]["after"],
+        snapshot["events"]
+            .as_array()
+            .ok_or("events must be an array")?
+            .len(),
+        0
+    );
+    assert!(snapshot["agents"].is_null());
+    assert!(snapshot["folders"].is_null());
+    Ok(())
+}
+
+#[test]
+fn hold_remembers_original_anchor_while_other_owner_advances()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut demo = Demo::default();
+    for command in ["next", "feedback bound retries", "next", "inspect 2"] {
+        assert!(demo.command(command)?);
+    }
+    let held = demo.clone();
+    assert_eq!(
+        demo.command("feedback replace hold"),
+        Err(Rejected::HeldWork)
+    );
+    assert_eq!(demo, held);
+    assert_eq!(demo.command("next"), Err(Rejected::HeldWork));
+    assert_eq!(demo, held);
+    assert_eq!(view(&demo)?["work"]["Held"]["anchor"], 1);
+    assert_eq!(view(&demo)?["inspection"]["trace"], "fixture-02");
+    assert!(demo.command("continue")?);
+    assert!(demo.command("next")?);
+    assert_eq!(view(&demo)?["inspection"]["line"], 18);
+    assert_eq!(view(&demo)?["inspection"]["file"], "src/retry.rs");
+    assert_eq!(view(&demo)?["inspection"]["before"], "sleep(delay)");
+    assert_eq!(
+        view(&demo)?["inspection"]["after"],
         "sleep(delay.min(remaining))"
     );
-    assert_eq!(view(&d)["feedback"][0]["text"], "bound retries");
-    assert_eq!(d.command("continue"), Err(Rejected::NoHeldWork));
+    assert_eq!(view(&demo)?["feedback"][0]["text"], "bound retries");
+    assert_eq!(demo.command("continue"), Err(Rejected::NoHeldWork));
+    Ok(())
 }
 
 #[test]
 fn invalid_inputs_are_atomic_and_control_text_is_rejected() {
-    let mut d = Demo::default();
-    for c in [
+    let mut demo = Demo::default();
+    for command in [
         "inspect 0",
         "inspect 1",
         "inspect 9999999999999999999999999",
@@ -65,60 +77,79 @@ fn invalid_inputs_are_atomic_and_control_text_is_rejected() {
         "\u{1b}[2J",
         "x\nnext",
     ] {
-        assert!(d.command(c).is_err(), "{c:?}");
-        assert_eq!(d, Demo::default());
+        assert!(demo.command(command).is_err(), "{command:?}");
+        assert_eq!(demo, Demo::default());
     }
     assert_eq!(
-        d.command(&"x".repeat(MAX_INPUT + 1)),
+        demo.command(&"x".repeat(MAX_INPUT.saturating_add(1))),
         Err(Rejected::InputBound)
     );
 }
 
 #[test]
-fn toggles_are_reversible_and_clone_tree_has_one_parent() {
-    let mut d = Demo::default();
-    d.command("folders").unwrap();
-    d.command("agents").unwrap();
-    let v = view(&d);
-    assert_eq!(v["folders"].as_array().unwrap().len(), 2);
-    let agents = v["agents"].as_array().unwrap();
+fn toggles_are_reversible_and_clone_tree_has_one_parent() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut demo = Demo::default();
+    assert!(demo.command("folders")?);
+    assert!(demo.command("agents")?);
+    let snapshot = view(&demo)?;
+    assert_eq!(
+        snapshot["folders"]
+            .as_array()
+            .ok_or("folders must be an array")?
+            .len(),
+        2
+    );
+    let agents = snapshot["agents"]
+        .as_array()
+        .ok_or("agents must be an array")?;
     assert!(agents[0]["parent"].is_null());
     assert_eq!(agents[1]["parent"], 0);
     assert_eq!(agents[2]["parent"], 0);
-    d.command("folders").unwrap();
-    d.command("agents").unwrap();
-    assert_eq!(d, Demo::default());
+    assert!(demo.command("folders")?);
+    assert!(demo.command("agents")?);
+    assert_eq!(demo, Demo::default());
+    Ok(())
 }
 
 #[test]
-fn empty_reset_end_and_quit_are_explicit() {
-    let mut d = Demo::default();
-    d.command("scenario empty").unwrap();
-    assert_eq!(d.command("next"), Err(Rejected::EndOfFixture));
-    assert_eq!(view(&d)["scenario"], "empty");
-    d.command("scenario change").unwrap();
+fn empty_reset_end_and_quit_are_explicit() -> Result<(), Box<dyn std::error::Error>> {
+    let mut demo = Demo::default();
+    assert!(demo.command("scenario empty")?);
+    assert_eq!(demo.command("next"), Err(Rejected::EndOfFixture));
+    assert_eq!(view(&demo)?["scenario"], "empty");
+    assert!(demo.command("scenario change")?);
     for _ in 0..3 {
-        d.command("next").unwrap();
+        assert!(demo.command("next")?);
     }
-    assert_eq!(d.command("next"), Err(Rejected::EndOfFixture));
-    d.command("reset").unwrap();
-    assert_eq!(d, Demo::default());
-    assert!(!d.command("quit").unwrap());
+    assert_eq!(demo.command("next"), Err(Rejected::EndOfFixture));
+    assert!(demo.command("reset")?);
+    assert_eq!(demo, Demo::default());
+    assert!(!demo.command("quit")?);
+    Ok(())
 }
 
 #[test]
-fn unicode_notes_have_finite_capacity_and_other_sessions_are_isolated() {
-    let mut d = Demo::default();
+fn unicode_notes_have_finite_capacity_and_other_sessions_are_isolated()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut demo = Demo::default();
     let other = Demo::default();
-    d.command("next").unwrap();
+    assert!(demo.command("next")?);
     for _ in 0..16 {
-        d.command("feedback préserver 日本語").unwrap();
-        d.command("continue").unwrap();
+        assert!(demo.command("feedback préserver 日本語")?);
+        assert!(demo.command("continue")?);
     }
-    let before = d.clone();
-    assert_eq!(d.command("feedback overflow"), Err(Rejected::NoteBound));
-    assert_eq!(d, before);
+    let before = demo.clone();
+    assert_eq!(demo.command("feedback overflow"), Err(Rejected::NoteBound));
+    assert_eq!(demo, before);
     assert_eq!(other, Demo::default());
-    assert_eq!(view(&d)["feedback"].as_array().unwrap().len(), 16);
-    assert_eq!(view(&d)["feedback"][0]["text"], "préserver 日本語");
+    assert_eq!(
+        view(&demo)?["feedback"]
+            .as_array()
+            .ok_or("feedback must be an array")?
+            .len(),
+        16
+    );
+    assert_eq!(view(&demo)?["feedback"][0]["text"], "préserver 日本語");
+    Ok(())
 }

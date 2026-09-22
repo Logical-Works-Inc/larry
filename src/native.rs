@@ -41,11 +41,15 @@ mod workspace;
 
 /// Below this the surface degrades to a single centred notice.
 const MIN_WIDTH: i32 = 50;
+/// Minimum rows required for the fixture's truthful compact layout.
 const MIN_HEIGHT: i32 = 12;
 
 /// Forge shows its dashboard at 100 columns and gives it a 34% share.
 const DASHBOARD_MIN_WIDTH: i32 = 100;
-const DASHBOARD_SHARE: f32 = 0.34;
+/// Integer numerator of the dashboard's 34% share.
+const DASHBOARD_SHARE_NUMERATOR: i32 = 34;
+/// Common denominator for layout share calculations.
+const LAYOUT_SHARE_DENOMINATOR: i32 = 100;
 
 /// The narrowest the dashboard's content column ever gets: the share column at
 /// [`DASHBOARD_MIN_WIDTH`], less the one-column divider and its two-column
@@ -54,8 +58,44 @@ const DASHBOARD_SHARE: f32 = 0.34;
 /// comment. It grows with the terminal, so this is the worst case.
 const PANEL_MIN_INNER: usize = 31;
 
-/// The status hub's MI/MD split.
-const HUB_MI_SHARE: f32 = 0.44;
+/// Integer numerator of the status hub's MI/MD 44% split.
+const HUB_MI_SHARE_NUMERATOR: i32 = 44;
+
+/// Returns a terminal text width without narrowing a platform-sized count.
+pub(super) fn text_width(text: &str) -> i32 {
+    i32::try_from(text.chars().count()).unwrap_or(i32::MAX)
+}
+
+/// Converts a nonnegative terminal coordinate into an allocation length.
+pub(super) fn allocation_width(width: i32) -> usize {
+    usize::try_from(width.max(0)).unwrap_or(usize::MAX)
+}
+
+/// Converts a bounded collection index into a terminal coordinate.
+pub(super) fn index_coordinate(index: usize) -> i32 {
+    i32::try_from(index).unwrap_or(i32::MAX)
+}
+
+/// Calculates Forge's dashboard share with integer, saturating arithmetic.
+fn dashboard_width(width: i32) -> i32 {
+    width
+        .max(0)
+        .saturating_mul(DASHBOARD_SHARE_NUMERATOR)
+        .div_euclid(LAYOUT_SHARE_DENOMINATOR)
+}
+
+/// Calculates the MI half of the status hub with the same bounded arithmetic.
+fn hub_mi_width(width: i32) -> i32 {
+    width
+        .max(0)
+        .saturating_mul(HUB_MI_SHARE_NUMERATOR)
+        .div_euclid(LAYOUT_SHARE_DENOMINATOR)
+}
+
+/// Converts AppCUI's unsigned surface dimension at its explicit terminal bound.
+pub(super) fn terminal_dimension(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
 
 /// The tail every accepted command's transcript echo carries. Named here
 /// because the width test has to tell an echo (which holds operator text and
@@ -64,6 +104,7 @@ const ECHO_SUFFIX: &str = " — DEMO; no backend action executed";
 
 /// Input prompt and the always-visible keybinding hint (Forge's `brand::HINT`).
 const PROMPT: &str = "❯ ";
+/// Always-visible shortcut reminder beside the fixture input.
 const HINT: &str = "/ cmds · Tab panels · ^C quit";
 
 /// Forge's activity line is `✢ {Verb}… · thinking with {EFFORT}`. Rocco has no
@@ -100,20 +141,28 @@ pub fn run() -> Result<(), appcui::system::Error> {
 /// A named panel that can take input. `Input` is the transcript itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    /// The transcript and note input own keyboard input.
     Input,
+    /// The fixture change panel is selected.
     Changes,
+    /// The fixture file panel is selected.
     Files,
+    /// The fixture agent panel is selected.
     Agents,
 }
 
 /// One styled run of text inside a transcript row.
 #[derive(Debug, Clone)]
 struct Part {
+    /// Text rendered by this run.
     text: String,
+    /// ANSI foreground colour for this run.
     color: Color,
+    /// Text emphasis flags for this run.
     flags: CharFlags,
 }
 
+/// Constructs one styled transcript run.
 fn part(text: impl Into<String>, color: Color, flags: CharFlags) -> Part {
     Part {
         text: text.into(),
@@ -144,11 +193,14 @@ enum Fit {
 /// One transcript row: a sequence of styled runs.
 #[derive(Debug, Clone)]
 struct Row {
+    /// Ordered styled runs making up the row.
     parts: Vec<Part>,
+    /// Whether the row must fit or may visibly clip.
     fit: Fit,
 }
 
 impl Row {
+    /// Creates an ordinary, unboldened authored row.
     fn plain(text: impl Into<String>, color: Color) -> Self {
         Self {
             parts: vec![part(text, color, CharFlags::None)],
@@ -156,6 +208,7 @@ impl Row {
         }
     }
 
+    /// Creates a bold authored row.
     fn bold(text: impl Into<String>, color: Color) -> Self {
         Self {
             parts: vec![part(text, color, CharFlags::Bold)],
@@ -163,6 +216,7 @@ impl Row {
         }
     }
 
+    /// Creates an authored row from supplied styled runs.
     fn of(parts: Vec<Part>) -> Self {
         Self {
             parts,
@@ -183,20 +237,31 @@ impl Row {
 /// what makes the 16-message cap evict whole messages instead of half of one.
 #[derive(Debug, Clone)]
 struct LogRow {
+    /// Rendered row contents.
     row: Row,
+    /// Whether this row begins a retained user-message group.
     starts_message: bool,
 }
 
+/// Disposable state for one native fixture session.
 struct Native {
+    /// Synthetic work fixture shown by the terminal surface.
     demo: Demo,
+    /// Current unsent input buffer.
     input: String,
+    /// Bounded fixture transcript.
     transcript: Vec<LogRow>,
     /// Count of user-message groups retained; drives eviction and the mark.
     user_messages: usize,
+    /// Whether a selected fixture diff is expanded.
     inspection: bool,
+    /// Whether the fixture command guide is visible.
     help: bool,
+    /// Whether slash-command completion owns input.
     command_mode: bool,
+    /// Bottom-relative transcript scroll offset.
     scroll: usize,
+    /// Panel currently owning keyboard navigation.
     focus: Focus,
     /// Advanced once per fixture action: rotates the tip without a timer.
     tick: usize,
@@ -251,13 +316,14 @@ impl Native {
         );
     }
 
+    /// Appends a row while evicting the oldest bounded transcript entry.
     fn push_row(&mut self, row: Row, starts_message: bool) {
         self.transcript.push(LogRow {
             row,
             starts_message,
         });
         while self.transcript.len() > MAX_LOG {
-            self.transcript.remove(0);
+            drop(self.transcript.drain(..1));
         }
     }
 
@@ -293,19 +359,26 @@ impl Native {
         panels
     }
 
+    /// Returns focus to the transcript when a conditional panel disappeared.
     fn normalize_focus(&mut self) {
         if !self.panels().contains(&self.focus) {
             self.focus = Focus::Input;
         }
     }
 
+    /// Moves focus through the currently available panels.
     fn cycle_focus(&mut self, forward: bool) {
         let panels = self.panels();
-        let at = panels.iter().position(|p| *p == self.focus).unwrap_or(0);
+        let at = panels
+            .iter()
+            .position(|panel| *panel == self.focus)
+            .unwrap_or(0);
         let next = if forward {
-            (at + 1) % panels.len()
+            at.saturating_add(1).rem_euclid(panels.len())
         } else {
-            (at + panels.len() - 1) % panels.len()
+            at.saturating_add(panels.len())
+                .saturating_sub(1)
+                .rem_euclid(panels.len())
         };
         self.focus = panels[next];
     }
@@ -337,7 +410,7 @@ impl Native {
     /// The canary: Forge's one-glance verdict strip, carrying Rocco's real
     /// fixture state instead of sensor heat.
     fn canary(&self) -> (&'static str, Color, String) {
-        match &self.demo.work {
+        match self.demo.work {
             Work::Held { owner, anchor } => (
                 "HELD",
                 WARN,
@@ -361,6 +434,7 @@ impl Native {
         }
     }
 
+    /// Applies one fixture command and records its typed result in the transcript.
     fn apply(&mut self, command: &str) {
         self.tick = self.tick.wrapping_add(1);
         match self.demo.command(command) {
@@ -380,7 +454,7 @@ impl Native {
                     _ => {}
                 }
                 self.normalize_focus();
-                let (text, color) = match &self.demo.work {
+                let (text, color) = match self.demo.work {
                     Work::Ready => (format!("{command}{ECHO_SUFFIX}"), BASE),
                     Work::Held { owner, anchor } => (
                         format!("HELD clone {owner} at event {anchor} · DEMO hold."),
@@ -396,6 +470,7 @@ impl Native {
         }
     }
 
+    /// Submits the input buffer as a fixture command or simulated message.
     fn submit(&mut self) {
         let input = std::mem::take(&mut self.input);
         self.tick = self.tick.wrapping_add(1);
@@ -419,7 +494,7 @@ impl Native {
                 false,
             );
             self.push_row(Row::plain("  F4 reveals the next change.", MUTED), false);
-            self.user_messages += 1;
+            self.user_messages = self.user_messages.saturating_add(1);
             self.evict_oldest_message();
         }
         self.scroll = 0;
@@ -433,16 +508,18 @@ impl Native {
         }
         let start = self.transcript.iter().position(|row| row.starts_message);
         if let Some(start) = start {
-            let end = self.transcript[start + 1..]
+            let after_start = start.saturating_add(1);
+            let end = self.transcript[after_start..]
                 .iter()
                 .position(|row| row.starts_message)
-                .map(|offset| start + 1 + offset)
+                .map(|offset| after_start.saturating_add(offset))
                 .unwrap_or(self.transcript.len());
             self.transcript.drain(start..end);
             self.user_messages = self.user_messages.saturating_sub(1);
         }
     }
 
+    /// Selects the adjacent revealed fixture event, if one exists.
     fn select_event(&mut self, down: bool) {
         if self.demo.cursor == 0 {
             self.push_notice("no events yet — F4 reveals the first change", WARN);
@@ -450,15 +527,18 @@ impl Native {
         }
         let selected = self.demo.selected.unwrap_or(0);
         let next = if down {
-            (selected + 1).min(self.demo.cursor - 1)
+            selected
+                .saturating_add(1)
+                .min(self.demo.cursor.saturating_sub(1))
         } else {
             selected.saturating_sub(1)
         };
-        self.apply(&format!("inspect {}", next + 1));
+        self.apply(&format!("inspect {}", next.saturating_add(1)));
     }
 
     // ── panel content ────────────────────────────────────────────────────
 
+    /// Builds the change-panel rows for the revealed fixture events.
     fn changes_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         if self.demo.cursor == 0 {
@@ -477,7 +557,11 @@ impl Native {
             // readable at [`PANEL_MIN_INNER`] with room to spare.
             rows.push(Row::of(vec![
                 part(" ▸ ", ACCENT, CharFlags::None),
-                part(format!("{}  ", index + 1), MUTED, CharFlags::None),
+                part(
+                    format!("{}  ", index.saturating_add(1)),
+                    MUTED,
+                    CharFlags::None,
+                ),
                 part(
                     format!("{}:{}", event.file, event.line),
                     if selected { ACCENT } else { BASE },
@@ -524,7 +608,12 @@ impl Native {
             )]),
             Row::plain("  /feedback TEXT · fixture", MUTED),
         ];
-        for note in self.demo.notes.iter().filter(|n| n.event == index + 1) {
+        for note in self
+            .demo
+            .notes
+            .iter()
+            .filter(|note| note.event == index.saturating_add(1))
+        {
             rows.push(Row::clipping(vec![part(
                 format!("  anchored note: {}", note.text),
                 WARN,
@@ -534,6 +623,7 @@ impl Native {
         rows
     }
 
+    /// Builds the fixture-only workspace tree shown in the Files panel.
     fn files_rows(&self) -> Vec<Row> {
         vec![
             Row::plain("src/", MUTED),
@@ -546,6 +636,7 @@ impl Native {
         ]
     }
 
+    /// Builds the fixture ownership rows shown in the Agents panel.
     fn agents_rows(&self) -> Vec<Row> {
         let held = match self.demo.work {
             Work::Held { owner, .. } => Some(owner),
@@ -616,8 +707,9 @@ impl Native {
         rows
     }
 
+    /// Returns the current deterministic status-hub tip.
     fn tip(&self) -> &'static str {
-        TIPS[self.tick % TIPS.len()]
+        TIPS[self.tick.rem_euclid(TIPS.len())]
     }
 
     /// The activity line's honest verb: the fixture has two states and no
@@ -694,28 +786,31 @@ fn mascot_color(ch: char) -> Option<Color> {
 /// bottom pixel uses '▄'. Transparent cells keep the terminal default.
 fn draw_mascot(surface: &mut Surface, x: i32, y: i32) {
     for pair in 0..12usize {
-        let top_row = MASCOT[pair * 2];
-        let bot_row = MASCOT[pair * 2 + 1];
-        for (col, (t, b)) in top_row.chars().zip(bot_row.chars()).enumerate() {
-            let (tf, bf) = (mascot_color(t), mascot_color(b));
-            if tf.is_none() && bf.is_none() {
+        let top_row = MASCOT[pair.saturating_mul(2)];
+        let bot_row = MASCOT[pair.saturating_mul(2).saturating_add(1)];
+        for (column, (top_pixel, bottom_pixel)) in top_row.chars().zip(bot_row.chars()).enumerate()
+        {
+            let (top_foreground, bottom_foreground) =
+                (mascot_color(top_pixel), mascot_color(bottom_pixel));
+            if top_foreground.is_none() && bottom_foreground.is_none() {
                 continue;
             }
-            let (ch, fg, bg) = match (tf, bf) {
-                (Some(f), None) => ('▀', f, Color::Transparent),
-                (None, Some(f)) => ('▄', f, Color::Transparent),
-                (Some(f), Some(g)) => ('▀', f, g),
-                (None, None) => unreachable!(),
+            let (ch, foreground, background) = match (top_foreground, bottom_foreground) {
+                (Some(foreground), None) => ('▀', foreground, Color::Transparent),
+                (None, Some(foreground)) => ('▄', foreground, Color::Transparent),
+                (Some(foreground), Some(background)) => ('▀', foreground, background),
+                (None, None) => continue,
             };
             surface.write_char(
-                x + col as i32,
-                y + pair as i32,
-                Character::new(ch, fg, bg, CharFlags::None),
+                x.saturating_add(index_coordinate(column)),
+                y.saturating_add(index_coordinate(pair)),
+                Character::new(ch, foreground, background, CharFlags::None),
             );
         }
     }
 }
 
+/// Writes one clipped styled string when its origin and width are visible.
 fn write(
     surface: &mut Surface,
     x: i32,
@@ -728,7 +823,7 @@ fn write(
     if width <= 0 || y < 0 || x < 0 {
         return;
     }
-    let clipped: String = text.chars().take(width as usize).collect();
+    let clipped: String = text.chars().take(allocation_width(width)).collect();
     surface.write_string(
         x,
         y,
@@ -748,26 +843,38 @@ fn write(
 fn write_row(surface: &mut Surface, x: i32, y: i32, width: i32, row: &Row) {
     let mut cursor = x;
     let mut left = width;
+    let mut truncated = false;
     for run in &row.parts {
         if left <= 0 {
+            truncated = true;
             break;
         }
         write(surface, cursor, y, left, &run.text, run.color, run.flags);
-        let used = run.text.chars().count() as i32;
-        cursor += used;
-        left -= used;
+        let used = text_width(&run.text);
+        truncated |= used > left;
+        cursor = cursor.saturating_add(used.min(left));
+        left = left.saturating_sub(used);
     }
-    if left < 0 && width > 0 {
+    if truncated && width > 0 {
         debug_assert!(
             row.fit == Fit::Clip,
             "an authored row overran its column: {row:?}"
         );
-        write(surface, x + width - 1, y, 1, "…", MUTED, CharFlags::None);
+        write(
+            surface,
+            x.saturating_add(width).saturating_sub(1),
+            y,
+            1,
+            "…",
+            MUTED,
+            CharFlags::None,
+        );
     }
 }
 
+/// Draws a clipped horizontal panel rule.
 fn rule(surface: &mut Surface, x: i32, y: i32, width: i32) {
-    let line: String = "─".repeat(width.max(0) as usize);
+    let line: String = "─".repeat(allocation_width(width));
     write(surface, x, y, width, &line, MUTED, CharFlags::None);
 }
 
@@ -792,37 +899,52 @@ fn frame(
     } else {
         CharFlags::None
     };
-    let inner = width - 4;
+    let inner = width.saturating_sub(4);
     let mut top = if title.is_empty() {
-        format!("┌{}┐", "─".repeat(inner as usize + 2))
+        format!(
+            "┌{}┐",
+            "─".repeat(allocation_width(inner.saturating_add(2)))
+        )
     } else {
         let label = format!(" {title} ");
-        let taken: i32 = label.chars().count() as i32;
-        let fill = (inner + 2 - taken.min(inner + 2)).max(0) as usize;
+        let taken = text_width(&label);
+        let span = inner.saturating_add(2);
+        let fill = allocation_width(span.saturating_sub(taken.min(span)));
         format!("┌{label}{}┐", "─".repeat(fill))
     };
-    top = top.chars().take(width as usize).collect();
+    top = top.chars().take(allocation_width(width)).collect();
     write(surface, x, y, width, &top, color, flags);
-    for row in 1..height - 1 {
-        write(surface, x, y + row, 1, "│", color, CharFlags::None);
+    for row in 1..height.saturating_sub(1) {
         write(
             surface,
-            x + width - 1,
-            y + row,
+            x,
+            y.saturating_add(row),
+            1,
+            "│",
+            color,
+            CharFlags::None,
+        );
+        write(
+            surface,
+            x.saturating_add(width).saturating_sub(1),
+            y.saturating_add(row),
             1,
             "│",
             color,
             CharFlags::None,
         );
     }
-    let bottom: String = format!("└{}┘", "─".repeat(inner as usize + 2))
-        .chars()
-        .take(width as usize)
-        .collect();
+    let bottom: String = format!(
+        "└{}┘",
+        "─".repeat(allocation_width(inner.saturating_add(2)))
+    )
+    .chars()
+    .take(allocation_width(width))
+    .collect();
     write(
         surface,
         x,
-        y + height - 1,
+        y.saturating_add(height).saturating_sub(1),
         width,
         &bottom,
         color,
@@ -831,50 +953,70 @@ fn frame(
     inner
 }
 
+/// Writes a string centered in the available terminal width.
 fn center(surface: &mut Surface, y: i32, width: i32, text: &str, color: Color, flags: CharFlags) {
-    let pad = ((width - text.chars().count() as i32) / 2).max(0);
-    write(surface, pad, y, width - pad, text, color, flags);
+    let remaining = width.saturating_sub(text_width(text));
+    let pad = remaining.div_euclid(2).max(0);
+    write(
+        surface,
+        pad,
+        y,
+        width.saturating_sub(pad),
+        text,
+        color,
+        flags,
+    );
 }
 
 /// Forge's three full-width regions: transcript, input line, status hub.
 struct Regions {
+    /// First transcript row.
     content_top: i32,
+    /// Exclusive transcript bottom row.
     content_bottom: i32,
+    /// Input row.
     input_y: i32,
+    /// Separator immediately above the status hub.
     hub_rule_y: i32,
+    /// First status-hub row.
     hub_top_y: i32,
+    /// Final status-hub row.
     hub_bottom_y: i32,
 }
 
+/// Computes the terminal rows assigned to transcript, input, and status hub.
 fn regions(height: i32) -> Regions {
     Regions {
         content_top: 0,
-        content_bottom: height - 4,
-        input_y: height - 4,
-        hub_rule_y: height - 3,
-        hub_top_y: height - 2,
-        hub_bottom_y: height - 1,
+        content_bottom: height.saturating_sub(4),
+        input_y: height.saturating_sub(4),
+        hub_rule_y: height.saturating_sub(3),
+        hub_top_y: height.saturating_sub(2),
+        hub_bottom_y: height.saturating_sub(1),
     }
 }
 
 /// The transcript, scrolled from the bottom like Forge's `follow_bottom`.
 fn draw_transcript(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Native) {
     let (top, bottom) = area;
-    let space = (bottom - top).max(0) as usize;
+    let space = allocation_width(bottom.saturating_sub(top));
     if space == 0 {
         return;
     }
     let show_mascot = ui.user_messages == 0
         && ui.scroll == 0
         && !ui.help
-        && bottom - top > MASCOT.len() as i32 / 2 + 4;
+        && bottom.saturating_sub(top)
+            > index_coordinate(MASCOT.len())
+                .div_euclid(2)
+                .saturating_add(4);
     let mut y = top;
     if show_mascot {
         draw_mascot(surface, 0, y);
-        y += MASCOT.len() as i32 / 2;
+        y = y.saturating_add(index_coordinate(MASCOT.len()).div_euclid(2));
     }
     let rows = ui.rows();
-    let space = (bottom - y).max(0) as usize;
+    let space = allocation_width(bottom.saturating_sub(y));
     let total = rows.len();
     let start = total
         .saturating_sub(space)
@@ -887,7 +1029,7 @@ fn draw_transcript(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Nat
 /// One fixture panel inside an area, Forge's bordered block with a title.
 fn draw_panel(surface: &mut Surface, width: i32, area: (i32, i32), title: &str, rows: &[Row]) {
     let (top, bottom) = area;
-    let height = bottom - top;
+    let height = bottom.saturating_sub(top);
     if height < 4 || width < 8 {
         for (y, row) in (top..bottom).zip(rows.iter()) {
             write_row(surface, 0, y, width, row);
@@ -895,8 +1037,19 @@ fn draw_panel(surface: &mut Surface, width: i32, area: (i32, i32), title: &str, 
         return;
     }
     frame(surface, 0, top, width, height, title, true);
-    for (index, row) in rows.iter().take((height - 2) as usize).enumerate() {
-        write_row(surface, 2, top + 1 + index as i32, width - 4, row);
+    for (index, row) in rows
+        .iter()
+        .take(allocation_width(height.saturating_sub(2)))
+        .enumerate()
+    {
+        write_row(
+            surface,
+            2,
+            top.saturating_add(1)
+                .saturating_add(index_coordinate(index)),
+            width.saturating_sub(4),
+            row,
+        );
     }
 }
 
@@ -905,16 +1058,16 @@ fn draw_panel(surface: &mut Surface, width: i32, area: (i32, i32), title: &str, 
 fn draw_canary(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
     let (word, color, reason) = ui.canary();
     let label = format!(" {} ", word);
-    let label_w = label.chars().count() as i32;
+    let label_w = text_width(&label);
     for (offset, ch) in label.chars().enumerate() {
         let cell = Character::new(ch, CHIP, color, CharFlags::Bold);
-        surface.write_char(x + offset as i32, y, cell);
+        surface.write_char(x.saturating_add(index_coordinate(offset)), y, cell);
     }
     write(
         surface,
-        x + label_w + 1,
+        x.saturating_add(label_w).saturating_add(1),
         y,
-        width - label_w - 1,
+        width.saturating_sub(label_w).saturating_sub(1),
         &reason,
         color,
         CharFlags::Bold,
@@ -933,15 +1086,15 @@ fn draw_tabs(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
     let active = ui.dashboard_tab();
     let mut cursor = x;
     let tabs = ui.tabs();
-    for (index, (label, active_label, focus)) in tabs.iter().enumerate() {
-        let is_active = *focus == active;
+    for (index, &(label, active_label, focus)) in tabs.iter().enumerate() {
+        let is_active = focus == active;
         let text = if is_active {
             format!("▸ {active_label}")
         } else {
-            (*label).to_owned()
+            label.to_owned()
         };
-        let used = text.chars().count() as i32;
-        if cursor + used >= x + width {
+        let used = text_width(&text);
+        if cursor.saturating_add(used) >= x.saturating_add(width) {
             break;
         }
         write(
@@ -957,10 +1110,10 @@ fn draw_tabs(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
                 CharFlags::None
             },
         );
-        cursor += used;
-        if index < tabs.len() - 1 {
+        cursor = cursor.saturating_add(used);
+        if index < tabs.len().saturating_sub(1) {
             write(surface, cursor, y, 3, " · ", MUTED, CharFlags::None);
-            cursor += 3;
+            cursor = cursor.saturating_add(3);
         }
     }
 }
@@ -968,8 +1121,8 @@ fn draw_tabs(surface: &mut Surface, x: i32, y: i32, width: i32, ui: &Native) {
 /// The right-hand dashboard behind a left rule, Forge's 34% column.
 fn draw_dashboard(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Native) {
     let (top, bottom) = area;
-    let dash_w = (width as f32 * DASHBOARD_SHARE) as i32;
-    let x = width - dash_w;
+    let dash_w = dashboard_width(width);
+    let x = width.saturating_sub(dash_w);
     if dash_w < 24 {
         return;
     }
@@ -977,15 +1130,16 @@ fn draw_dashboard(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Nati
     for y in top..bottom {
         write(surface, x, y, 1, "│", MUTED, CharFlags::None);
     }
-    let inner_x = x + 2;
-    let inner_w = dash_w - 3;
+    let inner_x = x.saturating_add(2);
+    let inner_w = dash_w.saturating_sub(3);
     // The dashboard is only reached at [`DASHBOARD_MIN_WIDTH`], so this is the
     // floor of the column every panel row is written to fit.
     debug_assert!(
-        inner_w >= PANEL_MIN_INNER as i32 || width < DASHBOARD_MIN_WIDTH,
+        inner_w >= i32::try_from(PANEL_MIN_INNER).unwrap_or(i32::MAX)
+            || width < DASHBOARD_MIN_WIDTH,
         "the dashboard threshold must leave room for the narrowest panel"
     );
-    if bottom - top < 7 || inner_w < 12 {
+    if bottom.saturating_sub(top) < 7 || inner_w < 12 {
         return;
     }
     // Forge titles the panel on its left border, above the canary strip
@@ -1002,9 +1156,9 @@ fn draw_dashboard(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Nati
         MUTED,
         CharFlags::None,
     );
-    draw_canary(surface, inner_x, top + 1, inner_w, ui);
-    draw_tabs(surface, inner_x, top + 2, inner_w, ui);
-    let body = (top + 4, bottom);
+    draw_canary(surface, inner_x, top.saturating_add(1), inner_w, ui);
+    draw_tabs(surface, inner_x, top.saturating_add(2), inner_w, ui);
+    let body = (top.saturating_add(4), bottom);
     let body_w = inner_w;
     let rows = match ui.dashboard_tab() {
         Focus::Changes => ui.changes_rows(),
@@ -1023,9 +1177,9 @@ fn draw_dashboard(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Nati
 /// the full width, so every panel stays reachable in a narrow terminal.
 fn draw_content(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Native) {
     let (top, bottom) = area;
-    let dashboard = width >= DASHBOARD_MIN_WIDTH && bottom - top >= 6;
+    let dashboard = width >= DASHBOARD_MIN_WIDTH && bottom.saturating_sub(top) >= 6;
     if dashboard {
-        let main_w = width - (width as f32 * DASHBOARD_SHARE) as i32;
+        let main_w = width.saturating_sub(dashboard_width(width));
         draw_transcript(surface, main_w, (top, bottom), ui);
         draw_dashboard(surface, width, (top, bottom), ui);
         return;
@@ -1060,11 +1214,13 @@ fn draw_content(surface: &mut Surface, width: i32, area: (i32, i32), ui: &Native
 /// right. A block cursor marks the insertion point (AppCUI has no caret here).
 fn draw_input(surface: &mut Surface, width: i32, y: i32, ui: &Native) {
     let focused = ui.focus == Focus::Input || ui.command_mode;
+    let hint_width = text_width(HINT);
+    let tail_width = allocation_width(width.saturating_sub(hint_width).saturating_sub(10).max(4));
     let tail: String = ui
         .input
         .chars()
         .rev()
-        .take((width - HINT.chars().count() as i32 - 10).max(4) as usize)
+        .take(tail_width)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -1083,17 +1239,17 @@ fn draw_input(surface: &mut Surface, width: i32, y: i32, ui: &Native) {
         surface,
         2,
         y,
-        width - HINT.chars().count() as i32 - 4,
+        width.saturating_sub(hint_width).saturating_sub(4),
         &format!("{shown}{caret}"),
         if placeholder { MUTED } else { BASE },
         CharFlags::None,
     );
-    let hint_x = width - HINT.chars().count() as i32;
+    let hint_x = width.saturating_sub(hint_width);
     write(
         surface,
         hint_x.max(2),
         y,
-        HINT.chars().count() as i32,
+        hint_width,
         HINT,
         MUTED,
         CharFlags::None,
@@ -1103,14 +1259,22 @@ fn draw_input(surface: &mut Surface, width: i32, y: i32, ui: &Native) {
 /// Forge's protected status hub: a top rule, then MI (the assistant side) and
 /// MD (the fixture's machine side) split by a vertical divider. Rocco already
 /// names these halves MI and MD (D01), so the hub is a direct fit.
-fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
-    rule(surface, 0, r.hub_rule_y, width);
-    let mi_w = (width as f32 * HUB_MI_SHARE) as i32;
-    write(surface, mi_w, r.hub_top_y, 1, "│", MUTED, CharFlags::None);
+fn draw_status(surface: &mut Surface, width: i32, regions: &Regions, ui: &Native) {
+    rule(surface, 0, regions.hub_rule_y, width);
+    let mi_w = hub_mi_width(width);
     write(
         surface,
         mi_w,
-        r.hub_bottom_y,
+        regions.hub_top_y,
+        1,
+        "│",
+        MUTED,
+        CharFlags::None,
+    );
+    write(
+        surface,
+        mi_w,
+        regions.hub_bottom_y,
         1,
         "│",
         MUTED,
@@ -1121,7 +1285,7 @@ fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
     write_parts(
         surface,
         0,
-        r.hub_top_y,
+        regions.hub_top_y,
         mi_w,
         &[
             chip("MI", MI),
@@ -1135,7 +1299,7 @@ fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
     write_parts(
         surface,
         0,
-        r.hub_bottom_y,
+        regions.hub_bottom_y,
         mi_w,
         &[
             part("✢ ", ACCENT, CharFlags::None),
@@ -1145,8 +1309,8 @@ fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
     );
 
     // MD: the fixture's machine-readable state, then a rotating tip.
-    let md_x = mi_w + 2;
-    let md_w = width - md_x;
+    let md_x = mi_w.saturating_add(2);
+    let md_w = width.saturating_sub(md_x);
     let held = match ui.demo.work {
         Work::Held { owner, .. } => Some(owner),
         Work::Ready => None,
@@ -1158,7 +1322,7 @@ fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
     write_parts(
         surface,
         md_x,
-        r.hub_top_y,
+        regions.hub_top_y,
         md_w,
         &[
             chip("MD", WARN),
@@ -1177,7 +1341,7 @@ fn draw_status(surface: &mut Surface, width: i32, r: &Regions, ui: &Native) {
     write(
         surface,
         md_x,
-        r.hub_bottom_y,
+        regions.hub_bottom_y,
         md_w,
         ui.tip(),
         MUTED,
@@ -1194,11 +1358,11 @@ fn write_parts(surface: &mut Surface, x: i32, y: i32, width: i32, parts: &[Part]
             break;
         }
         write(surface, cursor, y, left, &run.text, run.color, run.flags);
-        let used = run.text.chars().count() as i32;
-        cursor += used;
-        left -= used;
+        let used = text_width(&run.text);
+        cursor = cursor.saturating_add(used);
+        left = left.saturating_sub(used);
     }
-    cursor - x
+    cursor.saturating_sub(x)
 }
 
 /// Forge's command palette: 46 columns, sitting just above the input line,
@@ -1221,32 +1385,32 @@ fn draw_palette(surface: &mut Surface, width: i32, input_y: i32, ui: &Native) {
     let filter = ui.input.to_lowercase();
     let matches: Vec<(&str, &str, &str)> = commands
         .iter()
-        .filter(|(name, _, _)| name.starts_with(&filter))
+        .filter(|command| command.0.starts_with(&filter))
         .copied()
         .collect();
     if matches.is_empty() {
         return;
     }
-    let palette_w = 46.min(width - 4).max(20);
-    let palette_h = matches.len() as i32 + 2;
-    let y = input_y - palette_h;
+    let palette_w = 46.min(width.saturating_sub(4)).max(20);
+    let palette_h = index_coordinate(matches.len()).saturating_add(2);
+    let y = input_y.saturating_sub(palette_h);
     if y < 0 {
         return;
     }
     frame(surface, 2, y, palette_w, palette_h, "Commands", true);
-    for (index, (name, keys, description)) in matches.iter().enumerate() {
+    for (index, &(name, keys, description)) in matches.iter().enumerate() {
         let selected = index == 0;
         let marker = if selected { "❯ " } else { "  " };
         write_parts(
             surface,
             4,
-            y + 1 + index as i32,
-            palette_w - 4,
+            y.saturating_add(1).saturating_add(index_coordinate(index)),
+            palette_w.saturating_sub(4),
             &[
                 part(marker, ACCENT, CharFlags::Bold),
                 part(format!("{name:<16}"), ACCENT, CharFlags::Bold),
                 part(format!("{keys:<6}"), MUTED, CharFlags::None),
-                part(*description, BASE, CharFlags::None),
+                part(description, BASE, CharFlags::None),
             ],
         );
     }
@@ -1360,7 +1524,12 @@ impl InputApp for Native {
             }
             _ if ch != '\0' && !ch.is_control() => {
                 if self.focus == Focus::Input {
-                    if self.input.len() + ch.len_utf8() <= MAX_INPUT {
+                    if self
+                        .input
+                        .len()
+                        .checked_add(ch.len_utf8())
+                        .is_some_and(|length| length <= MAX_INPUT)
+                    {
                         self.input.push(ch);
                     } else {
                         self.push_notice("input limit: 4096 bytes", ERR);
@@ -1381,7 +1550,11 @@ impl InputApp for Native {
                         't' if !self.command_mode => self.apply("agents"),
                         'q' if !self.command_mode => App::close(),
                         ch if self.command_mode
-                            && self.input.len() + ch.len_utf8() <= MAX_INPUT =>
+                            && self
+                                .input
+                                .len()
+                                .checked_add(ch.len_utf8())
+                                .is_some_and(|length| length <= MAX_INPUT) =>
                         {
                             self.input.push(ch);
                         }
@@ -1395,8 +1568,8 @@ impl InputApp for Native {
     }
 
     fn on_paint(&self, surface: &mut Surface) {
-        let width = surface.size().width.min(i32::MAX as u32) as i32;
-        let height = surface.size().height.min(i32::MAX as u32) as i32;
+        let width = terminal_dimension(surface.size().width);
+        let height = terminal_dimension(surface.size().height);
         // Default terminal background and foreground everywhere: reset to
         // transparent cells, then paint glyphs only.
         surface.reset(Character::new(
@@ -1417,42 +1590,74 @@ impl InputApp for Native {
             );
             return;
         }
-        let r = regions(height);
-        draw_content(surface, width, (r.content_top, r.content_bottom), self);
-        draw_input(surface, width, r.input_y, self);
-        draw_status(surface, width, &r, self);
-        draw_palette(surface, width, r.input_y, self);
+        let layout = regions(height);
+        draw_content(
+            surface,
+            width,
+            (layout.content_top, layout.content_bottom),
+            self,
+        );
+        draw_input(surface, width, layout.input_y, self);
+        draw_status(surface, width, &layout, self);
+        draw_palette(surface, width, layout.input_y, self);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // `unwrap_used` is denied workspace-wide because an unwrap on a production
-    // path is a panic waiting for the wrong input. These are the surface
-    // probes: `Surface::char` returns `None` only outside the surface, and a
-    // test that indexes outside the surface it just sized SHOULD fail loudly.
-    #![allow(clippy::unwrap_used)]
-
     use super::*;
     use crate::theme::TOKENS;
 
-    fn painted(ui: &Native, width: u32, height: u32) -> String {
+    /// Read every expected cell; missing cells or unrepresentable sizes fail the probe.
+    fn painted(ui: &Native, width: u32, height: u32) -> std::io::Result<String> {
+        let rows = i32::try_from(height).map_err(std::io::Error::other)?;
+        let columns = i32::try_from(width).map_err(std::io::Error::other)?;
         let mut surface = Surface::new(width, height);
         ui.on_paint(&mut surface);
         let mut text = String::new();
-        for y in 0..height as i32 {
-            for x in 0..width as i32 {
-                text.push(surface.char(x, y).unwrap().code);
+        for y in 0..rows {
+            for x in 0..columns {
+                text.push(
+                    surface
+                        .char(x, y)
+                        .ok_or_else(|| {
+                            std::io::Error::other(format!("missing rendered cell ({x}, {y})"))
+                        })?
+                        .code,
+                );
             }
             text.push('\n');
         }
-        text
+        Ok(text)
     }
 
-    fn background_at(ui: &Native, width: u32, height: u32, x: i32, y: i32) -> Color {
+    /// Read a rendered color without hiding an invalid coordinate behind a default.
+    fn background_at(
+        ui: &Native,
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+    ) -> std::io::Result<Color> {
         let mut surface = Surface::new(width, height);
         ui.on_paint(&mut surface);
-        surface.char(x, y).unwrap().background
+        surface
+            .char(x, y)
+            .map(|cell| cell.background)
+            .ok_or_else(|| std::io::Error::other(format!("missing rendered cell ({x}, {y})")))
+    }
+
+    #[test]
+    fn surface_probes_reject_missing_cells_and_unrepresentable_sizes() {
+        let ui = Native::default();
+        assert_eq!(
+            background_at(&ui, 2, 2, 2, 0).map_err(|error| error.to_string()),
+            Err("missing rendered cell (2, 0)".to_owned())
+        );
+        assert_eq!(
+            painted(&ui, u32::MAX, 1).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::Other)
+        );
     }
 
     fn press(ui: &mut Native, code: KeyCode) {
@@ -1483,9 +1688,9 @@ mod tests {
     }
 
     #[test]
-    fn forge_chrome_carries_header_input_hub_and_dashboard() {
+    fn forge_chrome_carries_header_input_hub_and_dashboard() -> std::io::Result<()> {
         let ui = Native::default();
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         // Banner, welcome and the DEMO truth.
         assert!(shown.contains("Rocco v"));
         assert!(shown.contains("no model, no backend"));
@@ -1504,21 +1709,21 @@ mod tests {
         assert!(shown.contains("▸ Changes"));
         assert!(shown.contains("No changes yet"));
         assert!(shown.contains("Tip:"));
-        println!("APP_CUI_SURFACE_120x32\n{shown}");
+        Ok(())
     }
 
     /// The end state of the fixture journey: two changes behind us, both
     /// drawers revealed, the dashboard back on Changes and the transcript
     /// carrying every action that produced this picture.
     #[test]
-    fn surface_after_two_changes_with_the_drawers_open() {
+    fn surface_after_two_changes_with_the_drawers_open() -> std::io::Result<()> {
         let mut ui = Native::default();
         ui.apply("folders");
         ui.apply("agents");
         ui.focus = Focus::Changes;
         ui.apply("next");
         ui.apply("next");
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("1  src/retry.rs:12"));
         assert!(shown.contains("2  tests/retry.rs:8"));
         assert!(shown.contains("events 2/3 · notes 0 · ready"));
@@ -1526,14 +1731,14 @@ mod tests {
             shown.contains("▸ Changes · Files · Agents"),
             "revealed drawers stay on the tab bar"
         );
-        println!("APP_CUI_SURFACE_STATE\n{shown}");
-        println!("APP_CUI_SURFACE_STATE_100\n{}", painted(&ui, 100, 32));
+        assert!(painted(&ui, 100, 32)?.contains("src/retry.rs:12"));
         let mut held = Native::default();
         held.apply("next");
         held.inspection = true;
         held.apply("feedback keep the retry bounded");
         held.help = true;
-        println!("APP_CUI_SURFACE_HELD_HELP\n{}", painted(&held, 100, 32));
+        assert!(painted(&held, 100, 32)?.contains("HELD"));
+        Ok(())
     }
 
     /// The dashboard column at a default 120-column terminal — the width a
@@ -1544,7 +1749,7 @@ mod tests {
     /// transcript has the terminal to itself, i.e. at [`MIN_WIDTH`] — the
     /// narrowest width that still paints this layout. Authored transcript
     /// copy is held here.
-    const TRANSCRIPT_MIN_INNER: usize = MIN_WIDTH as usize;
+    const TRANSCRIPT_MIN_INNER: usize = 50;
 
     fn row_width(row: &Row) -> usize {
         row.parts.iter().map(|run| run.text.chars().count()).sum()
@@ -1556,14 +1761,14 @@ mod tests {
     /// [`PANEL_MIN_INNER`] is measured rather than asserted by comment.
     #[test]
     fn every_authored_row_fits_the_narrowest_column() {
-        let floor = (DASHBOARD_MIN_WIDTH as f32 * DASHBOARD_SHARE) as i32 - 3;
+        let floor = allocation_width(dashboard_width(DASHBOARD_MIN_WIDTH).saturating_sub(3));
         assert_eq!(
-            floor as usize, PANEL_MIN_INNER,
+            floor, PANEL_MIN_INNER,
             "the declared floor must equal the real share column"
         );
         assert_eq!(
-            (120f32 * DASHBOARD_SHARE) as i32 - 3,
-            DEFAULT_PANEL_INNER as i32,
+            allocation_width(dashboard_width(120).saturating_sub(3)),
+            DEFAULT_PANEL_INNER,
             "the default-terminal column must match a 120-column layout"
         );
 
@@ -1595,7 +1800,7 @@ mod tests {
 
         // The transcript is not covered by the loop below: it holds operator
         // input too, and that is allowed to clip. Its authored copy is not.
-        for (state, ui) in &states {
+        for &(state, ref ui) in &states {
             for row in ui.transcript.iter().map(|logged| &logged.row) {
                 let text: String = row.parts.iter().map(|run| run.text.as_str()).collect();
                 if text.ends_with(ECHO_SUFFIX) {
@@ -1609,7 +1814,7 @@ mod tests {
             }
         }
 
-        for (state, ui) in &states {
+        for &(state, ref ui) in &states {
             let (word, _, reason) = ui.canary();
             let canary = word.chars().count() + 2 + 1 + reason.chars().count();
             assert!(
@@ -1640,24 +1845,25 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_collapses_below_the_forge_threshold() {
+    fn dashboard_collapses_below_the_forge_threshold() -> std::io::Result<()> {
         let ui = Native::default();
-        let narrow = painted(&ui, 80, 24);
+        let narrow = painted(&ui, 80, 24)?;
         assert!(!narrow.contains("CLEAR"));
         assert!(narrow.contains("✢ Ready…"));
         assert_eq!(narrow.lines().count(), 24);
+        Ok(())
     }
 
     #[test]
-    fn canary_reports_the_real_fixture_verdict() {
+    fn canary_reports_the_real_fixture_verdict() -> std::io::Result<()> {
         let mut ui = Native::default();
         assert_eq!(ui.canary().0, "CLEAR");
-        assert!(painted(&ui, 120, 32).contains("CLEAR"));
+        assert!(painted(&ui, 120, 32)?.contains("CLEAR"));
 
         press(&mut ui, KeyCode::F4);
         ui.apply("feedback keep retry bounded");
         assert_eq!(ui.canary().0, "HELD");
-        let held = painted(&ui, 120, 32);
+        let held = painted(&ui, 120, 32)?;
         assert!(held.contains("HELD"));
         assert!(held.contains("clone 1 held at event 1"));
         assert!(held.contains("✢ Held…"));
@@ -1668,11 +1874,12 @@ mod tests {
         press(&mut ui, KeyCode::F4);
         press(&mut ui, KeyCode::F4);
         assert_eq!(ui.canary().0, "END");
-        assert!(painted(&ui, 120, 32).contains("scenario complete"));
+        assert!(painted(&ui, 120, 32)?.contains("scenario complete"));
+        Ok(())
     }
 
     #[test]
-    fn notices_and_diffs_are_narrated_into_the_transcript() {
+    fn notices_and_diffs_are_narrated_into_the_transcript() -> std::io::Result<()> {
         let mut ui = Native::default();
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.focus, Focus::Changes);
@@ -1681,7 +1888,7 @@ mod tests {
         assert!(transcript(&ui).contains("next — DEMO; no backend action executed"));
         type_text(&mut ui, "i");
         assert!(ui.inspection);
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("fixture-01"));
         assert!(shown.contains("retry_with_budget(request, 3)"));
         assert!(shown.contains("- retry(request)"));
@@ -1691,12 +1898,13 @@ mod tests {
         press(&mut ui, KeyCode::Enter);
         assert!(!ui.command_mode);
         assert!(transcript(&ui).contains("HELD clone 1"));
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("anchored note: pacing note"));
+        Ok(())
     }
 
     #[test]
-    fn rejected_commands_are_logged_without_changing_fixture_state() {
+    fn rejected_commands_are_logged_without_changing_fixture_state() -> std::io::Result<()> {
         let mut ui = Native::default();
         ui.apply("next");
         ui.apply("feedback keep bounded");
@@ -1709,33 +1917,36 @@ mod tests {
         assert_eq!(ui.demo, before);
         assert_eq!(ui.demo.cursor, 2);
         assert!(transcript(&ui).contains("HeldWork"));
-        assert!(painted(&ui, 120, 32).contains("✖"));
+        assert!(painted(&ui, 120, 32)?.contains("✖"));
+        Ok(())
     }
 
     #[test]
-    fn help_prints_forge_style_command_rows() {
+    fn help_prints_forge_style_command_rows() -> std::io::Result<()> {
         let mut ui = Native::default();
         press(&mut ui, KeyCode::Tab);
         type_text(&mut ui, "?");
         assert!(ui.help);
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("Commands — DEMO fixture, no backend"));
         assert!(shown.contains("/feedback"));
         assert!(shown.contains("Letters work outside the input; no F-keys needed."));
         type_text(&mut ui, "?");
         assert!(!ui.help);
+        Ok(())
     }
 
     #[test]
-    fn palette_sits_above_the_input_with_the_selection_marker() {
+    fn palette_sits_above_the_input_with_the_selection_marker() -> std::io::Result<()> {
         let mut ui = Native::default();
         press(&mut ui, KeyCode::Tab);
         type_text(&mut ui, "/");
         assert!(ui.command_mode);
         type_text(&mut ui, "f");
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("Commands"));
         assert!(shown.contains("❯ /folders"));
+        Ok(())
     }
 
     #[test]
@@ -1753,32 +1964,34 @@ mod tests {
     }
 
     #[test]
-    fn paint_keeps_terminal_default_background() {
+    fn paint_keeps_terminal_default_background() -> std::io::Result<()> {
         let ui = Native::default();
-        assert_eq!(background_at(&ui, 120, 32, 5, 0), Color::Transparent);
-        assert_eq!(background_at(&ui, 120, 32, 5, 30), Color::Transparent);
+        assert_eq!(background_at(&ui, 120, 32, 5, 0)?, Color::Transparent);
+        assert_eq!(background_at(&ui, 120, 32, 5, 30)?, Color::Transparent);
+        Ok(())
     }
 
     #[test]
-    fn mascot_perches_on_the_empty_landing_and_leaves_after_first_message() {
+    fn mascot_perches_on_the_empty_landing_and_leaves_after_first_message() -> std::io::Result<()> {
         let mut ui = Native::default();
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains('▀'));
         assert!(shown.contains("Safe fixture"));
         ui.input = "hello".into();
         press(&mut ui, KeyCode::Enter);
         assert_eq!(ui.user_messages, 1);
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(!shown.contains('▀'));
         assert!(!shown.contains('▄'));
         assert!(shown.contains("[SIMULATED]"));
         // Tiny terminals fall back to text only — the mascot never clips.
-        let tiny = painted(&ui, 60, 12);
+        let tiny = painted(&ui, 60, 12)?;
         assert!(!tiny.contains('▀'));
+        Ok(())
     }
 
     #[test]
-    fn mascot_brand_pixels_carry_the_canonical_palette() {
+    fn mascot_brand_pixels_carry_the_canonical_palette() -> std::io::Result<()> {
         let mut surface = Surface::new(24, 12);
         // on_paint resets every cell to Transparent first; replicate that so
         // the probe proves the mascot merges into the default background.
@@ -1789,23 +2002,28 @@ mod tests {
             CharFlags::None,
         ));
         draw_mascot(&mut surface, 0, 0);
-        let at = |x: i32, y: i32| surface.char(x, y).unwrap();
+        let at = |x: i32, y: i32| {
+            surface
+                .char(x, y)
+                .ok_or_else(|| std::io::Error::other(format!("missing mascot cell ({x}, {y})")))
+        };
         // Eye catchlight (row 12, col 7) is cream = White on gray fur.
-        assert_eq!(at(7, 6).foreground, Color::White);
+        assert_eq!(at(7, 6)?.foreground, Color::White);
         // Eye body (row 12, col 6) is brown = Olive (as the cell's top half).
-        assert_eq!(at(6, 6).foreground, Color::Olive);
+        assert_eq!(at(6, 6)?.foreground, Color::Olive);
         // Nose (rows 18-19, cols 10-13) is dark = Black.
-        assert_eq!(at(10, 9).foreground, Color::Black);
+        assert_eq!(at(10, 9)?.foreground, Color::Black);
         // Tongue (row 22, cols 9-14) is Red; mouth outline around it is Black.
-        assert_eq!(at(9, 11).foreground, Color::Red);
-        assert_eq!(at(8, 11).foreground, Color::Black);
+        assert_eq!(at(9, 11)?.foreground, Color::Red);
+        assert_eq!(at(8, 11)?.foreground, Color::Black);
         // Every painted glyph keeps the terminal default where transparent:
         // cells outside the 24x12 mascot box stay untouched.
-        assert_eq!(at(23, 11).background, Color::Transparent);
+        assert_eq!(at(23, 11)?.background, Color::Transparent);
+        Ok(())
     }
 
     #[test]
-    fn native_keys_drive_same_hold_continue_and_panes() {
+    fn native_keys_drive_same_hold_continue_and_panes() -> std::io::Result<()> {
         let mut ui = Native::default();
         press(&mut ui, KeyCode::F2);
         press(&mut ui, KeyCode::F3);
@@ -1837,12 +2055,13 @@ mod tests {
         // Back to the Changes panel to see the selected diff's trace.
         press(&mut ui, KeyCode::Tab);
         assert_eq!(ui.focus, Focus::Changes);
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("fixture-03"));
+        Ok(())
     }
 
     #[test]
-    fn focus_cycle_gives_visible_panel_focus_with_vim_movement() {
+    fn focus_cycle_gives_visible_panel_focus_with_vim_movement() -> std::io::Result<()> {
         let mut ui = Native::default();
         assert_eq!(ui.focus, Focus::Input);
         press(&mut ui, KeyCode::Tab);
@@ -1868,17 +2087,18 @@ mod tests {
         assert_eq!(ui.focus, Focus::Input);
         // The active tab carries the fixture marker; the others stay short so
         // the bar still fits Forge's narrow column.
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("▸ Changes"));
         assert!(shown.contains("Files"));
         assert!(shown.contains("Agents"));
         ui.focus = Focus::Agents;
-        let active = painted(&ui, 120, 32);
+        let active = painted(&ui, 120, 32)?;
         assert!(active.contains("▸ Agents [fixture]"));
+        Ok(())
     }
 
     #[test]
-    fn native_text_is_bounded_and_reset_empty_render() {
+    fn native_text_is_bounded_and_reset_empty_render() -> std::io::Result<()> {
         let mut ui = Native {
             input: "x".repeat(MAX_INPUT),
             ..Native::default()
@@ -1896,8 +2116,9 @@ mod tests {
         assert_eq!(ui.user_messages, 0);
         press(&mut ui, KeyCode::F4);
         assert_eq!(ui.demo.cursor, 1);
-        let shown = painted(&ui, 120, 32);
+        let shown = painted(&ui, 120, 32)?;
         assert!(shown.contains("src/retry.rs:12"));
+        Ok(())
     }
 
     #[test]
@@ -1915,12 +2136,16 @@ mod tests {
     }
 
     #[test]
-    fn small_terminal_sizes_are_bounded_without_panicking() {
+    fn small_terminal_sizes_are_bounded_without_panicking() -> std::io::Result<()> {
         let ui = Native::default();
         for (width, height) in [(1, 1), (49, 11), (50, 12), (80, 24), (120, 32), (200, 50)] {
-            let text = painted(&ui, width, height);
-            assert_eq!(text.lines().count(), height as usize);
+            let text = painted(&ui, width, height)?;
+            assert_eq!(
+                text.lines().count(),
+                usize::try_from(height).map_err(std::io::Error::other)?
+            );
         }
+        Ok(())
     }
 
     #[test]
@@ -1928,8 +2153,8 @@ mod tests {
         // The mapping is the falsifier for colour depth: if two Forge tokens
         // collapsed onto one ANSI16 colour, the UI could no longer tell a
         // caution from a failure.
-        for (index, (name, _, color)) in TOKENS.iter().enumerate() {
-            for (other_name, _, other) in TOKENS.iter().skip(index + 1) {
+        for (index, &(name, _, color)) in TOKENS.iter().enumerate() {
+            for &(other_name, _, other) in TOKENS.iter().skip(index.saturating_add(1)) {
                 assert_ne!(color, other, "tokens {name} and {other_name} collide");
             }
         }

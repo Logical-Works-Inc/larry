@@ -36,6 +36,7 @@ use rocco_contracts::state::{RunState, TransitionEvent};
 /// is allowed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
 pub struct WorkProposal {
     /// The run the work belongs to.
     pub run: RunId,
@@ -52,7 +53,7 @@ pub struct WorkProposal {
     /// The stable operation identity presented to the endpoint.
     pub operation: OperationId,
     /// The scopes the effect requires; every one must pass the gate.
-    pub required_scopes: BTreeSet<Scope>,
+    required_scopes: BTreeSet<Scope>,
     /// The declared cost.
     pub cost: u64,
     /// The unit the cost is denominated in.
@@ -62,6 +63,34 @@ pub struct WorkProposal {
 }
 
 impl WorkProposal {
+    /// Declares work; the runtime still supplies and validates its authority.
+    #[must_use]
+    pub const fn new(
+        run: RunId,
+        tenant: TenantId,
+        operation: OperationId,
+        required_scopes: BTreeSet<Scope>,
+        cost: u64,
+        unit: BudgetUnit,
+        strategy: ReconciliationStrategy,
+    ) -> Self {
+        Self {
+            run,
+            tenant,
+            operation,
+            required_scopes,
+            cost,
+            unit,
+            strategy,
+        }
+    }
+
+    /// Returns the declared scope requirements without allowing mutation.
+    #[must_use]
+    pub fn required_scopes(&self) -> &BTreeSet<Scope> {
+        &self.required_scopes
+    }
+
     /// The intent this proposal reserves, for `tenant`, admitted under
     /// `admission_epoch`.
     ///
@@ -80,14 +109,14 @@ impl WorkProposal {
     /// does not own (D42, E63).
     #[must_use]
     pub fn intent(&self, tenant: TenantId, admission_epoch: SecurityEpoch) -> EffectIntent {
-        EffectIntent {
-            id: EffectId::from_bytes(*self.operation.as_bytes()),
-            operation: self.operation,
-            run: self.run,
+        EffectIntent::new(
+            EffectId::from_bytes(*self.operation.as_bytes()),
+            self.operation,
+            self.run,
             tenant,
-            strategy: self.strategy,
+            self.strategy,
             admission_epoch,
-        }
+        )
     }
 }
 
@@ -95,6 +124,7 @@ impl WorkProposal {
 /// record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
 pub struct CommandAcceptedPayload {
     /// The accepted command identity.
     pub command: CommandId,
@@ -111,6 +141,7 @@ pub struct CommandAcceptedPayload {
 /// `from` and `event` through `state::transition` and refuses a mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
 pub struct TransitionPayload {
     /// The event offered to the algebra.
     pub event: TransitionEvent,
@@ -124,6 +155,7 @@ pub struct TransitionPayload {
 /// record: the durable reservation, written before dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
 pub struct IntentPayload {
     /// The reserved intent, including its stable operation ID and declared
     /// reconciliation strategy.
@@ -137,6 +169,7 @@ pub struct IntentPayload {
 /// record: what the owner reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
 pub struct OutcomePayload {
     /// The intent the outcome belongs to, carried so the fold can resolve the
     /// disposition without a separate lookup table.
@@ -149,7 +182,51 @@ pub struct OutcomePayload {
 /// record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
 pub struct ReceiptPayload {
     /// The immutable terminal receipt.
     pub receipt: TerminalReceipt,
+}
+
+impl CommandAcceptedPayload {
+    /// Records a command's accepted target and kind.
+    #[must_use]
+    pub const fn new(command: CommandId, run: RunId, kind: CommandKind) -> Self {
+        Self { command, run, kind }
+    }
+}
+
+impl TransitionPayload {
+    /// Records a transition and the states independently checked by replay.
+    #[must_use]
+    pub const fn new(event: TransitionEvent, from: RunState, to: RunState) -> Self {
+        Self { event, from, to }
+    }
+}
+
+impl IntentPayload {
+    /// Records a reservation and the authorization inputs that justified it.
+    #[must_use]
+    pub const fn new(intent: EffectIntent, authorization: ReplayRecord) -> Self {
+        Self {
+            intent,
+            authorization,
+        }
+    }
+}
+
+impl OutcomePayload {
+    /// Records an owner's observation for the reserved intent.
+    #[must_use]
+    pub const fn new(intent: EffectIntent, outcome: EffectOutcome) -> Self {
+        Self { intent, outcome }
+    }
+}
+
+impl ReceiptPayload {
+    /// Wraps an immutable terminal receipt for journal encoding.
+    #[must_use]
+    pub const fn new(receipt: TerminalReceipt) -> Self {
+        Self { receipt }
+    }
 }

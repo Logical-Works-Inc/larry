@@ -20,6 +20,16 @@ use rocco_contracts::state::RunState;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    /// An authorization decision is not understood; dispatch is refused.
+    UnsupportedDecision(rocco_contracts::replay::Decision),
+    /// A command kind is not understood; execution is refused.
+    UnsupportedCommand(rocco_contracts::command::CommandKind),
+    /// An event kind is not understood; replay is refused.
+    UnsupportedEvent(rocco_contracts::event::EventKind),
+    /// A disposition is not understood; no terminal receipt is published.
+    UnsupportedDisposition(rocco_contracts::effect::TerminalDisposition),
+    /// A reconciliation action is not understood; no owner interaction is permitted.
+    UnsupportedReconciliationAction(rocco_contracts::effect::ReconciliationAction),
     /// The bounded journal is at capacity. Admission is backpressured; no
     /// recorded fact is ever silently dropped (Cell 05).
     JournalFull {
@@ -110,7 +120,18 @@ pub enum RuntimeError {
 
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
+            Self::UnsupportedDecision(value) => {
+                write!(f, "unsupported authorization decision: {value:?}")
+            }
+            Self::UnsupportedCommand(value) => write!(f, "unsupported command kind: {value:?}"),
+            Self::UnsupportedEvent(value) => write!(f, "unsupported event kind: {value:?}"),
+            Self::UnsupportedDisposition(value) => {
+                write!(f, "unsupported terminal disposition: {value:?}")
+            }
+            Self::UnsupportedReconciliationAction(value) => {
+                write!(f, "unsupported reconciliation action: {value:?}")
+            }
             Self::JournalFull { capacity } => {
                 write!(
                     f,
@@ -132,12 +153,12 @@ impl fmt::Display for RuntimeError {
                     "run {run} already holds the maximum of {capacity} recorded effects"
                 )
             }
-            Self::Sequence(err) => write!(f, "event sequencing refused: {err}"),
-            Self::Ordering(err) => write!(f, "record ordering refused: {err}"),
-            Self::Command(err) => write!(f, "command refused: {err}"),
-            Self::Transition(err) => write!(f, "run-state transition refused: {err}"),
-            Self::Authority(err) => write!(f, "effect-boundary authority refused: {err}"),
-            Self::Codec(err) => write!(f, "journal payload codec failed: {err}"),
+            Self::Sequence(ref err) => write!(f, "event sequencing refused: {err}"),
+            Self::Ordering(ref err) => write!(f, "record ordering refused: {err}"),
+            Self::Command(ref err) => write!(f, "command refused: {err}"),
+            Self::Transition(ref err) => write!(f, "run-state transition refused: {err}"),
+            Self::Authority(ref err) => write!(f, "effect-boundary authority refused: {err}"),
+            Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
             Self::Denied { operation, reason } => {
                 write!(f, "effect {operation} denied: {reason:?}")
             }
@@ -173,14 +194,19 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Sequence(err) => Some(err),
-            Self::Ordering(err) => Some(err),
-            Self::Command(err) => Some(err),
-            Self::Transition(err) => Some(err),
-            Self::Authority(err) => Some(err),
-            Self::Codec(err) => Some(err),
-            Self::JournalFull { .. }
+        match *self {
+            Self::Sequence(ref err) => Some(err),
+            Self::Ordering(ref err) => Some(err),
+            Self::Command(ref err) => Some(err),
+            Self::Transition(ref err) => Some(err),
+            Self::Authority(ref err) => Some(err),
+            Self::Codec(ref err) => Some(err),
+            Self::UnsupportedDecision(_)
+            | Self::UnsupportedCommand(_)
+            | Self::UnsupportedEvent(_)
+            | Self::UnsupportedDisposition(_)
+            | Self::UnsupportedReconciliationAction(_)
+            | Self::JournalFull { .. }
             | Self::RunLimitReached { .. }
             | Self::ReadyWorkFull { .. }
             | Self::EffectLimitReached { .. }

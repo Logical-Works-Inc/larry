@@ -163,7 +163,9 @@ pub enum BudgetUnit {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct Budget {
+    /// Maximum spend in the declared unit.
     limit: u64,
+    /// Denomination of the ceiling.
     unit: BudgetUnit,
 }
 
@@ -215,6 +217,7 @@ impl Budget {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct ResourcePolicy {
+    /// Scopes admitted by this policy snapshot.
     allowed: BTreeSet<Scope>,
 }
 
@@ -247,11 +250,17 @@ impl ResourcePolicy {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 pub struct Grant {
+    /// Tenant inherited by every attenuated child.
     tenant: TenantId,
+    /// Worker entitled to exercise this grant.
     holder: WorkerId,
+    /// Scopes carried by the grant; attenuation rejects empty intersections.
     scopes: BTreeSet<Scope>,
+    /// Per-grant spending ceiling, not a live ledger.
     budget: Budget,
+    /// Exclusive end of authority validity.
     expiry: SystemTime,
+    /// Bounded number of attenuation hops from the root.
     delegation_depth: u8,
 }
 
@@ -330,13 +339,55 @@ impl Grant {
 #[non_exhaustive]
 pub struct AttenuationRequest {
     /// The worker the child grant would be held by.
-    pub holder: WorkerId,
+    holder: WorkerId,
     /// The scopes requested; they survive only inside parent-and-policy.
-    pub scopes: BTreeSet<Scope>,
+    scopes: BTreeSet<Scope>,
     /// The spend ceiling requested; it is capped to the parent's.
-    pub budget: Budget,
+    budget: Budget,
     /// The expiry requested; it is capped to the parent's.
-    pub expiry: SystemTime,
+    expiry: SystemTime,
+}
+
+impl AttenuationRequest {
+    /// Describes the desired shape of one attenuated child grant.
+    #[must_use]
+    pub fn new(
+        holder: WorkerId,
+        scopes: BTreeSet<Scope>,
+        budget: Budget,
+        expiry: SystemTime,
+    ) -> Self {
+        Self {
+            holder,
+            scopes,
+            budget,
+            expiry,
+        }
+    }
+
+    /// Returns the prospective child holder.
+    #[must_use]
+    pub const fn holder(&self) -> WorkerId {
+        self.holder
+    }
+
+    /// Returns the requested scopes without allowing mutation.
+    #[must_use]
+    pub fn scopes(&self) -> &BTreeSet<Scope> {
+        &self.scopes
+    }
+
+    /// Returns the requested spending ceiling.
+    #[must_use]
+    pub const fn budget(&self) -> Budget {
+        self.budget
+    }
+
+    /// Returns the requested expiry.
+    #[must_use]
+    pub const fn expiry(&self) -> SystemTime {
+        self.expiry
+    }
 }
 
 /// The authority equation (Cell 04): derive a child grant from a parent.
@@ -368,7 +419,7 @@ pub fn attenuate(
         });
     }
     let surviving: BTreeSet<Scope> = request
-        .scopes
+        .scopes()
         .intersection(&parent.scopes)
         .copied()
         .filter(|scope| policy.allows(*scope))
@@ -376,15 +427,15 @@ pub fn attenuate(
     if surviving.is_empty() {
         return Err(AuthorityError::EmptyAttenuation);
     }
-    let budget = request.budget.cap_to(parent.budget)?;
-    let expiry = if parent.expiry <= request.expiry {
+    let budget = request.budget().cap_to(parent.budget)?;
+    let expiry = if parent.expiry <= request.expiry() {
         parent.expiry
     } else {
-        request.expiry
+        request.expiry()
     };
     Grant::new(
         parent.tenant,
-        request.holder,
+        request.holder(),
         surviving,
         budget,
         expiry,
@@ -496,18 +547,29 @@ mod tests {
     }
 
     fn epoch_plus(secs: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+        let duration = std::time::Duration::from_secs(secs);
+        let instant = SystemTime::UNIX_EPOCH
+            .checked_add(duration)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            instant
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|error| error.to_string()),
+            Ok(duration),
+            "fixture instant must be representable"
+        );
+        instant
     }
 
-    fn root_grant() -> Grant {
-        crate::test_support::expect_ok(Grant::new(
+    fn root_grant() -> Result<Grant, AuthorityError> {
+        Grant::new(
             tid(),
             worker(1),
             scopes(&[Scope::FileRead, Scope::FileWrite, Scope::NetworkEgress]),
             Budget::new(100, BudgetUnit::Tokens),
             epoch_plus(1_000),
             0,
-        ))
+        )
     }
 
     fn full_policy() -> ResourcePolicy {
@@ -526,19 +588,20 @@ mod tests {
         unit: BudgetUnit,
         expiry_secs: u64,
     ) -> AttenuationRequest {
-        AttenuationRequest {
-            holder: worker(2),
-            scopes: scopes.iter().copied().collect(),
-            budget: Budget::new(limit, unit),
-            expiry: epoch_plus(expiry_secs),
-        }
+        AttenuationRequest::new(
+            worker(2),
+            scopes.iter().copied().collect(),
+            Budget::new(limit, unit),
+            epoch_plus(expiry_secs),
+        )
     }
 
     #[test]
-    fn attenuation_child_is_the_intersection_of_parent_policy_budget_expiry() {
+    fn attenuation_child_is_the_intersection_of_parent_policy_budget_expiry()
+    -> Result<(), AuthorityError> {
         let policy = full_policy();
-        let child = crate::test_support::expect_ok(attenuate(
-            &root_grant(),
+        let child = attenuate(
+            &root_grant()?,
             &policy,
             &request(
                 &[Scope::FileRead, Scope::ProcessSpawn],
@@ -546,7 +609,7 @@ mod tests {
                 BudgetUnit::Tokens,
                 900,
             ),
-        ));
+        )?;
         // Scopes: requested ∩ parent ∩ policy — ProcessSpawn dies with the
         // parent, FileRead survives both.
         assert_eq!(child.scopes(), &scopes(&[Scope::FileRead]));
@@ -561,41 +624,44 @@ mod tests {
         assert_eq!(child.holder(), worker(2));
         // Tenant is inherited, never re-declared.
         assert_eq!(child.tenant(), tid());
+        Ok(())
     }
 
     #[test]
-    fn attenuation_caps_the_expiry_to_the_parent_when_the_request_outlives_it() {
+    fn attenuation_caps_the_expiry_to_the_parent_when_the_request_outlives_it()
+    -> Result<(), AuthorityError> {
         let policy = full_policy();
-        let child = crate::test_support::expect_ok(attenuate(
-            &root_grant(),
+        let child = attenuate(
+            &root_grant()?,
             &policy,
             &request(&[Scope::FileRead], 10, BudgetUnit::Tokens, 5_000),
-        ));
+        )?;
         assert_eq!(
             child.expiry(),
             epoch_plus(1_000),
             "child expiry is capped by the parent"
         );
+        Ok(())
     }
 
     #[test]
-    fn attenuation_refuses_delegation_beyond_depth_three() {
+    fn attenuation_refuses_delegation_beyond_depth_three() -> Result<(), AuthorityError> {
         let policy = full_policy();
-        let level1 = crate::test_support::expect_ok(attenuate(
-            &root_grant(),
+        let level1 = attenuate(
+            &root_grant()?,
             &policy,
             &request(&[Scope::FileRead], 10, BudgetUnit::Tokens, 900),
-        ));
-        let level2 = crate::test_support::expect_ok(attenuate(
+        )?;
+        let level2 = attenuate(
             &level1,
             &policy,
             &request(&[Scope::FileRead], 5, BudgetUnit::Tokens, 900),
-        ));
-        let level3 = crate::test_support::expect_ok(attenuate(
+        )?;
+        let level3 = attenuate(
             &level2,
             &policy,
             &request(&[Scope::FileRead], 5, BudgetUnit::Tokens, 900),
-        ));
+        )?;
         assert_eq!(
             level3.delegation_depth(),
             3,
@@ -613,23 +679,26 @@ mod tests {
                 max: MAX_DELEGATION_DEPTH
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn attenuation_refuses_an_empty_intersection_instead_of_minting_empty_authority() {
+    fn attenuation_refuses_an_empty_intersection_instead_of_minting_empty_authority()
+    -> Result<(), AuthorityError> {
         let narrow_policy = ResourcePolicy::new(scopes(&[Scope::ModelInvoke]));
         let outcome = attenuate(
-            &root_grant(),
+            &root_grant()?,
             &narrow_policy,
             &request(&[Scope::FileRead], 10, BudgetUnit::Tokens, 900),
         );
         assert_eq!(outcome, Err(AuthorityError::EmptyAttenuation));
+        Ok(())
     }
 
     #[test]
-    fn budget_units_are_never_coerced_across_each_other() {
+    fn budget_units_are_never_coerced_across_each_other() -> Result<(), AuthorityError> {
         let outcome = attenuate(
-            &root_grant(),
+            &root_grant()?,
             &full_policy(),
             &request(&[Scope::FileRead], 10, BudgetUnit::MilliCents, 900),
         );
@@ -640,11 +709,12 @@ mod tests {
                 requested: BudgetUnit::MilliCents
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn cumulative_spend_is_bounded_by_the_ledger_not_the_ceiling() {
-        let grant = root_grant();
+    fn cumulative_spend_is_bounded_by_the_ledger_not_the_ceiling() -> Result<(), AuthorityError> {
+        let grant = root_grant()?;
         let policy = full_policy();
         // A 100-unit grant: one 60-unit effect fits, but a second 60-unit
         // effect against the ledger's remaining 40 must be refused, even
@@ -682,11 +752,13 @@ mod tests {
                 unit: grant.budget.unit,
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn e30_expired_approval_yields_a_typed_refusal_no_consent_from_timeout() {
-        let grant = root_grant();
+    fn e30_expired_approval_yields_a_typed_refusal_no_consent_from_timeout()
+    -> Result<(), AuthorityError> {
+        let grant = root_grant()?;
         let policy = full_policy();
         // Before expiry the same scope and cost validate.
         assert_eq!(
@@ -710,11 +782,12 @@ mod tests {
                 now: epoch_plus(1_001)
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn the_boundary_revalidates_against_the_current_policy() {
-        let grant = root_grant();
+    fn the_boundary_revalidates_against_the_current_policy() -> Result<(), AuthorityError> {
+        let grant = root_grant()?;
         // The policy has moved on since the grant was written: NetworkEgress
         // is no longer allowed even though it is still granted.
         let narrowed = ResourcePolicy::new(scopes(&[Scope::FileRead, Scope::FileWrite]));
@@ -730,11 +803,13 @@ mod tests {
                 scope: Scope::NetworkEgress
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn the_boundary_refuses_ungranted_scopes_and_overspend_with_typed_errors() {
-        let grant = root_grant();
+    fn the_boundary_refuses_ungranted_scopes_and_overspend_with_typed_errors()
+    -> Result<(), AuthorityError> {
+        let grant = root_grant()?;
         let policy = full_policy();
         assert_eq!(
             validate_at_effect_boundary(&grant, Scope::ProcessSpawn, 1, &policy, epoch_plus(500)),
@@ -755,13 +830,16 @@ mod tests {
             validate_at_effect_boundary(&grant, Scope::FileWrite, 100, &policy, epoch_plus(500)),
             Ok(())
         );
+        Ok(())
     }
 
     #[test]
-    fn e71_a_security_epoch_only_ever_moves_forward() {
+    fn e71_a_security_epoch_only_ever_moves_forward() -> Result<(), &'static str> {
         let start = SecurityEpoch::INITIAL;
         assert_eq!(start.value(), 0);
-        let next = crate::test_support::expect_ok_opt(start.successor());
+        let next = start
+            .successor()
+            .ok_or("initial epoch must have a successor")?;
         assert_eq!(next.value(), 1);
         assert!(next.is_later_than(start));
         assert!(!start.is_later_than(next));
@@ -775,6 +853,7 @@ mod tests {
         assert_eq!(start.later_of(next), next, "the later epoch wins");
         assert_eq!(next.later_of(start), next, "and an older one never wins");
         assert_eq!(next.later_of(next), next);
+        Ok(())
     }
 
     #[test]

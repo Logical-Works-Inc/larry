@@ -31,18 +31,18 @@ use support::{
 /// A stable identity for one journal entry: its run, sequence, kind tag and
 /// payload digest. Two journals with equal identity lists are the same
 /// history, without needing the entries to serialize identically.
-fn fingerprint(journal: &Journal) -> Vec<(RunId, u64, u8, ContentDigest)> {
+fn fingerprint(journal: &Journal) -> Vec<(RunId, u64, EventKind, ContentDigest)> {
     journal
         .entries()
         .iter()
-        .filter_map(|entry| match entry {
-            JournalEntry::Event(event) => Some((
+        .filter_map(|entry| match *entry {
+            JournalEntry::Event(ref event) => Some((
                 event.run(),
                 event.sequence().value(),
-                event.kind() as u8,
+                event.kind(),
                 event.payload_digest(),
             )),
-            JournalEntry::Command(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -74,10 +74,58 @@ fn identical_inputs_produce_identical_journals() -> Result<(), Box<dyn std::erro
     let first = drive()?;
     let second = drive()?;
 
-    let a = fingerprint(&first);
-    let b = fingerprint(&second);
-    assert!(!a.is_empty(), "the driven scenario recorded no events");
-    assert_eq!(a, b);
+    let first_fingerprint = fingerprint(&first);
+    let second_fingerprint = fingerprint(&second);
+    assert!(
+        !first_fingerprint.is_empty(),
+        "the driven scenario recorded no events"
+    );
+    assert_eq!(first_fingerprint, second_fingerprint);
+    Ok(())
+}
+
+/// Future strategy names must not turn into authorized dispatch or success.
+#[test]
+fn an_unknown_wire_strategy_is_refused_before_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    use rocco_contracts::command::{Command, CommandContent, CommandKind};
+
+    let mut runtime = runtime_with(
+        ScriptedOwner::scripted([succeeded(operation(1))]),
+        &[Scope::FileRead],
+        &[Scope::FileRead],
+        100,
+    )?;
+    let body = proposal(
+        run(1),
+        tenant(1),
+        operation(1),
+        &[Scope::FileRead],
+        1,
+        ReconciliationStrategy::Queryable,
+    );
+    let mut wire = lgwks_std::json::to_value(&body)?;
+    let strategy = wire
+        .get_mut("strategy")
+        .ok_or("serialized proposal has no strategy")?;
+    *strategy = lgwks_std::json::Value::String("UnsupportedFutureStrategy".to_owned());
+    let command = Command::new(
+        command_id(1),
+        tenant(1),
+        Vec::new(),
+        CommandContent::new(
+            CommandKind::Submit,
+            lgwks_std::json::to_vec(&wire)?.into_boxed_slice(),
+        ),
+    )?;
+    runtime.submit(command)?;
+    let result = runtime.tick();
+    assert!(
+        matches!(result, Err(RuntimeError::Codec(_))),
+        "unknown strategy must be a typed codec refusal: {result:?}"
+    );
+    assert_eq!(runtime.owner().dispatched(), &[]);
+    assert_eq!(runtime.projection().receipts(), &[]);
+    assert_eq!(runtime.projection().authorizations(), &[]);
     Ok(())
 }
 
@@ -217,14 +265,14 @@ fn replay_holds_each_decision_against_its_own_budget_snapshot()
 #[test]
 fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut limited = settings(&[Scope::FileRead], &[Scope::FileRead], 100);
+    let mut limited = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
     // Command, CommandAccepted, Admit, Start, EnterReconciling, Intent = 6
     // entries. The outcome event is the seventh and does not fit.
     limited.journal_capacity = 6;
     let mut rt: TestRuntime = Runtime::new(
         limited,
         ScriptedOwner::new(),
-        rocco_runtime::clock::FixedClock::new(epoch()),
+        rocco_runtime::clock::FixedClock::new(epoch()?),
     )?;
     let body = proposal(
         run(1),
@@ -254,9 +302,9 @@ fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
 
     // Restoration treats the reservation as possibly-dispatched and reconciles.
     let mut restored: TestRuntime = restore(
-        settings(&[Scope::FileRead], &[Scope::FileRead], 100),
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::scripted([succeeded(operation(1))]),
-        rocco_runtime::clock::FixedClock::new(epoch()),
+        rocco_runtime::clock::FixedClock::new(epoch()?),
         journal,
     )?;
 
@@ -277,12 +325,12 @@ fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
 #[test]
 fn a_divergent_transition_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let mut journal = Journal::new(64)?;
-    let payload = TransitionPayload {
-        event: TransitionEvent::Admit,
-        from: RunState::Draft,
+    let payload = TransitionPayload::new(
+        TransitionEvent::Admit,
+        RunState::Draft,
         // The algebra says Draft + Admit is Admitted; this claims otherwise.
-        to: RunState::Completed,
-    };
+        RunState::Completed,
+    );
     let bytes = lgwks_std::json::to_vec(&payload)?;
     let event = Event::new(
         tenant(1),
@@ -351,14 +399,14 @@ fn the_projection_is_discardable() -> Result<(), Box<dyn std::error::Error>> {
 /// with the intent they describe.
 #[test]
 fn outcome_carries_the_operation_it_describes() {
-    let intent = EffectIntent {
-        id: rocco_contracts::ids::EffectId::from_bytes(*operation(3).as_bytes()),
-        operation: operation(3),
-        run: run(3),
-        tenant: tenant(1),
-        strategy: ReconciliationStrategy::Queryable,
-        admission_epoch: SecurityEpoch::INITIAL,
-    };
+    let intent = EffectIntent::new(
+        rocco_contracts::ids::EffectId::from_bytes(*operation(3).as_bytes()),
+        operation(3),
+        run(3),
+        tenant(1),
+        ReconciliationStrategy::Queryable,
+        SecurityEpoch::INITIAL,
+    );
     let outcome: EffectOutcome = succeeded(intent.operation);
     assert_eq!(outcome.operation(), OperationId::from_bytes([3; 16]));
 }
@@ -384,11 +432,11 @@ fn the_journal_refuses_an_out_of_order_append() -> Result<(), Box<dyn std::error
         EventSequence::FIRST,
         Vec::new(),
         EventKind::StateTransition,
-        lgwks_std::json::to_vec(&TransitionPayload {
-            event: TransitionEvent::Admit,
-            from: RunState::Draft,
-            to: RunState::Admitted,
-        })?
+        lgwks_std::json::to_vec(&TransitionPayload::new(
+            TransitionEvent::Admit,
+            RunState::Draft,
+            RunState::Admitted,
+        ))?
         .into_boxed_slice(),
     )?;
     journal.record(first)?;
@@ -400,11 +448,11 @@ fn the_journal_refuses_an_out_of_order_append() -> Result<(), Box<dyn std::error
         EventSequence::new(2),
         Vec::new(),
         EventKind::StateTransition,
-        lgwks_std::json::to_vec(&TransitionPayload {
-            event: TransitionEvent::Start,
-            from: RunState::Admitted,
-            to: RunState::Running,
-        })?
+        lgwks_std::json::to_vec(&TransitionPayload::new(
+            TransitionEvent::Start,
+            RunState::Admitted,
+            RunState::Running,
+        ))?
         .into_boxed_slice(),
     )?;
 
@@ -456,9 +504,9 @@ fn a_run_that_reserved_no_effect_does_not_block_restore() -> Result<(), Box<dyn 
     assert!(probe.intents().is_empty(), "and reserved no effect for it");
 
     let restored: TestRuntime = restore(
-        settings(&[Scope::FileRead], &[Scope::FileRead], 100),
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::new(),
-        rocco_runtime::clock::FixedClock::new(epoch()),
+        rocco_runtime::clock::FixedClock::new(epoch()?),
         journal,
     )?;
 

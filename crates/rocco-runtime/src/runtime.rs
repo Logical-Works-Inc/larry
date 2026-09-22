@@ -73,6 +73,7 @@ use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK, MAX_RUNS_PER_TICK, MAX_TRACKED_
 /// the runtime already threads them as inputs rather than reading them from
 /// ambient state, so that change is a wiring change and not a rewrite.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuntimeSettings {
     /// The pinned policy snapshot.
     pub policy: PolicySnapshot,
@@ -127,13 +128,21 @@ impl RuntimeSettings {
 /// What one tick did, in stage order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TickReport {
+    /// First-time command admissions in this tick.
     admitted: Vec<CommandId>,
+    /// Duplicate commands excluded from execution.
     duplicates: Vec<CommandId>,
+    /// Operations authorized in this tick.
     authorized: Vec<OperationId>,
+    /// Authorization refusals with their deterministic reasons.
     denied: Vec<(OperationId, DenialReason)>,
+    /// Owner outcomes observed in this tick.
     outcomes: Vec<(OperationId, EffectOutcome)>,
+    /// Operations processed by reconciliation.
     reconciled: Vec<OperationId>,
+    /// Terminal receipts published in this tick.
     receipts: Vec<TerminalReceipt>,
+    /// Mutating reaches refused by the freshness fence.
     fenced: Vec<(OperationId, FenceRefusal)>,
 }
 
@@ -212,12 +221,14 @@ impl TickReport {
 /// A run the runtime is tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RunLive {
+    /// Tenant established by command admission.
     tenant: TenantId,
 }
 
 /// An effect the runtime has reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LiveEffect {
+    /// Durable reservation associated with this live witness.
     intent: EffectIntent,
     /// Whether this effect may have reached its owner. Set when a mutating
     /// reach is actually taken, and set by [`restore`] for every recorded
@@ -261,16 +272,27 @@ enum OwnerReach {
 /// The Rocco runtime.
 #[derive(Debug)]
 pub struct Runtime<P, O, C> {
+    /// Authoritative append-only history.
     journal: Journal,
+    /// Discardable deterministic fold of the history.
     projection: P,
+    /// Injected boundary for external effects.
     owner: O,
+    /// Injected source of tick time.
     clock: C,
+    /// Current authority check for mutating reaches.
     fence: RevocationFence,
+    /// Bounded queue of commands awaiting admission.
     ready: VecDeque<Command>,
+    /// Host-supplied snapshots and resource bounds.
     settings: RuntimeSettings,
+    /// Budget not yet reserved by recorded intents.
     remaining_budget: u64,
+    /// Tenant ownership of tracked runs.
     runs: BTreeMap<RunId, RunLive>,
+    /// Bounded effect witnesses in operation identity order.
     live: BTreeMap<OperationId, LiveEffect>,
+    /// Monotonic logical tick number.
     tick_count: u64,
 }
 
@@ -406,6 +428,7 @@ where
 
     // ── stage 2: admit, gate, reserve, dispatch, observe ────────────────────
 
+    /// Admits queued commands in deterministic order within the tick bound.
     fn pump_ready(&mut self, at: SystemTime, report: &mut TickReport) -> Result<(), RuntimeError> {
         let budget = self.settings.max_runs_per_tick;
         for _ in 0..budget {
@@ -432,11 +455,13 @@ where
                     // Steering is recorded at a safe boundary; the command's
                     // acceptance is the durable fact this slice owns.
                 }
+                other => return Err(RuntimeError::UnsupportedCommand(other)),
             }
         }
         Ok(())
     }
 
+    /// Gates and durably reserves a proposal before reaching its owner.
     fn admit_work(
         &mut self,
         tenant: TenantId,
@@ -513,6 +538,7 @@ where
         self.dispatch(run, intent, at, report)
     }
 
+    /// Checks durability and freshness before the first mutating reach.
     fn dispatch(
         &mut self,
         run: RunId,
@@ -645,12 +671,14 @@ where
                 self.publish_receipt(run, intent, disposition, report)?;
                 self.advance(run, TransitionEvent::ObserveUnknownOutcome)?;
             }
+            other => return Err(RuntimeError::UnsupportedDisposition(other)),
         }
         Ok(())
     }
 
     // ── stage 3: reconcile ──────────────────────────────────────────────────
 
+    /// Reconciles open effects in stable operation order.
     fn pump_reconciliation(
         &mut self,
         at: SystemTime,
@@ -659,7 +687,7 @@ where
         let open: Vec<OperationId> = self
             .live
             .iter()
-            .filter(|(operation, live)| self.is_reconcilable(**operation, live))
+            .filter(|&(operation, live)| self.is_reconcilable(*operation, live))
             .map(|(operation, _)| *operation)
             .collect();
 
@@ -667,7 +695,7 @@ where
             let Some(live) = self.live.get(&operation).copied() else {
                 continue;
             };
-            let Some(outcome) = self.reconcile_one(&live, operation, at, report) else {
+            let Some(outcome) = self.reconcile_one(&live, operation, at, report)? else {
                 // A fenced retry: no owner call and no recorded outcome, so
                 // the effect is not counted as reconciled. It stays visibly
                 // open — not resolved, not failed — exactly as an effect that
@@ -708,24 +736,25 @@ where
         operation: OperationId,
         at: SystemTime,
         report: &mut TickReport,
-    ) -> Option<EffectOutcome> {
-        match live.intent.strategy.retry_policy() {
-            rocco_contracts::effect::RetryPolicy::Bounded { max_attempts }
+    ) -> Result<Option<EffectOutcome>, RuntimeError> {
+        Ok(match live.intent.strategy.reconciliation_action() {
+            rocco_contracts::effect::ReconciliationAction::RetryBounded { max_attempts }
                 if live.dispatches < max_attempts =>
             {
                 self.reach_owner(live.intent, OwnerReach::Mutate, at, report)
             }
-            rocco_contracts::effect::RetryPolicy::Bounded { .. } => {
+            rocco_contracts::effect::ReconciliationAction::RetryBounded { .. } => {
                 // Budget spent. The effect stays visibly unresolved.
                 Some(EffectOutcome::Unknown { operation })
             }
-            rocco_contracts::effect::RetryPolicy::QueryUntilResolved => {
+            rocco_contracts::effect::ReconciliationAction::Observe => {
                 self.reach_owner(live.intent, OwnerReach::Observe, at, report)
             }
-            rocco_contracts::effect::RetryPolicy::None => {
+            rocco_contracts::effect::ReconciliationAction::LeaveUnknown => {
                 Some(EffectOutcome::Unknown { operation })
             }
-        }
+            other => return Err(RuntimeError::UnsupportedReconciliationAction(other)),
+        })
     }
 
     /// Whether an effect is still open *and* still within its interaction
@@ -773,17 +802,20 @@ where
         // no owner and writes nothing, and keeps the refusal visible on every
         // tick until the host either re-authenticates or gives up on the
         // effect deliberately.
-        match live.intent.strategy.retry_policy() {
-            rocco_contracts::effect::RetryPolicy::Bounded { max_attempts } => {
+        match live.intent.strategy.reconciliation_action() {
+            rocco_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
                 live.dispatches < max_attempts
             }
-            rocco_contracts::effect::RetryPolicy::QueryUntilResolved
-            | rocco_contracts::effect::RetryPolicy::None => true,
+            rocco_contracts::effect::ReconciliationAction::Observe
+            | rocco_contracts::effect::ReconciliationAction::LeaveUnknown => true,
+            // Route unsupported policies to reconcile_one's typed refusal.
+            _ => true,
         }
     }
 
     // ── stage 4: cancellation ───────────────────────────────────────────────
 
+    /// Records cancellation for a nonterminal run.
     fn request_cancellation(
         &mut self,
         tenant: TenantId,
@@ -803,6 +835,7 @@ where
         Ok(())
     }
 
+    /// Completes cancellation only once reserved effects have drained.
     fn pump_cancellation(&mut self, report: &mut TickReport) -> Result<(), RuntimeError> {
         let cancelling: Vec<RunId> = self
             .runs
@@ -832,6 +865,7 @@ where
 
     // ── journal writers ─────────────────────────────────────────────────────
 
+    /// Establishes run ownership without exceeding the run-table bound.
     fn track_run(&mut self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {
         if !self.runs.contains_key(&run) && self.runs.len() >= self.settings.run_capacity {
             return Err(RuntimeError::RunLimitReached {
@@ -842,25 +876,24 @@ where
         Ok(())
     }
 
+    /// Captures exactly the inputs used by the authorization reducer.
     fn pinned_inputs(&self, proposal: &WorkProposal, at: SystemTime) -> PinnedInputs {
-        PinnedInputs {
-            request: EffectRequest {
-                operation: proposal.operation,
-                required_scopes: proposal.required_scopes.clone(),
-                cost: proposal.cost,
-                unit: proposal.unit,
-                observed_at: at,
-            },
-            policy: self.settings.policy.clone(),
-            budget: BudgetSnapshot {
-                remaining: self.remaining_budget,
-                unit: self.settings.unit,
-            },
-            capabilities: self.settings.capabilities.clone(),
-            validity: self.settings.validity,
-        }
+        PinnedInputs::new(
+            EffectRequest::new(
+                proposal.operation,
+                proposal.required_scopes().clone(),
+                proposal.cost,
+                proposal.unit,
+                at,
+            ),
+            self.settings.policy.clone(),
+            BudgetSnapshot::new(self.remaining_budget, self.settings.unit),
+            self.settings.capabilities.clone(),
+            self.settings.validity,
+        )
     }
 
+    /// Records the accepted command's target run and kind.
     fn record_command_accepted(
         &mut self,
         command: CommandId,
@@ -879,6 +912,7 @@ where
         self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
     }
 
+    /// Records both the offered transition and its derived state.
     fn record_transition(
         &mut self,
         run: RunId,
@@ -892,6 +926,7 @@ where
         self.record_event(tenant, run, EventKind::StateTransition, bytes)
     }
 
+    /// Persists a reservation together with its pinned authorization.
     fn record_intent(
         &mut self,
         run: RunId,
@@ -907,6 +942,7 @@ where
         self.record_event(tenant, run, EventKind::EffectIntentRecorded, bytes)
     }
 
+    /// Persists an owner observation without inventing a disposition.
     fn record_outcome(
         &mut self,
         run: RunId,
@@ -919,6 +955,7 @@ where
         self.record_event(tenant, run, EventKind::EffectOutcomeRecorded, bytes)
     }
 
+    /// Publishes one immutable terminal receipt per operation.
     fn publish_receipt(
         &mut self,
         run: RunId,
@@ -950,6 +987,7 @@ where
         Ok(())
     }
 
+    /// Appends a sequenced event before applying it to the projection.
     fn record_event(
         &mut self,
         tenant: TenantId,
@@ -967,13 +1005,17 @@ where
             payload.into_boxed_slice(),
         )?;
         self.journal.record(event)?;
-        let stored = match self.journal.last() {
-            Some(JournalEntry::Event(recorded)) => recorded,
-            Some(JournalEntry::Command(_)) | None => return Ok(()),
+        let Some(last) = self.journal.last() else {
+            return Ok(());
+        };
+        let stored = match *last {
+            JournalEntry::Event(ref recorded) => recorded,
+            JournalEntry::Command(_) => return Ok(()),
         };
         self.projection.apply(stored)
     }
 
+    /// Derives and records the next run state using the pure contract algebra.
     fn advance(&mut self, run: RunId, event: TransitionEvent) -> Result<RunState, RuntimeError> {
         let from = self.projection.run_state(run).unwrap_or(RunState::Draft);
         let to = rocco_contracts::state::transition(from, event)?;
@@ -981,6 +1023,7 @@ where
         Ok(to)
     }
 
+    /// Reads established ownership, refusing untracked runs.
     fn tenant_of(&self, run: RunId) -> Result<TenantId, RuntimeError> {
         self.runs
             .get(&run)

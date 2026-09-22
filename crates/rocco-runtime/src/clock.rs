@@ -25,7 +25,9 @@ pub trait Clock {
 /// replayed authorization reproducible.
 #[derive(Debug, Clone)]
 pub struct FixedClock {
+    /// Time returned by the next observation.
     now: SystemTime,
+    /// Deterministic increment per observation.
     step: Duration,
 }
 
@@ -72,6 +74,7 @@ impl Clock for FixedClock {
 /// bit-identical, so [`crate::runtime::Runtime::replay`] takes only a
 /// journal and never consults this type.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct SystemClock;
 
 impl Clock for SystemClock {

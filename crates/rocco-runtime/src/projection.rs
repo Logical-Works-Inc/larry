@@ -39,6 +39,7 @@ use crate::payload::{
 /// "may have happened" — rather than as dispatched-and-therefore-known. A
 /// recovered run therefore cannot mistake a crash for a non-event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EffectPhase {
     /// A durable intent exists; the effect may or may not have reached the
     /// endpoint.
@@ -116,10 +117,15 @@ pub trait ProjectionBackend {
 /// The per-run view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunView {
+    /// State re-derived from recorded transitions.
     state: RunState,
+    /// Tenant recorded by the run's events.
     tenant: Option<TenantId>,
+    /// Last folded event sequence.
     last_sequence: Option<rocco_contracts::event::EventSequence>,
+    /// Effect phases keyed in deterministic operation order.
     effects: BTreeMap<OperationId, EffectPhase>,
+    /// Count of accepted commands folded for this run.
     commands: usize,
 }
 
@@ -170,10 +176,15 @@ impl RunView {
 /// The deterministic fold implementation of [`ProjectionBackend`].
 #[derive(Debug, Clone)]
 pub struct FoldProjection {
+    /// Run views keyed in deterministic identity order.
     runs: BTreeMap<RunId, RunView>,
+    /// Terminal receipts in recorded order.
     receipts: Vec<TerminalReceipt>,
+    /// Pinned decisions in recorded order.
     authorizations: Vec<ReplayRecord>,
+    /// Reservations in recorded order.
     intents: Vec<EffectIntent>,
+    /// Maximum number of tracked run views.
     capacity: usize,
 }
 
@@ -273,6 +284,7 @@ impl FoldProjection {
         Ok(())
     }
 
+    /// Finds or admits a bounded run view and validates event sequencing.
     fn entry(&mut self, run: RunId, event: &Event) -> Result<&mut RunView, RuntimeError> {
         if !self.runs.contains_key(&run) && self.runs.len() >= self.capacity {
             return Err(RuntimeError::RunLimitReached {
@@ -297,7 +309,7 @@ impl ProjectionBackend for FoldProjection {
         self.authorizations.clear();
         self.intents.clear();
         for entry in journal.entries() {
-            if let JournalEntry::Event(event) = entry {
+            if let JournalEntry::Event(ref event) = *entry {
                 self.apply(event)?;
             }
         }
@@ -311,6 +323,7 @@ impl ProjectionBackend for FoldProjection {
             EventKind::EffectIntentRecorded => self.fold_intent(event),
             EventKind::EffectOutcomeRecorded => self.fold_outcome(event),
             EventKind::TerminalReceiptPublished => self.fold_receipt(event),
+            other => Err(RuntimeError::UnsupportedEvent(other)),
         }
     }
 

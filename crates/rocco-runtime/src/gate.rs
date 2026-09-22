@@ -32,14 +32,12 @@ use crate::error::RuntimeError;
 pub fn authorize(pinned: &PinnedInputs) -> Result<ReplayRecord, RuntimeError> {
     let recorded = pinned.decide();
     match recorded {
-        Decision::Authorized => Ok(ReplayRecord {
-            pinned: pinned.clone(),
-            recorded,
-        }),
+        Decision::Authorized => Ok(ReplayRecord::new(pinned.clone(), recorded)),
         Decision::Denied { reason } => Err(RuntimeError::Denied {
             operation: pinned.request.operation,
             reason,
         }),
+        other => Err(RuntimeError::UnsupportedDecision(other)),
     }
 }
 

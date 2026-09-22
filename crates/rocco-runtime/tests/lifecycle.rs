@@ -415,7 +415,7 @@ fn cancellation_records_request_before_completion() -> Result<(), Box<dyn std::e
 
     let mut transitions = Vec::new();
     for entry in rt.journal().entries() {
-        if let JournalEntry::Event(event) = entry
+        if let JournalEntry::Event(ref event) = *entry
             && event.kind() == EventKind::StateTransition
         {
             let payload: TransitionPayload = lgwks_std::json::from_slice(event.payload())?;
@@ -443,11 +443,11 @@ fn cancellation_records_request_before_completion() -> Result<(), Box<dyn std::e
 /// a recorded fact.
 #[test]
 fn a_full_journal_backpressures_admission() -> Result<(), Box<dyn std::error::Error>> {
-    let mut settings = support::settings(&[Scope::FileRead], &[Scope::FileRead], 100);
+    let mut settings = support::settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
     settings.journal_capacity = 3;
     let mut rt: TestRuntime =
         rocco_runtime::runtime::Runtime::new(settings, ScriptedOwner::new(), {
-            rocco_runtime::clock::FixedClock::new(epoch())
+            rocco_runtime::clock::FixedClock::new(epoch()?)
         })?;
     let body = proposal(
         run(1),
@@ -509,7 +509,7 @@ fn an_expired_grant_is_refused_at_the_effect_boundary() -> Result<(), Box<dyn st
         WorkerId::from_bytes([7; 16]),
         [Scope::FileRead].into_iter().collect(),
         Budget::new(100, rocco_contracts::authority::BudgetUnit::Requests),
-        epoch(),
+        epoch()?,
         0,
     )?;
     let policy = ResourcePolicy::new([Scope::FileRead].into_iter().collect());
@@ -519,7 +519,9 @@ fn an_expired_grant_is_refused_at_the_effect_boundary() -> Result<(), Box<dyn st
         Scope::FileRead,
         1,
         &policy,
-        epoch() + std::time::Duration::from_secs(60),
+        epoch()?
+            .checked_add(std::time::Duration::from_secs(60))
+            .ok_or("fixture time overflow")?,
     );
 
     assert!(
@@ -540,11 +542,13 @@ fn a_live_grant_passes_the_effect_boundary() -> Result<(), Box<dyn std::error::E
         WorkerId::from_bytes([7; 16]),
         [Scope::FileRead].into_iter().collect(),
         Budget::new(100, BudgetUnit::Requests),
-        epoch() + std::time::Duration::from_secs(3_600),
+        epoch()?
+            .checked_add(std::time::Duration::from_secs(3_600))
+            .ok_or("fixture time overflow")?,
         0,
     )?;
     let policy = ResourcePolicy::new([Scope::FileRead].into_iter().collect());
 
-    rocco_runtime::gate::revalidate_at_boundary(&grant, Scope::FileRead, 1, &policy, epoch())?;
+    rocco_runtime::gate::revalidate_at_boundary(&grant, Scope::FileRead, 1, &policy, epoch()?)?;
     Ok(())
 }

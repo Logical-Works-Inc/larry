@@ -135,7 +135,10 @@ mod tests {
         // this test is the place the change has to be justified.
         assert_eq!(MAX_READY_WORK, 256);
         assert_eq!(MAX_RUNS_PER_TICK, 64);
-        assert_eq!(MAX_OFFLINE_DISPATCHES as usize, MAX_RUNS_PER_TICK);
+        assert_eq!(
+            usize::try_from(MAX_OFFLINE_DISPATCHES),
+            Ok(MAX_RUNS_PER_TICK)
+        );
         const { assert!(MAX_EFFECTS_PER_RUN < MAX_JOURNAL_ENTRIES) };
     }
 }

@@ -29,7 +29,7 @@ resolver = "3"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/srinji-kaggss/Rocco"
-# The real floor, and it is the library's: lgwks_std 0.6.3 declares
+# The real floor, and it is the library's: lgwks_std 0.6.6 declares
 # `rust-version = "1.98"` and edition 2024. The rocco-contracts manifest
 # formerly declared 1.85, which was never satisfiable against that
 # dependency — the merge corrects a false claim rather than raising a real
@@ -41,17 +41,16 @@ rust-version = "1.98"
 # Capability features are opted into per crate. `default-features = false` is
 # stated here rather than per member: cargo ignores a member's
 # `default-features` when the workspace declaration omits it, so leaving it
-# out would silently keep defaults on. lgwks_std's only default feature is
-# the empty `core` marker, so this changes no behaviour.
-lgwks_std = { version = "=0.6.3", default-features = false }
+# out would silently keep defaults on. Select only the capabilities used by
+# each member; 0.6.6 defaults also include structured tracing.
+lgwks_std = { version = "=0.6.6", default-features = false }
 # Catalogued but currently unused by any member: the async runner edge is
 # registered for the first crate that needs it, and the register records that
 # admission. A catalog entry is not a compile edge.
-lgwks_bot = { version = "=0.3.2" }
+lgwks_bot = { version = "=0.4.2" }
 # The dependency-admission storefront. rocco-demo opts into `appcui`; the
-# previously recorded 0.1.7 predates that feature, so the pin is corrected to
-# the published 0.1.8 that the visual pass actually builds against.
-lgwks_deps = { version = "=0.1.8", default-features = false }
+# published storefront owns that dependency and its transitive admission.
+lgwks_deps = { version = "=0.1.12", default-features = false }
 thiserror = "=2.0.20"
 
 # The stricter of the two former lint sets, applied to the whole workspace.
