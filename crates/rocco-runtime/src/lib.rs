@@ -80,6 +80,7 @@ mod admission;
 pub use admission::JournalStorage;
 
 pub mod clock;
+pub mod consumer;
 pub mod error;
 pub mod gate;
 pub mod journal;
