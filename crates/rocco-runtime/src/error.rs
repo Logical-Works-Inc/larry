@@ -20,6 +20,8 @@ use rocco_contracts::state::RunState;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    /// Display or resolved effect binding refused a reach.
+    Binding(rocco_contracts::binding::BindingError),
     /// An authorization decision is not understood; dispatch is refused.
     UnsupportedDecision(rocco_contracts::replay::Decision),
     /// A command kind is not understood; execution is refused.
@@ -130,6 +132,7 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::Binding(ref err) => write!(f, "{err}"),
             Self::UnsupportedDecision(value) => {
                 write!(f, "unsupported authorization decision: {value:?}")
             }
@@ -210,6 +213,7 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
+            Self::Binding(ref err) => Some(err),
             Self::Sequence(ref err) => Some(err),
             Self::Ordering(ref err) => Some(err),
             Self::Command(ref err) => Some(err),
@@ -270,5 +274,11 @@ impl From<AuthorityError> for RuntimeError {
 impl From<lgwks_std::json::Error> for RuntimeError {
     fn from(err: lgwks_std::json::Error) -> Self {
         Self::Codec(err)
+    }
+}
+
+impl From<rocco_contracts::binding::BindingError> for RuntimeError {
+    fn from(error: rocco_contracts::binding::BindingError) -> Self {
+        Self::Binding(error)
     }
 }
