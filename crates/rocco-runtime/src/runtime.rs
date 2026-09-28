@@ -63,6 +63,9 @@ use crate::payload::{
     WorkProposal,
 };
 use crate::projection::{EffectPhase, ProjectionBackend};
+use crate::protocol::{
+    MAX_PROTOCOL_BACKOFF_TICKS, NegotiatedProtocol, ProtocolError, ProtocolOffer, negotiate,
+};
 use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK, MAX_RUNS_PER_TICK, MAX_TRACKED_RUNS};
 
 /// The runtime's configuration: the pinned snapshots and the bounds.
@@ -347,6 +350,45 @@ where
         }
         self.ready.push_back(command);
         Ok(())
+    }
+
+    /// Negotiates protocol version and capabilities before queueing a command.
+    ///
+    /// This is the external protocol ingress. Local in-process callers may
+    /// continue using [`Self::submit`]; protocol callers must present an offer
+    /// for every command so a refusal cannot mutate the queue or journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::Protocol`] for unsupported versions, absent
+    /// capabilities, headless questions, tenant mismatch, or queue overload.
+    pub fn submit_protocol(
+        &mut self,
+        offer: &ProtocolOffer,
+        command: Command,
+    ) -> Result<NegotiatedProtocol, RuntimeError> {
+        let negotiated = negotiate(offer)?;
+        if negotiated.tenant != command.tenant() {
+            return Err(ProtocolError::TenantMismatch {
+                negotiated: negotiated.tenant,
+                command: command.tenant(),
+            }
+            .into());
+        }
+        if self.ready.len() >= MAX_READY_WORK {
+            let queue_band = self.ready.len().checked_div(MAX_RUNS_PER_TICK).unwrap_or(0);
+            let delay = queue_band
+                .saturating_add(1)
+                .min(usize::try_from(MAX_PROTOCOL_BACKOFF_TICKS).unwrap_or(usize::MAX));
+            let retry_after_ticks = u32::try_from(delay).unwrap_or(MAX_PROTOCOL_BACKOFF_TICKS);
+            return Err(ProtocolError::Overloaded {
+                capacity: MAX_READY_WORK,
+                retry_after_ticks,
+            }
+            .into());
+        }
+        self.ready.push_back(command);
+        Ok(negotiated)
     }
 
     /// The authoritative journal.
