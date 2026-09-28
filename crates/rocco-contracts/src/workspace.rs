@@ -215,6 +215,7 @@ impl WorkBoard {
     }
 
     /// Stable identity ordering, independent of arrival order.
+    #[must_use = "consume the iterator to visit the workspace items"]
     pub fn items(&self) -> impl ExactSizeIterator<Item = &WorkItem> {
         self.items.values()
     }
