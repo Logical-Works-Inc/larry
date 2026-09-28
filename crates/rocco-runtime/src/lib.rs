@@ -44,8 +44,10 @@
 //! [`owner::EffectOwner`], whose only implementations here are the
 //! deterministic doubles in [`owner::fixture`]. Nothing in this crate
 //! contacts Moo, Sentinel, Nova, Logical-DB, Secure-Authority or a network.
-//! Persistence is Logical-DB's and the memory hold is intact; the journal is
-//! bounded and in-memory, and durability across process death is not claimed.
+//! Persistence is Logical-DB's and the memory hold is intact. The default
+//! journal is volatile; [`JournalStorage`] lets a host attach its durable
+//! owner. E28 tests exercise real process death with a test-only file owner,
+//! not a production database integration or power-loss guarantee.
 //! P1–P8 remain proof obligations.
 //!
 //! ## The ECS seam
@@ -74,6 +76,9 @@
 
 #![forbid(unsafe_code)]
 
+mod admission;
+pub use admission::JournalStorage;
+
 pub mod clock;
 pub mod error;
 pub mod gate;
@@ -90,6 +95,9 @@ pub use fence::{FenceError, FenceRefusal, RevocationFence};
 /// Maximum ready-work descriptors before admission applies backpressure
 /// (Cell 05: 256 descriptors, no silent drop).
 pub const MAX_READY_WORK: usize = 256;
+
+/// Maximum queued command payload bytes (Cell 05: 8 MiB, explicit backpressure).
+pub const MAX_READY_BYTES: usize = 8_388_608;
 
 /// Maximum journal entries before an append is refused (Cell 05: bounded
 /// retained data, explicit overflow behaviour).

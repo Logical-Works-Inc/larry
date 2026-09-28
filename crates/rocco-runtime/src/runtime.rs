@@ -63,7 +63,7 @@ use crate::payload::{
     WorkProposal,
 };
 use crate::projection::{EffectPhase, ProjectionBackend};
-use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK, MAX_RUNS_PER_TICK, MAX_TRACKED_RUNS};
+use crate::{MAX_EFFECTS_PER_RUN, MAX_RUNS_PER_TICK, MAX_TRACKED_RUNS};
 
 /// The runtime's configuration: the pinned snapshots and the bounds.
 ///
@@ -132,6 +132,10 @@ pub struct TickReport {
     admitted: Vec<CommandId>,
     /// Duplicate commands excluded from execution.
     duplicates: Vec<CommandId>,
+    /// Corrections waiting for every effect in their run to reconcile.
+    deferred: Vec<CommandId>,
+    /// Corrections activated at this tick's admission boundary.
+    promoted: Vec<CommandId>,
     /// Operations authorized in this tick.
     authorized: Vec<OperationId>,
     /// Authorization refusals with their deterministic reasons.
@@ -158,6 +162,18 @@ impl TickReport {
     #[must_use]
     pub fn duplicates(&self) -> &[CommandId] {
         &self.duplicates
+    }
+
+    /// Corrections held because their run still has an unresolved effect.
+    #[must_use]
+    pub fn deferred(&self) -> &[CommandId] {
+        &self.deferred
+    }
+
+    /// Corrections made active at the admission-stage safe boundary.
+    #[must_use]
+    pub fn promoted(&self) -> &[CommandId] {
+        &self.promoted
     }
 
     /// Effects the gate authorized this tick.
@@ -211,6 +227,7 @@ impl TickReport {
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.admitted.is_empty()
+            && self.promoted.is_empty()
             && self.authorized.is_empty()
             && self.denied.is_empty()
             && self.reconciled.is_empty()
@@ -340,13 +357,47 @@ where
     /// bound. The caller must drain a tick; the runtime never silently drops
     /// a submission (Cell 05).
     pub fn submit(&mut self, command: Command) -> Result<(), RuntimeError> {
-        if self.ready.len() >= MAX_READY_WORK {
-            return Err(RuntimeError::ReadyWorkFull {
-                capacity: MAX_READY_WORK,
-            });
-        }
+        crate::admission::check_capacity(&self.ready, &command)?;
         self.ready.push_back(command);
         Ok(())
+    }
+
+    /// Durably accepts input without executing it (D25, E28).
+    ///
+    /// A successful return acknowledges only persistence, not completion or
+    /// correction activation. Retry the same envelope after a lost response.
+    /// Use a journal opened with [`Journal::with_storage`] and [`restore`].
+    ///
+    /// # Errors
+    /// Refuses missing/uncertain durability, malformed input, conflicting or
+    /// foreign retries, and ready-queue overflow before accepting new input.
+    pub fn admit(&mut self, command: Command) -> Result<CommandAcceptance, RuntimeError> {
+        self.journal.require_storage()?;
+        let acceptance =
+            rocco_contracts::command::accept(self.journal.command(command.id()), &command)?;
+        if acceptance == CommandAcceptance::DuplicateReplay {
+            return Ok(acceptance);
+        }
+        crate::admission::check_capacity(&self.ready, &command)?;
+        let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
+        self.ensure_run_tenant(proposal.run, command.tenant())?;
+        self.journal.accept_command(command.clone())?;
+        self.ready.push_back(command);
+        Ok(acceptance)
+    }
+
+    /// The active correction for a run, derived solely from promoted records.
+    /// Pending input never appears here and committed effects are never changed.
+    ///
+    /// # Errors
+    /// Refuses a foreign tenant or a malformed recorded promotion payload.
+    pub fn correction(
+        &self,
+        tenant: TenantId,
+        run: RunId,
+    ) -> Result<Option<&Command>, RuntimeError> {
+        self.ensure_run_tenant(run, tenant)?;
+        crate::admission::correction(&self.journal, tenant, run)
     }
 
     /// The authoritative journal.
@@ -387,10 +438,10 @@ where
     /// Consumes the runtime and returns its journal.
     ///
     /// This is the hand-off point to a durable store: the journal is the whole
-    /// state, so persisting it is persisting the runtime. Durable persistence
-    /// is Logical-DB's and the memory hold is intact — this method moves bytes
-    /// between two in-memory values and claims nothing about surviving a
-    /// process.
+    /// state, so persisting it is persisting the runtime. This move itself
+    /// performs no I/O. A journal opened with [`Journal::with_storage`] has
+    /// already committed each entry through its host-owned persistence boundary;
+    /// a default journal remains volatile. Logical-DB integration is separate.
     #[must_use]
     pub fn into_journal(self) -> Journal {
         self.journal
@@ -414,6 +465,7 @@ where
     ///
     /// Propagates every typed refusal from the stages below.
     pub fn tick(&mut self) -> Result<TickReport, RuntimeError> {
+        self.journal.check_writer()?;
         // The tick counter advances before any stage runs, so the stages agree
         // on which tick they are in and the reconciliation gate below can
         // compare against it.
@@ -430,7 +482,7 @@ where
 
     /// Admits queued commands in deterministic order within the tick bound.
     fn pump_ready(&mut self, at: SystemTime, report: &mut TickReport) -> Result<(), RuntimeError> {
-        let budget = self.settings.max_runs_per_tick;
+        let budget = self.settings.max_runs_per_tick.min(self.ready.len());
         for _ in 0..budget {
             let Some(command) = self.ready.pop_front() else {
                 return Ok(());
@@ -438,29 +490,53 @@ where
             let id = command.id();
             let tenant = command.tenant();
             let kind = command.content().kind();
-            let payload = command.content().payload().to_vec();
-            let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
+            let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
             self.ensure_run_tenant(proposal.run, tenant)?;
 
-            let acceptance = self.journal.accept_command(command)?;
-            if acceptance == CommandAcceptance::DuplicateReplay {
+            let acceptance = self.journal.accept_command(command.clone())?;
+            if self.journal.is_promoted(id) {
                 report.duplicates.push(id);
                 continue;
             }
-            report.admitted.push(id);
+            if acceptance == CommandAcceptance::Initial {
+                report.admitted.push(id);
+            }
+            if kind == CommandKind::Steer && !self.correction_boundary(proposal.run) {
+                report.deferred.push(id);
+                self.ready.push_back(command);
+                continue;
+            }
             self.record_command_accepted(id, tenant, kind, proposal.run)?;
 
             match kind {
                 CommandKind::Submit => self.admit_work(tenant, &proposal, at, report)?,
                 CommandKind::Cancel => self.request_cancellation(tenant, proposal.run)?,
                 CommandKind::Steer => {
-                    // Steering is recorded at a safe boundary; the command's
-                    // acceptance is the durable fact this slice owns.
+                    self.track_run(proposal.run, tenant)?;
+                    report.promoted.push(id);
                 }
                 other => return Err(RuntimeError::UnsupportedCommand(other)),
             }
         }
         Ok(())
+    }
+
+    /// A safe correction boundary has no unresolved effect for this run.
+    /// Merely observing a claimed success is insufficient: a receipt must exist.
+    fn correction_boundary(&self, run: RunId) -> bool {
+        self.live
+            .values()
+            .filter(|live| live.intent.run == run)
+            .all(|live| {
+                matches!(
+                    self.projection.effect_phase(live.intent.operation),
+                    Some(EffectPhase::Reconciled {
+                        disposition: TerminalDisposition::Succeeded
+                            | TerminalDisposition::Failed
+                            | TerminalDisposition::Compensated,
+                    })
+                )
+            })
     }
 
     /// Gates and durably reserves a proposal before reaching its owner.
@@ -472,11 +548,13 @@ where
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let run = proposal.run;
-        // Admissibility is decided from the runtime's own run table, never
-        // inferred from the projection: recording the command already created
-        // a run view, so a projection-based check would read `Draft` and skip
-        // the admission step.
-        let is_new = !self.runs.contains_key(&run);
+        // A command promotion creates a Draft view before the run's Admit
+        // transition. A prior correction may also have established ownership;
+        // neither fact means the run-state admission transition already ran.
+        let is_new = self
+            .projection
+            .run_state(run)
+            .is_none_or(|state| state == RunState::Draft);
         self.track_run(run, tenant)?;
 
         if is_new {
@@ -883,7 +961,7 @@ where
                 got: tenant,
             });
         }
-        Ok(())
+        crate::admission::check_pending_tenant(&self.journal, run, tenant)
     }
 
     /// Captures exactly the inputs used by the authorization reducer.
@@ -1150,13 +1228,14 @@ where
         runs.insert(run, RunLive { tenant });
     }
 
+    let ready = crate::admission::pending(&journal)?;
     Ok(Runtime {
         journal,
         projection,
         owner,
         clock,
         fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound),
-        ready: VecDeque::new(),
+        ready,
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
         settings,
         runs,

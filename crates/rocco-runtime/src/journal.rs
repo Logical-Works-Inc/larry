@@ -16,16 +16,22 @@
 //! refuses the append that would exceed it. Refusal is backpressure, not a
 //! silent drop (Cell 05).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use lgwks_std::json::serde::{Deserialize, Serialize};
 
 use rocco_contracts::command::{Command, CommandAcceptance, accept};
 use rocco_contracts::event::{Event, EventSequence, assign_sequence, validate_append};
 use rocco_contracts::ids::{CommandId, RunId};
 
+use crate::admission::JournalStorage;
 use crate::error::RuntimeError;
+use crate::payload::CommandAcceptedPayload;
 
 /// One recorded journal entry, in the order it was recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 #[non_exhaustive]
 pub enum JournalEntry {
     /// A command identity was accepted for the first time.
@@ -50,6 +56,12 @@ pub struct Journal {
     last_sequence: BTreeMap<RunId, EventSequence>,
     /// Maximum retained entries.
     capacity: usize,
+    /// Host-owned durable compare-and-append boundary, absent for fixtures.
+    storage: Option<Arc<dyn JournalStorage>>,
+    /// An uncertain append requires reopening from authoritative storage.
+    write_failed: bool,
+    /// Unpromoted command offsets, ordered by durable admission rather than ID.
+    pending: BTreeSet<usize>,
 }
 
 impl Journal {
@@ -69,6 +81,9 @@ impl Journal {
             command_index: BTreeMap::new(),
             last_sequence: BTreeMap::new(),
             capacity,
+            storage: None,
+            write_failed: false,
+            pending: BTreeSet::new(),
         })
     }
 
@@ -174,8 +189,12 @@ impl Journal {
         if acceptance == CommandAcceptance::Initial {
             self.reserve_one()?;
             let index = self.entries.len();
-            self.command_index.insert(command.id(), index);
-            self.entries.push(JournalEntry::Command(command));
+            let id = command.id();
+            let entry = JournalEntry::Command(command);
+            self.persist(&entry)?;
+            self.command_index.insert(id, index);
+            self.pending.insert(index);
+            self.entries.push(entry);
         }
         Ok(acceptance)
     }
@@ -191,8 +210,97 @@ impl Journal {
         let run = event.run();
         validate_append(self.last_sequence(run), event.sequence())?;
         self.reserve_one()?;
-        self.last_sequence.insert(run, event.sequence());
-        self.entries.push(JournalEntry::Event(event));
+        let promoted = if event.kind() == rocco_contracts::event::EventKind::CommandAccepted {
+            let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
+            Some(payload.command)
+        } else {
+            None
+        };
+        let sequence = event.sequence();
+        let entry = JournalEntry::Event(event);
+        self.persist(&entry)?;
+        self.last_sequence.insert(run, sequence);
+        if let Some(command) = promoted
+            && let Some(index) = self.command_index.get(&command)
+        {
+            self.pending.remove(index);
+        }
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    /// Opens host-recovered entries and attaches their durable writer.
+    ///
+    /// The host must supply the complete committed prefix from this storage,
+    /// with exclusive writer ownership. Each append compares its expected
+    /// offset; a stale clone cannot append over a different history.
+    ///
+    /// # Errors
+    /// Refuses invalid sequencing, conflicting identities and capacity overflow.
+    pub fn with_storage(
+        capacity: usize,
+        entries: impl IntoIterator<Item = JournalEntry>,
+        storage: Arc<dyn JournalStorage>,
+    ) -> Result<Self, RuntimeError> {
+        let mut journal = Self::new(capacity)?;
+        for entry in entries {
+            match entry {
+                JournalEntry::Command(command) => {
+                    journal.accept_command(command)?;
+                }
+                JournalEntry::Event(event) => journal.record(event)?,
+            }
+        }
+        journal.storage = Some(storage);
+        Ok(journal)
+    }
+
+    /// Requires a healthy durable owner before returning an admission acknowledgement.
+    pub(crate) fn require_storage(&self) -> Result<(), RuntimeError> {
+        self.check_writer()?;
+        if self.storage.is_none() {
+            return Err(RuntimeError::DurabilityUnavailable);
+        }
+        Ok(())
+    }
+
+    /// No execution may continue after persistence became uncertain.
+    pub(crate) fn check_writer(&self) -> Result<(), RuntimeError> {
+        if self.write_failed {
+            return Err(RuntimeError::JournalRecoveryRequired);
+        }
+        Ok(())
+    }
+
+    /// Whether the accepted identity already entered reduction.
+    pub(crate) fn is_promoted(&self, command: CommandId) -> bool {
+        self.command_index
+            .get(&command)
+            .is_some_and(|index| !self.pending.contains(index))
+    }
+
+    /// Accepted inputs that have not entered reduction, in admission order.
+    pub(crate) fn pending(&self) -> impl Iterator<Item = &Command> {
+        self.pending.iter().filter_map(|index| {
+            let entry = self.entries.get(*index)?;
+            match *entry {
+                JournalEntry::Command(ref command) => Some(command),
+                JournalEntry::Event(_) => None,
+            }
+        })
+    }
+
+    /// Persists before exposing an entry to any reader or owner.
+    fn persist(&mut self, entry: &JournalEntry) -> Result<(), RuntimeError> {
+        if self.write_failed {
+            return Err(RuntimeError::JournalRecoveryRequired);
+        }
+        if let Some(ref storage) = self.storage
+            && let Err(error) = storage.append(self.entries.len(), entry)
+        {
+            self.write_failed = true;
+            return Err(RuntimeError::JournalStorage(error));
+        }
         Ok(())
     }
 
