@@ -445,10 +445,9 @@ fn cancellation_records_request_before_completion() -> Result<(), Box<dyn std::e
 fn a_full_journal_backpressures_admission() -> Result<(), Box<dyn std::error::Error>> {
     let mut settings = support::settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
     settings.journal_capacity = 3;
-    let mut rt: TestRuntime =
-        rocco_runtime::runtime::Runtime::new(settings, ScriptedOwner::new(), {
-            rocco_runtime::clock::FixedClock::new(epoch()?)
-        })?;
+    let mut rt: TestRuntime = support::fixture_runtime(settings, ScriptedOwner::new(), {
+        rocco_runtime::clock::FixedClock::new(epoch()?)
+    })?;
     let body = proposal(
         run(1),
         tenant(1),

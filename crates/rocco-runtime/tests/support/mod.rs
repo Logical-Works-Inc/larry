@@ -87,11 +87,11 @@ pub fn runtime_with(
     capable: &[Scope],
     budget: u64,
 ) -> Result<TestRuntime, Box<dyn std::error::Error>> {
-    Ok(Runtime::new(
+    fixture_runtime(
         settings(allowed, capable, budget)?,
         owner,
         FixedClock::new(epoch()?),
-    )?)
+    )
 }
 
 /// A runtime whose owner has nothing scripted and therefore reports unknown
@@ -214,5 +214,68 @@ fn fixture_contracts() -> Result<(), Box<dyn std::error::Error>> {
         Some(RunState::Cancelled)
     );
     assert_eq!(tick.receipts(), &[]);
+    let restored: TestRuntime = fixture_restore(
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+        ScriptedOwner::new(),
+        FixedClock::new(epoch()?),
+        runtime.into_journal(),
+    )?;
+    assert_eq!(
+        restored.projection().run_state(run(1)),
+        Some(RunState::Cancelled)
+    );
     Ok(())
+}
+
+/// Explicitly provisions the finite synthetic tenant family used by these tests.
+/// Production constructors never derive authority from runtime settings.
+pub fn fixture_authority(
+    settings: &RuntimeSettings,
+) -> Result<rocco_runtime::authority::fixture::FixtureAuthority, Box<dyn std::error::Error>> {
+    let mut source = rocco_runtime::authority::fixture::FixtureAuthority::new(
+        settings.security_epoch,
+        settings.offline_dispatch_bound,
+    );
+    for byte in u8::MIN..=u8::MAX {
+        source.trust(
+            tenant(byte),
+            settings.policy.clone(),
+            settings.capabilities.clone(),
+            settings.validity,
+        )?;
+    }
+    Ok(source)
+}
+
+/// Constructs a runtime with explicitly synthetic source evidence.
+pub fn fixture_runtime<P, O, C>(
+    settings: RuntimeSettings,
+    owner: O,
+    clock: C,
+) -> Result<Runtime<P, O, C>, Box<dyn std::error::Error>>
+where
+    P: ProjectionBackend + Default,
+    O: rocco_runtime::owner::EffectOwner,
+    C: rocco_runtime::clock::Clock,
+{
+    let authority = fixture_authority(&settings)?;
+    Ok(Runtime::new(settings, owner, clock, authority)?)
+}
+
+/// Reopens a journal with an explicit independently supplied fixture source.
+pub fn fixture_restore<P, O, C>(
+    settings: RuntimeSettings,
+    owner: O,
+    clock: C,
+    journal: rocco_runtime::journal::Journal,
+) -> Result<Runtime<P, O, C>, Box<dyn std::error::Error>>
+where
+    P: ProjectionBackend + Default,
+    O: rocco_runtime::owner::EffectOwner,
+    C: rocco_runtime::clock::Clock,
+{
+    let authority = fixture_authority(&settings)?;
+    Ok(rocco_runtime::runtime::restore(
+        settings, owner, clock, journal, authority,
+    )?)
 }
