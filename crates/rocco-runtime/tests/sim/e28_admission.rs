@@ -16,7 +16,7 @@ use rocco_runtime::payload::WorkProposal;
 use rocco_runtime::projection::ProjectionBackend;
 use rocco_runtime::runtime::{Runtime, restore};
 
-use super::{Store, TestResult, TestRuntime, command, raw, reopen, settings};
+use super::{Store, TestResult, TestRuntime, authority, command, raw, reopen, settings};
 
 /// Runs a deterministic fault schedule and returns the complete trace digest.
 fn simulate(seed: u64) -> TestResult<ContentDigest> {
@@ -255,10 +255,13 @@ fn sim_e28_queue_saturation_and_recovery() -> TestResult {
 /// Volatile fixtures cannot accidentally acknowledge durability.
 #[test]
 fn sim_e28_missing_owner_and_malformed_input() -> TestResult {
+    let pinned = settings(1);
+    let source = authority(&pinned)?;
     let mut runtime: TestRuntime = Runtime::new(
-        settings(1),
+        pinned,
         ScriptedOwner::new(),
         FixedClock::new(SystemTime::UNIX_EPOCH),
+        source,
     )?;
     assert!(
         matches!(
@@ -398,11 +401,14 @@ fn sim_e28_pending_byte_backpressure() -> TestResult {
         [JournalEntry::Command(oversized)],
         Arc::new(Store::default()),
     )?;
+    let pinned = settings(1);
+    let source = authority(&pinned)?;
     let recovered: Result<TestRuntime, _> = restore(
-        settings(1),
+        pinned,
         ScriptedOwner::new(),
         FixedClock::new(SystemTime::UNIX_EPOCH),
         journal,
+        source,
     );
     assert!(
         matches!(recovered, Err(RuntimeError::ReadyBytesFull { .. })),

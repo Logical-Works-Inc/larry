@@ -11,8 +11,10 @@ use std::time::SystemTime;
 use rocco_contracts::authority::BudgetUnit;
 use rocco_contracts::command::{Command, CommandContent, CommandKind};
 use rocco_contracts::effect::ReconciliationStrategy;
+use rocco_contracts::event::EventKind;
 use rocco_contracts::ids::{CommandId, ContentDigest, OperationId, RunId, TenantId};
 use rocco_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
+use rocco_runtime::authority::fixture::FixtureAuthority;
 use rocco_runtime::clock::FixedClock;
 use rocco_runtime::consumer::{
     Consumer, ConsumerCursor, ConsumerLimits, CursorError, MAX_PAGE_BYTES, MAX_PAGE_ITEMS,
@@ -24,7 +26,7 @@ use rocco_runtime::projection::FoldProjection;
 use rocco_runtime::runtime::{Runtime, RuntimeSettings, restore};
 
 /// Concrete runtime, driven exclusively through public entrypoints.
-type Subject = Runtime<FoldProjection, ScriptedOwner, FixedClock>;
+type Subject = Runtime<FoldProjection, ScriptedOwner, FixedClock, FixtureAuthority>;
 /// Errors propagate through tests instead of panicking on setup.
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -44,13 +46,38 @@ fn settings() -> RuntimeSettings {
     )
 }
 
+/// Test-owned durable journal owner: compare-and-append into memory.
+#[derive(Debug, Default)]
+struct MemoryStore {
+    /// The committed prefix.
+    entries: std::sync::Mutex<Vec<JournalEntry>>,
+}
+
+impl rocco_runtime::JournalStorage for MemoryStore {
+    fn append(&self, offset: usize, entry: &JournalEntry) -> std::io::Result<()> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| std::io::Error::other("poisoned test store"))?;
+        if offset != entries.len() {
+            return Err(std::io::Error::other("stale offset refused"));
+        }
+        entries.push(entry.clone());
+        Ok(())
+    }
+}
+
 /// Fresh runtime or restoration of an authoritative journal in hand.
 fn subject(journal: Option<Journal>) -> TestResult<Subject> {
     let owner = ScriptedOwner::new();
     let clock = FixedClock::new(SystemTime::UNIX_EPOCH);
+    let settings = settings();
+    // Steering is never an effect, so the source trusts no tenant: any
+    // steering path that consulted effect authority would be refused here.
+    let authority = FixtureAuthority::new(settings.security_epoch, settings.offline_dispatch_bound);
     Ok(match journal {
-        Some(journal) => restore(settings(), owner, clock, journal)?,
-        None => Runtime::new(settings(), owner, clock)?,
+        Some(journal) => restore(settings, owner, clock, journal, authority)?,
+        None => Runtime::new(settings, owner, clock, authority)?,
     })
 }
 
@@ -385,21 +412,60 @@ fn e35_oversized_entry_never_skipped() -> TestResult {
     Ok(())
 }
 
-/// Bounded caller-owned subscriptions and 5,000 distinct tenant histories.
+/// Bounded caller-owned subscriptions across the declared tracked-run ceiling
+/// of distinct tenant histories, produced by the real admission path.
 #[test]
 fn e35_many_consumers_and_tenants() -> TestResult {
-    let mut journal = Journal::new(10_000)?;
-    for identity in 1..=5_000 {
-        journal.accept_command(command(identity, tenant(identity), 0)?)?;
+    // Histories are produced by the real admission path: a durable journal
+    // owner, admission, then the tick that promotes each accepted command.
+    // Batches stay under the bounded ready queue, as a live runtime must.
+    let storage: std::sync::Arc<dyn rocco_runtime::JournalStorage> =
+        std::sync::Arc::new(MemoryStore::default());
+    // Every promoted steer tracks its run, so the declared tracked-run ceiling
+    // is the most tenant histories one live runtime can hold. The test runs at
+    // that ceiling rather than at a count the runtime refuses by design.
+    let tenants = u128::try_from(rocco_runtime::MAX_TRACKED_RUNS)?;
+    let mut runtime = subject(Some(Journal::with_storage(20_000, Vec::new(), storage)?))?;
+    for batch in (1..=tenants)
+        .collect::<Vec<_>>()
+        .chunks(rocco_runtime::MAX_RUNS_PER_TICK)
+    {
+        for &identity in batch {
+            runtime.admit(command(identity, tenant(identity), 0)?)?;
+        }
+        let report = runtime.tick()?;
+        assert_eq!(
+            report.promoted().len(),
+            batch.len(),
+            "one tick promotes exactly one bounded batch"
+        );
     }
-    let runtime = subject(Some(journal))?;
-    for identity in 1..=5_000 {
+    let history = runtime.journal().len();
+    for identity in 1..=tenants {
         let mut consumer = runtime.subscribe(tenant(identity), None, ConsumerLimits::default())?;
         let page = runtime.consumer_page(tenant(identity), &mut consumer)?;
+        // A promoted command's history is the command and its acceptance fact,
+        // both this tenant's; any foreign or missing record is an isolation leak.
+        let kinds: Vec<_> = page
+            .records()
+            .iter()
+            .map(|record| match *record.entry() {
+                JournalEntry::Command(ref command) => {
+                    (command.tenant(), Some(command.content().kind()), None)
+                }
+                JournalEntry::Event(ref event) => (event.tenant(), None, Some(event.kind())),
+                // An entry kind this test does not know is never counted as
+                // this tenant's history: the sentinel fails the assertion.
+                _ => (TenantId::from_bytes([0; 16]), None, None),
+            })
+            .collect();
         assert_eq!(
-            page.records().len(),
-            1,
-            "exactly this tenant's accepted command"
+            kinds,
+            [
+                (tenant(identity), Some(CommandKind::Steer), None),
+                (tenant(identity), None, Some(EventKind::CommandAccepted)),
+            ],
+            "exactly this tenant's command and its acceptance, nothing foreign"
         );
         assert!(page.caught_up(), "no foreign backlog");
     }
@@ -408,15 +474,17 @@ fn e35_many_consumers_and_tenants() -> TestResult {
             .map(|_| runtime.subscribe(tenant(1), None, ConsumerLimits::default()))
             .collect::<Result<_, _>>()?;
         for consumer in &mut consumers {
+            // Tenant 1's history is the two records asserted above; every
+            // live consumer reads all of it from its own checkpoint.
             assert_eq!(
                 runtime.consumer_page(tenant(1), consumer)?.records().len(),
-                1,
+                2,
                 "simultaneously live consumers have independent checkpoints"
             );
         }
         assert_eq!(
             runtime.journal().len(),
-            5_000,
+            history,
             "consumer count never mutates authoritative history"
         );
     }

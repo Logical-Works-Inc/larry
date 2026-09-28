@@ -8,12 +8,14 @@ use rocco_contracts::command::{Command, CommandContent, CommandKind};
 use rocco_contracts::effect::{EffectOutcome, ReconciliationStrategy};
 use rocco_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use rocco_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
+use rocco_runtime::authority::fixture::FixtureAuthority;
 use rocco_runtime::clock::FixedClock;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::projection::ProjectionBackend;
 use rocco_runtime::runtime::{Runtime, RuntimeSettings};
 
-type TestRuntime = Runtime<rocco_runtime::projection::FoldProjection, ScriptedOwner, FixedClock>;
+type TestRuntime =
+    Runtime<rocco_runtime::projection::FoldProjection, ScriptedOwner, FixedClock, FixtureAuthority>;
 
 const HOSTILE_SEEDS: u64 = 1_000;
 
@@ -82,7 +84,7 @@ fn run_seed(
         Vec::new(),
         CommandContent::new(CommandKind::Submit, hostile_payload.into_boxed_slice()),
     )?;
-    let mut runtime = runtime_with(operation)?;
+    let mut runtime = runtime_with(operation, authenticated_tenant)?;
     runtime.submit(command)?;
 
     let report = runtime.tick()?;
@@ -275,7 +277,12 @@ fn id_bytes(seed: u64, domain: u8) -> [u8; 16] {
 }
 
 /// Builds a real runtime with one effective scope and one bounded budget unit.
-fn runtime_with(operation: OperationId) -> Result<TestRuntime, Box<dyn std::error::Error>> {
+/// The authority source trusts only the authenticated tenant. The forged
+/// `claimed_tenant` is never provisioned, so no path can borrow its authority.
+fn runtime_with(
+    operation: OperationId,
+    authenticated_tenant: TenantId,
+) -> Result<TestRuntime, Box<dyn std::error::Error>> {
     let at = SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_secs(1_700_000_000))
         .ok_or("fixture epoch is outside the platform time range")?;
@@ -294,6 +301,19 @@ fn runtime_with(operation: OperationId) -> Result<TestRuntime, Box<dyn std::erro
         BudgetUnit::Requests,
         1,
     );
+    let mut authority =
+        FixtureAuthority::new(settings.security_epoch, settings.offline_dispatch_bound);
+    authority.trust(
+        authenticated_tenant,
+        settings.policy.clone(),
+        settings.capabilities.clone(),
+        settings.validity,
+    )?;
     let owner = ScriptedOwner::scripted([EffectOutcome::Succeeded { operation }]);
-    Ok(Runtime::new(settings, owner, FixedClock::new(at))?)
+    Ok(Runtime::new(
+        settings,
+        owner,
+        FixedClock::new(at),
+        authority,
+    )?)
 }

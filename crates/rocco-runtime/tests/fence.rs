@@ -23,7 +23,7 @@ use rocco_runtime::clock::{Clock, FixedClock};
 use rocco_runtime::journal::JournalEntry;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::projection::{EffectPhase, FoldProjection, ProjectionBackend};
-use rocco_runtime::runtime::{Runtime, RuntimeSettings, restore};
+use rocco_runtime::runtime::{Runtime, RuntimeSettings};
 use rocco_runtime::{FenceError, FenceRefusal, RevocationFence};
 
 use support::{
@@ -129,7 +129,7 @@ fn work(
 fn open_retry_safe_effect(
     bound: u32,
 ) -> Result<(TestRuntime, OperationId), Box<dyn std::error::Error>> {
-    let mut rt: TestRuntime = Runtime::new(
+    let mut rt: TestRuntime = support::fixture_runtime(
         settings_at(SecurityEpoch::INITIAL, bound)?,
         ScriptedOwner::new(),
         FixedClock::new(epoch()?),
@@ -172,7 +172,7 @@ fn e71_revocation_before_admission_fences_the_effect_at_the_boundary()
     // journal knows nothing about it.
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     assert_eq!(rt.journal().len(), 0);
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.authority_mut().withdraw(tenant(1), operation(1))?);
 
     let tick = rt.tick()?;
 
@@ -220,7 +220,7 @@ fn e71_the_fence_sits_between_the_durable_intent_and_the_owner_call()
         100,
     )?;
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.authority_mut().withdraw(tenant(1), operation(1))?);
     let tick = rt.tick()?;
 
     let intents_recorded = rt
@@ -253,7 +253,7 @@ fn e71_a_fenced_retry_is_a_non_event_reported_every_tick() -> Result<(), Box<dyn
 {
     let (mut rt, op) = open_retry_safe_effect(64)?;
     let before = rt.journal().len();
-    assert!(rt.fence_mut().revoke(op));
+    assert!(rt.authority_mut().withdraw(tenant(1), op)?);
 
     let tick = rt.tick()?;
     assert_eq!(
@@ -279,7 +279,7 @@ fn e71_a_fenced_retry_is_a_non_event_reported_every_tick() -> Result<(), Box<dyn
 #[test]
 fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut rt = ManualRuntime::new(
+    let mut rt: ManualRuntime = support::fixture_runtime(
         settings_at(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
         ManualClock::new(epoch()?),
@@ -313,7 +313,7 @@ fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
     // Reaching the authority source recharges it, and the reserved effect goes
     // out on its declared retry path.
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
+        rt.authority_mut().authenticate(SecurityEpoch::INITIAL)?,
         SecurityEpoch::INITIAL
     );
     assert_eq!(rt.fence().offline_spent(), 0);
@@ -333,7 +333,7 @@ fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
 fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let clock = ManualClock::new(epoch()?);
-    let mut rt = ManualRuntime::new(
+    let mut rt: ManualRuntime = support::fixture_runtime(
         settings_that_outlive_a_year(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
         clock.clone(),
@@ -405,16 +405,19 @@ fn e71_a_replayed_older_snapshot_never_lowers_the_fence() -> Result<(), Box<dyn 
         100,
     )?;
     assert_eq!(rt.fence().epoch(), SecurityEpoch::INITIAL);
-    assert_eq!(rt.fence_mut().advance_epoch()?, SecurityEpoch::new(1));
+    assert_eq!(rt.authority_mut().advance_epoch()?, SecurityEpoch::new(1));
     // The snapshot the attacker holds says generation zero.
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
-        SecurityEpoch::new(1)
+        rt.authority_mut().authenticate(SecurityEpoch::INITIAL),
+        Err(FenceRefusal::StaleEpoch {
+            admitted: SecurityEpoch::INITIAL,
+            current: SecurityEpoch::new(1)
+        })
     );
     assert_eq!(rt.fence().epoch(), SecurityEpoch::new(1));
     // A genuine advance still moves in the other direction.
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::new(4)),
+        rt.authority_mut().authenticate(SecurityEpoch::new(4))?,
         SecurityEpoch::new(4)
     );
     assert_eq!(rt.fence().epoch(), SecurityEpoch::new(4));
@@ -460,7 +463,7 @@ fn e71_an_advanced_epoch_fences_the_retry_but_not_the_status_query()
     assert!(rt.owner().reconciled().is_empty());
 
     // Revocation lands after both effects are already out.
-    assert_eq!(rt.fence_mut().advance_epoch()?, SecurityEpoch::new(1));
+    assert_eq!(rt.authority_mut().advance_epoch()?, SecurityEpoch::new(1));
     let second = rt.tick()?;
 
     assert_eq!(
@@ -522,7 +525,7 @@ fn e71_a_proposal_cannot_declare_its_own_admission_epoch() -> Result<(), Box<dyn
     )?;
     early.submit(submit(command_id(1), &body)?)?;
     early.tick()?;
-    let mut late: TestRuntime = Runtime::new(
+    let mut late: TestRuntime = support::fixture_runtime(
         settings_at(SecurityEpoch::new(7), 64)?,
         ScriptedOwner::new(),
         FixedClock::new(epoch()?),
@@ -599,7 +602,7 @@ fn e63_a_proposal_cannot_declare_its_own_tenant() -> Result<(), Box<dyn std::err
     // A restart must not re-attribute the run to the declared tenant: the
     // restored run table is the same table the journal recorded.
     let journal = rt.into_journal();
-    let restored: TestRuntime = restore(
+    let restored: TestRuntime = support::fixture_restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::new(),
         FixedClock::new(epoch()?),
@@ -632,12 +635,12 @@ fn e71_restore_fences_only_the_effects_the_new_generation_left_behind()
 -> Result<(), Box<dyn std::error::Error>> {
     let reopened = |at_epoch: SecurityEpoch| -> Result<TestRuntime, Box<dyn std::error::Error>> {
         let (original, _) = open_retry_safe_effect(64)?;
-        Ok(restore(
+        support::fixture_restore(
             settings_at(at_epoch, 64)?,
             ScriptedOwner::new(),
             FixedClock::new(epoch()?),
             original.into_journal(),
-        )?)
+        )
     };
 
     let mut advanced = reopened(SecurityEpoch::new(1))?;
@@ -691,7 +694,7 @@ fn e71_a_fenced_effect_keeps_its_reservation_and_that_is_a_known_limit()
     )?;
     assert_eq!(rt.remaining_budget(), 100);
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.authority_mut().withdraw(tenant(1), operation(1))?);
     let tick = rt.tick()?;
 
     assert_eq!(tick.fenced().len(), 1);
@@ -759,7 +762,7 @@ fn e71_an_observation_cannot_resolve_an_effect_that_was_never_sent()
 -> Result<(), Box<dyn std::error::Error>> {
     // The offline bound is spent, so the only reach this effect ever gets is
     // the refused one: `dispatch` is never called on the owner.
-    let mut rt: TestRuntime = Runtime::new(
+    let mut rt: TestRuntime = support::fixture_runtime(
         settings_at(SecurityEpoch::INITIAL, 0)?,
         // The endpoint answers "succeeded" to the status query.
         ScriptedOwner::scripted([succeeded(operation(1))]),
@@ -847,7 +850,7 @@ fn e71_an_observation_cannot_resolve_an_effect_that_was_never_sent()
 /// authentications and not a credit that authentication hands out.
 #[test]
 fn e71_a_zero_bound_stops_every_effect_permanently() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rt: TestRuntime = Runtime::new(
+    let mut rt: TestRuntime = support::fixture_runtime(
         settings_at(SecurityEpoch::INITIAL, 0)?,
         ScriptedOwner::new(),
         FixedClock::new(epoch()?),
@@ -863,7 +866,7 @@ fn e71_a_zero_bound_stops_every_effect_permanently() -> Result<(), Box<dyn std::
     );
 
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
+        rt.authority_mut().authenticate(SecurityEpoch::INITIAL)?,
         SecurityEpoch::INITIAL
     );
     assert_eq!(
@@ -923,7 +926,7 @@ fn a_fenced_effect_leaves_the_run_visibly_unfinished() -> Result<(), Box<dyn std
         operation(1),
         ReconciliationStrategy::RequiresHuman,
     )?)?;
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.authority_mut().withdraw(tenant(1), operation(1))?);
     rt.tick()?;
     let state = rt.projection().run_state(run(1));
     assert_eq!(state, Some(RunState::Reconciling));
@@ -947,7 +950,7 @@ fn e71_epoch_exhaustion_refuses_at_the_runtime_boundary() -> Result<(), Box<dyn 
 /// mutating operations on the fence are crate-internal, so a caller cannot
 /// pre-clear a reach or assert that a dispatch happened.
 #[test]
-fn the_host_control_surface_is_withdrawal_refresh_and_reading()
+fn the_fixture_source_controls_withdrawal_refresh_and_reading()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut rt = runtime_with(
         ScriptedOwner::new(),
@@ -955,18 +958,18 @@ fn the_host_control_surface_is_withdrawal_refresh_and_reading()
         &[Scope::FileRead],
         100,
     )?;
-    let fence: &mut RevocationFence = rt.fence_mut();
-    assert!(!fence.is_revoked(operation(9)));
-    assert!(fence.revoke(operation(9)));
-    assert!(fence.is_revoked(operation(9)));
-    assert_eq!(fence.offline_bound(), rocco_runtime::MAX_OFFLINE_DISPATCHES);
-    assert_eq!(fence.offline_spent(), 0);
-    assert_eq!(fence.epoch(), SecurityEpoch::INITIAL);
+    assert!(rt.authority_mut().withdraw(tenant(1), operation(9))?);
     assert_eq!(
-        fence.authenticate(SecurityEpoch::new(2)),
+        rt.fence().offline_bound(),
+        rocco_runtime::MAX_OFFLINE_DISPATCHES
+    );
+    assert_eq!(rt.fence().offline_spent(), 0);
+    assert_eq!(rt.fence().epoch(), SecurityEpoch::INITIAL);
+    assert_eq!(
+        rt.authority_mut().authenticate(SecurityEpoch::new(2))?,
         SecurityEpoch::new(2)
     );
-    assert_eq!(fence.advance_epoch()?, SecurityEpoch::new(3));
+    assert_eq!(rt.authority_mut().advance_epoch()?, SecurityEpoch::new(3));
     // Refusals and epoch failures render as sentences, not as Debug output.
     assert_eq!(
         FenceRefusal::Revoked {

@@ -30,7 +30,7 @@
 //! Recording a decision is not the same as being entitled to act on it
 //! later, so authorization is deliberately two things. [`gate`] is the
 //! reproducible half: pure, pinned, replayable. [`RevocationFence`] is the
-//! fresh half: live host state holding the security epoch, the withdrawn
+//! fresh half: source-owned state holding the security epoch, the withdrawn
 //! operations and the offline exposure bound, consulted at the single point
 //! where an effect reaches its owner to change something. Replaying the
 //! journal re-derives the decision bit-identically; it never re-authorizes
@@ -68,8 +68,8 @@
 //! - [`gate`] — the pure authorization reducer and the boundary re-check.
 //! - [`RevocationFence`] — dispatch-time freshness: epoch, revocation,
 //!   offline bound. The module behind it is private and this crate re-exports
-//!   the three types below rather than opening a fourth namespace; the host
-//!   needs a control surface for the fence, not the ability to reach past it.
+//!   the types below. Runtime accepts fence evidence only through the
+//!   explicit [`authority::AuthoritySource`] owner seam.
 //! - [`owner`] — the canonical-owner trait and its deterministic doubles.
 //! - [`runtime`] — the tick, its stages and the typed report.
 //! - [`error`] — every refused operation, with structured context.
@@ -79,6 +79,7 @@
 mod admission;
 pub use admission::JournalStorage;
 
+pub mod authority;
 pub mod clock;
 pub mod consumer;
 pub mod error;

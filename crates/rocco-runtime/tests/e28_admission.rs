@@ -15,6 +15,7 @@ use rocco_contracts::error::CommandError;
 use rocco_contracts::ids::{CommandId, ContentDigest, OperationId, RunId, TenantId};
 use rocco_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use rocco_runtime::JournalStorage;
+use rocco_runtime::authority::fixture::FixtureAuthority;
 use rocco_runtime::clock::FixedClock;
 use rocco_runtime::error::RuntimeError;
 use rocco_runtime::journal::{Journal, JournalEntry};
@@ -29,7 +30,7 @@ mod simulation;
 /// Test errors preserve the failing public boundary.
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 /// Runtime driven by deterministic owner responses.
-type TestRuntime = Runtime<FoldProjection, ScriptedOwner, FixedClock>;
+type TestRuntime = Runtime<FoldProjection, ScriptedOwner, FixedClock, FixtureAuthority>;
 /// Bounded test journal, with injected acknowledgement loss.
 #[derive(Debug, Default)]
 struct Store {
@@ -71,6 +72,21 @@ fn settings(seed: u64) -> RuntimeSettings {
     )
 }
 
+/// Effect authority for the one legitimate submitter, tenant 1, taken from
+/// the test's own snapshots. Tenant 2, the cross-tenant correction case in the
+/// simulation module, is deliberately untrusted.
+fn authority(settings: &RuntimeSettings) -> TestResult<FixtureAuthority> {
+    let mut source =
+        FixtureAuthority::new(settings.security_epoch, settings.offline_dispatch_bound);
+    source.trust(
+        TenantId::from_bytes(raw(1)),
+        settings.policy.clone(),
+        settings.capabilities.clone(),
+        settings.validity,
+    )?;
+    Ok(source)
+}
+
 /// Seed-derived identities do not depend on process state or random devices.
 fn raw(seed: u64) -> [u8; 16] {
     u128::from(seed).to_be_bytes()
@@ -106,11 +122,14 @@ fn reopen(store: &Arc<Store>, seed: u64, outcomes: Vec<EffectOutcome>) -> TestRe
         .clone();
     let concrete = Arc::clone(store);
     let storage: Arc<dyn JournalStorage> = concrete;
+    let settings = settings(seed);
+    let authority = authority(&settings)?;
     Ok(restore(
-        settings(seed),
+        settings,
         ScriptedOwner::scripted(outcomes),
         FixedClock::new(SystemTime::UNIX_EPOCH),
         Journal::with_storage(4096, entries, storage)?,
+        authority,
     )?)
 }
 
@@ -162,13 +181,16 @@ fn file_runtime(path: &Path, crash_barrier: bool) -> TestResult<TestRuntime> {
         path: path.to_path_buf(),
         crash_barrier,
     });
+    let settings = settings(1);
+    let authority = authority(&settings)?;
     Ok(restore(
-        settings(1),
+        settings,
         ScriptedOwner::scripted([EffectOutcome::Succeeded {
             operation: OperationId::from_bytes(raw(1)),
         }]),
         FixedClock::new(SystemTime::UNIX_EPOCH),
         Journal::with_storage(4096, entries, storage)?,
+        authority,
     )?)
 }
 
@@ -379,16 +401,20 @@ fn e28_correction_during_real_tool() -> TestResult {
     let (results, result) = std::sync::mpsc::sync_channel(1);
     let store = Arc::new(Store::default());
     let storage: Arc<dyn JournalStorage> = store;
-    let mut runtime: Runtime<FoldProjection, ComputingTool, FixedClock> = restore(
-        settings(19),
-        ComputingTool {
-            launch,
-            result,
-            observed: None,
-        },
-        FixedClock::new(SystemTime::UNIX_EPOCH),
-        Journal::with_storage(4096, Vec::new(), storage)?,
-    )?;
+    let pinned = settings(19);
+    let source = authority(&pinned)?;
+    let mut runtime: Runtime<FoldProjection, ComputingTool, FixedClock, FixtureAuthority> =
+        restore(
+            pinned,
+            ComputingTool {
+                launch,
+                result,
+                observed: None,
+            },
+            FixedClock::new(SystemTime::UNIX_EPOCH),
+            Journal::with_storage(4096, Vec::new(), storage)?,
+            source,
+        )?;
     std::thread::scope(|scope| -> TestResult {
         let tool = scope.spawn(move || -> Result<ContentDigest, &'static str> {
             let operation: OperationId = launched

@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 /target/
+# Build output anywhere in the tree: rust-guard's compile check leaves
+# crates/<crate>/target/.rust-guard-compile.lock, which `/target/` misses.
+target/
 Cargo.lock.bak
 *.swp
 .DS_Store

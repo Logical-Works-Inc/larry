@@ -21,7 +21,6 @@ use rocco_runtime::payload::TransitionPayload;
 use rocco_runtime::projection::{
     EffectPhase, FoldProjection, ProjectionBackend, replay_authorizations,
 };
-use rocco_runtime::runtime::{Runtime, restore};
 
 use support::{
     TestRuntime, assert_state, command_id, epoch, operation, proposal, run, runtime_with, settings,
@@ -269,7 +268,7 @@ fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
     // Command, CommandAccepted, Admit, Start, EnterReconciling, Intent = 6
     // entries. The outcome event is the seventh and does not fit.
     limited.journal_capacity = 6;
-    let mut rt: TestRuntime = Runtime::new(
+    let mut rt: TestRuntime = support::fixture_runtime(
         limited,
         ScriptedOwner::new(),
         rocco_runtime::clock::FixedClock::new(epoch()?),
@@ -301,7 +300,7 @@ fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
     );
 
     // Restoration treats the reservation as possibly-dispatched and reconciles.
-    let mut restored: TestRuntime = restore(
+    let mut restored: TestRuntime = support::fixture_restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::scripted([succeeded(operation(1))]),
         rocco_runtime::clock::FixedClock::new(epoch()?),
@@ -503,7 +502,7 @@ fn a_run_that_reserved_no_effect_does_not_block_restore() -> Result<(), Box<dyn 
     assert_eq!(probe.run_ids(), vec![run(1)], "the journal names the run");
     assert!(probe.intents().is_empty(), "and reserved no effect for it");
 
-    let restored: TestRuntime = restore(
+    let restored: TestRuntime = support::fixture_restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::new(),
         rocco_runtime::clock::FixedClock::new(epoch()?),

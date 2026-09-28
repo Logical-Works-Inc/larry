@@ -54,6 +54,7 @@ use rocco_contracts::replay::{
 };
 use rocco_contracts::state::{RunState, TransitionEvent};
 
+use crate::authority::AuthoritySource;
 use crate::error::RuntimeError;
 use crate::fence::{FenceRefusal, RevocationFence};
 use crate::journal::{Journal, JournalEntry};
@@ -85,12 +86,12 @@ pub struct RuntimeSettings {
     pub unit: BudgetUnit,
     /// The initially reserved budget.
     pub initial_budget: u64,
-    /// The security generation the fence starts at (R87, D48). Host-supplied
-    /// like the snapshots above, and for the same reason: it is a fact about
-    /// authority, not about this process.
+    /// Legacy fixture-provisioning hint. Runtime never trusts this value: the
+    /// explicit authority source supplies the reservation and dispatch epochs.
     pub security_epoch: SecurityEpoch,
     /// How many mutating reaches the fence permits before the authority
-    /// source must be re-contacted.
+    /// source must be re-contacted. This may restrict, never enlarge, the
+    /// authority source's own ceiling.
     pub offline_dispatch_bound: u32,
     /// The journal entry ceiling.
     pub journal_capacity: usize,
@@ -247,6 +248,8 @@ struct RunLive {
 struct LiveEffect {
     /// Durable reservation associated with this live witness.
     intent: EffectIntent,
+    /// Index of this reservation's recorded authorization; rebuilt on restore.
+    authorization_index: usize,
     /// Whether this effect may have reached its owner. Set when a mutating
     /// reach is actually taken, and set by [`restore`] for every recorded
     /// reservation, because the journal proves the effect was reserved and
@@ -288,7 +291,7 @@ enum OwnerReach {
 
 /// The Rocco runtime.
 #[derive(Debug)]
-pub struct Runtime<P, O, C> {
+pub struct Runtime<P, O, C, A = crate::authority::fixture::FixtureAuthority> {
     /// Authoritative append-only history.
     journal: Journal,
     /// Discardable deterministic fold of the history.
@@ -298,7 +301,7 @@ pub struct Runtime<P, O, C> {
     /// Injected source of tick time.
     clock: C,
     /// Current authority check for mutating reaches.
-    fence: RevocationFence,
+    authority: A,
     /// Bounded queue of commands awaiting admission.
     ready: VecDeque<Command>,
     /// Host-supplied snapshots and resource bounds.
@@ -313,11 +316,12 @@ pub struct Runtime<P, O, C> {
     tick_count: u64,
 }
 
-impl<P, O, C> Runtime<P, O, C>
+impl<P, O, C, A> Runtime<P, O, C, A>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
     C: crate::clock::Clock,
+    A: AuthoritySource,
 {
     /// A runtime with an empty journal and empty projection.
     ///
@@ -325,20 +329,25 @@ where
     ///
     /// Returns [`RuntimeError::RunLimitReached`] when the run capacity is
     /// zero, which would make every run untrackable.
-    pub fn new(settings: RuntimeSettings, owner: O, clock: C) -> Result<Self, RuntimeError> {
+    pub fn new(
+        settings: RuntimeSettings,
+        owner: O,
+        clock: C,
+        mut authority: A,
+    ) -> Result<Self, RuntimeError> {
         let projection = P::default();
         let journal = Journal::new(settings.journal_capacity)?;
         if settings.run_capacity == 0 {
             return Err(RuntimeError::RunLimitReached { capacity: 0 });
         }
         let remaining_budget = settings.initial_budget;
-        let fence = RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound);
+        authority.begin_session(settings.offline_dispatch_bound);
         Ok(Self {
             journal,
             projection,
             owner,
             clock,
-            fence,
+            authority,
             ready: VecDeque::new(),
             settings,
             remaining_budget,
@@ -418,21 +427,15 @@ where
         &self.owner
     }
 
-    /// The live dispatch fence (R87, D48).
+    /// The source-owned dispatch fence; callers cannot mutate runtime authority.
     #[must_use]
-    pub const fn fence(&self) -> &RevocationFence {
-        &self.fence
+    pub fn fence(&self) -> &RevocationFence {
+        self.authority.fence()
     }
 
-    /// The fence, mutably, for the authority layer that owns it.
-    ///
-    /// This is the host's control surface — withdraw an operation, advance
-    /// the epoch, re-authenticate against the authority source. The runtime
-    /// only ever *reads* the fence: withdrawal and freshness are not
-    /// decisions it is entitled to make about itself, and the two mutating
-    /// operations the runtime performs on a reach are crate-internal.
-    pub const fn fence_mut(&mut self) -> &mut RevocationFence {
-        &mut self.fence
+    /// The injected authority owner. Only fixture owners expose simulation controls.
+    pub const fn authority_mut(&mut self) -> &mut A {
+        &mut self.authority
     }
 
     /// Consumes the runtime and returns its journal.
@@ -597,7 +600,7 @@ where
         // revocation, or record an effect — or re-attribute a run after a
         // restart — to a tenant it does not own (D42, E63).
         let tenant = self.tenant_of(run)?;
-        let intent = proposal.intent(tenant, self.fence.epoch());
+        let intent = proposal.intent(tenant, self.authority.fence().epoch());
         self.record_intent(run, intent, authorization)?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
@@ -605,6 +608,7 @@ where
             intent.operation,
             LiveEffect {
                 intent,
+                authorization_index: self.projection.authorizations().len().saturating_sub(1),
                 // Nothing has reached the owner yet: the reservation is
                 // durable, and the reach that follows is what sets this.
                 sent: false,
@@ -669,7 +673,7 @@ where
     ) -> Option<EffectOutcome> {
         match reach {
             OwnerReach::Mutate => {
-                if let Err(refusal) = self.fence.check(&intent) {
+                if let Err(refusal) = self.authorize_reach(&intent) {
                     report.fenced.push((intent.operation, refusal));
                     return None;
                 }
@@ -683,11 +687,6 @@ where
                     // query about it is therefore evidence.
                     live.sent = true;
                 }
-                // The reach happens without the authority source having been
-                // re-contacted, so it consumes offline authority. Spending it
-                // here — rather than at the call site — is what keeps the
-                // accounting tied to an owner call that actually occurred.
-                self.fence.spend_offline();
                 Some(self.owner.dispatch(&intent, at))
             }
             OwnerReach::Observe => {
@@ -697,6 +696,26 @@ where
                 Some(self.owner.reconcile(&intent, at))
             }
         }
+    }
+
+    /// Revalidates the reservation's own snapshots through the source, then
+    /// checks and spends its fence. Replay never supplies fresh authority.
+    fn authorize_reach(&mut self, intent: &EffectIntent) -> Result<(), FenceRefusal> {
+        let index = self
+            .live
+            .get(&intent.operation)
+            .ok_or(FenceRefusal::StaleSnapshots)?
+            .authorization_index;
+        let record = self
+            .projection
+            .authorizations()
+            .get(index)
+            .filter(|record| record.pinned.request.operation == intent.operation)
+            .ok_or(FenceRefusal::StaleSnapshots)?;
+        let fence = self.authority.authenticate_reach(intent, &record.pinned)?;
+        fence.check(intent)?;
+        fence.spend_offline();
+        Ok(())
     }
 
     /// Records an observed outcome and, when it may terminate the effect,
@@ -1143,29 +1162,28 @@ pub fn replay<P: ProjectionBackend>(
 /// reconciliation strategy that is *not* retry-based (status query, human, or
 /// compensation) is unaffected either way.
 ///
-/// Each restored effect keeps the admission epoch its intent recorded, and the
-/// fence starts from `settings.security_epoch`, which the host supplies. That
-/// pairing is the recovery contract D48 asks to be persisted before dispatch:
-/// a host that has since moved its authority to a later generation restores
-/// with `security_epoch` set to it, and every effect admitted below that
-/// generation comes back already fenced rather than being re-dispatched on the
-/// strength of a decision that no longer stands (E71).
+/// Each restored effect retains its recorded epoch and pinned snapshots. An
+/// explicit authority source starts a new session and revalidates those exact
+/// inputs before any retry. Host settings cannot refresh a restored decision;
+/// disconnected recovery cannot recreate an authenticated session (E71).
 ///
 /// # Errors
 ///
 /// Returns [`RuntimeError::Codec`] or [`RuntimeError::FoldDivergence`] from
 /// the rebuild, and [`RuntimeError::RunNotTracked`] for a run the projection
 /// tracks but recorded no tenant for.
-pub fn restore<P, O, C>(
+pub fn restore<P, O, C, A>(
     settings: RuntimeSettings,
     owner: O,
     clock: C,
     journal: Journal,
-) -> Result<Runtime<P, O, C>, RuntimeError>
+    mut authority: A,
+) -> Result<Runtime<P, O, C, A>, RuntimeError>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
     C: crate::clock::Clock,
+    A: AuthoritySource,
 {
     // The recorded history is kept as it is; only the ceiling moves, so a
     // journal that filled up mid-effect can still record the reconciliation it
@@ -1182,6 +1200,12 @@ where
     for record in projection.authorizations() {
         reserved_budget = reserved_budget.saturating_add(record.pinned.request.cost);
     }
+    let authorization_indices: BTreeMap<OperationId, usize> = projection
+        .authorizations()
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.pinned.request.operation, index))
+        .collect();
     for intent in projection.intents() {
         let phase = projection.effect_phase(intent.operation);
         // A reservation with no recorded outcome may already have reached the
@@ -1196,6 +1220,11 @@ where
             intent.operation,
             LiveEffect {
                 intent: *intent,
+                authorization_index: *authorization_indices.get(&intent.operation).ok_or(
+                    RuntimeError::IntentNotDurable {
+                        operation: intent.operation,
+                    },
+                )?,
                 // The journal proves the effect was reserved and cannot prove
                 // it was never sent, so every restored effect counts as
                 // possibly-sent — including one that merely read as `Reserved`
@@ -1229,12 +1258,13 @@ where
     }
 
     let ready = crate::admission::pending(&journal)?;
+    authority.begin_session(settings.offline_dispatch_bound);
     Ok(Runtime {
         journal,
         projection,
         owner,
         clock,
-        fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound),
+        authority,
         ready,
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
         settings,

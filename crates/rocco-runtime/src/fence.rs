@@ -8,7 +8,7 @@
 //! **now**, held by the authority source, and yesterday's recorded decision
 //! is exactly the evidence that must not be trusted today.
 //!
-//! [`RevocationFence`] is that second half. It is live host state — the
+//! [`RevocationFence`] is that second half. It is source-owned state — the
 //! runtime never infers it from the journal and never records it as a
 //! decision — and it is consulted at the one point where an effect would
 //! reach its owner to *change* something.
@@ -51,7 +51,7 @@ use std::collections::BTreeSet;
 
 use rocco_contracts::authority::SecurityEpoch;
 use rocco_contracts::effect::EffectIntent;
-use rocco_contracts::ids::OperationId;
+use rocco_contracts::ids::{OperationId, TenantId};
 
 /// Why the fence refused to let an effect reach its owner.
 ///
@@ -62,14 +62,24 @@ use rocco_contracts::ids::OperationId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FenceRefusal {
+    /// No freshly authenticated authority session exists.
+    AuthorityUnavailable,
+    /// No current source record authenticates this tenant.
+    AuthorityTenant {
+        /// Refused tenant scope.
+        tenant: TenantId,
+    },
+    /// Historical policy, capability or validity evidence differs from the source.
+    StaleSnapshots,
+    /// The authority owner refused bounded state growth without eviction.
+    AuthorityCapacity,
     /// The operation's authority was withdrawn by name.
     Revoked {
         /// The withdrawn operation.
         operation: OperationId,
     },
-    /// The effect was admitted below the fence's current security epoch, so
-    /// its authorization belongs to a generation the authority source has
-    /// left behind (E71).
+    /// The reservation and source epochs differ. Neither an old intent nor
+    /// a rolled-back source can independently authorize a reach (E71).
     StaleEpoch {
         /// The generation the reservation was admitted under.
         admitted: SecurityEpoch,
@@ -87,6 +97,19 @@ pub enum FenceRefusal {
 impl fmt::Display for FenceRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::AuthorityUnavailable => {
+                write!(f, "authority source unavailable for this session")
+            }
+            Self::AuthorityTenant { tenant } => {
+                write!(f, "authority source does not authenticate tenant {tenant}")
+            }
+            Self::StaleSnapshots => {
+                write!(f, "pinned snapshots are not current authority evidence")
+            }
+            Self::AuthorityCapacity => write!(
+                f,
+                "authority source capacity exhausted; no evidence evicted"
+            ),
             Self::Revoked { operation } => {
                 write!(f, "operation {operation} was revoked by name")
             }
@@ -128,14 +151,14 @@ impl std::error::Error for FenceError {}
 
 /// The live freshness state consulted at dispatch (R87, D48, E71).
 ///
-/// Host-owned: the authority layer revokes, advances and authenticates
+/// Source-owned: the authority adapter revokes, advances and authenticates
 /// through this type; the runtime only reads it. Nothing here is folded from
 /// the journal, and nothing here is written to it, because freshness is not
 /// a recorded fact — it is a fact about the present that a record cannot
 /// carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevocationFence {
-    /// Current host-authenticated security generation.
+    /// Current source-authenticated security generation.
     epoch: SecurityEpoch,
     /// Operations whose authority has been withdrawn.
     revoked: BTreeSet<OperationId>,
@@ -225,13 +248,16 @@ impl RevocationFence {
     /// The fence moves to the later of the two values and never back, so a
     /// replayed old device, grant or policy snapshot is absorbed rather than
     /// obeyed, and stale evidence never independently authorizes execution
-    /// (E71). Offline exposure resets, because this call *is* the authority
-    /// source being reached — that is the only thing that resets it.
+    /// (E71). Only a report at or above the current epoch resets exposure;
+    /// replaying a stale report never refunds a spent reach.
     ///
     /// Returns the generation the fence now stands at.
     #[must_use = "the returned epoch is the generation the fence now stands at"]
     pub fn authenticate(&mut self, reported: SecurityEpoch) -> SecurityEpoch {
-        self.epoch = self.epoch.later_of(reported);
+        if self.epoch.is_later_than(reported) {
+            return self.epoch;
+        }
+        self.epoch = reported;
         self.offline_spent = 0;
         self.epoch
     }
@@ -260,18 +286,29 @@ impl RevocationFence {
                 operation: intent.operation,
             });
         }
-        if self.epoch.is_later_than(intent.admission_epoch) {
-            return Err(FenceRefusal::StaleEpoch {
-                admitted: intent.admission_epoch,
-                current: self.epoch,
-            });
-        }
+        self.check_epoch(intent.admission_epoch)?;
         if self.offline_spent >= self.offline_bound {
             return Err(FenceRefusal::OfflineExposureExhausted {
                 bound: self.offline_bound,
             });
         }
         Ok(())
+    }
+
+    /// Checks generation identity without consulting or spending offline credit.
+    pub(crate) fn check_epoch(&self, admitted: SecurityEpoch) -> Result<(), FenceRefusal> {
+        if self.epoch != admitted {
+            return Err(FenceRefusal::StaleEpoch {
+                admitted,
+                current: self.epoch,
+            });
+        }
+        Ok(())
+    }
+
+    /// Applies a host's stricter ceiling without enlarging source authority.
+    pub(crate) fn restrict_offline_bound(&mut self, bound: u32) {
+        self.offline_bound = self.offline_bound.min(bound);
     }
 
     /// Records that one mutating reach happened without the authority source
