@@ -20,6 +20,12 @@ use rocco_contracts::state::RunState;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    /// No durable journal owner is attached; no acknowledgement is permitted.
+    DurabilityUnavailable,
+    /// Persistence failed ambiguously; reload the committed journal before writing.
+    JournalRecoveryRequired,
+    /// The host journal owner refused or could not confirm the append.
+    JournalStorage(std::io::Error),
     /// An authorization decision is not understood; dispatch is refused.
     UnsupportedDecision(rocco_contracts::replay::Decision),
     /// A command kind is not understood; execution is refused.
@@ -39,6 +45,11 @@ pub enum RuntimeError {
     /// The run table is at capacity.
     RunLimitReached {
         /// The configured run ceiling.
+        capacity: usize,
+    },
+    /// Pending payload bytes exceed the Cell 05 admission ceiling.
+    ReadyBytesFull {
+        /// Maximum admitted pending bytes.
         capacity: usize,
     },
     /// The ready-work queue is at capacity; the caller must drain a tick
@@ -130,6 +141,13 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::DurabilityUnavailable => {
+                f.write_str("durable admission requires a journal storage owner")
+            }
+            Self::JournalRecoveryRequired => {
+                f.write_str("journal append is uncertain; recover before writing")
+            }
+            Self::JournalStorage(ref error) => write!(f, "journal storage refused: {error}"),
             Self::UnsupportedDecision(value) => {
                 write!(f, "unsupported authorization decision: {value:?}")
             }
@@ -150,6 +168,10 @@ impl fmt::Display for RuntimeError {
             Self::RunLimitReached { capacity } => {
                 write!(f, "run table is at capacity {capacity}")
             }
+            Self::ReadyBytesFull { capacity } => write!(
+                f,
+                "pending payloads exceed {capacity} bytes; drain a tick first"
+            ),
             Self::ReadyWorkFull { capacity } => {
                 write!(
                     f,
@@ -210,6 +232,8 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
+            Self::JournalStorage(ref err) => Some(err),
+            Self::DurabilityUnavailable | Self::JournalRecoveryRequired => None,
             Self::Sequence(ref err) => Some(err),
             Self::Ordering(ref err) => Some(err),
             Self::Command(ref err) => Some(err),
@@ -224,6 +248,7 @@ impl std::error::Error for RuntimeError {
             | Self::JournalFull { .. }
             | Self::RunLimitReached { .. }
             | Self::ReadyWorkFull { .. }
+            | Self::ReadyBytesFull { .. }
             | Self::EffectLimitReached { .. }
             | Self::Denied { .. }
             | Self::RunNotTracked { .. }
