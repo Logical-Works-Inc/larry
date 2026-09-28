@@ -9,6 +9,7 @@
 
 use core::fmt;
 
+use crate::approval::ApprovalQuestionError;
 use rocco_contracts::error::{
     AuthorityError, CommandError, OrderingError, SequenceError, TransitionError,
 };
@@ -20,6 +21,8 @@ use rocco_contracts::state::RunState;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    /// An approval question or answer violated its typed lifecycle contract.
+    ApprovalQuestion(ApprovalQuestionError),
     /// An authorization decision is not understood; dispatch is refused.
     UnsupportedDecision(rocco_contracts::replay::Decision),
     /// A command kind is not understood; execution is refused.
@@ -130,6 +133,7 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::ApprovalQuestion(ref err) => write!(f, "approval question refused: {err}"),
             Self::UnsupportedDecision(value) => {
                 write!(f, "unsupported authorization decision: {value:?}")
             }
@@ -210,6 +214,7 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
+            Self::ApprovalQuestion(ref err) => Some(err),
             Self::Sequence(ref err) => Some(err),
             Self::Ordering(ref err) => Some(err),
             Self::Command(ref err) => Some(err),
@@ -240,6 +245,12 @@ impl std::error::Error for RuntimeError {
 impl From<SequenceError> for RuntimeError {
     fn from(err: SequenceError) -> Self {
         Self::Sequence(err)
+    }
+}
+
+impl From<ApprovalQuestionError> for RuntimeError {
+    fn from(err: ApprovalQuestionError) -> Self {
+        Self::ApprovalQuestion(err)
     }
 }
 
