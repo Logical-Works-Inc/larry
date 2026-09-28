@@ -22,6 +22,32 @@ planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
 
+## 2026-09-28: main returned to green before parallel falsifier work
+
+Main at e9c3973 failed the strict Clippy lane: `WorkItems::items` carried a
+bare `#[must_use]` on an `impl ExactSizeIterator` return, which clippy
+`double_must_use` denies under `-D warnings`. The attribute is removed; the
+iterator type already carries the obligation. No lint was lowered.
+
+The local-CI span check counted unittest lines ending in `... ok`. On a host
+with `FORCE_COLOR` set, Python 3.14 wraps `ok` in ANSI escapes, so the check
+read 0 journeys against a green PTY suite and refused the receipt. The check's
+own invocation now forces colour off; the threshold of two journeys is
+unchanged.
+
+Estate pins were checked against crates.io on 2026-09-28: lgwks_std 0.6.6,
+lgwks_bot 0.4.2 and lgwks_deps 0.1.12 are the latest published releases, so no
+pin moved. Estate main carries unpublished 0.6.7 / 0.5.0 / 0.1.13; the
+register law forbids path or git edges, so they are NOT consumed until
+published. The installed `lgwks-deps` binary was 0.1.2 and is now 0.1.12,
+matching the pin.
+
+Checks: `bash .wwfd/local-ci.sh` exit 0 across every lane (build, workspace
+tests, strict Clippy, fmt, unittest, governance, lgwks-deps, demo CLI, native
+PTY, diff check, span check). Receipts:
+`tools/receipts/20260928-baseline-green-{pre,post}-exec.json`. Hosted CI:
+NOT RUN at the time of writing. No spec ID changes; no cell moves.
+
 ## 2026-09-22: native layout hardening and full strict-gate recovery
 
 The native AppCUI path now represents terminal dimensions, text widths, layout
