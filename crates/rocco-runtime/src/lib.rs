@@ -74,6 +74,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod approval;
 pub mod clock;
 pub mod error;
 pub mod gate;

@@ -7,10 +7,12 @@
 //! 2. **admit** — duplicate-suppress each ready command, record its
 //!    acceptance, drive the run-state algebra, then gate, reserve, dispatch
 //!    and record the outcome;
-//! 3. **reconcile** — for every effect whose journal position is still
+//! 3. **questions** — settle cancellation, then expiry, then queued answers;
+//!    independent question reads never block one another (E30);
+//! 4. **reconcile** — for every effect whose journal position is still
 //!    `Reserved`, ask its owner what happened. This is where a resumed run
 //!    and an ambiguous outcome both land;
-//! 4. **cancel** — complete a cancellation only once every owned effect has
+//! 5. **cancel** — complete a cancellation only once every owned effect has
 //!    stopped or reconciled. Cancellation requested is not cancellation
 //!    completed.
 //!
@@ -47,13 +49,16 @@ use rocco_contracts::authority::{BudgetUnit, SecurityEpoch};
 use rocco_contracts::command::{Command, CommandAcceptance, CommandKind};
 use rocco_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use rocco_contracts::event::{Event, EventKind};
-use rocco_contracts::ids::{CommandId, OperationId, RunId, TenantId};
+use rocco_contracts::ids::{CommandId, OperationId, RunId, TenantId, WorkerId};
 use rocco_contracts::replay::{
     BudgetSnapshot, CapabilitySnapshot, DenialReason, EffectRequest, PinnedInputs, PolicySnapshot,
     ValiditySnapshot,
 };
 use rocco_contracts::state::{RunState, TransitionEvent};
 
+use crate::approval::{
+    ApprovalAnswer, ApprovalBook, ApprovalQuestionId, ApprovalQuestionSpec, ApprovalQuestionStatus,
+};
 use crate::error::RuntimeError;
 use crate::fence::{FenceRefusal, RevocationFence};
 use crate::journal::{Journal, JournalEntry};
@@ -294,6 +299,8 @@ pub struct Runtime<P, O, C> {
     live: BTreeMap<OperationId, LiveEffect>,
     /// Monotonic logical tick number.
     tick_count: u64,
+    /// Process-scoped questions; Logical-DB owns durable question state.
+    approval_questions: ApprovalBook,
 }
 
 impl<P, O, C> Runtime<P, O, C>
@@ -328,6 +335,7 @@ where
             runs: BTreeMap::new(),
             live: BTreeMap::new(),
             tick_count: 0,
+            approval_questions: ApprovalBook::default(),
         })
     }
 
@@ -408,6 +416,51 @@ where
         self.remaining_budget
     }
 
+    /// Opens a bounded question bound to the exact tracked effect and respondent.
+    ///
+    /// No interactive client or a client other than the named respondent is a
+    /// typed refusal; neither mode nor elapsed time can approve an effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::ApprovalQuestion`] for a missing active effect,
+    /// cancelled/terminal run, absent interactive client, wrong respondent or
+    /// bounded-capacity refusal.
+    pub fn open_approval_question(
+        &mut self,
+        spec: ApprovalQuestionSpec,
+        interactive_client: Option<WorkerId>,
+    ) -> Result<ApprovalQuestionId, RuntimeError> {
+        let effect = self.live.get(&spec.operation()).map(|live| live.intent);
+        let run_state = self.projection.run_state(spec.run());
+        self.approval_questions
+            .open(spec, interactive_client, effect, run_state)
+            .map_err(RuntimeError::from)
+    }
+
+    /// Queues one respondent's answer for deterministic application at the next tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal if the question, tenant, respondent, operation,
+    /// effect digest or schema digest differs from the original binding.
+    pub fn answer_approval_question(&mut self, answer: ApprovalAnswer) -> Result<(), RuntimeError> {
+        self.approval_questions
+            .answer(answer)
+            .map_err(RuntimeError::from)
+    }
+
+    /// Reads one question without blocking or consuming another question's state.
+    pub fn approval_question_status(
+        &self,
+        question: ApprovalQuestionId,
+    ) -> Result<ApprovalQuestionStatus, RuntimeError> {
+        self.approval_questions
+            .status(question)
+            .cloned()
+            .map_err(RuntimeError::from)
+    }
+
     /// Runs one bounded, deterministic tick.
     ///
     /// # Errors
@@ -421,9 +474,21 @@ where
         let at = self.clock.now();
         let mut report = TickReport::default();
         self.pump_ready(at, &mut report)?;
+        self.settle_approval_questions(at);
         self.pump_reconciliation(at, &mut report)?;
         self.pump_cancellation(&mut report)?;
         Ok(report)
+    }
+
+    /// Settles cancellation before expiry and expiry before any queued answer.
+    fn settle_approval_questions(&mut self, at: SystemTime) {
+        let cancelled: Vec<RunId> = self
+            .runs
+            .keys()
+            .copied()
+            .filter(|run| self.projection.run_state(*run) == Some(RunState::Cancelling))
+            .collect();
+        self.approval_questions.settle(at, &cancelled);
     }
 
     // ── stage 2: admit, gate, reserve, dispatch, observe ────────────────────
@@ -1162,5 +1227,6 @@ where
         runs,
         live,
         tick_count: 0,
+        approval_questions: ApprovalBook::default(),
     })
 }
