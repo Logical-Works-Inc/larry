@@ -210,6 +210,23 @@ fn e47_overload_backoff_is_bounded_deterministic_and_does_not_append()
     assert_eq!(retry_delay, MAX_PROTOCOL_BACKOFF_TICKS);
     assert_eq!(rt.journal().len(), 0);
     assert_eq!(rt.tick_count(), 0);
+
+    for _ in 0..MAX_PROTOCOL_BACKOFF_TICKS {
+        rt.tick()?;
+    }
+    let recovered_body = proposal(
+        run(10),
+        tenant_id,
+        operation(10),
+        &[Scope::FileRead],
+        1,
+        ReconciliationStrategy::Queryable,
+    );
+    let recovered = submit(command_id(10), &recovered_body)?;
+    let negotiated = rt.submit_protocol(&valid, recovered)?;
+    assert_eq!(negotiated.tenant, tenant_id);
+    assert_eq!(negotiated.version, MAX_PROTOCOL_VERSION);
+    assert_eq!(rt.tick()?.admitted(), &[command_id(10)]);
     Ok(())
 }
 
