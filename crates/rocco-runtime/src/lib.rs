@@ -88,6 +88,7 @@ pub mod journal;
 pub mod owner;
 pub mod payload;
 pub mod projection;
+pub mod protocol;
 pub mod runtime;
 
 mod fence;

@@ -94,6 +94,49 @@ pub fn runtime_with(
     )
 }
 
+/// Test-owned durable journal owner: compare-and-append into memory. Durable
+/// admission (E28) refuses a runtime without one.
+#[derive(Debug, Default)]
+pub struct MemoryStore {
+    /// The committed prefix.
+    entries: std::sync::Mutex<Vec<rocco_runtime::journal::JournalEntry>>,
+}
+
+impl rocco_runtime::JournalStorage for MemoryStore {
+    fn append(
+        &self,
+        offset: usize,
+        entry: &rocco_runtime::journal::JournalEntry,
+    ) -> std::io::Result<()> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| std::io::Error::other("poisoned test store"))?;
+        if offset != entries.len() {
+            return Err(std::io::Error::other("stale offset refused"));
+        }
+        entries.push(entry.clone());
+        Ok(())
+    }
+}
+
+/// [`runtime_with`] over a durable journal owner, for callers of admission.
+pub fn durable_runtime_with(
+    owner: ScriptedOwner,
+    allowed: &[Scope],
+    capable: &[Scope],
+    budget: u64,
+) -> Result<TestRuntime, Box<dyn std::error::Error>> {
+    let storage: std::sync::Arc<dyn rocco_runtime::JournalStorage> =
+        std::sync::Arc::new(MemoryStore::default());
+    fixture_restore(
+        settings(allowed, capable, budget)?,
+        owner,
+        FixedClock::new(epoch()?),
+        rocco_runtime::journal::Journal::with_storage(4_096, Vec::new(), storage)?,
+    )
+}
+
 /// A runtime whose owner has nothing scripted and therefore reports unknown
 /// forever, with `allowed`/`capable` permitting `FileRead` and a budget of 100.
 ///
@@ -224,6 +267,16 @@ fn fixture_contracts() -> Result<(), Box<dyn std::error::Error>> {
         restored.projection().run_state(run(1)),
         Some(RunState::Cancelled)
     );
+    // The durable fixture journals an admitted command before any tick runs.
+    let mut durable = durable_runtime_with(
+        ScriptedOwner::new(),
+        &[Scope::FileRead],
+        &[Scope::FileRead],
+        100,
+    )?;
+    durable.admit(submit(command_id(2), &body)?)?;
+    assert_eq!(durable.journal().len(), 1);
+    assert_eq!(durable.tick_count(), 0);
     Ok(())
 }
 

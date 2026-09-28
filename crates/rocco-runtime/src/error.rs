@@ -136,6 +136,8 @@ pub enum RuntimeError {
         /// The state the pure algebra re-derived.
         rederived: RunState,
     },
+    /// Protocol negotiation or protocol-bound command ingress was refused.
+    Protocol(crate::protocol::ProtocolError),
 }
 
 impl fmt::Display for RuntimeError {
@@ -225,6 +227,7 @@ impl fmt::Display for RuntimeError {
                 f,
                 "run {run} fold diverged: journal recorded {recorded}, algebra re-derived {rederived}"
             ),
+            Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
         }
     }
 }
@@ -240,6 +243,7 @@ impl std::error::Error for RuntimeError {
             Self::Transition(ref err) => Some(err),
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
+            Self::Protocol(ref err) => Some(err),
             Self::UnsupportedDecision(_)
             | Self::UnsupportedCommand(_)
             | Self::UnsupportedEvent(_)
@@ -295,5 +299,11 @@ impl From<AuthorityError> for RuntimeError {
 impl From<lgwks_std::json::Error> for RuntimeError {
     fn from(err: lgwks_std::json::Error) -> Self {
         Self::Codec(err)
+    }
+}
+
+impl From<crate::protocol::ProtocolError> for RuntimeError {
+    fn from(err: crate::protocol::ProtocolError) -> Self {
+        Self::Protocol(err)
     }
 }
