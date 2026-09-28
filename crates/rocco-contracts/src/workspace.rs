@@ -49,7 +49,7 @@ pub struct WorkspaceScope {
 
 impl WorkspaceScope {
     /// Binds the workspace to an authenticated host-supplied tenant.
-    #[must_use = "the iterator borrows the workspace and does nothing unless consumed"]
+    #[must_use]
     pub const fn new(tenant: TenantId, workspace: WorkspaceId) -> Self {
         Self { tenant, workspace }
     }
@@ -215,7 +215,7 @@ impl WorkBoard {
     }
 
     /// Stable identity ordering, independent of arrival order.
-    #[must_use]
+    #[must_use = "the iterator borrows the workspace and does nothing unless consumed"]
     pub fn items(&self) -> impl ExactSizeIterator<Item = &WorkItem> {
         self.items.values()
     }
