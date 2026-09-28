@@ -1,0 +1,1 @@
+{"phase":"post-exec","model":"Qwen/Qwen3-Reranker-0.6B","revision":"e61197ed45024b0ed8a2d74b80b4d909f1255473","query_sha256":"8cb7e0c928bcbfab34a4cefd1cb736bbad60c666a41064854fac9d519b03630e","candidates_sha256":"66d91dcb84803a8656a9046fff1bbe35c4995c9e5fb667da2097a9129f7b3a40","candidate_count":1,"top_k":1,"max_seconds":900,"results":[{"id":"inventory-parity","score":1.0}]}

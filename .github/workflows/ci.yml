@@ -12,6 +12,7 @@ jobs:
   # the merged workspace: `--workspace` now covers rocco-demo and
   # rocco-contracts together.
   rust:
+    name: Rust, simulation and end-to-end journeys
     # This repository runs on a self-hosted runner, not a GitHub-hosted one.
     # Every run this repository ever produced — 61 of them, across both
     # workflows — concluded failure in about two seconds having executed no
@@ -39,7 +40,18 @@ jobs:
       # different thing from the standard it appears to enforce, and a green
       # check would mean less than a reader would take it to mean.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --locked
+      - name: Run workspace tests and deterministic simulations
+        run: cargo test --workspace --all-targets --locked
+      - name: Build public binaries
+        run: cargo build --bins --locked
+      - name: Exercise demo and native end-to-end journeys
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHON_COLORS: "0"
+          NO_COLOR: "1"
+        run: |
+          python3 tools/test_demo_cli.py
+          python3 tools/test_native_cli.py
 
   # The specification and governance lanes, carried over from Rocco's
   # workflow. Action SHAs are pinned here because this job ran that way
