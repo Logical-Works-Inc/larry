@@ -1,9 +1,9 @@
 ---
 type: Overview
-title: Rocco
+title: Larry
 description: Private documentation repository for a continuity-first agent runtime.
 resource: /README.md
-tags: [rocco, specification, agent-runtime]
+tags: [larry, specification, agent-runtime]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: repository bootstrap; not runtime verification}
 status: documentation-only-final-structure-v1.1
@@ -11,9 +11,12 @@ stale_after: 2026-10-15
 sources: [Director decisions in conversations 2026-09-15 and 2026-09-16]
 ---
 
-# Rocco
+# Larry
 
-Rocco is the working name for a persistent assistant with disposable workers,
+Larry (repository `srinji-kaggss/larry`, formerly Rocco) is the always-on
+harness. The name Rocco now belongs to a separate, unstarted embedded harness;
+the `rocco-*` crate and `rocco` binary names below are this repository's
+until they are renamed. Larry is the working name for a persistent assistant with disposable workers,
 explicit authority, accountable effects and measurable learning. This private
 repository holds its final proposed specification, not an implemented or
 validated runtime.
@@ -63,7 +66,7 @@ waits for Logical-DB readiness. Phone/app and website remain required surfaces.
 
 ## Change evidence
 
-Requirement: establish the explicitly requested private Rocco repository without
+Requirement: establish the explicitly requested private Larry repository without
 claiming implementation. Applicable axes: all nine remain product obligations;
 decoupling prevents this bootstrap from introducing another runtime authority.
 Predicted outcome: one named specification repository. Verification: Git and
