@@ -1,9 +1,9 @@
 ---
 type: Instructions
-title: Rocco repository execution contract
+title: Larry repository execution contract
 description: Strict, maintained instructions for humans and agents working in this repository.
 resource: /AGENTS.md
-tags: [governance, agents, rocco]
+tags: [governance, agents, larry]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: Director decisions and governing contracts}
 status: active
@@ -23,7 +23,9 @@ the Director to restate an already clear request.
 
 ## Current scope and settled decisions
 
-- Rocco is a private, specification-led repository. The Director's 2026-09-19
+- Larry (`srinji-kaggss/larry`, formerly Rocco) is a private, specification-led
+  repository for the always-on harness. Rocco now names a separate, unstarted
+  embedded harness; the `rocco-*` crate and `rocco` binary names here are Larry's. The Director's 2026-09-19
   authorization adds a board-first native workspace and a bounded backend slice
   with selective prior-harness reuse. See /docs/workspace-experience.md for ADRs.
   Synthetic data stays visibly DEMO; orchestration may not be fabricated.
@@ -35,7 +37,7 @@ the Director to restate an already clear request.
   pretend adapter or erased requirement. Adjustable decay/tuning stays in the spec.
 - Sentinel, Secure-Authority, Logical-DB, Nova, Moo and Logicalworks-Crates retain
   their owners. Harness sources are reference evidence, not a wholesale import.
-- Logicalworks-Crates is the core starting point for dependencies: every Rocco
+- Logicalworks-Crates is the core starting point for dependencies: every Larry
   dependency chain roots there, sibling adapters follow the order in
   /docs/dependencies/README.md, and no component roots its graph elsewhere.
 - MatrAIx is one evaluation source. Do not modify it or substitute simulated
