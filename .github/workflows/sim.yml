@@ -1,4 +1,4 @@
-name: sim
+name: simulation and e2e journey
 on:
   push:
     branches: [main]
