@@ -27,6 +27,7 @@ validated by the same structural gate as the root documents.
 | [/docs/architecture/README.md](/docs/architecture/README.md) | Final component and runtime structure, ownership rule, state machines | Cells 02/04, D01 |
 | [/docs/dependencies/README.md](/docs/dependencies/README.md) | Dependency root and sibling adapter order; Logicalworks-Crates first | D21, C01 |
 | [/docs/evaluation/README.md](/docs/evaluation/README.md) | Evaluation portfolio, lanes and falsifier organization | D15/D34/D41, Cell 09/10 |
+| [/docs/product/README.md](/docs/product/README.md) | Product plan: three faces against Muse, Duet and Dots; planner/executor cost split | None; positioning only |
 
 ## Structure rules
 
