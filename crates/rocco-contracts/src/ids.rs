@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(text.len(), 36);
         let parsed = text.parse::<TenantId>();
         assert!(
-            parsed.as_ref().is_ok_and(|value| *value == id),
+            matches!(parsed, Ok(ref value) if *value == id),
             "canonical display must parse: {parsed:?}"
         );
     }
@@ -280,27 +280,15 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
-    fn identifiers_and_digests_roundtrip_through_json() {
+    fn identifiers_and_digests_roundtrip_through_json() -> Result<(), Box<dyn std::error::Error>> {
         let id = RunId::from_bytes(RAW);
-        let encoded = lgwks_std::json::to_string(&id);
-        assert!(encoded.is_ok(), "serialize failed: {encoded:?}");
-        let decoded: Result<RunId, _> = lgwks_std::json::from_str(&encoded.unwrap_or_default());
-        assert!(
-            decoded.as_ref().is_ok_and(|value| *value == id),
-            "roundtrip failed: {decoded:?}"
-        );
+        let decoded: RunId = lgwks_std::json::from_str(&lgwks_std::json::to_string(&id)?)?;
+        assert_eq!(decoded, id, "identifier must roundtrip through JSON");
 
         let digest = ContentDigest::over(&[b"x"]);
-        let encoded_digest = lgwks_std::json::to_string(&digest);
-        assert!(
-            encoded_digest.is_ok(),
-            "serialize failed: {encoded_digest:?}"
-        );
-        let decoded_digest: Result<ContentDigest, _> =
-            lgwks_std::json::from_str(&encoded_digest.unwrap_or_default());
-        assert!(
-            decoded_digest.as_ref().is_ok_and(|value| *value == digest),
-            "roundtrip failed: {decoded_digest:?}"
-        );
+        let decoded_digest: ContentDigest =
+            lgwks_std::json::from_str(&lgwks_std::json::to_string(&digest)?)?;
+        assert_eq!(decoded_digest, digest, "digest must roundtrip through JSON");
+        Ok(())
     }
 }
