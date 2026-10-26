@@ -20,6 +20,38 @@ use rocco_contracts::ids::OperationId;
 
 /// The owner boundary through which every external effect passes.
 pub trait EffectOwner {
+    /// Resolves stable target identities without performing the effect.
+    /// `None` is reserved for disconnected, effect-free lifecycle fixtures.
+    /// Real owners must return `Some` or refuse; the default is unsupported.
+    ///
+    /// # Errors
+    /// Refuses when resolved identity cannot be established.
+    fn resolve(
+        &mut self,
+        _intent: &EffectIntent,
+    ) -> Result<
+        Option<rocco_contracts::binding::ResolvedEffect>,
+        rocco_contracts::binding::BindingError,
+    > {
+        Err(rocco_contracts::binding::BindingError::UnsupportedOwner)
+    }
+
+    /// Atomically compares the intent binding with current owner state and
+    /// executes exactly that resolved target, retaining handles or using an
+    /// owner transaction. Never re-resolve a mutable name after the comparison.
+    /// The default refuses: there is no fall-through to legacy dispatch.
+    ///
+    /// # Errors
+    /// A binding error guarantees no effect was attempted. Once attempted,
+    /// ambiguous results MUST return `Ok(EffectOutcome::Unknown { .. })`.
+    fn dispatch_bound(
+        &mut self,
+        _intent: &EffectIntent,
+        _at: SystemTime,
+    ) -> Result<EffectOutcome, rocco_contracts::binding::BindingError> {
+        Err(rocco_contracts::binding::BindingError::UnsupportedOwner)
+    }
+
     /// Performs the effect for the first time.
     fn dispatch(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome;
 
@@ -96,6 +128,17 @@ pub mod fixture {
     }
 
     impl EffectOwner for ScriptedOwner {
+        fn resolve(
+            &mut self,
+            _intent: &EffectIntent,
+        ) -> Result<
+            Option<rocco_contracts::binding::ResolvedEffect>,
+            rocco_contracts::binding::BindingError,
+        > {
+            // This fixture has no external target and performs no effects.
+            Ok(None)
+        }
+
         fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
             self.dispatched.push(intent.operation);
             self.next(intent.operation)

@@ -136,6 +136,9 @@ pub struct EffectIntent {
     /// (R87, D48). An effect is dispatchable only while it is still at that
     /// generation; see `rocco_runtime::fence`.
     pub admission_epoch: SecurityEpoch,
+    /// Exact displayed target; absent only for effect-free lifecycle fixtures.
+    #[cfg_attr(feature = "serde", serde(default))]
+    binding: Option<crate::binding::EffectBinding>,
 }
 
 impl EffectIntent {
@@ -157,7 +160,20 @@ impl EffectIntent {
             tenant,
             strategy,
             admission_epoch,
+            binding: None,
         }
+    }
+    /// Attaches the display identity before the reservation is recorded.
+    #[must_use]
+    pub const fn with_binding(mut self, binding: crate::binding::EffectBinding) -> Self {
+        self.binding = Some(binding);
+        self
+    }
+
+    /// The immutable display identity, when this is a resolved external effect.
+    #[must_use]
+    pub const fn binding(&self) -> Option<&crate::binding::EffectBinding> {
+        self.binding.as_ref()
     }
 }
 
@@ -416,6 +432,7 @@ mod tests {
             tenant: tenant(),
             strategy,
             admission_epoch: SecurityEpoch::INITIAL,
+            binding: None,
         }
     }
 
