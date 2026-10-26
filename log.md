@@ -22,6 +22,24 @@ planned_crash_cases: E02 E13 E19 E28 E31 E39 E40 E42 E50 E72 E77
 
 Counts are document structure, not implemented features or passing tests.
 
+## 2026-09-28: estate pins moved to the published 0.7.0 release
+
+The Director authorized the estate release (logicalworks-crates PR #174,
+merge 9658b732). lgwks_std 0.7.0, lgwks_deps 0.1.13 and lgwks_bot 0.5.0 are
+published on crates.io and tagged. Rocco's exact pins move to them. lgwks_bot is
+catalogued but has no consumer, so the lockfile does not change for it.
+
+One consumer break: lgwks_std 0.7.0 removes `Uuid::from_bytes` in favour of
+`impl From<[u8; 16]> for Uuid`, whose behaviour is identical. The id macro in
+`rocco-contracts/src/ids.rs` now calls `Uuid::from(raw)`. Rocco's own
+`from_bytes` API is unchanged. The lockfile gains `tracing-subscriber` and its
+tree transitively through the estate crates. `lgwks-deps check .` confirms that no
+new authored edge was added.
+
+Checks: `bash .wwfd/local-ci.sh` exit 0 on every lane; stable 1.98.1 strict
+Clippy clean. Receipts: `tools/receipts/20260928-estate-pins-{pre,post}-exec.json`.
+No spec IDs changed and no cells moved.
+
 ## 2026-09-28: main returned to green before parallel falsifier work
 
 Main at e9c3973 failed the strict Clippy lane: `WorkItems::items` carried a
