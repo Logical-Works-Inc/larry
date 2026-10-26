@@ -18,14 +18,18 @@ use rocco_runtime::payload::WorkProposal;
 use rocco_runtime::runtime::{TickReport, restore};
 
 use crate::support::{
-    TestRuntime, command_id, epoch, operation, proposal, run, runtime_with, settings, submit,
-    tenant,
+    TestRuntime, command_id, epoch, operation, proposal, run, runtime_with, seeded, settings,
+    submit, tenant,
 };
 
 /// A fallible simulation step; setup failures propagate instead of panicking.
 pub type Sim<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Runs `drive` twice for every seed in `seeds` and refuses any divergence.
+///
+/// Each drive runs inside `support::seeded`, so the seed decides every
+/// identity the drive builds and the clock it starts from: two seeds are two
+/// different worlds, and one seed must replay its world exactly.
 ///
 /// # Errors
 ///
@@ -36,8 +40,8 @@ pub fn replay<T: PartialEq + Debug>(
     mut drive: impl FnMut(u64) -> Sim<T>,
 ) -> Sim<()> {
     for seed in seeds {
-        let first = drive(seed)?;
-        let second = drive(seed)?;
+        let first = seeded(seed, || drive(seed))?;
+        let second = seeded(seed, || drive(seed))?;
         if first != second {
             return Err(format!("seed {seed}: replay diverged: {first:?} != {second:?}").into());
         }
@@ -214,6 +218,16 @@ fn sim_kit_replay_and_trace_contract() -> Sim<()> {
             work(number, 2, number, 1, ReconciliationStrategy::Queryable).tenant,
         ))
     })?;
+    let world = |seed| {
+        seeded(seed, || -> Sim<ContentDigest> {
+            let mut runtime = reader(ScriptedOwner::new(), 10)?;
+            runtime.offer(1, &read_work(1, 1, ReconciliationStrategy::Queryable))?;
+            runtime.tick()?;
+            Ok(trace(runtime.journal()))
+        })
+    };
+    assert_ne!(world(1)?, world(2)?, "two seeds drive two different worlds");
+    assert_eq!(world(1)?, world(1)?, "one seed drives one world");
     let mut calls = 0_u64;
     let diverged = replay(0..1, |_| {
         calls = calls.saturating_add(1);

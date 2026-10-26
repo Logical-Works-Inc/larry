@@ -5,6 +5,7 @@
 //! Moo, Sentinel, Nova or a network, and the owner is always the scripted
 //! fixture double in `rocco_runtime::owner::fixture`.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime};
 
@@ -23,31 +24,69 @@ use rocco_runtime::runtime::{Runtime, RuntimeSettings};
 /// The alias the tests use for the concrete runtime under test.
 pub type TestRuntime = Runtime<FoldProjection, ScriptedOwner, FixedClock>;
 
-/// The pinned instant every test starts from.
+thread_local! {
+    /// The seed every fixture identity and the epoch are drawn under. Zero is
+    /// the unseeded world the non-simulation falsifiers run in.
+    static SEED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Puts the previous seed back when a seeded scope ends, early returns included.
+struct Restore(u64);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        SEED.with(|cell| cell.set(self.0));
+    }
+}
+
+/// Runs `body` with every identity fixture and [`epoch`] drawn from `seed`.
+///
+/// The scope is synchronous on the caller's thread, so no other test and no
+/// other thread observes the seed.
+pub fn seeded<T>(seed: u64, body: impl FnOnce() -> T) -> T {
+    let _restore = Restore(SEED.with(|cell| cell.replace(seed)));
+    body()
+}
+
+/// Sixteen identity bytes for `byte` under the current seed: `byte` leads, so
+/// identities keep their relative order under every seed, and the seed is
+/// folded into the tail, so each seed draws its own identity universe. Seed
+/// zero yields `[byte; 16]`.
+fn id_bytes(byte: u8) -> [u8; 16] {
+    let mut bytes = [byte; 16];
+    let salt = SEED.with(Cell::get).to_be_bytes();
+    for (slot, mix) in bytes.iter_mut().skip(8).zip(salt) {
+        *slot ^= mix;
+    }
+    bytes
+}
+
+/// The pinned instant every test starts from, shifted by the seed in seconds.
 pub fn epoch() -> Result<SystemTime, Box<dyn std::error::Error>> {
     SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_secs(1_700_000_000))
+        .and_then(|base| base.checked_add(Duration::from_secs(SEED.with(Cell::get))))
         .ok_or_else(|| "fixture epoch is outside the platform time range".into())
 }
 
 /// A run identifier from one byte.
 pub fn run(byte: u8) -> RunId {
-    RunId::from_bytes([byte; 16])
+    RunId::from_bytes(id_bytes(byte))
 }
 
 /// A tenant identifier from one byte.
 pub fn tenant(byte: u8) -> TenantId {
-    TenantId::from_bytes([byte; 16])
+    TenantId::from_bytes(id_bytes(byte))
 }
 
 /// An operation identifier from one byte.
 pub fn operation(byte: u8) -> OperationId {
-    OperationId::from_bytes([byte; 16])
+    OperationId::from_bytes(id_bytes(byte))
 }
 
 /// A command identifier from one byte.
 pub fn command_id(byte: u8) -> CommandId {
-    CommandId::from_bytes([byte; 16])
+    CommandId::from_bytes(id_bytes(byte))
 }
 
 /// The pinned validity window the tests use: valid for an hour from [`epoch`].
@@ -214,5 +253,16 @@ fn fixture_contracts() -> Result<(), Box<dyn std::error::Error>> {
         Some(RunState::Cancelled)
     );
     assert_eq!(tick.receipts(), &[]);
+    assert_eq!(run(7), RunId::from_bytes([7; 16]), "seed zero is unseeded");
+    let (seeded_run, seeded_epoch) = seeded(3, || {
+        Ok::<_, Box<dyn std::error::Error>>((run(7), epoch()?))
+    })?;
+    assert_ne!(seeded_run, run(7), "a seed draws its own identities");
+    assert_ne!(seeded_epoch, epoch()?, "a seed shifts the epoch");
+    assert_eq!(
+        run(7),
+        RunId::from_bytes([7; 16]),
+        "the seed is restored after its scope"
+    );
     Ok(())
 }
