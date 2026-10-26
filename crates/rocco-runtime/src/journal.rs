@@ -48,6 +48,8 @@ pub struct Journal {
     command_index: BTreeMap<CommandId, usize>,
     /// Last accepted event sequence for each run.
     last_sequence: BTreeMap<RunId, EventSequence>,
+    /// Disposable tenant cursor lookup, rebuilt from entries on reopen.
+    pub(crate) consumer_index: crate::consumer::ConsumerIndex,
     /// Maximum retained entries.
     capacity: usize,
 }
@@ -66,6 +68,7 @@ impl Journal {
         }
         Ok(Self {
             entries: Vec::new(),
+            consumer_index: crate::consumer::ConsumerIndex::default(),
             command_index: BTreeMap::new(),
             last_sequence: BTreeMap::new(),
             capacity,
@@ -89,7 +92,12 @@ impl Journal {
         if capacity == 0 || capacity < self.entries.len() {
             return Err(RuntimeError::JournalFull { capacity });
         }
-        Ok(Self { capacity, ..self })
+        let consumer_index = crate::consumer::ConsumerIndex::rebuild(&self.entries);
+        Ok(Self {
+            capacity,
+            consumer_index,
+            ..self
+        })
     }
 
     /// The number of recorded entries.
@@ -175,7 +183,7 @@ impl Journal {
             self.reserve_one()?;
             let index = self.entries.len();
             self.command_index.insert(command.id(), index);
-            self.entries.push(JournalEntry::Command(command));
+            self.append_indexed(JournalEntry::Command(command));
         }
         Ok(acceptance)
     }
@@ -192,8 +200,14 @@ impl Journal {
         validate_append(self.last_sequence(run), event.sequence())?;
         self.reserve_one()?;
         self.last_sequence.insert(run, event.sequence());
-        self.entries.push(JournalEntry::Event(event));
+        self.append_indexed(JournalEntry::Event(event));
         Ok(())
+    }
+
+    /// Publishes the derived descriptor and the accepted fact together.
+    fn append_indexed(&mut self, entry: JournalEntry) {
+        self.consumer_index.record(&entry, self.entries.len());
+        self.entries.push(entry);
     }
 
     /// Refuses an append once the configured entry bound is reached.

@@ -40,6 +40,11 @@
 //! above true for the effect's whole life rather than only for the tick that
 //! refused it.
 
+mod display;
+
+pub use display::DisplayedEffect;
+use display::ReadyCommand;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::time::SystemTime;
 
@@ -283,7 +288,7 @@ pub struct Runtime<P, O, C> {
     /// Current authority check for mutating reaches.
     fence: RevocationFence,
     /// Bounded queue of commands awaiting admission.
-    ready: VecDeque<Command>,
+    ready: VecDeque<ReadyCommand>,
     /// Host-supplied snapshots and resource bounds.
     settings: RuntimeSettings,
     /// Budget not yet reserved by recorded intents.
@@ -340,6 +345,14 @@ where
     /// bound. The caller must drain a tick; the runtime never silently drops
     /// a submission (Cell 05).
     pub fn submit(&mut self, command: Command) -> Result<(), RuntimeError> {
+        self.enqueue(ReadyCommand {
+            command,
+            display: None,
+        })
+    }
+
+    /// Enqueues one descriptor under the shared bound.
+    fn enqueue(&mut self, command: ReadyCommand) -> Result<(), RuntimeError> {
         if self.ready.len() >= MAX_READY_WORK {
             return Err(RuntimeError::ReadyWorkFull {
                 capacity: MAX_READY_WORK,
@@ -432,9 +445,10 @@ where
     fn pump_ready(&mut self, at: SystemTime, report: &mut TickReport) -> Result<(), RuntimeError> {
         let budget = self.settings.max_runs_per_tick;
         for _ in 0..budget {
-            let Some(command) = self.ready.pop_front() else {
+            let Some(queued) = self.ready.pop_front() else {
                 return Ok(());
             };
+            let ReadyCommand { command, display } = queued;
             let id = command.id();
             let tenant = command.tenant();
             let kind = command.content().kind();
@@ -442,6 +456,9 @@ where
             let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
             self.ensure_run_tenant(proposal.run, tenant)?;
 
+            if kind == CommandKind::Submit && self.journal.command(id).is_none() {
+                self.validate_display(&command, &proposal, display.as_ref(), at)?;
+            }
             let acceptance = self.journal.accept_command(command)?;
             if acceptance == CommandAcceptance::DuplicateReplay {
                 report.duplicates.push(id);
@@ -451,7 +468,9 @@ where
             self.record_command_accepted(id, tenant, kind, proposal.run)?;
 
             match kind {
-                CommandKind::Submit => self.admit_work(tenant, &proposal, at, report)?,
+                CommandKind::Submit => {
+                    self.admit_work(tenant, &proposal, display.as_ref(), at, report)?
+                }
                 CommandKind::Cancel => self.request_cancellation(tenant, proposal.run)?,
                 CommandKind::Steer => {
                     // Steering is recorded at a safe boundary; the command's
@@ -468,6 +487,7 @@ where
         &mut self,
         tenant: TenantId,
         proposal: &WorkProposal,
+        display: Option<&DisplayedEffect>,
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
@@ -497,7 +517,10 @@ where
             });
         }
 
-        let pinned = self.pinned_inputs(proposal, at);
+        let mut pinned = self.pinned_inputs(proposal, at);
+        if let Some(shown) = display {
+            shown.constrain(&mut pinned);
+        }
         let authorization = match crate::gate::authorize(&pinned) {
             Ok(record) => record,
             Err(RuntimeError::Denied { operation, reason }) => {
@@ -520,6 +543,7 @@ where
         // restart — to a tenant it does not own (D42, E63).
         let tenant = self.tenant_of(run)?;
         let intent = proposal.intent(tenant, self.fence.epoch());
+        let intent = display.map_or(intent, |shown| intent.with_binding(*shown.binding()));
         self.record_intent(run, intent, authorization)?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
@@ -552,7 +576,7 @@ where
                 operation: intent.operation,
             });
         }
-        let Some(outcome) = self.reach_owner(intent, OwnerReach::Mutate, at, report) else {
+        let Some(outcome) = self.reach_owner(intent, OwnerReach::Mutate, at, report)? else {
             // Fenced. The ordering is the point: the reservation above is
             // already durable and the owner below was never called, so the
             // effect reads as reserved — reserved, and genuinely never sent.
@@ -588,13 +612,15 @@ where
         reach: OwnerReach,
         at: SystemTime,
         report: &mut TickReport,
-    ) -> Option<EffectOutcome> {
-        match reach {
+    ) -> Result<Option<EffectOutcome>, RuntimeError> {
+        Ok(match reach {
             OwnerReach::Mutate => {
                 if let Err(refusal) = self.fence.check(&intent) {
                     report.fenced.push((intent.operation, refusal));
-                    return None;
+                    return Ok(None);
                 }
+                self.validate_bound_reach(&intent, at)?;
+                let previous = self.live.get(&intent.operation).copied();
                 if let Some(live) = self.live.get_mut(&intent.operation) {
                     live.dispatches = live.dispatches.saturating_add(1);
                     // The reach below is about to happen, so this effect may
@@ -609,8 +635,23 @@ where
                 // re-contacted, so it consumes offline authority. Spending it
                 // here — rather than at the call site — is what keeps the
                 // accounting tied to an owner call that actually occurred.
+                let outcome = if intent.binding().is_some() {
+                    match self.owner.dispatch_bound(&intent, at) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            // Typed owner refusal guarantees no attempted effect.
+                            // Restore the witness, including a previous successful reach.
+                            if let Some(previous) = previous {
+                                self.live.insert(intent.operation, previous);
+                            }
+                            return Err(error.into());
+                        }
+                    }
+                } else {
+                    self.owner.dispatch(&intent, at)
+                };
                 self.fence.spend_offline();
-                Some(self.owner.dispatch(&intent, at))
+                Some(outcome)
             }
             OwnerReach::Observe => {
                 if let Some(live) = self.live.get_mut(&intent.operation) {
@@ -618,7 +659,7 @@ where
                 }
                 Some(self.owner.reconcile(&intent, at))
             }
-        }
+        })
     }
 
     /// Records an observed outcome and, when it may terminate the effect,
@@ -742,14 +783,14 @@ where
             rocco_contracts::effect::ReconciliationAction::RetryBounded { max_attempts }
                 if live.dispatches < max_attempts =>
             {
-                self.reach_owner(live.intent, OwnerReach::Mutate, at, report)
+                self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
             }
             rocco_contracts::effect::ReconciliationAction::RetryBounded { .. } => {
                 // Budget spent. The effect stays visibly unresolved.
                 Some(EffectOutcome::Unknown { operation })
             }
             rocco_contracts::effect::ReconciliationAction::Observe => {
-                self.reach_owner(live.intent, OwnerReach::Observe, at, report)
+                self.reach_owner(live.intent, OwnerReach::Observe, at, report)?
             }
             rocco_contracts::effect::ReconciliationAction::LeaveUnknown => {
                 Some(EffectOutcome::Unknown { operation })

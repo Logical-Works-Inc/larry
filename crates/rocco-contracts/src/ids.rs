@@ -52,10 +52,10 @@ macro_rules! define_id {
             /// Rehydrates an identifier from its raw 16 network-order bytes.
             ///
             /// This is the deserialization path for recorded values; it
-            /// imposes no version bits, mirroring [`Uuid::from_bytes`].
+            /// imposes no version bits, mirroring `Uuid`'s `From<[u8; 16]>`.
             #[must_use]
             pub fn from_bytes(raw: [u8; 16]) -> Self {
-                Self(Uuid::from_bytes(raw))
+                Self(Uuid::from(raw))
             }
 
             /// The identifier's raw 16 network-order bytes.

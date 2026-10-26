@@ -42,6 +42,7 @@
 #![forbid(unsafe_code)]
 
 pub mod authority;
+pub mod binding;
 pub mod command;
 pub mod effect;
 pub mod error;

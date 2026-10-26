@@ -75,6 +75,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod consumer;
 pub mod error;
 pub mod gate;
 pub mod journal;

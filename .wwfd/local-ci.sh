@@ -71,10 +71,12 @@ step 'git diff --check'
 git diff --check
 
 # The PTY suite is the only lane that can pass by finding nothing. Assert it
-# actually ran its journeys rather than reporting a vacuous green.
+# actually ran its journeys rather than reporting a vacuous green. Colour is
+# forced off: Python 3.14's unittest wraps "ok" in ANSI escapes when the host
+# sets FORCE_COLOR, and the count below would then read 0 against a green run.
 step 'span check — the native PTY lane must have run both journeys'
 journeys="$(
-  PYTHONDONTWRITEBYTECODE=1 python3 tools/test_native_cli.py 2>&1 |
+  NO_COLOR=1 PYTHON_COLORS=0 FORCE_COLOR= PYTHONDONTWRITEBYTECODE=1 python3 tools/test_native_cli.py 2>&1 |
     grep -c '\.\.\. ok$' || true
 )"
 if [[ "$journeys" -lt 2 ]]; then
