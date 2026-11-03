@@ -16,6 +16,8 @@ Changing a runtime rule is a specification change, never a refactor.
 - Tenants never share state, budgets or receipts. Why: one principal's agent must not act on another's data. Test: `tests/sim_multitenant.rs`.
 - Cancellation stops new work and releases owned resources. Why: the stop control in LICENSE Part B.4.3 must be real. Test: `tests/sim_cancel.rs`.
 - Hostile or malformed input is refused with a typed error, never a panic. Why: the harness reads untrusted text all day. Test: `tests/hostile_input.rs`.
+- Test doubles never ship: `owner::fixture` compiles only for this crate's tests or under the `fixture` feature, and only the crate's own dev-dependency turns it on. Why: a scripted owner resolves to `None` and would bypass binding in a real build (larry#68). Test: `owner::fixture::tests::an_exhausted_script_reports_unknown_never_success`, `cargo build --bins --locked`.
+- Each capability has one estate owner; a module moves onto lgwks_bot row by row per larry#68 and the Larry copy is deleted in the same change. Why: kernel absorption, one owner per capability (province#4, #7). Test: review-only, owner Director, 2026-11-03, until larry#68 closes; each row's PR shows that row's suites green before and after on the same seeds, and the first row that deletes a Larry module adds the test that refuses its return.
 
 ## Contracts (crates/rocco-contracts)
 

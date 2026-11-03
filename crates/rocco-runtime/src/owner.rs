@@ -12,11 +12,9 @@
 //! that fails to *reach* the endpoint is indistinguishable from one whose
 //! reply was lost, and the correct record for both is the same: unknown.
 
-use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use rocco_contracts::effect::{EffectIntent, EffectOutcome};
-use rocco_contracts::ids::OperationId;
 
 /// The owner boundary through which every external effect passes.
 pub trait EffectOwner {
@@ -69,8 +67,18 @@ pub trait EffectOwner {
 /// can be driven deterministically by tests, and it is named `fixture` so no
 /// reader can mistake it for a wired owner — the same rule the repository
 /// applies to visibly-DEMO synthetic data.
+///
+/// It compiles only for this crate's own tests or under the opt-in `fixture`
+/// feature, which the crate's dev-dependency on itself turns on for its
+/// integration tests, so no build that ships carries a double whose
+/// `resolve` answers `None` (larry#68).
+#[cfg(any(test, feature = "fixture"))]
 pub mod fixture {
-    use super::{EffectIntent, EffectOutcome, EffectOwner, OperationId, SystemTime, VecDeque};
+    use std::collections::VecDeque;
+
+    use rocco_contracts::ids::OperationId;
+
+    use super::{EffectIntent, EffectOutcome, EffectOwner, SystemTime};
 
     /// An owner that returns scripted outcomes in order and records the
     /// operations it was asked about.
@@ -119,11 +127,14 @@ pub mod fixture {
             &self.reconciled
         }
 
-        /// Consumes a scripted outcome, defaulting to unknown when exhausted.
+        /// Consumes a scripted outcome. An exhausted script is a real answer,
+        /// not a missing one: the fixture was never told what happened, so it
+        /// reports unknown and never invents a success.
         fn next(&mut self, operation: OperationId) -> EffectOutcome {
-            self.scripted
-                .pop_front()
-                .unwrap_or(EffectOutcome::Unknown { operation })
+            match self.scripted.pop_front() {
+                Some(outcome) => outcome,
+                None => EffectOutcome::Unknown { operation },
+            }
         }
     }
 
@@ -147,6 +158,36 @@ pub mod fixture {
         fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
             self.reconciled.push(intent.operation);
             self.next(intent.operation)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{EffectOutcome, OperationId, ScriptedOwner};
+
+        // Source: specification D21/D43 and ADR-R04: an owner that cannot say
+        // what happened reports unknown, so reconciliation stays open instead
+        // of a receipt being published for an effect nobody observed.
+        #[test]
+        fn an_exhausted_script_reports_unknown_never_success() {
+            let first = OperationId::from_bytes([1; 16]);
+            let second = OperationId::from_bytes([2; 16]);
+            let mut owner =
+                ScriptedOwner::scripted([EffectOutcome::Succeeded { operation: first }]);
+            assert!(matches!(
+                owner.next(first),
+                EffectOutcome::Succeeded { operation } if operation == first
+            ));
+            for _ in 0..3 {
+                assert!(matches!(
+                    owner.next(second),
+                    EffectOutcome::Unknown { operation } if operation == second
+                ));
+            }
+            assert!(matches!(
+                ScriptedOwner::new().next(first),
+                EffectOutcome::Unknown { operation } if operation == first
+            ));
         }
     }
 }

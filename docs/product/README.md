@@ -60,7 +60,10 @@ and merged on green or closed with a reason.
 `lgwks_bot`'s journal and ECS world through `lgwks_bot::app`, keeping every rule in INVARIANTS.md and every
 existing falsifier green before and after. Authority checks consume secure-authority. What lgwks_bot lacks
 (dispatch fence, ambiguous-crash semantics, offline exposure bound) is filed as `gap` issues on
-logicalworks-crates and ported there with its tests, never kept as a second copy here.
+logicalworks-crates and ported there with its tests, never kept as a second copy here. The crate's
+2026-10-26 deprecation is lifted (Director 2026-11-03: "Rocco-runtime can be edited and it should be
+decoupled"); larry#68 is the port map, one row per PR, and its first row keeps the test doubles out of
+every shipped build.
 
 **Track 2, Face 2: the operator agent (the Copilot answer).** The revenue slice's agent gateway (moo#184).
 A model limited to each app's manifest of typed actions with a risk class. Reads run in the client;
