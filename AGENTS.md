@@ -106,8 +106,9 @@ GOVERNANCE.md and GitHub issues, and log.md inventory lines move only when speci
 
 - One task, one issue, one branch, one PR (Director 2026-11-03: "work based on each pr carries GH issues").
   Planned work is filed as issues sized to one PR, as sub-issues of the order they serve; the PR body says
-  `Closes #N` (a keyword only in a commit does not link the PR). Commit only on `rust-guard: GO COMMIT`
-  with a design-gate plan trailer.
+  `Closes #N` (a keyword only in a commit does not link the PR, and any "close #N" left in a branch commit
+  message links that issue too: write issue lists without closing verbs). Commit only on
+  `rust-guard: GO COMMIT` with a design-gate plan trailer.
 - `main` has no branch protection (read 2026-11-03), so the endpoint is a merged PR on a green CI run, then
   local and remote in sync. Merge each falsifier PR as it goes green; stacked PRs left open conflict.
 - Subagents only on the Director's explicit order; a subagent never merges its own PR.
