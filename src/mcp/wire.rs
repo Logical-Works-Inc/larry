@@ -1,9 +1,10 @@
 //! Newline-delimited stdio framing and JSON-RPC 2.0 reply shapes.
 //!
-//! Written from the MCP specification (2025-06-18, "Transports: stdio"): one
-//! JSON-RPC message per line, UTF-8, no embedded newlines. The frame bound is
-//! Larry's own: a line longer than the bound is discarded as it streams in, so
-//! a peer that never sends a newline cannot grow the server's memory.
+//! Written from the MCP specification (2026-07-28 and 2025-11-25, "Transports:
+//! stdio"): one JSON-RPC message per line, UTF-8, no embedded newlines. The
+//! frame bound is Larry's own: a line longer than the bound is discarded as it
+//! streams in, so a peer that never sends a newline cannot grow the server's
+//! memory.
 
 use lgwks_std::json::{self, Value, json};
 use std::io::{self, BufRead, ErrorKind};
@@ -19,10 +20,13 @@ pub(super) const INVALID_REQUEST: i64 = -32600;
 pub(super) const METHOD_NOT_FOUND: i64 = -32601;
 /// JSON-RPC 2.0: the parameters are invalid.
 pub(super) const INVALID_PARAMS: i64 = -32602;
+/// MCP 2026-07-28 `UnsupportedProtocolVersionError`: inside the range the spec
+/// reserves for itself (-32020 to -32099); the only code from it this server emits.
+pub(super) const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 /// The JSON-RPC 2.0 internal error (-32603) reply, sent only when a value cannot be
 /// encoded, which the shapes built here never hit.
 const FALLBACK_REPLY: &[u8] =
-    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error"}}"#;
+    br#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal error"}}"#;
 
 /// One unit read from the peer.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,9 +101,33 @@ pub(super) fn result(id: &Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-/// An error reply. `id` is `Value::Null` when the request id is unknown.
+/// An error reply. `id` is `Value::Null` when the request id is unknown, and
+/// the reply then omits `id`: the MCP schemas (2026-07-28 and 2025-11-25,
+/// `JSONRPCErrorResponse`) type `id` as optional and string or integer, so a
+/// null id fails a schema-checking client where an absent one is valid.
 pub(super) fn error(id: &Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+    with_id(
+        id,
+        json!({ "jsonrpc": "2.0", "error": { "code": code, "message": message } }),
+    )
+}
+
+/// An error reply carrying a `data` member, as `UnsupportedProtocolVersionError` does.
+pub(super) fn error_with_data(id: &Value, code: i64, message: &str, data: Value) -> Value {
+    with_id(
+        id,
+        json!({ "jsonrpc": "2.0", "error": { "code": code, "message": message, "data": data } }),
+    )
+}
+
+/// `frame` with `id` set, unless the id is unknown (`Value::Null`).
+fn with_id(id: &Value, mut frame: Value) -> Value {
+    if !id.is_null()
+        && let Some(map) = frame.as_object_mut()
+    {
+        map.insert(String::from("id"), id.clone());
+    }
+    frame
 }
 
 /// Encodes one reply as a newline-terminated compact line.
@@ -166,6 +194,21 @@ mod tests {
             Some(Frame::Oversized),
             "an unterminated line over the bound is refused at end of input"
         );
+    }
+
+    /// Source: schema.json (2026-07-28 and 2025-11-25) `JSONRPCErrorResponse`:
+    /// `id` is optional and never null, so an unknown id is left out and a known one kept.
+    #[test]
+    fn an_unknown_id_is_omitted_and_a_known_one_is_kept() {
+        let unknown = error(&Value::Null, -32700, "no");
+        assert!(
+            unknown
+                .as_object()
+                .is_some_and(|map| !map.contains_key("id")),
+            "no id key for an unreadable request"
+        );
+        let known = error(&Value::from(7), -32601, "no");
+        assert_eq!(known["id"], 7, "the request id comes back");
     }
 
     /// Encoded replies are one line and carry the id back.

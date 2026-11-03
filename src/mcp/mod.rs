@@ -1,28 +1,55 @@
 //! MCP server over stdio, started by `rocco mcp`.
 //!
-//! Written from the Model Context Protocol specification, revision 2025-06-18:
-//! the initialize/initialized lifecycle with version negotiation, `ping`,
-//! `tools/list`, `tools/call` and JSON-RPC 2.0 errors, one message per line.
-//! The forge-mcp copy this replaces is not the reference: its Codex-adapted
-//! client framing is not ported and its 2026-07-28 stateless era is not served.
+//! Written from the Model Context Protocol specification, revision 2026-07-28
+//! (stateless: every request names its version and client capabilities in
+//! `_meta`, `server/discover`, `resultType`, cache hints) and, for clients that
+//! open with `initialize`, the initialize lifecycle of 2025-11-25, 2025-06-18,
+//! 2025-03-26 and 2024-11-05. A dual-era server picks the era from how the
+//! client opens (2026-07-28 Versioning): an `initialize` request selects legacy
+//! semantics for this process, a request carrying the per-request version in
+//! `_meta` is served statelessly, in either order, on the same process. The
+//! forge-mcp copy this replaces is not the reference: its Codex-adapted client
+//! framing is not ported.
 //!
 //! Bounds: a frame over `wire::MAX_FRAME_BYTES` (1 MiB) is discarded as it
 //! streams in and answered with `-32600`; the server keeps serving. Pending work
 //! is exactly one frame, read, answered, then the next is read, so a slow peer
 //! can never queue anything. End of input ends the loop with exit code 0.
 
+mod legacy;
+mod modern;
 mod tools;
 mod wire;
 
 use lgwks_std::json::{self, Map, Value, json};
 use std::io::{self, BufRead, Write};
 
-/// Newest revision served; the reply to an initialize that names an unknown one.
-const LATEST_VERSION: &str = "2025-06-18";
-/// Revisions whose lifecycle and `tools/*` shapes this server answers, newest first.
-const SUPPORTED_VERSIONS: [&str; 3] = [LATEST_VERSION, "2025-03-26", "2024-11-05"];
-/// Reply text for a request that needs a completed initialize.
-const NOT_INITIALIZED: &str = "server not initialized: send initialize first";
+/// The stateless revision: newest, served per request.
+const MODERN_VERSION: &str = "2026-07-28";
+/// The newest legacy revision: the reply to an `initialize` that names one not served.
+const LATEST_LEGACY: &str = "2025-11-25";
+/// Legacy revisions served through `initialize`, newest first.
+const LEGACY_VERSIONS: [&str; 4] = [LATEST_LEGACY, "2025-06-18", "2025-03-26", "2024-11-05"];
+/// Guidance for the model, in `initialize` and `server/discover` results.
+const INSTRUCTIONS: &str = "Hand Larry a typed task with larry_submit_task.";
+
+/// Every revision this process serves, newest first, as `server/discover` and
+/// `UnsupportedProtocolVersionError` advertise them.
+fn supported_versions() -> Vec<&'static str> {
+    let mut versions = vec![MODERN_VERSION];
+    versions.extend(LEGACY_VERSIONS);
+    versions
+}
+
+/// Who answers: the `serverInfo` of `initialize` and of every stateless result.
+fn identity() -> Value {
+    json!({ "name": "larry", "title": "Larry", "version": env!("CARGO_PKG_VERSION") })
+}
+
+/// What the server offers; the tool set is static, so nothing ever changes.
+fn capabilities() -> Value {
+    json!({ "tools": { "listChanged": false } })
+}
 
 /// Serves MCP until the reader reaches end of input.
 pub(crate) fn serve<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<()> {
@@ -49,11 +76,11 @@ fn serve_bounded<R: BufRead, W: Write>(mut reader: R, mut writer: W, max: usize)
     }
 }
 
-/// Per-connection state: the whole lifecycle is one flag.
+/// Per-process state: only the legacy lifecycle keeps any; the stateless era keeps none.
 #[derive(Default)]
 struct Session {
-    /// Set when an initialize request has been answered.
-    initialized: bool,
+    /// The initialize handshake, for clients that open with `initialize`.
+    lifecycle: legacy::Lifecycle,
 }
 
 impl Session {
@@ -130,57 +157,27 @@ impl Session {
         Some(self.request(request_id, method, params))
     }
 
-    /// Answers one request.
+    /// Answers one request, choosing the era from how the request opens.
+    ///
+    /// `initialize` is legacy. A request carrying the per-request version in
+    /// `_meta` is stateless, whatever came before. Otherwise an open legacy
+    /// session serves it (and `ping` before the handshake, which the legacy
+    /// lifecycle allows). A stateless method with neither `_meta` nor a session
+    /// lacks required fields; any other method is unknown.
     fn request(&mut self, id: &Value, method: &str, params: Option<&Map<String, Value>>) -> Value {
-        match method {
-            "ping" => wire::result(id, json!({})),
-            "initialize" => self.initialize(id, params),
-            "tools/list" | "tools/call" if !self.initialized => {
-                wire::error(id, wire::INVALID_REQUEST, NOT_INITIALIZED)
-            }
-            "tools/list" => tools_list(id, params),
-            "tools/call" => tools_call(id, params),
-            _ => wire::error(id, wire::METHOD_NOT_FOUND, "method not found"),
+        if method == "initialize" {
+            return self.lifecycle.initialize(id, params);
         }
-    }
-
-    /// The lifecycle handshake: negotiate a revision and open the session.
-    fn initialize(&mut self, id: &Value, params: Option<&Map<String, Value>>) -> Value {
-        if self.initialized {
-            return wire::error(id, wire::INVALID_REQUEST, "already initialized");
+        if modern::is_stateless(params) {
+            return modern::request(id, method, params);
         }
-        let Some(requested) = params
-            .and_then(|map| map.get("protocolVersion"))
-            .and_then(Value::as_str)
-        else {
-            return wire::error(
-                id,
-                wire::INVALID_PARAMS,
-                "initialize requires params.protocolVersion as a string",
-            );
-        };
-        let negotiated = match SUPPORTED_VERSIONS
-            .iter()
-            .copied()
-            .find(|version| *version == requested)
-        {
-            Some(version) => version,
-            None => LATEST_VERSION,
-        };
-        self.initialized = true;
-        wire::result(
-            id,
-            json!({
-                "protocolVersion": negotiated,
-                "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": {
-                    "name": "larry",
-                    "title": "Larry",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "instructions": "Hand Larry a typed task with larry_submit_task."
-            }),
-        )
+        if self.lifecycle.is_open() || method == "ping" {
+            return legacy::request(id, method, params);
+        }
+        if modern::METHODS.contains(&method) {
+            return modern::missing_meta(id);
+        }
+        wire::error(id, wire::METHOD_NOT_FOUND, "method not found")
     }
 }
 
@@ -189,17 +186,27 @@ fn is_valid_id(value: &Value) -> bool {
     value.is_string() || value.is_i64() || value.is_u64()
 }
 
-/// `tools/list`: the declared tools; no cursor is ever issued, so none is valid.
-fn tools_list(id: &Value, params: Option<&Map<String, Value>>) -> Value {
+/// `tools/list`: the declared tools, shaped for the era by `finish`; no cursor
+/// is ever issued, so none is valid.
+fn list_tools(
+    id: &Value,
+    params: Option<&Map<String, Value>>,
+    finish: &dyn Fn(Value) -> Value,
+) -> Value {
     if params.is_some_and(|map| map.contains_key("cursor")) {
         return wire::error(id, wire::INVALID_PARAMS, "invalid cursor");
     }
-    wire::result(id, tools::list())
+    wire::result(id, finish(tools::list()))
 }
 
 /// `tools/call`: an unknown tool or a malformed call is a protocol error; a
-/// tool's own failure comes back as a result with `isError` true.
-fn tools_call(id: &Value, params: Option<&Map<String, Value>>) -> Value {
+/// tool's own failure comes back as a result with `isError` true, shaped for
+/// the era by `finish`.
+fn call_tool(
+    id: &Value,
+    params: Option<&Map<String, Value>>,
+    finish: &dyn Fn(Value) -> Value,
+) -> Value {
     let Some(name) = params
         .and_then(|map| map.get("name"))
         .and_then(Value::as_str)
@@ -225,14 +232,14 @@ fn tools_call(id: &Value, params: Option<&Map<String, Value>>) -> Value {
         },
     };
     match tools::call(name, arguments) {
-        Some(outcome) => wire::result(id, outcome),
+        Some(outcome) => wire::result(id, finish(outcome)),
         None => wire::error(id, wire::INVALID_PARAMS, "unknown tool"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::serve_bounded;
+    use super::{serve_bounded, supported_versions};
     use lgwks_std::json::{self, Value};
     use std::io::Cursor;
 
@@ -247,7 +254,7 @@ mod tests {
         Ok(parsed)
     }
 
-    /// The lifecycle, in order, with the notification silent.
+    /// The legacy lifecycle, in order, with the notification silent.
     #[test]
     fn initialize_then_list_then_ping() -> Result<(), Box<dyn std::error::Error>> {
         let input = concat!(
@@ -271,22 +278,56 @@ mod tests {
             got[1]["result"]["tools"][0]["name"], "larry_submit_task",
             "tool listed"
         );
+        assert!(
+            got[1]["result"]["resultType"].is_null(),
+            "a legacy result keeps the legacy shape"
+        );
         assert_eq!(got[2]["result"], json::json!({}), "ping is an empty result");
         Ok(())
     }
 
-    /// A tool request before initialize is refused, an oversized line is
+    /// A stateless request needs no handshake and gets the 2026-07-28 shape.
+    #[test]
+    fn stateless_list_needs_no_handshake() -> Result<(), Box<dyn std::error::Error>> {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            "\n",
+        );
+        let got = replies(input, 1_048_576)?;
+        assert_eq!(got[0]["result"]["resultType"], "complete", "resultType");
+        assert_eq!(got[0]["result"]["cacheScope"], "public", "cache scope");
+        assert!(got[0]["result"]["ttlMs"].is_u64(), "ttlMs");
+        Ok(())
+    }
+
+    /// A stateless method without `_meta` is refused, an oversized line is
     /// refused, and the server keeps serving after both.
     #[test]
-    fn pre_initialize_and_oversized_are_refused_then_serving_continues()
+    fn missing_meta_and_oversized_are_refused_then_serving_continues()
     -> Result<(), Box<dyn std::error::Error>> {
         let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n\
                      xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\
                      {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n";
         let got = replies(input, 64)?;
-        assert_eq!(got[0]["error"]["code"], -32600, "not initialized");
+        assert_eq!(got[0]["error"]["code"], -32602, "no _meta, no session");
         assert_eq!(got[1]["error"]["code"], -32600, "oversized");
         assert_eq!(got[2]["id"], 2, "still serving");
         Ok(())
+    }
+
+    /// The advertised list names the stateless revision first, then every legacy one.
+    #[test]
+    fn supported_versions_lead_with_the_newest() {
+        assert_eq!(
+            supported_versions(),
+            [
+                "2026-07-28",
+                "2025-11-25",
+                "2025-06-18",
+                "2025-03-26",
+                "2024-11-05"
+            ],
+            "newest first, legacy after"
+        );
     }
 }

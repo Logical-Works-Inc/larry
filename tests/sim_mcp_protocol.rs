@@ -113,21 +113,24 @@ fn seeded_notification_storms_draw_no_reply() -> TestResult<()> {
     Ok(())
 }
 
-/// Before initialize only ping works; tools are refused, other methods are unknown.
+/// Before initialize only ping works; the stateless methods without `_meta` lack
+/// required fields (-32602, MCP 2026-07-28 Basic), other methods are unknown.
 #[test]
 fn seeded_pre_initialize_traffic_is_gated() -> TestResult<()> {
     let table = [
-        ("tools/list", -32600),
-        ("tools/call", -32600),
+        ("tools/list", -32602),
+        ("tools/call", -32602),
+        ("server/discover", -32602),
         ("ping", 0),
         ("resources/list", -32601),
         ("completion/complete", -32601),
+        ("logging/setLevel", -32601),
     ];
     for seed in 0..6 {
         let mut rng = Rng(seed);
         let mut session = Session::start()?;
         for index in 0..20 {
-            let (method, code) = table[rng.index(5)?];
+            let (method, code) = table[rng.index(7)?];
             let reply = ask(&mut session, &json!(index), method)?;
             if code == 0 {
                 assert!(reply["result"].is_object(), "seed {seed}: {method} allowed");
@@ -148,10 +151,11 @@ fn seeded_pre_initialize_traffic_is_gated() -> TestResult<()> {
     Ok(())
 }
 
-/// Every revision string negotiates to a supported revision, echoing known ones.
+/// Every revision string negotiates to a served legacy revision, echoing known
+/// ones; the stateless revision is not a legacy one, so it gets the newest legacy.
 #[test]
 fn seeded_version_strings_negotiate_to_a_supported_revision() -> TestResult<()> {
-    let known = ["2025-06-18", "2025-03-26", "2024-11-05"];
+    let known = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
     let pool = [
         "2025-06-18",
         "2025-03-26",
@@ -172,7 +176,7 @@ fn seeded_version_strings_negotiate_to_a_supported_revision() -> TestResult<()> 
         let want = if known.contains(&asked) {
             asked
         } else {
-            "2025-06-18"
+            "2025-11-25"
         };
         assert_eq!(reply["result"]["protocolVersion"], want, "asked {asked:?}");
     }
