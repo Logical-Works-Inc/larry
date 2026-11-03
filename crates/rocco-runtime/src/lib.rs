@@ -42,7 +42,8 @@
 //!
 //! It integrates **no** canonical owner. Effects go through
 //! [`owner::EffectOwner`], whose only implementations here are the
-//! deterministic doubles in [`owner::fixture`]. Nothing in this crate
+//! deterministic doubles in `owner::fixture`, compiled only for tests or under
+//! the opt-in `fixture` feature so no shipped build carries one. Nothing in this crate
 //! contacts Moo, Sentinel, Nova, Logical-DB, Secure-Authority or a network.
 //! Persistence is Logical-DB's and the memory hold is intact; the journal is
 //! bounded and in-memory, and durability across process death is not claimed.
@@ -50,12 +51,13 @@
 //!
 //! ## The ECS seam
 //!
-//! [`projection::ProjectionBackend`] is the seam for a `bevy_ecs` view. The
-//! question of whether an ECS world may ever hold *authority* is left open by
-//! the Director and is recorded in `docs/architecture/runtime.md`; this crate
-//! does not decide it. Today the only implementation is
-//! [`projection::FoldProjection`], which uses `BTreeMap` throughout so no
-//! operation depends on hash iteration order.
+//! [`projection::ProjectionBackend`] is the seam for an ECS view. ECS driving
+//! the runtime is the Director's intent (2026-10-26), not an open question:
+//! the fold drifted to a `BTreeMap` and the ECS world became an optional seam.
+//! The way back is the lgwks_bot ECS world, row by row in larry#68, with every
+//! rule in `INVARIANTS.md` green before and after. Until then the only
+//! implementation is [`projection::FoldProjection`], which uses `BTreeMap`
+//! throughout so no operation depends on hash iteration order.
 //!
 //! ## Module map
 //!
@@ -68,7 +70,8 @@
 //!   offline bound. The module behind it is private and this crate re-exports
 //!   the three types below rather than opening a fourth namespace; the host
 //!   needs a control surface for the fence, not the ability to reach past it.
-//! - [`owner`] — the canonical-owner trait and its deterministic doubles.
+//! - [`owner`] — the canonical-owner trait and, for tests, its deterministic
+//!   doubles.
 //! - [`runtime`] — the tick, its stages and the typed report.
 //! - [`error`] — every refused operation, with structured context.
 
