@@ -1,0 +1,41 @@
+name: simulation and e2e journey
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The seeded simulation suites (`crates/rocco-runtime/tests/sim_*.rs`) as a
+  # check of their own, so a PR shows its deterministic-simulation verdict by
+  # name instead of inside the whole-workspace `rust` lane.
+  simulation:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # One cache for both jobs, and the runner's own toolchain left in place:
+      # this is a long-running self-hosted machine.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sim
+          cache-bin: "false"
+      - run: cargo test --locked -p rocco-runtime --test 'sim_*'
+
+  # The shipped `rocco` binary driven through a real terminal by
+  # `tests/e2e_journey.rs`: every slash command a user types, exit 0 asserted.
+  e2e-journey:
+    name: e2e/journey
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sim
+          cache-bin: "false"
+      - run: cargo test --locked -p rocco-demo --test e2e_journey
