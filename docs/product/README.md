@@ -1,112 +1,99 @@
 ---
 type: Plan
-title: Rocco product plan, three faces against Muse, Duet and Dots
-description: Where Rocco sits after Meta Muse, Claude Duet and OpenAI Dots shipped the operator agent, and the planner/executor cost split for power users.
+title: Larry product plan, reconciled with the estate on 2026-11-03
+description: What Larry ships against Copilot, Muse, Duet, Dots and Harness², in what order, on which estate owners, and how each step is falsified.
 resource: /docs/product/README.md
-tags: [rocco, product, competitors, cost, dock, operator, executor]
-generated: {by: claude-code, at: 2026-10-22}
-verified: {by: claude-code, method: primary-source fetches through design-gate on 2026-10-22; no runtime run}
-status: plan-v1
-stale_after: 2026-11-22
+tags: [larry, product, competitors, copilot, operator, executor, learning]
+generated: {by: claude-code, at: 2026-11-03}
+verified: {by: claude-code, method: plan-v1 of 2026-10-22 reconciled against ~/.codex/AGENTS.md, province#3 to #10 and logic-os-kernel#850; no runtime run}
+status: plan-v2
+stale_after: 2026-12-03
 sources:
   - https://claude.com/resources/articles/claude-duet
   - https://openai.com/index/introducing-dots/
-  - https://www.engadget.com/2256577/how-to-get-started-with-meta-s-new-ai-agent-muse/
   - https://www.cnn.com/2026/09/23/tech/meta-muse-ai-agent
+  - https://github.com/google-research/harness2
   - https://api-docs.deepseek.com/quick_start/pricing
-  - https://venturebeat.com/technology/deepseek-v4-1-flash-debuts-with-0-003-1m-off-peak-cached-input-rate-and-benchmarks-eclipsing-gpt-5-6-sol-claude-opus-5
 ---
 
-# Rocco product plan
+# Larry product plan
 
-The harness before Forge, then Forge, then Rocco were one idea: an agent that
-works for a person, asks before it acts, and can account for what it did. In
-September 2026 three labs shipped that idea as a consumer product. This plan
-records what they shipped, where Rocco still differs, and the three faces Rocco
-ships as. Requirement and decision IDs stay owned by /specification.md.
+Larry is the always-on harness organ of Logic OS: an agent that works for a person, asks before it acts and
+can account for every effect. Logic OS replaces Microsoft's whole stack by 2027-03-21, so Larry's
+counterpart is Microsoft Copilot (Copilot, Copilot Studio, Agent 365). Each track ships the moment it is
+proven; the date is the worst case. Requirement and decision IDs stay owned by /specification.md.
 
-## What shipped (DOC: vendor and press claims, not reproduced)
+## What changed since plan-v1 (2026-10-22)
 
-| | Meta Muse | Claude Duet | OpenAI Dots |
-|---|---|---|---|
-| Launch | 2026-09-08, own iOS, Android and web app | Research preview, waitlist, US Pro and Max | 2026-09-29, Pro and Business Premium |
-| Model | Meta's own | Claude Opus 5.5 | GPT-6 Astra |
-| Where it works | Meta cloud; can "build its own software" | Own VM and browser; morning brief; checks apps every few hours | Own cloud computer and browser; your laptop with permission |
-| Reach | Connectors plus any public API | 6,000+ connectors and plugins | 4,000+ apps; ChatGPT, Slack, Teams |
-| Approval | Default "ask for some actions"; "always ask" option | Shows the exact action and waits before send, pay, sign, delete; some actions off-limits | Built-in rules plus Custom Rules (allow, require approval, block); auto-review |
-| Money | Stripe wallet, card number hidden | Stripe Link virtual card, Shop Pay | Not stated |
-| Organisation | Personal | Professionals and small business | Specialist dots with their own identity; Microsoft Agent 365 governance |
+| Ruling | Effect on this plan |
+|---|---|
+| Rocco renamed to Larry; Rocco now names an embedded harness that cannot speak (2026-10-26) | Face 1, the no-model dock, is Rocco's. Larry keeps Faces 2 and 3 and hands low-confidence dock sessions in. |
+| Repos moved to Logical-Works-Inc (2026-11-03) | Larry is `Logical-Works-Inc/larry`, private. |
+| Kernel deprecated by absorption; one owner per capability (logic-os-kernel#850, province#4, #7) | Larry's own journal and fold move onto `lgwks_bot`; authority comes from secure-authority. |
+| Revenue gate (province#5): nothing off the revenue slice's critical path | Face 2 is the agent gateway of the revenue slice (moo#184) and moves ahead of Face 3. |
+| Newest estate pins and `gap` issues (2026-11-03) | lgwks_std 3.2.2, lgwks_deps 5.1.2 and lgwks_bot 6.1.0 pinned in this change; thiserror cites crates#842. |
+| Python banned in product repos (2026-10-13) | The governance tooling ports to Rust (larry#53) before more tooling is added. |
+| Harness² published (larry#60) | Measurable learning is a track with a matched benchmark, not a README promise. |
+| HL3 ordered (2026-11-03) | LICENSE is HL3-FULL plus Part B; Part B's Safeguards are product requirements, not just terms. |
 
-What all three share: the agent lives in the vendor's cloud, runs the vendor's
-model, is judged by the vendor's classifier, and reaches the company through
-connectors into systems someone else owns. Dots going into Microsoft Agent 365
-makes Microsoft's governance the control plane for OpenAI's agents.
+## Competitors (DOC: vendor and press claims, not reproduced)
 
-## Where Rocco differs
+| | Meta Muse | Claude Duet | OpenAI Dots | Microsoft Copilot / Agent 365 |
+|---|---|---|---|---|
+| Where it runs | Meta cloud | Own VM and browser | Own cloud computer; laptop with permission | Microsoft cloud over Graph |
+| Approval | "ask for some actions" | Shows the action, waits on send, pay, sign, delete | Custom Rules: allow, approve, block | Tenant admin policy; Dots plug into Agent 365 |
+| Audit | Not stated | Not stated | Auto-review | Purview logs of what the vendor chose to log |
 
-- **The company's own system of record.** Logic OS data (Logical-DB, the
-  workspace) is the ground truth, not a connector into Graph or Gmail.
-- **Typed actions, not open-ended browsing.** Each app publishes a manifest of
-  action ids with parameters and a risk class. The model can only pick from it.
-- **Accountable effects.** rocco-runtime records the intent before acting,
-  checks authority and freshness, writes a receipt and replays bit-identically.
-  The vendors offer approvals; none offers a journal a company can audit.
-- **Model-neutral.** Planner and executor are chosen per task by cost and
-  capability, which is Face 3.
+All four keep the agent in the vendor's cloud, on the vendor's model, judged by the vendor's classifier,
+reaching the company through connectors into systems someone else owns. Larry differs on four points:
+the company's own system of record (Logical-DB, the workspace), typed manifest actions instead of
+open-ended browsing, a journal the company can replay bit-identically, and model neutrality.
 
-## Face 1: the dock (embedded, no model)
+## Tracks, in order
 
-The Rocco dock inside every Logic OS app predicts the next page and matches
-walkthroughs. On-device counts: a page-transition Markov chain blended with a
-shipped all-users prior, plus BM25 over walkthrough titles and example
-phrasings; day 0 lists the walkthroughs. Kilobytes, not a language model. It
-extends lgwks-frontend `src/lib/rocco-rank.js`. Low confidence hands off to Face 2.
+**Track 0, estate alignment.** This change: HL3 license, newest pins, governance 1.2, INVARIANTS.md,
+this plan. Next: larry#53 (Rust governance checker, tracker, PTY journeys, reranker on lgwks_deps ML
+features, pixel tool, over-size documents split) and the falsifier PRs #20, #21, #22, #25, #50 rebased
+and merged on green or closed with a reason.
 
-## Face 2: the operator agent (the Copilot answer)
+**Track 1, the runtime on the estate.** Move the journal, deterministic tick and projection onto
+`lgwks_bot`'s journal and ECS world through `lgwks_bot::app`, keeping every rule in INVARIANTS.md and every
+existing falsifier green before and after. Authority checks consume secure-authority. What lgwks_bot lacks
+(dispatch fence, ambiguous-crash semantics, offline exposure bound) is filed as `gap` issues on
+logicalworks-crates and ported there with its tests, never kept as a second copy here.
 
-The chat shape of the same dock, backed by a model limited to the app
-manifest's actions. Read-only actions run in the client. Writes and anything
-that leaves the company go through the rocco-runtime gate, wait in the approval
-queue and leave a receipt. Code execution, when a task needs it, runs in Nova.
+**Track 2, Face 2: the operator agent (the Copilot answer).** The revenue slice's agent gateway (moo#184).
+A model limited to each app's manifest of typed actions with a risk class. Reads run in the client;
+writes and anything that leaves the company pass the gate, wait in the approval queue and leave a receipt.
+Code runs in Nova; state and memory live in Logical-DB; receipts follow experience-as-code. Multi-tenant
+from the first run. The human-view issues (#27 to #46 errands and threats, #54, #55, #58, #59 legacy
+estates) are its acceptance cases.
 
-## Face 3: the executor for power users (the cost router)
+**Track 3, Face 3: the executor for power users (the cost router).** The Director plans with Claude; Larry
+executes on a cheaper model through the estate's 9router, DeepSeek V4.1 Flash first. Claude hands a typed
+task (goal, repo, files, acceptance commands) through an MCP tool; Larry returns a diff, the command output
+and a receipt; only Claude-approved work lands. It runs on the Director's own code and uses the same gate
+as Track 2, so it exercises the gate on real work every day. DeepSeek's first-party API is hosted outside
+Canada, so customer data never takes this path; Face 2 picks a host per tenant.
 
-The Director plans with Claude in Claude Code; Rocco executes on a cheaper
-model, so a Claude subscription buys judgment, not typing.
+**Track 4, learning (larry#60 to #66).** The harness becomes a versioned, content-hashed journal value;
+propose, probe and compose run as journalled steps; no grader verdict reaches the improver; lessons live
+in Logical-DB per tenant. Never a fork or wrapper of Harness² (Python, file-tree state).
 
-- **Contract.** Claude hands Rocco a typed task (goal, repo, files, acceptance
-  commands) through an MCP tool. Rocco returns a diff, the command output and a
-  receipt. Claude reviews; only Claude-approved work lands.
-- **Executor model.** DeepSeek V4.1 Flash first. Its API speaks the OpenAI and
-  Anthropic formats, so the provider is a config value, not code. Its open
-  weights are MIT, so other hosts can serve it.
-- **Price (DOC, VentureBeat 2026-09-10).** Flash off-peak: $0.003 per million
-  cached input, $0.15 uncached, $0.60 output; peak doubles. Claude Opus 5: $5
-  input, $0.50 cached, $25 output. Peak is Mon to Fri 01:00 to 04:00 and 06:00
-  to 10:00 UTC, so schedulable work runs off-peak.
-- **Where Flash is weaker (DOC, DeepSeek-run).** It edges Opus 5 on DeepSWE
-  (74.2 against 74.0) but trails on Terminal-Bench 3.0 (30.0 against 43.3).
-  Long terminal work is its weak spot, so every run ends in the task's own
-  acceptance commands, and a failure returns to Claude, never to the user as
-  success.
-- **Metric.** Cost per accepted task and cache-hit ratio on a matched task set,
-  against Claude doing the same tasks end to end. Headline token price is not
-  the metric.
-- **Data.** DeepSeek's first-party API is hosted outside Canada. Face 3 runs on
-  the Director's own code; Face 2 customer data uses a host chosen per tenant.
-
-## Order
-
-1. Face 3: smallest surface, fastest saving, and it exercises the gate, the
-   journal and receipts on real work every day.
-2. Face 1: no backend, extends code already in lgwks-frontend.
-3. Face 2: the same gate, once Logical-DB and the workspace handlers exist.
+**Rocco handoff.** Rocco's dock (page-transition Markov chain plus BM25 over walkthroughs, extending
+lgwks-frontend `src/lib/rocco-rank.js`) hands a low-confidence session to Larry's Face 2 with its context.
 
 ## Falsifiers
 
-- Face 3: one matched task set, cost per accepted task and acceptance rate for
-  Claude alone against Claude planning plus Flash executing, numbers printed.
-- Face 1: replayed sessions, hit rate of the clicked page in the dock's top 3
-  against authored links alone and the current ranker.
-- Face 2: no write leaves the gate without an intent, an authority record and a
-  receipt, under kill -9 and replay, for two workspaces at once.
+- Track 0: the CI governance lane and the Rust gates green on main with the new pins; LICENSE Part A
+  byte-identical to the canonical HL3-FULL text.
+- Track 1: every runtime falsifier passes on lgwks_bot; replay p50/p95/p99 and peak RSS printed before
+  and after the move on the same seed set.
+- Track 2: no write leaves the gate without an intent, an authority record and a receipt, under kill -9
+  and replay, for two tenants at once; one matched journey against Copilot Studio with p50/p95/p99, peak
+  RSS and the approval count a user sees.
+- Track 3: one matched task set, cost per accepted task and acceptance rate for Claude alone against Claude
+  planning plus Flash executing, numbers printed.
+- Track 4: larry#65, matched against Harness² on JobBench and LAB: score, cost, p50/p95/p99, peak RSS.
+- License: every Part B prohibited use that the runtime can see (spend over budget, Safeguards bypassed,
+  impersonation without authorization) is refused by the gate with a typed error in a test.
