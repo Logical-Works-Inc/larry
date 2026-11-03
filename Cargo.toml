@@ -62,6 +62,12 @@ rocco-contracts = { path = "crates/rocco-contracts" }
 lgwks_std = { workspace = true, features = ["json"] }
 lgwks_deps = { workspace = true, features = ["appcui"] }
 
+[dev-dependencies]
+# Test support only (tests/support/mock_model.rs, larry#82): the estate's BLAKE3
+# hasher for the mock endpoint's trace hash. Not a new crate and not in the
+# shipped build; the shipped `rocco` binary keeps `json` alone.
+lgwks_std = { workspace = true, features = ["json", "hash"] }
+
 [lints]
 workspace = true
 
