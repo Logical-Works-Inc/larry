@@ -17,6 +17,11 @@ permissions:
 # (util-linux script, present on ubuntu-latest). Hosted legs install nextest;
 # the self-hosted leg keeps `cargo test` because that machine's nextest is not
 # a given.
+#
+# `macos-latest` is absent on purpose: on 2026-11-03 both of its legs sat
+# queued for 15+ minutes with no runner assigned (hosted macOS capacity for
+# this org), which breaks the 5-minute gate budget. macOS is covered by the
+# self-hosted leg and GitHub-hosted by `ubuntu-latest`; that is the hybrid.
 
 jobs:
   # The seeded simulation suites (`crates/rocco-runtime/tests/sim_*.rs`) as a
@@ -33,9 +38,6 @@ jobs:
           - lane: self-hosted
             runner: '["self-hosted", "macOS", "ARM64"]'
             hosted: false
-          - lane: macos-latest
-            runner: '"macos-latest"'
-            hosted: true
           - lane: ubuntu-latest
             runner: '"ubuntu-latest"'
             hosted: true
@@ -73,9 +75,6 @@ jobs:
           - lane: self-hosted
             runner: '["self-hosted", "macOS", "ARM64"]'
             hosted: false
-          - lane: macos-latest
-            runner: '"macos-latest"'
-            hosted: true
           - lane: ubuntu-latest
             runner: '"ubuntu-latest"'
             hosted: true
