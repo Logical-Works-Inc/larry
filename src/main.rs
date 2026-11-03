@@ -35,7 +35,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match demo.command(command) {
             Ok(false) => break,
             Ok(true) => {}
-            Err(error) => writeln!(io::stderr().lock(), "{error}")?,
+            Err(error) => diagnose(&error.to_string())?,
         }
         writeln!(output, "{}", demo.snapshot()?)?;
         output.flush()?;
@@ -43,11 +43,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Writes one diagnostic line to standard error.
+fn diagnose(message: &str) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(message.as_bytes())?;
+    stderr.write_all(b"\n")
+}
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            if writeln!(io::stderr().lock(), "DEMO failed: {error}").is_err() {
+            if diagnose(&format!("DEMO failed: {error}")).is_err() {
                 return std::process::ExitCode::FAILURE;
             }
             std::process::ExitCode::FAILURE
