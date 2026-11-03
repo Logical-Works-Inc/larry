@@ -38,4 +38,5 @@ Changing a runtime rule is a specification change, never a refactor.
 
 - Synthetic data stays visibly DEMO and orchestration is never simulated. Why: a demo must not become evidence. Test: `tests/demo.rs`, `tests/e2e_journey.rs`.
 - No write leaves the gate without an intent, an authority record and a receipt, for two tenants under kill -9 and replay. Why: the accountable-effect promise is the product. Test: `crates/rocco-runtime/tests/sim_crash_restore.rs`, `crates/rocco-runtime/tests/sim_multitenant.rs`.
+- `rocco mcp` answers every stdio frame as MCP 2025-06-18 and JSON-RPC 2.0 say, refuses a frame over 1 MiB without buffering it, holds one frame of pending work, and refuses a typed task with `executor_not_connected` until #85 and #83 land, never a success. Why: an oversized or malformed peer must not grow memory or fake an effect. Test: `tests/sim_mcp_stdio.rs`, `tests/mcp_stdio_journey.rs`.
 - Memory waits for Logical-DB; no substitute store. Why: state that outlives a run lives in the estate database. Test: review-only, owner Director, 2026-11-03, until Logical-DB ships the store.
