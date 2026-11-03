@@ -53,7 +53,8 @@ INVARIANTS.md and the plan before the first edit.
 - `lgwks_*` crates are exact-pinned to the newest release (rust-guard ESTATE-LATEST).
 - Any reproducible, advisory-free OSS crate is allowed when its manifest line cites an open `gap` issue on
   `Logical-Works-Inc/logicalworks-crates` and the gates stay under 5 minutes (rust-guard GAP). Its row in
-  `contract/APPROVED.toml` names that issue. Loco.rs fills web, ORM, jobs, mail and auth gaps.
+  `contract/APPROVED.toml` names that issue. Loco.rs fills web, ORM, jobs, mail and auth gaps; the
+  owner of every capability is set in `docs/dependencies/cargo-sweep.md`, and a new edge updates it.
 - New workspace members or crates of ours need the Director's name.
 - A broken upstream edge gets a pin plus an issue (logicalworks-crates#841: appcui_proc_macro =0.3.6).
 

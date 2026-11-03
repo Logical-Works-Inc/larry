@@ -35,6 +35,7 @@ proven; the date is the worst case. Requirement and decision IDs stay owned by /
 | Python banned in product repos (2026-10-13) | The governance tooling ports to Rust (larry#53) before more tooling is added. |
 | Harness² published (larry#60) | Measurable learning is a track with a matched benchmark, not a README promise. |
 | HL3 ordered (2026-11-03) | LICENSE is HL3-FULL plus Part B; Part B's Safeguards are product requirements, not just terms. |
+| Cargo sweep, Loco where lgwks_* is insufficient (2026-11-03) | [The sweep](/docs/dependencies/cargo-sweep.md) sets each owner; Track 3 goes before Track 2 (larry#71, #70); harness benchmark larry#72. |
 
 ## Competitors (DOC: vendor and press claims, not reproduced)
 
