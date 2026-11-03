@@ -1,0 +1,4 @@
+# LICENSE Part A is the canonical HL3-FULL text byte for byte, including the
+# two-space markdown line break at 3.1.12.2.5. Exempt only this path from the
+# whitespace check so `git diff --check` keeps gating every other file.
+LICENSE -whitespace

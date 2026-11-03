@@ -1,32 +1,32 @@
-# Registered dependency edges for Rocco.
+# Registered dependency edges for Larry (Logical-Works-Inc/larry).
 #
 # Merged 2026-09-18 from the two registers that existed while the contract
-# crate lived in a second repository (`srinji-kaggss/rocco-runtime`). This
-# file is now the only register. `srinji-kaggss/Rocco` carries the
-# specification, the fixture surface and the contract crate, and every
-# external edge they compile against is accounted for here.
+# crate lived in a second repository (`srinji-kaggss/rocco-runtime`, deleted
+# 2026-10-26). This file is the only register. Larry carries the
+# specification, the fixture surface, the contract crate and the runtime, and
+# every external edge they compile against is accounted for here.
 #
-# The law is the logicalworks-crates deps rule: the foundation is Rust `std`
-# plus the `lgwks_*` crates taken as exact-pinned crates.io releases. A NEW
-# third-party crate is registered here with an owner and a reason, or the
-# dependency is refused. The default answer to "can I add this crate?" is no.
+# The law (Director 2026-10-22, 2026-11-01, 2026-11-03): the foundation is
+# Rust `std` plus the `lgwks_*` crates exact-pinned to their newest releases.
+# Any reproducible, advisory-free OSS crate is allowed when its manifest line
+# cites an open `gap` issue on Logical-Works-Inc/logicalworks-crates and the
+# gates stay under 5 minutes; its row here names that issue and is retired
+# when the estate closes the gap.
 #
-# The `lgwks_*` edges are deliberately absent: lgwks_std is ladder rung 2
-# (workspace stdlib+, self-exempt) and lgwks_deps is the estate's own
-# admission storefront, so `lgwks-deps check` reports them as owned without a
-# row. The former runtime register declared all four of them anyway, in a
-# shape this tool refuses — its gate list ran only fmt/clippy/test, so the
-# register was never schema-checked there. The merge is the first time it has
-# been. The AppCUI edge is `lgwks_deps`/`appcui`, not a direct appcui
-# dependency; that storefront admission is recorded in
-# `docs/architecture/visual-pass.md`, not folded in here.
+# The `lgwks_*` edges are deliberately absent: lgwks_std is the workspace
+# stdlib+ (self-exempt) and lgwks_deps is the estate's own admission
+# storefront, so `lgwks-deps check` reports them as owned without a row. The
+# AppCUI edge is `lgwks_deps`/`appcui`, not a direct appcui dependency; that
+# storefront admission is recorded in `docs/architecture/visual-pass.md`. Its
+# proc-macro is held at 0.3.6 in Cargo.lock until
+# Logical-Works-Inc/logicalworks-crates#841 lands.
 #
 # `lgwks_bot` is catalogued in the workspace manifest but no member depends on
 # it yet, so it is not an edge and needs no row.
 
 [policy]
 enforce = true
-repository = "https://github.com/srinji-kaggss/Rocco"
+repository = "https://github.com/Logical-Works-Inc/larry"
 
 # The one third-party edge in the workspace. Carried from the rocco-runtime
 # admission, which recorded an owner and a reason but none of the sign-off
@@ -41,39 +41,17 @@ capability = "error-derive"
 source = "registry"
 allowed_consumers = "rocco-contracts"
 allowed_kinds = "normal"
-reason = "derive-backed std::error::Error implementations on the C02 contract error types, which std's own error trait cannot express without hand-written boilerplate and no lgwks_std feature exposes."
+reason = "derive-backed std::error::Error implementations on the C02 contract error types, which std's own error trait cannot express without hand-written boilerplate and no lgwks_std feature exposes. Estate gap: Logical-Works-Inc/logicalworks-crates#842; retire this row when it closes."
 approved_by = "srinji-kaggss (Director)"
 approved_on = "2026-09-16"
 review = "https://github.com/srinji-kaggss/rocco-runtime/commit/53c751220ddef57c694647b7da14eb3b88eda1df"
 
-# ── PENDING ADMISSION — NOT APPROVED, NOT AN EDGE ────────────────────────────
+# ── bevy_ecs: SUPERSEDED, NOT AN EDGE ────────────────────────────────────────
 #
-# `bevy_ecs` is requested by the Director's 2026-09-20 direction ("work on the
-# lowest invariant, the runtime, based on Bevy") and is deliberately NOT
-# entered as an [[approved]] row above, because the sign-off keys that schema
-# requires would have to be invented to do so. A row carrying a Director's name
-# without the Director's approval is the exact failure this register prevents.
-#
-# Nothing compiles against `bevy_ecs` today. `crates/rocco-runtime` is built on
-# Rust `std`, `lgwks_std` and `rocco-contracts` only, and `lgwks-deps check .`
-# confirms no new authored external edge. The runtime reads state through
-# `ProjectionBackend`, so admitting Bevy later is an added implementation behind
-# that trait, not a rewrite — see docs/architecture/runtime.md, ADR-R06.
-#
-# To admit, uncomment the block below, fill `approved_by` and `approved_on`
-# with the actual sign-off and date, and move it above the [policy] table. To
-# refuse, delete this comment block; the runtime does not depend on the answer.
-#
-# [[approved]]
-# crate = "bevy_ecs"
-# tier = "boundary"
-# version = "=<pin at admission>"
-# owner = "rocco-runtime"
-# capability = "ecs-projection-backend"
-# source = "registry"
-# allowed_consumers = "rocco-runtime"
-# allowed_kinds = "normal"
-# reason = "optional deterministic ECS backend behind the ProjectionBackend seam for the runtime's run/effect view; not required by the journal-authoritative design, which is std-only."
-# approved_by = "<Director sign-off>"
-# approved_on = "<date>"
-# review = "<link to the admission decision>"
+# The Director's 2026-09-20 direction ("work on the lowest invariant, the
+# runtime, based on Bevy") and the 2026-10-26 correction that ECS drives
+# everything are now served by the estate: lgwks_bot 6.1.0 is workflow
+# orchestration on one ECS world. One owner per capability (province#4,
+# logic-os-kernel#850) means the runtime moves onto lgwks_bot's world and
+# journal instead of admitting a second ECS here. See the product plan,
+# Track 1 (docs/product/README.md).

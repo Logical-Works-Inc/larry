@@ -1,6 +1,6 @@
 ---
 type: Index
-title: Rocco documentation tree
+title: Larry documentation tree
 description: Final repository structure; navigation over the canonical specification, ledger, log and governance documents.
 resource: /docs/README.md
 tags: [rocco, structure, navigation, okf]
@@ -11,13 +11,13 @@ stale_after: 2026-10-16
 sources: [Director conversation 2026-09-16, /GOVERNANCE.md, /specification.md]
 ---
 
-# Rocco documentation tree
+# Larry documentation tree
 
 This tree navigates the specification; it never competes with a canonical
 owner. Authority is unchanged: /specification.md owns requirements, decisions
 and acceptance; /research-ledger.md owns source claims; /log.md owns settled
 directions and change evidence; /AGENTS.md and /GOVERNANCE.md own working
-rules. Every document here carries the full OKF frontmatter set and is
+rules; /INVARIANTS.md owns runtime rules; /LICENSE owns the terms of use. Every document here carries the full OKF frontmatter set and is
 validated by the same structural gate as the root documents.
 
 ## Layout
@@ -27,7 +27,7 @@ validated by the same structural gate as the root documents.
 | [/docs/architecture/README.md](/docs/architecture/README.md) | Final component and runtime structure, ownership rule, state machines | Cells 02/04, D01 |
 | [/docs/dependencies/README.md](/docs/dependencies/README.md) | Dependency root and sibling adapter order; Logicalworks-Crates first | D21, C01 |
 | [/docs/evaluation/README.md](/docs/evaluation/README.md) | Evaluation portfolio, lanes and falsifier organization | D15/D34/D41, Cell 09/10 |
-| [/docs/product/README.md](/docs/product/README.md) | Product plan: three faces against Muse, Duet and Dots; planner/executor cost split | None; positioning only |
+| [/docs/product/README.md](/docs/product/README.md) | Product plan v2: tracks against Copilot, Muse, Duet, Dots and Harness², reconciled with the estate 2026-11-03 | None; order of work only |
 
 ## Structure rules
 
