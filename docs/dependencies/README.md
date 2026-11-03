@@ -25,6 +25,10 @@ mechanics or claim any sibling is production-ready from its name (D21).
 existing parser. Third-party dependencies enter only through the estate's
 admission/storefront process; no copied vendor trees and no dual engines.
 
+The capability-by-capability map (estate owner, forge port or Loco.rs), with
+cargo measurements, is [the cargo sweep](/docs/dependencies/cargo-sweep.md)
+(2026-11-03); where it and this page differ, the sweep is newer.
+
 ## Sibling adapter order
 
 | Order | Owner | Rocco consumes | Ledger-pinned inspection revision |
