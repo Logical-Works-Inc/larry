@@ -42,7 +42,8 @@ Larry is licensed under the Hippocratic License 3.0 in its full form (every modu
 Part B (agent-specific prohibited uses, legal obligations, immediate termination for the gravest breaches,
 Canadian governing law), by Director order 2026-11-03. It is not open source and the Director accepts that.
 The repository stays private; a license is not a publication order. The manifest declares
-`LicenseRef-Larry-HL3-FULL`. Part A must stay byte-identical to firstdonoharm.dev/version/3/0/full.md.
+`LicenseRef-Larry-HL3-FULL`. Part A must stay byte-identical to firstdonoharm.dev/version/3/0/full.md,
+so `.gitattributes` exempts LICENSE alone from the whitespace check for the canonical text's hard break.
 
 ## Self-updating control loop
 
