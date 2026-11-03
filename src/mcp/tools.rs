@@ -26,35 +26,56 @@ const MAX_ACCEPTANCE: usize = 32;
 /// Longest acceptance command in bytes.
 const MAX_COMMAND_BYTES: usize = 2048;
 
-/// The `tools/list` result: every tool in declaration order, no pagination.
+/// The `tools/list` result body: every tool ordered by name, no pagination.
+///
+/// MCP 2026-07-28 (Tools, Capabilities): the order is the same across requests
+/// while the set is unchanged, so clients and LLM prompt caches can key on it.
 pub(super) fn list() -> Value {
-    json!({
-        "tools": [{
-            "name": SUBMIT_TASK,
-            "title": "Submit a task to Larry",
-            "description": "Hand Larry a typed task: a goal, the repository, the files it may touch and the acceptance commands that prove it. Larry returns a diff, command output and a receipt once an executor is connected; until then the call is refused with executor_not_connected.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "goal": { "type": "string", "minLength": 1, "maxLength": MAX_GOAL_BYTES },
-                    "repo": { "type": "string", "minLength": 1, "maxLength": MAX_REPO_BYTES },
-                    "files": {
-                        "type": "array",
-                        "items": { "type": "string", "minLength": 1, "maxLength": MAX_PATH_BYTES },
-                        "maxItems": MAX_FILES
-                    },
-                    "acceptance": {
-                        "type": "array",
-                        "items": { "type": "string", "minLength": 1, "maxLength": MAX_COMMAND_BYTES },
-                        "minItems": 1,
-                        "maxItems": MAX_ACCEPTANCE
-                    }
+    let mut body = Map::new();
+    body.insert(
+        String::from("tools"),
+        Value::Array(sorted_by_name(declared())),
+    );
+    Value::Object(body)
+}
+
+/// Orders tool definitions by their `name`; the sort is stable and total.
+fn sorted_by_name(mut tools: Vec<Value>) -> Vec<Value> {
+    tools.sort_by(|left, right| {
+        let name_of = |tool: &Value| tool.get("name").and_then(Value::as_str).map(String::from);
+        name_of(left).cmp(&name_of(right))
+    });
+    tools
+}
+
+/// Every tool definition, in no promised order. The `inputSchema` carries no
+/// `$schema`: MCP 2026-07-28 (Basic, JSON Schema Usage) makes 2020-12 the default dialect.
+fn declared() -> Vec<Value> {
+    vec![json!({
+        "name": SUBMIT_TASK,
+        "title": "Submit a task to Larry",
+        "description": "Hand Larry a typed task: a goal, the repository, the files it may touch and the acceptance commands that prove it. Larry returns a diff, command output and a receipt once an executor is connected; until then the call is refused with executor_not_connected.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "goal": { "type": "string", "minLength": 1, "maxLength": MAX_GOAL_BYTES },
+                "repo": { "type": "string", "minLength": 1, "maxLength": MAX_REPO_BYTES },
+                "files": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1, "maxLength": MAX_PATH_BYTES },
+                    "maxItems": MAX_FILES
                 },
-                "required": ["goal", "repo", "acceptance"],
-                "additionalProperties": false
-            }
-        }]
-    })
+                "acceptance": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1, "maxLength": MAX_COMMAND_BYTES },
+                    "minItems": 1,
+                    "maxItems": MAX_ACCEPTANCE
+                }
+            },
+            "required": ["goal", "repo", "acceptance"],
+            "additionalProperties": false
+        }
+    })]
 }
 
 /// Runs tool `name`; `None` means no such tool (a protocol error, not a tool error).
@@ -224,8 +245,26 @@ fn is_repo_relative(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{call, list};
+    use super::{call, list, sorted_by_name};
     use lgwks_std::json::{Value, json};
+
+    /// Source: MCP 2026-07-28 Tools, "Servers SHOULD return tools in a
+    /// deterministic order": any input order yields name order, and a repeat
+    /// of the sort changes nothing.
+    #[test]
+    fn tools_are_ordered_by_name_whatever_the_input_order() {
+        let tool = |name: &str| json!({ "name": name });
+        let names = |tools: &[Value]| -> Vec<String> {
+            tools
+                .iter()
+                .filter_map(|entry| entry["name"].as_str().map(String::from))
+                .collect()
+        };
+        let sorted = sorted_by_name(vec![tool("b"), tool("c"), tool("a")]);
+        assert_eq!(names(&sorted), ["a", "b", "c"], "name order");
+        let again = sorted_by_name(sorted.clone());
+        assert_eq!(names(&again), names(&sorted), "idempotent");
+    }
 
     /// Calls the tool with `arguments` and returns the structured error code.
     fn code_of(arguments: &Value) -> Option<String> {

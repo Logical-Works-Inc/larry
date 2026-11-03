@@ -97,19 +97,20 @@ fn full_lifecycle_ends_with_exit_code_zero() -> TestResult<()> {
 }
 
 /// Lifecycle order: only ping and initialize before initialize; one initialize.
+/// A stateless method with neither `_meta` nor a session lacks required fields.
 #[test]
 fn requests_before_initialize_are_refused_and_initialize_is_once() -> TestResult<()> {
     let mut session = Session::start()?;
     let early = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))?;
     assert_eq!(
-        early["error"]["code"], -32600,
-        "tools/list before initialize"
+        early["error"]["code"], -32602,
+        "tools/list before initialize, without _meta"
     );
     let call = session.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
         "params":{"name":"larry_submit_task","arguments":task()}}))?;
     assert_eq!(
-        call["error"]["code"], -32600,
-        "tools/call before initialize"
+        call["error"]["code"], -32602,
+        "tools/call before initialize, without _meta"
     );
     let ping = session.request(&json!({"jsonrpc":"2.0","id":3,"method":"ping"}))?;
     assert_eq!(ping["result"], json!({}), "ping is allowed at any time");
@@ -128,10 +129,15 @@ fn requests_before_initialize_are_refused_and_initialize_is_once() -> TestResult
     Ok(())
 }
 
-/// Version negotiation: a known revision is echoed, an unknown one gets the newest.
+/// Version negotiation: a known legacy revision is echoed, an unknown one gets
+/// the newest legacy revision.
 #[test]
 fn version_negotiation_echoes_known_and_offers_newest_otherwise() -> TestResult<()> {
-    for (asked, answered) in [("2024-11-05", "2024-11-05"), ("1999-01-01", "2025-06-18")] {
+    for (asked, answered) in [
+        ("2024-11-05", "2024-11-05"),
+        ("2025-11-25", "2025-11-25"),
+        ("1999-01-01", "2025-11-25"),
+    ] {
         let mut session = Session::start()?;
         let reply = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize",
             "params":{"protocolVersion":asked,"capabilities":{},"clientInfo":{"name":"t","version":"0"}}}))?;
@@ -148,7 +154,59 @@ fn version_negotiation_echoes_known_and_offers_newest_otherwise() -> TestResult<
     Ok(())
 }
 
-/// A malformed line is a parse error with a null id and the stream recovers.
+/// The stateless 2026-07-28 journey as a client lives it: no handshake, the
+/// version and capabilities on every request, discover, list, the typed
+/// refusal, a removed method, an unsupported version, end of input.
+#[test]
+fn stateless_journey_needs_no_handshake_and_ends_with_exit_code_zero() -> TestResult<()> {
+    let meta = |version: &str| {
+        json!({"io.modelcontextprotocol/protocolVersion": version,
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "journey", "version": "1"}})
+    };
+    let mut session = Session::start()?;
+    let refused = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"larry_submit_task","arguments":task(),"_meta":meta("2026-07-28")}}))?;
+    assert_eq!(
+        refused["result"]["resultType"], "complete",
+        "resultType on a tool result"
+    );
+    assert_eq!(
+        refused["result"]["structuredContent"]["error"]["code"], "executor_not_connected",
+        "the first request of the process is served, typed refusal intact"
+    );
+    let found = session.request(&json!({"jsonrpc":"2.0","id":2,"method":"server/discover",
+        "params":{"_meta":meta("2026-07-28")}}))?;
+    assert_eq!(
+        found["result"]["supportedVersions"][0], "2026-07-28",
+        "newest first"
+    );
+    assert_eq!(
+        found["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "larry",
+        "identity in result _meta"
+    );
+    let list = session.request(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list",
+        "params":{"_meta":meta("2026-07-28")}}))?;
+    assert_eq!(
+        list["result"]["tools"][0]["name"], "larry_submit_task",
+        "the one tool"
+    );
+    assert_eq!(list["result"]["cacheScope"], "public", "cache scope");
+    let ping = session.request(&json!({"jsonrpc":"2.0","id":4,"method":"ping",
+        "params":{"_meta":meta("2026-07-28")}}))?;
+    assert_eq!(ping["error"]["code"], -32601, "ping is removed");
+    let old = session.request(&json!({"jsonrpc":"2.0","id":5,"method":"tools/list",
+        "params":{"_meta":meta("1900-01-01")}}))?;
+    assert_eq!(old["error"]["code"], -32022, "unsupported version");
+    assert_eq!(
+        old["error"]["data"]["supported"][0], "2026-07-28",
+        "the supported list names the newest first"
+    );
+    assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+    Ok(())
+}
+
+/// A malformed line is a parse error with no id and the stream recovers.
 #[test]
 fn malformed_line_gets_parse_error_and_the_server_keeps_serving() -> TestResult<()> {
     let mut session = ready()?;
