@@ -59,8 +59,8 @@ thiserror = "=2.0.20"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # A member opts in with `[lints] workspace = true`.
 [dependencies]
 rocco-contracts = { path = "crates/rocco-contracts" }
-lgwks_std = { workspace = true, features = ["json", "http"] }
-lgwks_deps = { workspace = true, features = ["appcui"] }
+lgwks_std = { workspace = true, features = ["json", "http", "process", "hash"] }
+lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
 
 [dev-dependencies]
 # Test support only (tests/support/mock_model.rs, larry#82): the estate's BLAKE3

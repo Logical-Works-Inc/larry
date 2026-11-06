@@ -60,6 +60,8 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | MCP stdio (Face 3) | forge-mcp server ported onto `lgwks_std::json` | `rmcp`: 62 crates for JSON-RPC we own |
 | MCP remote, Streamable HTTP and OAuth (Face 2) | `rmcp` | stdio port: carries no transport or OAuth |
 | Sandboxed execution | Nova (crates#846) | forge stations: interim, Apple `container` only |
+| Executor process groups, orphan reaping (larry#85) | `lgwks_std::process` | processkit: kill-on-drop dies with its owner under kill -9 |
+| Executor ledger of live groups (larry#85) | `lgwks_deps` `sqlite` | a pid file: no start instant, so a reused pid reads as live |
 | Typed errors | `thiserror` | estate has no derive |
 | Memory, durable product state | Logical-DB | any substitute store: refused |
 
@@ -71,7 +73,8 @@ edges. Each new manifest line cites its issue.
 
 - Loco serves and authenticates. It never dispatches an effect, never authorizes and never holds authority.
 - Every Loco table is a projection the journal rebuilds; dropping the database loses nothing but caches.
-- One SQLite engine per binary: Larry takes Loco's sqlx path and leaves `lgwks_deps/sqlite` off until #849.
+- One SQLite engine per binary: the executor ledger (larry#85, ADR 0004) takes `lgwks_deps/sqlite`, so Loco
+  takes Postgres through sqlx, or `db-sqlite` once #849 closes.
 - Loco sits behind a `serve` feature with the `opt-level 0` dependency override, so `cargo build --bins` on
   the default features does not pay its 544 crates; the cost is measured in the PR that adds it.
 - The production config boots in the live test (empty templated YAML becomes null and 500s a route).
