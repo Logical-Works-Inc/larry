@@ -18,7 +18,7 @@ sources: [Director orders 2026-09-15 to 2026-11-06]
 > point it at data, accounts, credentials or machines you cannot afford to lose, and do not expose `rocco mcp`
 > to an untrusted network or peer. Interfaces, wire formats and stored data change without notice. This
 > repository accepts no contributions: outside pull requests and issues are closed unread. Report a
-> vulnerability privately as [SECURITY.md](SECURITY.md) describes.
+> vulnerability privately as `SECURITY.md` describes.
 
 Larry is an always-on agent harness: a persistent assistant with disposable workers, explicit authority,
 accountable effects and measurable learning. Every effect passes one journal: a durable intent before the call,

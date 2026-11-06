@@ -16,4 +16,4 @@ sources: [Director order 2026-11-06]
 Larry accepts **zero contributions**. Pull requests, issues, discussions and patches from outside Logical
 Works Inc. are closed unread, and outside interaction with this repository is limited to collaborators.
 The source is published to read under the license in LICENSE, not to develop in the open. Security reports
-go through [SECURITY.md](SECURITY.md).
+go through `SECURITY.md`.
