@@ -48,7 +48,7 @@ pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
 /// others reassemble from their `data:` payloads, so the framing never reaches
 /// the caller.
 fn leading_document(text: &str) -> Result<Value, ModelError> {
-    if let Ok(document) = json::from_str::<Value>(text) {
+    if let Ok(document) = json::from_str::<Value>(without_done_marker(text)) {
         return Ok(document);
     }
     let mut assembled = String::new();
@@ -76,12 +76,63 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
     Ok(json!({ "choices": [{ "message": { "content": assembled } }] }))
 }
 
-/// Map a non-success status to its error. 429 carries the gateway's
-/// `Retry-After` hint when present. A 5xx is `Server`, every other status `Client`.
-pub(super) fn status_error(status: u16, retry_after: Option<u64>) -> ModelError {
+/// The text without surrounding whitespace and without one trailing
+/// `data: [DONE]` marker. OpenRouter through 9router pads a non-streaming
+/// reply with keepalive whitespace and appends the marker to the document on
+/// the same line (larry#128).
+fn without_done_marker(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(head) = trimmed.strip_suffix("[DONE]") else {
+        return trimmed;
+    };
+    match head.trim_end().strip_suffix("data:") {
+        Some(document) => document.trim_end(),
+        None => trimmed,
+    }
+}
+
+/// Most characters of a gateway's own refusal message an error carries.
+const MAX_DETAIL_CHARS: usize = 512;
+
+/// The gateway's reason for a refusal: `error.message` when the body is an
+/// OpenAI-shaped error, else the body text. Bounded, and with every control
+/// character replaced, so an upstream cannot write into an operator's terminal.
+fn refusal_detail(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let trimmed = text.trim();
+    let message = json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|document| document["error"]["message"].as_str().map(str::to_owned));
+    let reason = match message {
+        Some(message) => message,
+        None => trimmed.to_owned(),
+    };
+    reason
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_DETAIL_CHARS)
+        .collect()
+}
+
+/// Map a non-success status and its body to an error. 429 carries the
+/// gateway's `Retry-After` hint when present. A 5xx is `Server`, every other
+/// status `Client`; both carry the gateway's own reason.
+pub(super) fn status_error(status: u16, retry_after: Option<u64>, body: &[u8]) -> ModelError {
     match status {
         429 => ModelError::RateLimited { retry_after },
-        500..=599 => ModelError::Server(status),
-        _ => ModelError::Client(status),
+        500..=599 => ModelError::Server {
+            status,
+            detail: refusal_detail(body),
+        },
+        _ => ModelError::Client {
+            status,
+            detail: refusal_detail(body),
+        },
     }
 }

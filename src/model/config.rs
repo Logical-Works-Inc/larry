@@ -14,8 +14,9 @@ use super::ModelError;
 
 /// The gateway the client talks to when `LARRY_MODEL_URL` is unset.
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:20128/v1";
-/// The pinned model when `LARRY_MODEL` is unset.
-const DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash";
+/// The pinned model when `LARRY_MODEL` is unset: DeepSeek V4.1 Flash under the
+/// id the local 9router gateway serves it as (larry#128).
+const DEFAULT_MODEL: &str = "ocg/deepseek-v4.1-flash";
 /// The sampling temperature when `LARRY_MODEL_TEMPERATURE` is unset.
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 /// The per-request bound in milliseconds: one whole exchange, body included.

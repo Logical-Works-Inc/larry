@@ -230,13 +230,29 @@ fn sim_scripted_faults_are_visible_to_a_plain_client_and_replay() -> TestResult 
         Some(Fault::TruncatedBody),
         Some(Fault::ServerError { status: 503 }),
         None,
+        Some(Fault::PaddedDone),
+        Some(Fault::HostileRefusal { status: 401 }),
     ];
     let config = Config {
         script,
         ..Config::seeded(77)
     };
-    let (replies, trace) = session(config.clone(), 5)?;
-    assert_eq!(replies.len(), 5, "one reply per request");
+    let (replies, trace) = session(config.clone(), 7)?;
+    assert_eq!(replies.len(), 7, "one reply per request");
+    let padded = replies.get(5).ok_or("missing padded reply")?;
+    let text = std::str::from_utf8(&padded.body)?;
+    assert!(
+        text.starts_with('\n') && text.trim_end().ends_with("}data: [DONE]"),
+        "the padded reply has keepalive whitespace and the marker on the document's line: {text:.80}"
+    );
+    let hostile = replies.get(6).ok_or("missing hostile reply")?;
+    let refusal: Value = json::from_slice(&hostile.body)?;
+    assert_eq!(hostile.status, 401, "the hostile refusal keeps its status");
+    assert_eq!(
+        refusal["error"]["message"].as_str(),
+        Some(mock_model::hostile_message().as_str()),
+        "the hostile message is sent unaltered"
+    );
     let at = |slot: usize| replies.get(slot).ok_or("missing reply");
     let (limited, malformed, truncated, failed, clean) = (at(0)?, at(1)?, at(2)?, at(3)?, at(4)?);
     assert_eq!(limited.status, 429, "rate limit status");
@@ -262,7 +278,7 @@ fn sim_scripted_faults_are_visible_to_a_plain_client_and_replay() -> TestResult 
     assert_eq!(failed.status, 503, "5xx status");
     assert_eq!(clean.status, 200, "the request past the script is clean");
     assert!(!content(clean)?.is_empty(), "the clean reply parses");
-    let (_, again) = session(config, 5)?;
+    let (_, again) = session(config, 7)?;
     assert_eq!(trace, again, "a scripted run replays to one trace hash");
     Ok(())
 }

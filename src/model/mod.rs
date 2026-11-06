@@ -37,11 +37,21 @@ pub enum ModelError {
         /// The `Retry-After` value in seconds, if the header was a whole number.
         retry_after: Option<u64>,
     },
-    /// The gateway answered a 5xx status with this code.
-    Server(u16),
+    /// The gateway answered a 5xx status.
+    Server {
+        /// The status code.
+        status: u16,
+        /// The gateway's own reason, at most 512 characters, control characters replaced.
+        detail: String,
+    },
     /// The gateway answered with a status that is never retried: a 4xx other than
     /// 429, or a 3xx, which the client does not follow.
-    Client(u16),
+    Client {
+        /// The status code.
+        status: u16,
+        /// The gateway's own reason, at most 512 characters, control characters replaced.
+        detail: String,
+    },
     /// The reply is not a completion document. The reason names what is missing.
     Malformed(&'static str),
     /// The reply body is not UTF-8.
@@ -83,8 +93,14 @@ impl fmt::Display for ModelError {
             Self::RateLimited { retry_after: None } => {
                 out.write_str("the model gateway rate limited the request")
             }
-            Self::Server(status) => write!(out, "the model gateway failed with status {status}"),
-            Self::Client(status) => write!(out, "the model gateway refused with status {status}"),
+            Self::Server { status, ref detail } => {
+                write!(out, "the model gateway failed with status {status}")?;
+                with_detail(out, detail)
+            }
+            Self::Client { status, ref detail } => {
+                write!(out, "the model gateway refused with status {status}")?;
+                with_detail(out, detail)
+            }
             Self::Malformed(reason) => write!(out, "malformed model reply: {reason}"),
             Self::NotUtf8(ref cause) => write!(out, "the model reply is not UTF-8: {cause}"),
             Self::Transport => out.write_str("the model gateway could not be reached"),
@@ -101,6 +117,14 @@ impl fmt::Display for ModelError {
             Self::BodyTooLarge => out.write_str("a model request or reply exceeded its size bound"),
         }
     }
+}
+
+/// Append the gateway's reason after a status, when it gave one.
+fn with_detail(out: &mut fmt::Formatter<'_>, detail: &str) -> fmt::Result {
+    if detail.is_empty() {
+        return Ok(());
+    }
+    write!(out, ": {detail}")
 }
 
 impl std::error::Error for ModelError {

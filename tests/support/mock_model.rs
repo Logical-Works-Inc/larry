@@ -69,6 +69,20 @@ pub(crate) enum Fault {
         /// The 5xx status code.
         status: u16,
     },
+    /// Answer 200 the way OpenRouter does through 9router (larry#128):
+    /// keepalive whitespace, the document, then `data: [DONE]` on its line.
+    PaddedDone,
+    /// Answer `status` with an error message an upstream could use against a
+    /// terminal: escape sequences, a newline, and 4 KiB of text.
+    HostileRefusal {
+        /// The status code.
+        status: u16,
+    },
+}
+
+/// The message a [`Fault::HostileRefusal`] carries.
+pub(crate) fn hostile_message() -> String {
+    format!("\u{1b}[31mexpired\nkey\u{7}{}", "x".repeat(4096))
 }
 
 /// What one mock server does.
@@ -391,6 +405,17 @@ fn apply(fault: Option<Fault>, good: Vec<u8>) -> Result<Planned, Failure> {
             status,
             Vec::new(),
             error_body("upstream failure", "server_error")?,
+        ),
+        Some(Fault::PaddedDone) => {
+            let mut body = b"\n\n         \n".to_vec();
+            body.extend_from_slice(&good);
+            body.extend_from_slice(b"data: [DONE]\n\n");
+            Planned::whole(200, Vec::new(), body)
+        }
+        Some(Fault::HostileRefusal { status }) => Planned::whole(
+            status,
+            Vec::new(),
+            error_body(&hostile_message(), "authentication_error")?,
         ),
     })
 }

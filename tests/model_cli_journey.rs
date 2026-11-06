@@ -242,6 +242,49 @@ fn a_gateway_slower_than_the_timeout_is_a_timeout_through_the_binary() -> TestRe
 }
 
 #[test]
+fn a_padded_openrouter_reply_prints_its_content() -> TestResult {
+    let padded = Config {
+        script: vec![Some(Fault::PaddedDone)],
+        ..Config::seeded(16)
+    };
+    let framed = mock_model::run(padded, |handle| {
+        rocco_model(&operator(handle.addr()), b"framed")
+    })?;
+    let bare = mock_model::run(Config::seeded(16), |handle| {
+        rocco_model(&operator(handle.addr()), b"framed")
+    })?;
+    assert!(framed.status.success(), "stderr {}", stderr_of(&framed));
+    assert_eq!(
+        framed.stdout, bare.stdout,
+        "the padded framing prints the same reply as the bare document (larry#128)"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_refusal_shows_the_gateway_reason_without_terminal_control() -> TestResult {
+    let config = Config {
+        script: vec![Some(Fault::HostileRefusal { status: 401 })],
+        ..Config::seeded(17)
+    };
+    mock_model::run(config, |handle| {
+        let output = rocco_model(&operator(handle.addr()), b"expired?")?;
+        assert!(!output.status.success(), "a 401 fails");
+        let shown = stderr_of(&output);
+        assert!(
+            shown.contains("refused with status 401:  [31mexpired key"),
+            "the operator sees the gateway's reason: {shown:.120}"
+        );
+        assert!(
+            !shown.trim_end().chars().any(char::is_control),
+            "no escape or bell reaches the terminal"
+        );
+        assert_eq!(handle.served(), 1, "a 401 is never retried");
+        Ok(())
+    })
+}
+
+#[test]
 fn the_same_seed_through_the_binary_replays_one_trace() -> TestResult {
     let trace = |seed: u64| {
         mock_model::run(Config::seeded(seed), |handle| {
