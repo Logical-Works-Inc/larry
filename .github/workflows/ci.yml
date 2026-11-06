@@ -12,19 +12,10 @@ jobs:
   # the merged workspace: `--workspace` now covers rocco-demo and
   # rocco-contracts together.
   rust:
-    # This repository runs on a self-hosted runner, not a GitHub-hosted one.
-    # Every run this repository ever produced — 61 of them, across both
-    # workflows — concluded failure in about two seconds having executed no
-    # step at all: the jobs were created and never assigned a runner, which is
-    # an account-level condition rather than a defect in this file, and not
-    # something the repository can repair. `ubuntu-latest` never matched
-    # anything, so the gate had never once gated. The label set below names the
-    # machine that actually runs these lanes; every sibling repository in the
-    # estate asks for its own runner the same way.
-    #
-    # The cost is stated rather than hidden: this lane now proves the workspace
-    # on macOS/ARM64 and no longer claims Linux coverage it never had.
-    runs-on: [self-hosted, macOS, ARM64]
+    # Runner by visibility (larry#116, see sim.yml): the self-hosted Mac while
+    # private, GitHub-hosted ubuntu-latest once public; never self-hosted on a
+    # public repository.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +37,7 @@ jobs:
   # before the merge; the rust job above keeps its tag refs for the same
   # reason. Neither convention was changed by merging the two files.
   governance:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     env:
       PYTHONDONTWRITEBYTECODE: "1"

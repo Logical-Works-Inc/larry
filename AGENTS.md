@@ -70,10 +70,10 @@ cargo fmt --all -- --check
 lgwks-deps check .
 git diff --check
 ```
-
-The governance checker, its negative controls and the PTY journeys are still Python and run only in CI
-(`.github/workflows/governance.yml`, `ci.yml`) until larry#53 ports them to Rust; agents may not run Python
-locally. `.wwfd/local-ci.sh` mirrors CI and moves with that port. Launch the demo with
+The governance checker, its negative controls and the PTY journeys are still Python and run only in CI until
+larry#53 ports them to Rust; agents may not run Python locally. `.wwfd/local-ci.sh` mirrors CI. Each CI job
+picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
+once public, never self-hosted on a public repository (larry#116). Launch the demo with
 `cargo run --locked --bin rocco`; fixture runs are not backend, device or fleet acceptance.
 
 ## Size law
