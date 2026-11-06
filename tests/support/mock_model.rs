@@ -177,6 +177,8 @@ struct Ledger {
     trace: Hasher,
     /// The first [`MAX_RECORDED`] request bodies.
     bodies: Vec<Vec<u8>>,
+    /// The `Authorization` header of each recorded body, at the same index.
+    authorizations: Vec<Option<String>>,
 }
 
 /// Shared server state.
@@ -345,6 +347,7 @@ impl State {
         }
         if ledger.bodies.len() < MAX_RECORDED {
             ledger.bodies.push(request.body.clone());
+            ledger.authorizations.push(request.authorization.clone());
         }
         Ok(planned)
     }
@@ -501,6 +504,12 @@ impl Handle {
         locked(&self.state.ledger).bodies.clone()
     }
 
+    /// The `Authorization` header of each recorded request, aligned with
+    /// [`Self::requests`].
+    pub(crate) fn authorizations(&self) -> Vec<Option<String>> {
+        locked(&self.state.ledger).authorizations.clone()
+    }
+
     /// Let one delayed reply through.
     pub(crate) fn release_delayed(&self) {
         if let Some(gate) = locked(&self.state.gate_tx).as_ref() {
@@ -532,6 +541,7 @@ fn start<'scope, 'env>(scope: &'scope Scope<'scope, 'env>, config: Config) -> io
             served: 0,
             trace: Hasher::new(),
             bodies: Vec::new(),
+            authorizations: Vec::new(),
         }),
         gate_tx: Mutex::new(Some(gate_tx)),
         gate_rx: Mutex::new(gate_rx),

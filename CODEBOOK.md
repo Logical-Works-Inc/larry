@@ -54,12 +54,18 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | Module | Owns |
 |---|---|
 | `lib` | The effect-free DEMO session state |
+| `model` | The blocking chat-completions client to 9router (ADR 0003) |
+| `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
+| `model::config` | Gateway, key (never shown), pinned model, temperature, timeout, retry |
+| `model::wire` | The request body and the reply parser |
 | `native` | The native AppCUI view |
 | `theme` | View colours |
 | `src/main.rs`, `src/mcp/` | The binary entry and the `rocco mcp` server |
+| `src/bin/rocco.rs` | The `rocco` launcher: native view, `rocco mcp`, `rocco model` |
 
 ## Invariants the module map carries
 
 - Only `runtime::reconcile` completes a cancellation, and only with no owned effect open (ADR 0001).
 - Only `runtime::writers` appends to the journal; every append folds the projection after it.
 - `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
+- `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).

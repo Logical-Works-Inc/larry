@@ -3,6 +3,7 @@
 
 use lgwks_std::json::{self, Serialize};
 
+pub mod model;
 pub mod native;
 pub mod theme;
 
