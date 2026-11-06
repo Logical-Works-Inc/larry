@@ -28,6 +28,7 @@ validated by the same structural gate as the root documents.
 | [/docs/dependencies/README.md](/docs/dependencies/README.md) | Dependency root and sibling adapter order; Logicalworks-Crates first | D21, C01 |
 | [/docs/evaluation/README.md](/docs/evaluation/README.md) | Evaluation portfolio, lanes and falsifier organization | D15/D34/D41, Cell 09/10 |
 | [/docs/product/README.md](/docs/product/README.md) | Product plan v2: tracks against Copilot, Muse, Duet, Dots and Harness², reconciled with the estate 2026-11-03 | None; order of work only |
+| [/docs/product/SHIP.md](/docs/product/SHIP.md) | Ship checklist: every remaining PR in order with its proof, ticked by the PR that ships it | None; state of work only |
 
 ## Structure rules
 
