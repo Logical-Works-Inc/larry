@@ -122,7 +122,11 @@ impl ModelClient {
                 .iter()
                 .find(|header| header.0.eq_ignore_ascii_case("retry-after"))
                 .and_then(|header| header.1.trim().parse::<u64>().ok());
-            return Err(wire::status_error(response.status, retry_after));
+            return Err(wire::status_error(
+                response.status,
+                retry_after,
+                response.body(),
+            ));
         }
         wire::parse_completion(response.body())
     }
@@ -135,7 +139,7 @@ impl ModelClient {
 fn is_retryable(refusal: &ModelError) -> bool {
     matches!(
         refusal,
-        ModelError::RateLimited { .. } | ModelError::Server(_)
+        ModelError::RateLimited { .. } | ModelError::Server { .. }
     )
 }
 

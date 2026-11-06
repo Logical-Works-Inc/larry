@@ -136,7 +136,7 @@ fn the_body_sent_carries_the_pinned_model_and_temperature() -> TestResult {
             let recorded = handle.requests();
             let sent: Value = json::from_slice(recorded.first().ok_or("no recorded request")?)?;
             assert_eq!(
-                sent["model"], "deepseek/deepseek-v4.1-flash",
+                sent["model"], "ocg/deepseek-v4.1-flash",
                 "seed {seed}: the default pinned model reached the gateway"
             );
             assert_eq!(
@@ -178,7 +178,10 @@ fn a_server_error_that_exhausts_the_retries_is_a_server_error() -> TestResult {
             let client = client_from(settings(&base_of(handle.addr()), "test-key"))?;
             assert_eq!(
                 client.complete(&[user("doomed")]),
-                Err(ModelError::Server(503)),
+                Err(ModelError::Server {
+                    status: 503,
+                    detail: String::from("upstream failure"),
+                }),
                 "seed {seed}: five-hundreds retry, then the last one is reported"
             );
             assert_eq!(
@@ -200,12 +203,74 @@ fn a_client_error_is_never_retried() -> TestResult {
             let client = client_from(settings(&wrong_route, "test-key"))?;
             assert_eq!(
                 client.complete(&[user("lost")]),
-                Err(ModelError::Client(404)),
-                "seed {seed}: a 404 is a client error"
+                Err(ModelError::Client {
+                    status: 404,
+                    detail: String::from("no such route"),
+                }),
+                "seed {seed}: a 404 is a client error carrying the gateway's reason"
             );
             assert_eq!(handle.served(), 1, "seed {seed}: a 4xx is sent once");
             Ok::<_, Box<dyn Error>>(())
         })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_padded_reply_with_a_trailing_done_marker_is_a_completion() -> TestResult {
+    for seed in 0..SEEDS {
+        let (padded, _) = run_once(
+            scripted(seed, vec![Some(Fault::PaddedDone)]),
+            &[],
+            &[user("framed")],
+        )?;
+        let (bare, _) = run_once(Config::seeded(seed), &[], &[user("framed")])?;
+        assert_eq!(
+            padded.map_err(|error| format!("seed {seed}: {error}"))?,
+            bare.map_err(|error| format!("seed {seed}: {error}"))?,
+            "seed {seed}: OpenRouter's padded framing reads as the bare document (larry#128)"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_hostile_refusal_message_is_bounded_and_cannot_drive_a_terminal() -> TestResult {
+    for seed in 0..SEEDS {
+        let status = [401_u16, 403, 500, 503][usize::try_from(seed % 4)?];
+        let config = scripted(seed, vec![Some(Fault::HostileRefusal { status }); 3]);
+        let (outcome, _) = run_once(config, &[], &[user("hostile")])?;
+        let detail = match outcome {
+            Err(ModelError::Client {
+                status: got,
+                detail,
+            })
+            | Err(ModelError::Server {
+                status: got,
+                detail,
+            }) => {
+                assert_eq!(got, status, "seed {seed}: the status is kept");
+                detail
+            }
+            other => return Err(format!("seed {seed}: expected a refusal, got {other:?}").into()),
+        };
+        assert!(
+            detail.starts_with(" [31mexpired key"),
+            "seed {seed}: the gateway's words survive with control characters blanked: {detail:.40}"
+        );
+        assert!(
+            !detail.chars().any(char::is_control),
+            "seed {seed}: no control character reaches the operator"
+        );
+        assert_eq!(
+            detail.chars().count(),
+            512,
+            "seed {seed}: the reason is cut at 512 characters"
+        );
+        assert!(
+            mock_model::hostile_message().chars().count() > 512,
+            "the fixture is longer than the bound"
+        );
     }
     Ok(())
 }

@@ -43,6 +43,10 @@ that pair, `ureq` or `reqwest` directly, and an async client on `lgwks_bot::rt`.
   backoff, deadline); a bad one is a typed error naming the variable, never a silent default.
 - The shipped caller is `rocco model`: a prompt on stdin, the reply on stdout. It is the operator's check
   that a key and a gateway work, and the executor (#85) calls the same client.
+- From the first live run (larry#128): the default model is `ocg/deepseek-v4.1-flash`, the id 9router
+  serves; a reply padded with whitespace and ending `data: [DONE]` on the document's line (OpenRouter) is
+  read as the bare document; `Server` and `Client` carry the gateway's own reason, cut at 512 characters
+  with control characters blanked so an upstream cannot drive the operator's terminal.
 
 ## Consequences
 
