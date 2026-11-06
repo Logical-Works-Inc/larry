@@ -133,7 +133,10 @@ fn seeded_pre_initialize_traffic_is_gated() -> TestResult<()> {
             let (method, code) = table[rng.index(7)?];
             let reply = ask(&mut session, &json!(index), method)?;
             if code == 0 {
-                assert!(reply["result"].is_object(), "seed {seed}: {method} allowed");
+                assert!(
+                    reply["result"].as_object().is_some(),
+                    "seed {seed}: {method} allowed"
+                );
             } else {
                 assert_eq!(
                     reply["error"]["code"], code,
@@ -144,7 +147,7 @@ fn seeded_pre_initialize_traffic_is_gated() -> TestResult<()> {
         session.initialize()?;
         let list = ask(&mut session, &json!("after"), "tools/list")?;
         assert!(
-            list["result"]["tools"].is_array(),
+            list["result"]["tools"].as_array().is_some(),
             "seed {seed}: open after initialize"
         );
     }
@@ -248,11 +251,17 @@ fn seeded_task_limits_hold_on_both_sides() -> TestResult<()> {
         let over = rng.below(2) == 1;
         let extra = usize::from(over);
         let mut task = json!({"goal":"g","repo":"r","files":[],"acceptance":["c"]});
-        match rng.below(3) {
-            0 => task["goal"] = json!("g".repeat(8192_usize.saturating_add(extra))),
-            1 => task["files"] = json!(vec!["f"; 256_usize.saturating_add(extra)]),
-            _ => task["acceptance"] = json!(vec!["c"; 32_usize.saturating_add(extra)]),
-        }
+        let (key, value) = match rng.below(3) {
+            0 => ("goal", json!("g".repeat(8192_usize.saturating_add(extra)))),
+            1 => ("files", json!(vec!["f"; 256_usize.saturating_add(extra)])),
+            _ => (
+                "acceptance",
+                json!(vec!["c"; 32_usize.saturating_add(extra)]),
+            ),
+        };
+        task.as_object_mut()
+            .ok_or("task is an object")?
+            .insert(key, value);
         let want = if over {
             "invalid_arguments"
         } else {
@@ -416,7 +425,10 @@ fn seeded_nesting_depths_split_at_the_parser_limit() -> TestResult<()> {
         session.send(frame.as_bytes())?;
         let reply = session.recv()?;
         if depth <= 100 {
-            assert!(reply["result"].is_object(), "depth {depth} is served");
+            assert!(
+                reply["result"].as_object().is_some(),
+                "depth {depth} is served"
+            );
         } else {
             assert_eq!(reply["error"]["code"], -32700, "depth {depth} is refused");
         }
@@ -468,7 +480,7 @@ fn seeded_repeated_initialization_is_refused_without_harm() -> TestResult<()> {
         }
         let list = ask(&mut session, &json!("ok"), "tools/list")?;
         assert!(
-            list["result"]["tools"].is_array(),
+            list["result"]["tools"].as_array().is_some(),
             "seed {seed}: still serving"
         );
     }

@@ -47,16 +47,16 @@ fn fingerprint(journal: &Journal) -> Vec<(RunId, u64, EventKind, ContentDigest)>
         .collect()
 }
 
+/// A runtime over `owner` that permits and is capable of `FileRead` with a budget of 100.
+fn file_read_runtime(owner: ScriptedOwner) -> Result<TestRuntime, Box<dyn std::error::Error>> {
+    runtime_with(owner, &[Scope::FileRead], &[Scope::FileRead], 100)
+}
+
 /// The same command sequence, driven twice, produces the same history.
 #[test]
 fn identical_inputs_produce_identical_journals() -> Result<(), Box<dyn std::error::Error>> {
     fn drive() -> Result<Journal, Box<dyn std::error::Error>> {
-        let mut rt = runtime_with(
-            ScriptedOwner::scripted([succeeded(operation(1))]),
-            &[Scope::FileRead],
-            &[Scope::FileRead],
-            100,
-        )?;
+        let mut rt = file_read_runtime(ScriptedOwner::scripted([succeeded(operation(1))]))?;
         let body = proposal(
             run(1),
             tenant(1),
@@ -89,12 +89,7 @@ fn identical_inputs_produce_identical_journals() -> Result<(), Box<dyn std::erro
 fn an_unknown_wire_strategy_is_refused_before_dispatch() -> Result<(), Box<dyn std::error::Error>> {
     use rocco_contracts::command::{Command, CommandContent, CommandKind};
 
-    let mut runtime = runtime_with(
-        ScriptedOwner::scripted([succeeded(operation(1))]),
-        &[Scope::FileRead],
-        &[Scope::FileRead],
-        100,
-    )?;
+    let mut runtime = file_read_runtime(ScriptedOwner::scripted([succeeded(operation(1))]))?;
     let body = proposal(
         run(1),
         tenant(1),
@@ -107,7 +102,7 @@ fn an_unknown_wire_strategy_is_refused_before_dispatch() -> Result<(), Box<dyn s
     let strategy = wire
         .get_mut("strategy")
         .ok_or("serialized proposal has no strategy")?;
-    *strategy = lgwks_std::json::Value::String("UnsupportedFutureStrategy".to_owned());
+    *strategy = "UnsupportedFutureStrategy".into();
     let command = Command::new(
         command_id(1),
         tenant(1),
@@ -362,12 +357,10 @@ fn a_divergent_transition_is_refused() -> Result<(), Box<dyn std::error::Error>>
 /// The projection is a view: discarding and rebuilding it loses nothing.
 #[test]
 fn the_projection_is_discardable() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rt = runtime_with(
-        ScriptedOwner::scripted([unknown(operation(1)), succeeded(operation(1))]),
-        &[Scope::FileRead],
-        &[Scope::FileRead],
-        100,
-    )?;
+    let mut rt = file_read_runtime(ScriptedOwner::scripted([
+        unknown(operation(1)),
+        succeeded(operation(1)),
+    ]))?;
     let body = proposal(
         run(1),
         tenant(1),

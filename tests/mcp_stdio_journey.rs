@@ -116,7 +116,7 @@ fn requests_before_initialize_are_refused_and_initialize_is_once() -> TestResult
     assert_eq!(ping["result"], json!({}), "ping is allowed at any time");
     let init = session.initialize()?;
     assert!(
-        init["result"].is_object(),
+        init["result"].as_object().is_some(),
         "initialize still works after refusals"
     );
     let again = session.request(&json!({"jsonrpc":"2.0","id":9,"method":"initialize",

@@ -524,9 +524,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "5.1.2"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9f32d6bc84e1a92bd8dbe4edd5a640d97e884cbb4db639d7fe68ea8dbddb6f"
+checksum = "bc22779ce4d67fe5e02e4809dbd579473f7a695779ba805acc9e75b4e3f387ba"
 dependencies = [
  "appcui",
  "lgwks_std",
@@ -534,9 +534,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "3.2.2"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c669f8ca511d7843db4437d2e071aafe62c0d97720b8071095ab2ba9bc970229"
+checksum = "cc4182fb20c11682a7e2b6b8b07bdfc442709c8cfca608bd17124ff329e70300"
 dependencies = [
  "blake3",
  "getrandom",

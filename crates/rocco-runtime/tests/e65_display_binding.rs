@@ -519,7 +519,13 @@ fn e65_bounds_epochs_and_integrity() -> Result {
     );
     let display = runtime.display(&command, holder(), &[grant])?;
     let mut wire = lgwks_std::json::to_value(display.binding())?;
-    wire["digest"] = lgwks_std::json::to_value(&ContentDigest::over(&[b"forged"]))?;
+    let members = wire
+        .as_object_mut()
+        .ok_or("serialized binding is not an object")?;
+    members.insert(
+        "digest",
+        lgwks_std::json::to_value(&ContentDigest::over(&[b"forged"]))?,
+    );
     let corrupt: rocco_contracts::binding::EffectBinding = lgwks_std::json::from_value(wire)?;
     assert_eq!(
         corrupt.verify_runtime(17, instant(0)?),

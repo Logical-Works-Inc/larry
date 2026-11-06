@@ -125,12 +125,15 @@ fn sim_both_eras_interleave_on_one_process() -> TestResult<()> {
                     reply["result"]["resultType"], "complete",
                     "seed {seed}: stateless"
                 );
-                assert!(reply["result"]["ttlMs"].is_u64(), "seed {seed}: cache hint");
+                assert!(
+                    reply["result"]["ttlMs"].as_u64().is_some(),
+                    "seed {seed}: cache hint"
+                );
             } else if index >= opened_at {
                 let list = legacy_frame(&id, "tools/list", json!({}));
                 let (_, reply) = ask(&mut session, &legacy, &list)?;
                 assert!(
-                    reply["result"]["tools"].is_array(),
+                    reply["result"]["tools"].as_array().is_some(),
                     "seed {seed}: legacy list"
                 );
                 assert!(
@@ -285,7 +288,7 @@ fn run_mixed(seed: u64, modern: &Schema, legacy: &Schema) -> TestResult<Vec<Vec<
                 .check_reply(step.method, &reply)
                 .map_err(|why| format!("{context}: {why}; {reply}"))?;
         }
-        if reply["result"].is_object() && step.method.starts_with("tools/") {
+        if reply["result"].as_object().is_some() && step.method.starts_with("tools/") {
             assert_eq!(
                 reply["result"]["resultType"].is_null(),
                 step.legacy,
@@ -386,11 +389,14 @@ fn sim_the_schema_check_refuses_a_broken_reply() -> TestResult<()> {
         modern.check_reply(method, case.1)?;
         let mut broken = case.1.clone();
         let (parent, key) = pointer.rsplit_once('/').ok_or("pointer")?;
-        let holder = broken.pointer_mut(parent).ok_or("parent")?;
+        let holder = pointer_mut(&mut broken, parent).ok_or("parent")?;
+        let members = holder.as_object_mut().ok_or("object")?;
         match case.3.as_ref() {
-            Some(value) => holder[key] = value.clone(),
+            Some(value) => {
+                members.insert(key, value.clone());
+            }
             None => {
-                holder.as_object_mut().ok_or("object")?.remove(key);
+                members.remove(key);
             }
         }
         assert!(
@@ -404,6 +410,27 @@ fn sim_the_schema_check_refuses_a_broken_reply() -> TestResult<()> {
         "a legacy tool needs a string name"
     );
     let meta = meta_at(&mut shuffle, MODERN)?;
-    assert!(meta.is_object(), "the builder returns a _meta object");
+    assert!(
+        meta.as_object().is_some(),
+        "the builder returns a _meta object"
+    );
     Ok(())
+}
+
+/// Follows a `/`-separated JSON Pointer mutably, `~1` and `~0` unescaped.
+fn pointer_mut<'a>(root: &'a mut Value, path: &str) -> Option<&'a mut Value> {
+    if path.is_empty() {
+        return Some(root);
+    }
+    path.strip_prefix('/')?
+        .split('/')
+        .try_fold(root, |node, segment| {
+            let token = segment.replace("~1", "/").replace("~0", "~");
+            let is_array = matches!(*node, Value::Array(_));
+            if is_array {
+                node.get_mut(token.parse::<usize>().ok()?)
+            } else {
+                node.get_mut(token.as_str())
+            }
+        })
 }

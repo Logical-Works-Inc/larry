@@ -42,7 +42,7 @@ const TTL_MS: u64 = 3_600_000;
 pub(super) const METHODS: [&str; 3] = ["server/discover", "tools/list", "tools/call"];
 
 /// The `_meta` object of a request's params, if it is one.
-fn meta_of(params: Option<&Map<String, Value>>) -> Option<&Map<String, Value>> {
+fn meta_of(params: Option<&Map>) -> Option<&Map> {
     params
         .and_then(|map| map.get("_meta"))
         .and_then(Value::as_object)
@@ -50,7 +50,7 @@ fn meta_of(params: Option<&Map<String, Value>>) -> Option<&Map<String, Value>> {
 
 /// Whether the request opens itself as a 2026-07-28 request: its `_meta`
 /// carries the protocol version key, whatever the value.
-pub(super) fn is_stateless(params: Option<&Map<String, Value>>) -> bool {
+pub(super) fn is_stateless(params: Option<&Map>) -> bool {
     meta_of(params).is_some_and(|meta| meta.contains_key(VERSION_KEY))
 }
 
@@ -65,7 +65,7 @@ pub(super) fn missing_meta(id: &Value) -> Value {
 }
 
 /// Answers one stateless request: version, then method, then the rest of `_meta`.
-pub(super) fn request(id: &Value, method: &str, params: Option<&Map<String, Value>>) -> Value {
+pub(super) fn request(id: &Value, method: &str, params: Option<&Map>) -> Value {
     let Some(meta) = meta_of(params) else {
         return missing_meta(id);
     };
@@ -105,8 +105,11 @@ fn unsupported_version(id: &Value, requested: &str) -> Value {
 }
 
 /// Checks the rest of `_meta`: capabilities required, identity and log level optional.
-fn check_meta(meta: &Map<String, Value>) -> Result<(), &'static str> {
-    if !meta.get(CAPABILITIES_KEY).is_some_and(Value::is_object) {
+fn check_meta(meta: &Map) -> Result<(), &'static str> {
+    if !meta
+        .get(CAPABILITIES_KEY)
+        .is_some_and(|value| value.as_object().is_some())
+    {
         return Err("io.modelcontextprotocol/clientCapabilities is required and must be an object");
     }
     if let Some(info) = meta.get(CLIENT_INFO_KEY) {
@@ -162,7 +165,7 @@ mod tests {
     use lgwks_std::json::{Map, Value, json};
 
     /// A request's params as a map.
-    fn params(value: &Value) -> Option<&Map<String, Value>> {
+    fn params(value: &Value) -> Option<&Map> {
         value.as_object()
     }
 

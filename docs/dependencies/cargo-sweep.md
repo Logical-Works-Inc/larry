@@ -19,7 +19,7 @@ sources:
 # Cargo sweep
 
 Read 2026-11-03. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
-`lgwks_ast`, `lgwks_deps`, all at their newest release: 3.2.2, 6.1.0, 4.1.0, 5.1.2); Loco.rs where the estate
+`lgwks_ast`, `lgwks_deps`, all at their newest release: 4.0.2, 7.1.1, 4.1.0, 6.1.0); Loco.rs where the estate
 owns nothing; any other crate only with a `gap` issue on its manifest line. Labels: MEASURED, READ, DOC.
 
 ## Measured with cargo (MEASURED, stable toolchain, load average 4 to 6)
