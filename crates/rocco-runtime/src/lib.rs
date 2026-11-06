@@ -121,17 +121,9 @@ pub const MAX_EFFECTS_PER_RUN: usize = 64;
 /// clock cannot recharge a count.
 pub const MAX_OFFLINE_DISPATCHES: u32 = 64;
 
-/// Crate version as declared in `Cargo.toml`.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn version_is_exposed() {
-        assert!(!VERSION.is_empty());
-    }
 
     #[test]
     fn bounds_match_the_specification_cell_05() {

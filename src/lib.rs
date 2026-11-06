@@ -1,4 +1,4 @@
-//! Effect-free fixture state for the pending native AppCUI presentation.
+//! Effect-free fixture state behind the `rocco` workspace demo and its native AppCUI view.
 //! Every command changes only this owned session; no backend is connected.
 
 use lgwks_std::json::{self, Serialize};
