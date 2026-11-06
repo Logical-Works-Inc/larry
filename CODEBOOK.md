@@ -54,6 +54,11 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | Module | Owns |
 |---|---|
 | `lib` | The effect-free DEMO session state |
+| `executor` | `rocco exec`: settings, the run of one task, its JSON report (ADR 0004) |
+| `executor::task` | The bounded task document and its typed refusals |
+| `executor::run` | One command in its own process group: capture, timeout, group kill |
+| `executor::ledger` | The SQLite record of live groups and the reap after a kill -9 |
+| `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
 | `model` | The blocking chat-completions client to 9router (ADR 0003) |
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
 | `model::config` | Gateway, key (never shown), pinned model, temperature, timeout, retry |
@@ -61,7 +66,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native` | The native AppCUI view |
 | `theme` | View colours |
 | `src/main.rs`, `src/mcp/` | The binary entry and the `rocco mcp` server |
-| `src/bin/rocco.rs` | The `rocco` launcher: native view, `rocco mcp`, `rocco model` |
+| `src/bin/rocco.rs` | The `rocco` launcher: native view, `rocco mcp`, `rocco model`, `rocco exec` |
 
 ## Invariants the module map carries
 
@@ -69,3 +74,4 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - Only `runtime::writers` appends to the journal; every append folds the projection after it.
 - `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
+- `executor::ledger` records a group's leader before the wait and removes it only once the group is gone.

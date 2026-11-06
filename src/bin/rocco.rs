@@ -1,5 +1,6 @@
-//! Native AppCUI launcher, `rocco mcp`, the MCP stdio server (larry#84), and
-//! `rocco model`, one completion through the configured gateway (larry#83).
+//! Native AppCUI launcher, `rocco mcp`, the MCP stdio server (larry#84),
+//! `rocco model`, one completion through the configured gateway (larry#83),
+//! and `rocco exec`, the task-document executor (larry#85).
 //! The launcher paints the fixture surface and exits when the operator
 //! quits; it performs no backend or workspace effect.
 #[path = "../mcp/mod.rs"]
@@ -10,11 +11,16 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use rocco_demo::executor::{ExecError, Settings, Task, execute, refuse_model_command};
 use rocco_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
 
 /// Prompt bytes `rocco model` reads: one past the client's 1 MiB request
 /// bound, so an oversize prompt reaches the client's typed refusal.
 const PROMPT_LIMIT: u64 = 1_048_577;
+
+/// Task bytes `rocco exec` reads: one past the executor's 64 KiB task bound,
+/// so an oversize task reaches the parser's typed `TooLarge` refusal.
+const TASK_LIMIT: u64 = 65_537;
 
 /// The interactive check never blocks on a clock: a retry that needs no wait
 /// goes ahead, and one that would wait stops, so the operator sees the
@@ -83,6 +89,27 @@ fn diagnose(message: &str) -> io::Result<()> {
     stderr.write_all(b"\n")
 }
 
+/// `rocco exec`: parse the task document on standard input, run it in a fresh clone,
+/// and print the JSON report. Model commands are refused until Nova isolation lands.
+fn exec_once() -> Result<(), ExecError> {
+    let settings = Settings::from_env(|name| std::env::var(name).ok())?;
+    let mut bytes = Vec::new();
+    io::stdin()
+        .lock()
+        .take(TASK_LIMIT)
+        .read_to_end(&mut bytes)
+        .map_err(ExecError::Input)?;
+    let task = Task::parse(&bytes).map_err(ExecError::Task)?;
+    if task.has_model_commands() {
+        return Err(refuse_model_command());
+    }
+    let report = execute(&task, &settings)?;
+    let mut out = io::stdout().lock();
+    writeln!(out, "{report}")
+        .and_then(|()| out.flush())
+        .map_err(ExecError::Output)
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let outcome = match (args.next(), args.next()) {
@@ -96,8 +123,11 @@ fn main() -> ExitCode {
         (Some(command), None) if command == "model" => {
             model_once().map_err(|error| error.to_string())
         }
+        (Some(command), None) if command == "exec" => {
+            exec_once().map_err(|error| error.to_string())
+        }
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp` and `model`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `model` and `exec`; F1 opens native help",
         )),
     };
     match outcome {
