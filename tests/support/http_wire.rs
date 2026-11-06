@@ -14,6 +14,8 @@ pub(crate) struct Request {
     pub(crate) method: String,
     /// The request target, as sent.
     pub(crate) path: String,
+    /// The `Authorization` header value, when one was sent.
+    pub(crate) authorization: Option<String>,
     /// The body, at most the configured cap.
     pub(crate) body: Vec<u8>,
 }
@@ -64,10 +66,14 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
         return Err(Refusal::Head);
     }
     let mut declared: Option<usize> = None;
+    let mut authorization: Option<String> = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
+        if name.trim().eq_ignore_ascii_case("authorization") {
+            authorization = Some(String::from(value.trim()));
+        }
         if name.trim().eq_ignore_ascii_case("transfer-encoding") {
             return Err(Refusal::LengthRequired);
         }
@@ -85,7 +91,12 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
     }
     let mut body = vec![0_u8; length];
     stream.read_exact(&mut body).map_err(|_| Refusal::Io)?;
-    Ok(Request { method, path, body })
+    Ok(Request {
+        method,
+        path,
+        authorization,
+        body,
+    })
 }
 
 /// The reason phrase for the statuses the mock emits.

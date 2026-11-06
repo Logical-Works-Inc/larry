@@ -423,6 +423,11 @@ fn the_model_and_temperature_a_client_sends_reach_the_endpoint() -> TestResult {
             sent["model"], "deepseek-v4-flash",
             "model reached the gateway"
         );
+        assert_eq!(
+            handle.authorizations(),
+            [None],
+            "a request without a key is recorded as keyless, aligned with its body"
+        );
         Ok(())
     })
 }

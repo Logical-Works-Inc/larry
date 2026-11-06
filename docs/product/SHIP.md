@@ -34,10 +34,11 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 ## 1. Weekend ship: Larry v0.1, the executor (#114, umbrella #71)
 
-- [ ] First merge after the flip runs CI on `ubuntu-latest` and is green (rides on #83's PR). Proof:
-  `gh run list --branch main` shows ci, simulation and governance passing on hosted runners.
-- [ ] #83 model client to 9router on `lgwks_std::http`, `json`, `retry`. Proof: drives the mock endpoint;
-  typed errors on timeout, 429 and malformed body.
+- [x] First merge after the flip runs CI on `ubuntu-latest` and is green: PR #126, rust, simulation,
+  e2e/journey, governance and docs-check all passing on hosted runners.
+- [x] #83 model client to 9router on `lgwks_std::http`, `json`, `retry`. Proof: drives the mock endpoint;
+  typed errors on timeout, 429 and malformed body: PR #127, `rocco model` ships it; 16 client cases over 64
+  seeds and 8 binary journeys, 568 tests in 10.0 s; `rocco model` p50 6.4 ms, p99 12.4 ms (32 runs, mock).
 - [ ] #85 executor workspace and process control. Proof: kill -9 of the executor leaves no orphan process
   group; the origin tree is byte-identical after a hostile command.
 - [ ] #86 signed receipts over the journal (ed25519). Proof: a tampered receipt is refused; a denied run
