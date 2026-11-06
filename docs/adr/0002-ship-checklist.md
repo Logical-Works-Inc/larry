@@ -26,12 +26,12 @@ last measured 2026-09-22, and renders through Python, which is banned locally un
 ## Decision
 
 `/docs/product/SHIP.md` lists every remaining PR-sized issue in ship order with its proof. A session takes
-the first unchecked line; the PR that ships it ticks the line and appends the PR, merge SHA and measured
-number. Issues keep the detail, `specification.md` keeps every ID, and the cell tracker stays the cell
+the first unchecked line; the PR that ships it ticks the line and appends the PR and measured number (a
+squash SHA exists only after merge, so git log holds it). Issues keep the detail, `specification.md` keeps every ID, and the cell tracker stays the cell
 dashboard.
 
 ## Consequences
 
 - One file read gives a session its next PR.
-- A ticked line without its PR, SHA and number is a defect a reviewer refuses.
+- A ticked line without its PR and number is a defect a reviewer refuses.
 - No CI job checks the ticks yet; the rule is review-only, owner Director, until #103's job can read them.

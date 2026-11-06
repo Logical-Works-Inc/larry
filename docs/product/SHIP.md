@@ -19,8 +19,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
    marked parallel. A newer Director order beats this order; record it here in the same PR.
 2. Read the issue, then work it as AGENTS.md says: research, plan, build in the run path, the Gates, a PR
    whose body says `Closes #N`, merge on green.
-3. In that same PR, tick the line and append `PR #M, <merge SHA>, <the measured number>`. A line is ticked
-   only when its proof ran and printed; a green build alone ticks nothing.
+3. In that same PR, tick the line and append `PR #M, <the measured number>`; the squash SHA appears only
+   at merge, so `git log` holds it. A line is ticked only when its proof ran and printed.
 4. New work enters as an issue and a line here in the PR that files it. Never delete a line: tick it, or
    strike it with the reason and the Director's order.
 
