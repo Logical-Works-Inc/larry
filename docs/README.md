@@ -3,7 +3,7 @@ type: Index
 title: Larry documentation tree
 description: Final repository structure; navigation over the canonical specification, ledger, log and governance documents.
 resource: /docs/README.md
-tags: [rocco, structure, navigation, okf]
+tags: [larry, structure, navigation, okf]
 generated: {by: opencode, at: 2026-09-16}
 verified: {by: opencode, method: structural gate admission and link validation; content review against canonical owners}
 status: final-structure-v1.1

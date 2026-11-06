@@ -1,4 +1,4 @@
-//! The task document `rocco exec` parses from standard input (larry#85).
+//! The task document `larry exec` parses from standard input (larry#85).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ const MAX_BASE_BYTES: usize = 256;
 /// Maximum bytes in the repository path.
 const MAX_REPO_BYTES: usize = 4096;
 
-/// One parsed `rocco exec` task document.
+/// One parsed `larry exec` task document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Task {

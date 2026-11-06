@@ -20,9 +20,9 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
 use lgwks_std::json::{self, Value};
 use mock_model::{Config, Fault};
-use rocco_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn Error>>;

@@ -4,7 +4,7 @@
   "measured": "2026-09-22",
   "branch": "uncommitted estate/build repair atop 416a8ac",
   "receipt": "LOCAL GREEN: workspace build/test/strict Clippy, governance and CLI journeys pass; product acceptance remains open",
-  "lede": "Rocco is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",
+  "lede": "Larry is built in thirteen cells, C00 through C12. Each one is a slice. This page shows how many are actually started, what is blocking the rest, and exactly how much the runtime work moved.",
   "falsifier_total": 80,
   "axes_total": 9,
   "cells": [
@@ -22,7 +22,7 @@
       "pct": 0,
       "st": "todo",
       "blocked": "Sibling owner snapshots",
-      "why": "The EffectOwner seam now exists in rocco-runtime, but no adapter, API or licence manifest is produced."
+      "why": "The EffectOwner seam now exists in larry-runtime, but no adapter, API or licence manifest is produced."
     },
     {
       "id": "C02",
@@ -196,8 +196,8 @@
   "evidence": {
     "measured": [
       "Cargo search/info: published std 0.6.6, deps 0.1.12, bot 0.4.2; consumed pins and unused bot catalog updated",
-      "rocco-contracts: scoped check/test/strict Clippy/fmt pass; 76 default and 73 no-default test executions",
-      "rocco-runtime: scoped check/test/strict Clippy/fmt pass; 60 test executions",
+      "larry-contracts: scoped check/test/strict Clippy/fmt pass; 76 default and 73 no-default test executions",
+      "larry-runtime: scoped check/test/strict Clippy/fmt pass; 60 test executions",
       "lgwks-deps check .: exit 0, one existing semantic approval",
       "full workspace: cargo build --bins, 178 Rust tests, strict Clippy and fmt pass locally; native and line-driver CLI journeys pass",
       "Source review found no actionable defect; not an independent gate execution",

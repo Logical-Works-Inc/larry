@@ -1,4 +1,4 @@
-//! The executor behind `rocco exec` (larry#85).
+//! The executor behind `larry exec` (larry#85).
 
 mod ledger;
 mod run;
@@ -25,7 +25,7 @@ const MAX_TIMEOUT_MS: u64 = 86_400_000;
 /// Characters of the task's BLAKE3 digest that name a run.
 const TASK_PREFIX_CHARS: usize = 16;
 
-/// Why `rocco exec` failed; each variant keeps its cause.
+/// Why `larry exec` failed; each variant keeps its cause.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExecError {
@@ -46,6 +46,8 @@ pub enum ExecError {
     },
     /// The sqlite ledger could not be opened or migrated.
     Ledger(lgwks_deps::sqlite::SqliteError),
+    /// The state directory or the lock that serializes ledger opens failed.
+    LedgerLock(std::io::Error),
     /// A ledger statement failed.
     Sql(lgwks_deps::storefront::rusqlite::Error),
     /// A process group could not be signalled, probed or reaped.
@@ -96,6 +98,7 @@ impl fmt::Display for ExecError {
                 "exec LARRY_EXEC_TIMEOUT_MS is not a timeout in 1..=86400000: {value}"
             ),
             Self::Ledger(ref cause) => write!(out, "exec ledger: {cause}"),
+            Self::LedgerLock(ref cause) => write!(out, "exec ledger lock: {cause}"),
             Self::Sql(ref cause) => write!(out, "exec ledger statement: {cause}"),
             Self::Reap(ref cause) => write!(out, "exec process group: {cause}"),
             Self::Spawn {
@@ -122,6 +125,7 @@ impl std::error::Error for ExecError {
             Self::Task(ref cause) => Some(cause),
             Self::Output(ref cause) => Some(cause),
             Self::Ledger(ref cause) => Some(cause),
+            Self::LedgerLock(ref cause) => Some(cause),
             Self::Sql(ref cause) => Some(cause),
             Self::Reap(ref cause) => Some(cause),
             Self::Spawn { ref source, .. } => Some(source),

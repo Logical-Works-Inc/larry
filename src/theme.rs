@@ -21,7 +21,7 @@
 //!    this file changes.
 //!
 //! 2. **Theme universality.** Forge paints body text `fg(CREAM)`, which
-//!    assumes a dark terminal. Rocco's accessibility pass (2026-09-18) made
+//!    assumes a dark terminal. Larry's accessibility pass (2026-09-18) made
 //!    every body role resolve to the terminal default so light, dark,
 //!    `NO_COLOR` and dumb terminals share one branch-free path. Body text
 //!    therefore stays [`BASE`] = `Transparent`; Forge's *accent* language —

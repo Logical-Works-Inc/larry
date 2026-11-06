@@ -17,7 +17,7 @@ permissions:
 # `cargo test` so a job never installs tools into the shared machine.
 
 jobs:
-  # The seeded simulation suites (`crates/rocco-runtime/tests/sim_*.rs`) as a
+  # The seeded simulation suites (`crates/larry-runtime/tests/sim_*.rs`) as a
   # check of their own, so a PR shows its deterministic-simulation verdict by
   # name instead of inside the whole-workspace `rust` lane.
   simulation:
@@ -38,11 +38,11 @@ jobs:
         with:
           tool: nextest
       - if: ${{ !github.event.repository.private }}
-        run: cargo nextest run --locked -p rocco-runtime -E 'binary(/^sim_/)'
+        run: cargo nextest run --locked -p larry-runtime -E 'binary(/^sim_/)'
       - if: ${{ github.event.repository.private }}
-        run: cargo test --locked -p rocco-runtime --test 'sim_*'
+        run: cargo test --locked -p larry-runtime --test 'sim_*'
 
-  # The shipped `rocco` binary driven through a real terminal by
+  # The shipped `larry` binary driven through a real terminal by
   # `tests/e2e_journey.rs`: every slash command a user types, exit 0 asserted.
   e2e-journey:
     name: e2e/journey (${{ github.event.repository.private && 'self-hosted' || 'ubuntu-latest' }})
@@ -62,6 +62,6 @@ jobs:
         with:
           tool: nextest
       - if: ${{ !github.event.repository.private }}
-        run: cargo nextest run --locked -p rocco-demo --test e2e_journey
+        run: cargo nextest run --locked -p larry-demo --test e2e_journey
       - if: ${{ github.event.repository.private }}
-        run: cargo test --locked -p rocco-demo --test e2e_journey
+        run: cargo test --locked -p larry-demo --test e2e_journey

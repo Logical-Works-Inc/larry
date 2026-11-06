@@ -1,4 +1,4 @@
-//! Drives the shipped `rocco mcp` binary over stdio for the MCP suites.
+//! Drives the shipped `larry mcp` binary over stdio for the MCP suites.
 //!
 //! Source: the MCP specification 2025-06-18, "Transports: stdio" (one
 //! JSON-RPC message per line on the child's stdin and stdout). Every suite
@@ -41,7 +41,7 @@ impl Rng {
     }
 }
 
-/// One running `rocco mcp` process and its two pipes.
+/// One running `larry mcp` process and its two pipes.
 pub struct Session {
     /// The server process.
     child: Child,
@@ -52,9 +52,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts `rocco mcp` with piped stdio and discarded stderr.
+    /// Starts `larry mcp` with piped stdio and discarded stderr.
     pub fn start() -> TestResult<Self> {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rocco"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

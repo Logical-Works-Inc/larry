@@ -2,7 +2,7 @@ id: return-to-work
 actor: returning-human
 job: Recover the one work item needing attention and safely resume its context without mistaking fixture state for live orchestration.
 prior_knowledge:
-  - Knows Rocco is a terminal workspace, but has forgotten the previous stopping point.
+  - Knows Larry is a terminal workspace, but has forgotten the previous stopping point.
   - Does not know internal adapter, fixture, or persistence implementation details.
 start:
   installation: existing local binary

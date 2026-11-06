@@ -1,4 +1,4 @@
-//! Seeded simulations of the stateless 2026-07-28 era against the shipped `rocco mcp`.
+//! Seeded simulations of the stateless 2026-07-28 era against the shipped `larry mcp`.
 //!
 //! Source: MCP specification 2026-07-28 (Basic: `_meta` per-request fields and
 //! error codes; Versioning and Compatibility; Server: Discovery, Tools,

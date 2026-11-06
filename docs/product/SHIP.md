@@ -37,11 +37,11 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] First merge after the flip runs CI on `ubuntu-latest` and is green: PR #126, rust, simulation,
   e2e/journey, governance and docs-check all passing on hosted runners.
 - [x] #83 model client to 9router on `lgwks_std::http`, `json`, `retry`. Proof: drives the mock endpoint;
-  typed errors on timeout, 429 and malformed body: PR #127, `rocco model` ships it; 16 client cases over 64
-  seeds and 8 binary journeys, 568 tests in 10.0 s; `rocco model` p50 6.4 ms, p99 12.4 ms (32 runs, mock).
+  typed errors on timeout, 429 and malformed body: PR #127, `larry model` ships it; 16 client cases over 64
+  seeds and 8 binary journeys, 568 tests in 10.0 s; `larry model` p50 6.4 ms, p99 12.4 ms (32 runs, mock).
 - [x] #85 executor workspace and process control. Proof: kill -9 of the executor leaves no orphan process
-  group; the origin tree is byte-identical after a hostile command: PR #130, `rocco exec` ships it; 7 binary
-  journeys and 3 unit sims, 582 tests in 10.4 s; `rocco exec` p50 70.8 ms, p99 74.5 ms (32 runs, debug).
+  group; the origin tree is byte-identical after a hostile command: PR #130, `larry exec` ships it; 7 binary
+  journeys and 3 unit sims, 582 tests in 10.4 s; `larry exec` p50 70.8 ms, p99 74.5 ms (32 runs, debug).
 - [ ] #86 signed receipts over the journal (ed25519). Proof: a tampered receipt is refused; a denied run
   never reports success.
 - [ ] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task
@@ -49,9 +49,12 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [ ] #87 matched task set, Claude alone against Claude plus Flash. Proof: cost per accepted task,
   acceptance rate, p50/p95/p99 and peak RSS printed for both arms.
 - [ ] #124 v0.1.0 release with #87's numbers. Proof: `gh release view v0.1.0`; a clean
-  `cargo install --git ... --tag v0.1.0 --locked` serves `rocco mcp`.
+  `cargo install --git ... --tag v0.1.0 --locked` serves `larry mcp`.
 
 ## 2. Track 0: estate alignment (parallel with section 1)
+
+- [x] #131 rename Rocco to Larry (Director 2026-11-06). Proof: the Gates green under the new names; 582 tests in
+  10.3 s under `larry-demo`, `larry-contracts` and `larry-runtime` (ADR 0005).
 
 - [ ] #53 port the nine Python tools to Rust (governance checker and tracker first). Proof: CI and
   `.wwfd/local-ci.sh` run no Python; the over-size documents split.

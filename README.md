@@ -15,7 +15,7 @@ sources: [Director orders 2026-09-15 to 2026-11-06]
 
 > **ALPHA. ZERO SECURITY GUARANTEES. ZERO CONTRIBUTIONS.**
 > Larry is alpha-stage software from Logical Works Inc. It carries no security guarantee of any kind: do not
-> point it at data, accounts, credentials or machines you cannot afford to lose, and do not expose `rocco mcp`
+> point it at data, accounts, credentials or machines you cannot afford to lose, and do not expose `larry mcp`
 > to an untrusted network or peer. Interfaces, wire formats and stored data change without notice. This
 > repository accepts no contributions: outside pull requests and issues are closed unread. Report a
 > vulnerability privately as `SECURITY.md` describes.
@@ -23,14 +23,14 @@ sources: [Director orders 2026-09-15 to 2026-11-06]
 Larry is an always-on agent harness: a persistent assistant with disposable workers, explicit authority,
 accountable effects and measurable learning. Every effect passes one journal: a durable intent before the call,
 a recorded authorization, a fence re-check at dispatch and a receipt after it. Replay is bit-identical, tenants
-never share state, and cancellation stops new work. The `rocco-*` crate and `rocco` binary names are Larry's
+never share state, and cancellation stops new work. The `larry-*` crate and `larry` binary names are Larry's
 until they are renamed.
 
 ## What is here
 
-- `crates/rocco-contracts`: the pure typed contracts (commands, events, effects, authority, replay).
-- `crates/rocco-runtime`: the headless journal-authoritative runtime with falsifier and seeded simulation suites.
-- `rocco`: the workspace demo (fixture data; nothing executes) and `rocco mcp`, a stateless MCP 2026-07-28
+- `crates/larry-contracts`: the pure typed contracts (commands, events, effects, authority, replay).
+- `crates/larry-runtime`: the headless journal-authoritative runtime with falsifier and seeded simulation suites.
+- `larry`: the workspace demo (fixture data; nothing executes) and `larry mcp`, a stateless MCP 2026-07-28
   server whose `larry_submit_task` tool validates a typed task and answers `executor_not_connected` until the
   executor lands.
 
@@ -50,7 +50,7 @@ authority, journal and receipt safeguards; they apply Canadian law. This is not 
 ## Try the workspace demo
 
 ```sh
-cargo run --locked --bin rocco
+cargo run --locked --bin larry
 ```
 Start on the Kanban board. Click a card, press its number, or select it and press Enter to open work and
 request Continue. Escape returns Home with the draft intact. Chat occupies its own pane; Tab and `/files`,

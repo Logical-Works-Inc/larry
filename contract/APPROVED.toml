@@ -1,7 +1,7 @@
 # Registered dependency edges for Larry (Logical-Works-Inc/larry).
 #
 # Merged 2026-09-18 from the two registers that existed while the contract
-# crate lived in a second repository (`srinji-kaggss/rocco-runtime`, deleted
+# crate lived in a second repository (`srinji-kaggss/larry-runtime`, deleted
 # 2026-10-26). This file is the only register. Larry carries the
 # specification, the fixture surface, the contract crate and the runtime, and
 # every external edge they compile against is accounted for here.
@@ -28,7 +28,7 @@
 enforce = true
 repository = "https://github.com/Logical-Works-Inc/larry"
 
-# The one third-party edge in the workspace. Carried from the rocco-runtime
+# The one third-party edge in the workspace. Carried from the larry-runtime
 # admission, which recorded an owner and a reason but none of the sign-off
 # keys this schema requires; the sign-off below names that commit rather than
 # inventing a fresh approval.
@@ -36,15 +36,15 @@ repository = "https://github.com/Logical-Works-Inc/larry"
 crate = "thiserror"
 tier = "boundary"
 version = "=2.0.20"
-owner = "rocco-contracts"
+owner = "larry-contracts"
 capability = "error-derive"
 source = "registry"
-allowed_consumers = "rocco-contracts"
+allowed_consumers = "larry-contracts"
 allowed_kinds = "normal"
 reason = "derive-backed std::error::Error implementations on the C02 contract error types, which std's own error trait cannot express without hand-written boilerplate and no lgwks_std feature exposes. Estate gap: Logical-Works-Inc/logicalworks-crates#842; retire this row when it closes."
 approved_by = "srinji-kaggss (Director)"
 approved_on = "2026-09-16"
-review = "https://github.com/srinji-kaggss/rocco-runtime/commit/53c751220ddef57c694647b7da14eb3b88eda1df"
+review = "https://github.com/srinji-kaggss/larry-runtime/commit/53c751220ddef57c694647b7da14eb3b88eda1df"
 
 # ── bevy_ecs: SUPERSEDED, NOT AN EDGE ────────────────────────────────────────
 #

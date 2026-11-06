@@ -1,11 +1,11 @@
 ---
 type: ADR
 title: "ADR 0004: the executor runs each command in its own process group and ledgers it in SQLite"
-description: Why `rocco exec` (larry#85) clones, how it bounds and kills commands, and how a kill -9 of it is reaped.
+description: Why `larry exec` (larry#85) clones, how it bounds and kills commands, and how a kill -9 of it is reaped.
 resource: /docs/adr/0004-executor-process-groups-and-ledger.md
 tags: [larry, adr, executor, process, sqlite]
 generated: {by: claude-code, at: 2026-11-06}
-verified: {by: claude-code, method: tests/executor_journey.rs on the shipped rocco binary, unit sims in src/executor}
+verified: {by: claude-code, method: tests/executor_journey.rs on the shipped larry binary, unit sims in src/executor}
 status: accepted
 stale_after: 2027-02-06
 sources: [larry#85, larry#71, logicalworks-crates#846, lgwks_std 4.0.2 src/process.rs and src/process/identity.rs, lgwks_deps 6.1.0 src/sqlite.rs]

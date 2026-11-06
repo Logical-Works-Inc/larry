@@ -18,7 +18,7 @@ pub struct ModelClient {
     config: ModelConfig,
     /// Waits out one retry backoff and says whether to retry. The caller owns
     /// the clock and cancellation: the executor waits on its cancel token, the
-    /// `rocco model` check refuses any wait, and a test records the wait. A
+    /// `larry model` check refuses any wait, and a test records the wait. A
     /// `false` stops retrying and the last refusal is returned.
     pause: Box<dyn Fn(Duration) -> bool + Send + Sync>,
 }

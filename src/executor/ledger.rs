@@ -1,6 +1,7 @@
 //! The ledger of process groups a run has started and not yet settled, in
 //! `<state>/executor.db` (larry#85).
 
+use std::fs::File;
 use std::path::Path;
 
 use lgwks_deps::storefront::rusqlite;
@@ -24,10 +25,29 @@ pub(crate) struct Ledger {
 
 impl Ledger {
     /// Opens, creating if needed, the ledger under the state directory.
+    ///
+    /// Open and migration run under an exclusive lock on `executor.db.lock`, so
+    /// executors starting together on one state directory open the store one at a
+    /// time. Without it the second of two first opens was refused at once with
+    /// "database is locked": `lgwks_deps::sqlite::open` switches a fresh file to
+    /// WAL before it sets its busy timeout (logicalworks-crates#873), and
+    /// `migrate` reads and writes `user_version` outside one transaction (#872).
+    /// The kernel releases the lock when its holder dies, so a `kill -9` mid-open
+    /// leaves nothing to clear; a live holder keeps it for one open and one
+    /// migration, each under the store's own 60 s busy bound.
     pub(crate) fn open(state_dir: &Path) -> Result<Ledger, ExecError> {
+        std::fs::create_dir_all(state_dir).map_err(ExecError::LedgerLock)?;
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(state_dir.join("executor.db.lock"))
+            .map_err(ExecError::LedgerLock)?;
+        lock.lock().map_err(ExecError::LedgerLock)?;
         let conn =
             lgwks_deps::sqlite::open(&state_dir.join("executor.db")).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(&conn, 1, &[SCHEMA]).map_err(ExecError::Ledger)?;
+        lock.unlock().map_err(ExecError::LedgerLock)?;
         Ok(Ledger { conn })
     }
 
@@ -184,6 +204,50 @@ mod tests {
         );
         assert!(ledger.live_tasks()?.is_empty(), "reap leaves no row behind");
         drop(std::fs::remove_dir_all(&directory));
+        Ok(())
+    }
+
+    /// Openers racing on one fresh state directory: every first open waits for the
+    /// one switching the store to WAL instead of failing "database is locked"
+    /// (larry#131, logicalworks-crates#873). Each round is a new directory, so
+    /// every round races the creation itself.
+    #[test]
+    fn concurrent_first_opens_of_one_fresh_ledger_all_succeed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        /// Openers per round: past the two executors the journey starts.
+        const OPENERS: usize = 16;
+        /// Rounds, each on a fresh directory.
+        const ROUNDS: usize = 8;
+        for _round in 0..ROUNDS {
+            let directory = scratch_directory();
+            let barrier = std::sync::Barrier::new(OPENERS);
+            let refusals = std::thread::scope(|scope| {
+                let openers: Vec<_> = (0..OPENERS)
+                    .map(|_opener| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            Ledger::open(&directory)
+                                .map(drop)
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .collect();
+                openers
+                    .into_iter()
+                    .filter_map(|opener| match opener.join() {
+                        Ok(Ok(())) => None,
+                        Ok(Err(refusal)) => Some(refusal),
+                        Err(_panicked) => Some("an opener panicked".to_owned()),
+                    })
+                    .collect::<Vec<String>>()
+            });
+            drop(std::fs::remove_dir_all(&directory));
+            assert_eq!(
+                refusals,
+                Vec::<String>::new(),
+                "every concurrent first open succeeds"
+            );
+        }
         Ok(())
     }
 }

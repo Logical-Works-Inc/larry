@@ -1,4 +1,4 @@
-//! Journeys against the shipped `rocco mcp` binary, as an MCP client lives them.
+//! Journeys against the shipped `larry mcp` binary, as an MCP client lives them.
 //!
 //! Source: MCP specification 2025-06-18 (lifecycle, tools, transports/stdio)
 //! and JSON-RPC 2.0 section 5 (error codes). Requirement: larry#84, a stdio
@@ -303,7 +303,7 @@ fn kill_dash_nine_then_restart_serves_a_fresh_session() -> TestResult<()> {
 #[test]
 fn unknown_arguments_exit_nonzero_with_empty_stdout() -> TestResult<()> {
     for args in [vec!["mcp", "extra"], vec!["serve"]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rocco"))
+        let output = Command::new(env!("CARGO_BIN_EXE_larry"))
             .args(&args)
             .stdin(Stdio::null())
             .output()?;

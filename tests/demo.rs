@@ -1,10 +1,10 @@
 //! Integration journeys for the fixture domain: the published JSON view, the
-//! rejection contract, and session isolation. These drive `rocco_demo`
+//! rejection contract, and session isolation. These drive `larry_demo`
 //! directly; the native surface has its own real-PTY suite in
 //! `tools/test_native_cli.py`.
 
+use larry_demo::{Demo, MAX_INPUT, Rejected};
 use lgwks_std::json::{self, Value};
-use rocco_demo::{Demo, MAX_INPUT, Rejected};
 
 /// Read the public snapshot, propagating either serialization failure.
 fn view(demo: &Demo) -> Result<Value, json::Error> {

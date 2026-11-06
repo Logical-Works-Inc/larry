@@ -22,8 +22,8 @@ INVARIANTS.md and the plan before the first edit.
 - Larry (`Logical-Works-Inc/larry`, public alpha, formerly Rocco) is the always-on harness organ of Logic OS, which
   replaces Microsoft's whole stack by 2027-03-21. Larry answers Microsoft Copilot (Copilot, Copilot Studio,
   Agent 365): an agent that works for a person, asks before it acts and can account for every effect.
-- Rocco now names a separate embedded harness that cannot speak (the in-app dock). The `rocco-*` crates and
-  the `rocco` binary here are Larry's until a rename order.
+- Rocco names a separate embedded harness that cannot speak (the in-app dock); nothing in this repository is
+  Rocco. Every crate, binary and document here says Larry (Director 2026-11-06: "Rename Rocco to Larry", larry#131).
 - The plan is [the product plan](/docs/product/README.md); the next PR is the first open line of its
   [ship checklist](/docs/product/SHIP.md). specification.md owns every requirement, decision, falsifier,
   cell and axis ID; INVARIANTS.md holds the runtime rules; LICENSE is HL3-FULL plus Part B, not open source.
@@ -74,7 +74,7 @@ The governance checker, its negative controls and the PTY journeys are still Pyt
 larry#53 ports them to Rust; agents may not run Python locally. `.wwfd/local-ci.sh` mirrors CI. Each CI job
 picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
 once public, never self-hosted on a public repository (larry#116). Launch the demo with
-`cargo run --locked --bin rocco`; fixture runs are not backend, device or fleet acceptance.
+`cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.
 
 ## Size law
 

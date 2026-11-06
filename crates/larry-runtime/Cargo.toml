@@ -1,0 +1,42 @@
+[package]
+name = "larry-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The Larry runtime: bounded journal, deterministic tick, admission and authorization gate, effect lifecycle and replay (spec C02)."
+
+# Dependency law (contract/APPROVED.toml): the foundation is Rust `std` plus
+# exact-pinned `lgwks_*` crates.io releases. The `lgwks_*` edges are
+# deliberately absent from the register — lgwks_std is ladder rung 2
+# (workspace stdlib+) and lgwks_deps is the estate's own admission
+# storefront — so this crate adds **no** registered third-party edge.
+#
+# `thiserror` is deliberately NOT used here even though it is the estate's
+# error-derive choice: its register row names `larry-contracts` as the single
+# `allowed_consumers` entry. Widening that row is a Director sign-off, not a
+# local convenience, so this crate hand-writes `Display` + `Error` instead.
+[dependencies]
+larry-contracts = { path = "../larry-contracts" }
+lgwks_std = { workspace = true, features = ["json"] }
+
+[features]
+# `owner::fixture` (the scripted owner doubles) compiles only under this
+# feature or the crate's own unit tests, so no shipped build carries a double
+# (larry#68). Off by default; nothing outside this crate's tests turns it on.
+fixture = []
+
+[dev-dependencies]
+# Tests-only edges. Both are already workspace foundation (std + exact-pinned
+# lgwks_* + the sibling contract crate); neither is a new third-party edge, so
+# the register is untouched.
+larry-contracts = { path = "../larry-contracts" }
+lgwks_std = { workspace = true, features = ["json"] }
+# The crate itself with `fixture` on, so the integration tests can drive the
+# scripted owner; Cargo enables a dev-dependency's features for test targets only.
+larry-runtime = { path = ".", features = ["fixture"] }
+
+[lints]
+workspace = true

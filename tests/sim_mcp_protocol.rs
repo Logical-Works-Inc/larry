@@ -1,4 +1,4 @@
-//! Seeded protocol simulations against the shipped `rocco mcp` binary.
+//! Seeded protocol simulations against the shipped `larry mcp` binary.
 //!
 //! Source: JSON-RPC 2.0 section 5 (error codes, notifications are never
 //! answered), MCP specification 2025-06-18 (lifecycle, version negotiation,

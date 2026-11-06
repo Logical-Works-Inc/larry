@@ -1,7 +1,7 @@
-id: rocco-workspace
+id: larry-workspace
 actors:
   - returning-human
-  - rocco-system
+  - larry-system
   - bounded-ai
 promise: A returning human can see what needs attention, resume one work item, and distinguish fixture presentation from real authority.
 non_goals:

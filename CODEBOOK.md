@@ -8,14 +8,14 @@ generated: {by: claude-code, at: 2026-11-06}
 verified: {by: claude-code, method: read of each crate root and module declaration, 2026-11-06}
 status: public-alpha
 stale_after: 2026-12-06
-sources: [crates/rocco-contracts/src/lib.rs, crates/rocco-runtime/src/lib.rs, src/lib.rs, INVARIANTS.md]
+sources: [crates/larry-contracts/src/lib.rs, crates/larry-runtime/src/lib.rs, src/lib.rs, INVARIANTS.md]
 ---
 
 # Codebook
 
 Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each module has one owner.
 
-## crates/rocco-contracts (pure algebra; no state, clock or I/O)
+## crates/larry-contracts (pure algebra; no state, clock or I/O)
 
 | Module | Owns |
 |---|---|
@@ -29,8 +29,9 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `replay` | The pure authorization reducer and pinned replay |
 | `error` | Every typed contract failure |
 | `workspace` | Bounded workspace projections and the Continue boundary |
+| `fixture` (test only) | Pinned instants shared by the unit tests |
 
-## crates/rocco-runtime (the deterministic tick)
+## crates/larry-runtime (the deterministic tick)
 
 | Module | Owns |
 |---|---|
@@ -49,12 +50,12 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |
 | `runtime::writers` | Every journal writer and the run-state `advance` |
 
-## Root crate (the `rocco` binary)
+## Root crate (the `larry` binary)
 
 | Module | Owns |
 |---|---|
 | `lib` | The effect-free DEMO session state |
-| `executor` | `rocco exec`: settings, the run of one task, its JSON report (ADR 0004) |
+| `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::run` | One command in its own process group: capture, timeout, group kill |
 | `executor::ledger` | The SQLite record of live groups and the reap after a kill -9 |
@@ -63,10 +64,15 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
 | `model::config` | Gateway, key (never shown), pinned model, temperature, timeout, retry |
 | `model::wire` | The request body and the reply parser |
-| `native` | The native AppCUI view |
+| `native` | The native AppCUI view: session state, commands and saturating geometry |
+| `native::render` | Painting the forge chrome: transcript, panels, dashboard, input, status hub |
+| `native::input` | Key routing and the paint entry point of the session view |
+| `native::workspace` | The board-first workspace: cards, the `ink!` and `shell_card!` painters |
+| `native::workspace::views` | The board, truth and work scenes |
+| `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
-| `src/main.rs`, `src/mcp/` | The binary entry and the `rocco mcp` server |
-| `src/bin/rocco.rs` | The `rocco` launcher: native view, `rocco mcp`, `rocco model`, `rocco exec` |
+| `src/main.rs`, `src/mcp/` | The binary entry and the `larry mcp` server |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `larry mcp`, `larry model`, `larry exec` |
 
 ## Invariants the module map carries
 
@@ -75,3 +81,6 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone.
+- `executor::ledger` opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
+- Test fixtures shared by several runtime test binaries live in `tests/support`, `tests/sim_kit` and
+  `tests/fence_kit`, each with a test that exercises every helper.

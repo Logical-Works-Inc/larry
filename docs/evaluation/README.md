@@ -1,9 +1,9 @@
 ---
 type: Design
-title: Rocco evaluation structure and falsifier organization
+title: Larry evaluation structure and falsifier organization
 description: Evaluation lanes, portfolio sources and falsifier inventory layout; all results NOT RUN.
 resource: /docs/evaluation/README.md
-tags: [rocco, evaluation, falsifiers, benchmarks]
+tags: [larry, evaluation, falsifiers, benchmarks]
 generated: {by: opencode, at: 2026-09-16}
 verified: {by: opencode, method: structural gate and source review of /specification.md Cell 09/10 and /research-ledger.md; nothing executed}
 status: final-structure-v1.1

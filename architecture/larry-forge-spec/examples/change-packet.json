@@ -1,0 +1,17 @@
+{
+  "change_id":"EXAMPLE-0001",
+  "owner":"Larry control plane",
+  "semantic_surface":["run lifecycle","effect admission"],
+  "canonical_refs":["MC04","MC05","R44","D25"],
+  "old_revision":"1.0",
+  "new_revision":"1.1",
+  "compatibility":"behavior-preserving-replacement",
+  "migration":{"strategy":"dual-read during bounded transition","status":"PLANNED"},
+  "rollback_boundary":"before new reducer revision seals a terminal receipt",
+  "resource_delta":{"cpu":"unknown","memory":"unknown","network":"none expected"},
+  "security_delta":{"authority_semantics_changed":false},
+  "real_entrypoint_reachability":{"entrypoints":["CLI","TUI"],"evidence_state":"planned"},
+  "falsifiers":["sentinel output cannot alter control state","duplicate effect remains deduplicated after crash"],
+  "evidence":[],
+  "unknowns":["runtime implementation not present","fault injection not run"]
+}

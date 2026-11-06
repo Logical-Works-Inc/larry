@@ -27,7 +27,7 @@ proven; the date is the worst case. Requirement and decision IDs stay owned by /
 
 | Ruling | Effect on this plan |
 |---|---|
-| Rocco renamed to Larry; Rocco now names an embedded harness that cannot speak (2026-10-26) | Face 1, the no-model dock, is Rocco's. Larry keeps Faces 2 and 3 and hands low-confidence dock sessions in. |
+| Larry renamed to Larry; Larry now names an embedded harness that cannot speak (2026-10-26) | Face 1, the no-model dock, is Larry's. Larry keeps Faces 2 and 3 and hands low-confidence dock sessions in. |
 | Repos moved to Logical-Works-Inc (2026-11-03); public alpha (2026-11-06) | Larry is `Logical-Works-Inc/larry`, public, HL3, no contributions. |
 | Kernel deprecated by absorption; one owner per capability (logic-os-kernel#850, province#4, #7) | Larry's own journal and fold move onto `lgwks_bot`; authority comes from secure-authority. |
 | Revenue gate (province#5): nothing off the revenue slice's critical path | Face 2 is the agent gateway of the revenue slice (moo#184) and moves ahead of Face 3. |
@@ -64,7 +64,7 @@ and merged on green or closed with a reason.
 existing falsifier green before and after. Authority checks consume secure-authority. What lgwks_bot lacks
 (dispatch fence, ambiguous-crash semantics, offline exposure bound) is filed as `gap` issues on
 logicalworks-crates and ported there with its tests, never kept as a second copy here. The crate's
-2026-10-26 deprecation is lifted (Director 2026-11-03: "Rocco-runtime can be edited and it should be
+2026-10-26 deprecation is lifted (Director 2026-11-03: "Larry-runtime can be edited and it should be
 decoupled"); larry#68 is the port map, one row per PR, and its first row keeps the test doubles out of
 every shipped build.
 
@@ -86,8 +86,8 @@ Canada, so customer data never takes this path; Face 2 picks a host per tenant.
 propose, probe and compose run as journalled steps; no grader verdict reaches the improver; lessons live
 in Logical-DB per tenant. Never a fork or wrapper of Harness² (Python, file-tree state).
 
-**Rocco handoff.** Rocco's dock (page-transition Markov chain plus BM25 over walkthroughs, extending
-lgwks-frontend `src/lib/rocco-rank.js`) hands a low-confidence session to Larry's Face 2 with its context.
+**Larry handoff.** Larry's dock (page-transition Markov chain plus BM25 over walkthroughs, extending
+lgwks-frontend `src/lib/larry-rank.js`) hands a low-confidence session to Larry's Face 2 with its context.
 
 ## Falsifiers
 

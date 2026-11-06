@@ -19,6 +19,9 @@ const CAPTURE_LIMIT: u64 = 1_048_576;
 /// The kernel's error number for "no such process".
 const ESRCH: i32 = 3;
 
+/// The kernel's error number for "operation not permitted", the same on Linux and Darwin.
+const EPERM: i32 = 1;
+
 /// Probes of a process group before it counts as surviving; killed members are
 /// briefly zombies, so the probes yield between checks.
 const GROUP_PROBES: u32 = 10_000;
@@ -226,11 +229,31 @@ fn abandon(child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
 }
 
 /// SIGKILLs a process group; a group that is already gone is settled.
+///
+/// macOS refuses a signal to a group whose remaining members are zombies with
+/// `EPERM` (openvax/mhctools#620), and BSD `kill(2)` sends nothing to any member
+/// when one target fails the check, so one refusal can leave live members
+/// unsignalled. The kill is therefore repeated while `EPERM` persists, up to
+/// [`GROUP_PROBES`] yields, so it lands once the zombie is reaped; refusing at the
+/// first `EPERM` failed 7 of 24 parallel runs of the timeout journey (MEASURED,
+/// larry#131). A refusal that outlasts the probes is handed to
+/// [`await_group_gone`], which never presumes the group gone and ends a member
+/// that really refuses in [`ExecError::GroupSurvived`].
 fn settle_group(pgid: i32) -> Result<(), ExecError> {
-    match kill_process_group(pgid) {
-        Ok(()) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(ESRCH) => Ok(()),
-        Err(error) => Err(ExecError::Reap(error)),
+    let mut refusals = 0_u32;
+    loop {
+        match kill_process_group(pgid) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.raw_os_error() == Some(ESRCH) => return Ok(()),
+            Err(error) if error.raw_os_error() == Some(EPERM) => {
+                if refusals >= GROUP_PROBES {
+                    return Ok(());
+                }
+                refusals = refusals.saturating_add(1);
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(ExecError::Reap(error)),
+        }
     }
 }
 
