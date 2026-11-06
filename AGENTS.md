@@ -19,7 +19,7 @@ INVARIANTS.md and the plan before the first edit.
 
 ## What Larry is
 
-- Larry (`Logical-Works-Inc/larry`, private, formerly Rocco) is the always-on harness organ of Logic OS, which
+- Larry (`Logical-Works-Inc/larry`, public alpha, formerly Rocco) is the always-on harness organ of Logic OS, which
   replaces Microsoft's whole stack by 2027-03-21. Larry answers Microsoft Copilot (Copilot, Copilot Studio,
   Agent 365): an agent that works for a person, asks before it acts and can account for every effect.
 - Rocco now names a separate embedded harness that cannot speak (the in-app dock). The `rocco-*` crates and

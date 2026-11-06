@@ -3,8 +3,8 @@
 //! Scope: the C02 work package of the Rocco specification — the typed
 //! command/event/effect/terminal contract, the finite run-state model, the
 //! pure-authorization replay surface and the authority model — as governed
-//! by the private specification repository `srinji-kaggss/Rocco` (IDs R/D/E/C/A
-//! refer to that inventory). The contract algebra is pure; the workspace
+//! by this repository's `specification.md` (IDs R/D/E/C/A refer to its
+//! inventory). The contract algebra is pure; the workspace
 //! coordinator owns only bounded disposable projections and retry identities.
 //! Persistence waits for Logical-DB readiness and never enters here as a
 //! substitute store.
@@ -51,16 +51,3 @@ pub mod ids;
 pub mod replay;
 pub mod state;
 pub mod workspace;
-
-/// Crate version as declared in Cargo.toml.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_is_exposed() {
-        assert!(!VERSION.is_empty());
-    }
-}
