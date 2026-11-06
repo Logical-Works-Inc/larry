@@ -3,6 +3,8 @@
 //! bound and asserts the same counts plus the caller-visible admission,
 //! backpressure or refusal the bound produces.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -23,6 +25,7 @@ use rocco_runtime::payload::WorkProposal;
 use rocco_runtime::projection::{FoldProjection, ProjectionBackend};
 use rocco_runtime::runtime::{Runtime, RuntimeSettings};
 
+use seed::step;
 use sim_kit::{Offer, Sim, offer_runs, read_work, reader, replay, work};
 use support::{
     TestRuntime, assert_state, command_id, operation, run, settings, submit, succeeded, unknown,
@@ -33,10 +36,12 @@ type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn bound_seed(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(9_642_542_699_645_379_107)
-        .wrapping_add(1_791_694_844_328_226_019);
-    seed.rotate_left(7)
+    step(
+        seed,
+        9_642_542_699_645_379_107,
+        1_791_694_844_328_226_019,
+        7,
+    )
 }
 
 /// Count trace: journal length plus published receipts.

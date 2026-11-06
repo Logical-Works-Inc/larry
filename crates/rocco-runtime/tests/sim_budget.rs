@@ -4,6 +4,8 @@
 //! same fingerprint plus the exact remaining budget the reservations leave.
 //! Budget is never created or destroyed except by a recorded reservation.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -14,6 +16,7 @@ use rocco_contracts::state::RunState;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::projection::ProjectionBackend;
 
+use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, trace, work};
 use support::{
     TestRuntime, assert_state, command_id, operation, proposal, run, runtime_with, succeeded,
@@ -25,10 +28,7 @@ type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn advance(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(12_150_014_235_147_800_641)
-        .wrapping_add(19_775_109_225_716_931);
-    seed.rotate_left(31)
+    step(seed, 12_150_014_235_147_800_641, 19_775_109_225_716_931, 31)
 }
 
 /// E55: three sequential reservations leave exactly the unspent remainder.

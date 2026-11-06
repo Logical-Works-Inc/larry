@@ -4,6 +4,8 @@
 //! projection from the recorded journal, and asserts the rebuilt view matches
 //! the live one plus the same fingerprint on both runs.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -16,6 +18,7 @@ use rocco_runtime::projection::ProjectionBackend;
 
 use rocco_runtime::projection::{FoldProjection, replay_authorizations};
 
+use seed::step;
 use sim_kit::{Offer, Sim, offer_runs, read_work, reader, reopen, replay, trace, work};
 use support::{
     TestRuntime, assert_state, command_id, operation, proposal, run, succeeded, tenant, unknown,
@@ -26,10 +29,7 @@ type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn advance(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(16_578_374_476_512_345_143)
-        .wrapping_add(17_130_477_736_030_129);
-    seed.rotate_left(27)
+    step(seed, 16_578_374_476_512_345_143, 17_130_477_736_030_129, 27)
 }
 
 /// E55: replaying an empty journal folds an empty projection.

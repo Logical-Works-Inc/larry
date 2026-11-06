@@ -2,6 +2,8 @@
 //! Every test drives the real consumer surface twice from one seed and
 //! asserts the same drained counts plus the caller-visible page or refusal.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -9,6 +11,7 @@ use rocco_contracts::effect::ReconciliationStrategy;
 use rocco_runtime::consumer::{ConsumerLimits, CursorError, MAX_PAGE_BYTES};
 use rocco_runtime::owner::fixture::ScriptedOwner;
 
+use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, work};
 use support::{
     TestRuntime, assert_state, command_id, operation, proposal, run, succeeded, tenant, unknown,
@@ -22,10 +25,12 @@ type TwinTrace = ((usize, usize), (usize, usize));
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn drift(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(11_400_714_819_323_198_481)
-        .wrapping_add(3_606_645_540_379_231_233);
-    seed.rotate_left(5)
+    step(
+        seed,
+        11_400_714_819_323_198_481,
+        3_606_645_540_379_231_233,
+        5,
+    )
 }
 
 /// Submits one successful unit of work for `effect` in `scope`.

@@ -4,6 +4,8 @@
 //! gate and asserts the same fingerprint plus the deterministic first-failing
 //! reason. Check order is fixed: policy, then capability, then budget.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -14,6 +16,7 @@ use rocco_contracts::replay::DenialReason;
 use rocco_contracts::state::RunState;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 
+use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, trace};
 use support::{
     TestRuntime, assert_state, operation, proposal, run, runtime_with, succeeded, tenant,
@@ -24,10 +27,7 @@ type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn advance(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(17_179_287_269_428_366_711)
-        .wrapping_add(11_253_257_634_551_369);
-    seed.rotate_left(23)
+    step(seed, 17_179_287_269_428_366_711, 11_253_257_634_551_369, 23)
 }
 
 /// D36: all three checks fail, but policy is reported first.

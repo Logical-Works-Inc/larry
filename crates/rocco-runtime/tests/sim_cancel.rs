@@ -3,6 +3,8 @@
 //! public cancel surface and asserts the same counts plus the caller-visible
 //! cancelled state. Cancellation never fabricates a receipt.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -15,6 +17,7 @@ use rocco_runtime::projection::ProjectionBackend;
 
 use rocco_runtime::runtime::TickReport;
 
+use seed::step;
 use sim_kit::{Offer, Sim, dispatch, read_work, reader, reopen, replay};
 use support::{
     TestRuntime, assert_state, cancel, command_id, operation, proposal, run, succeeded, tenant,
@@ -26,10 +29,7 @@ type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn halt_seed(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(15_919_425_858_406_647_679)
-        .wrapping_add(13_957_476_399_865_751);
-    seed.rotate_left(3)
+    step(seed, 15_919_425_858_406_647_679, 13_957_476_399_865_751, 3)
 }
 
 /// Submits one cancellation and ticks once, returning the tick report.
@@ -302,12 +302,16 @@ fn sim_cancel_zero_identity_cancels() -> Outcome {
     })
 }
 
-/// E72/E30: a cancelled run restored from the journal stays cancelled.
+/// E72/E30: a cancelled run restored from the journal stays cancelled. The
+/// query answers in the cancel tick, so the effect reconciles with its own
+/// receipt before the cancellation completes (larry#119).
 #[test]
 fn sim_cancel_restored_stays_cancelled() -> Outcome {
     replay(72_u64..80, |_| -> Sim<(usize, usize)> {
-        let mut runtime: TestRuntime =
-            reader(ScriptedOwner::scripted([unknown(operation(16))]), 100)?;
+        let mut runtime: TestRuntime = reader(
+            ScriptedOwner::scripted([unknown(operation(16)), succeeded(operation(16))]),
+            100,
+        )?;
         dispatch(
             &mut runtime,
             16,
@@ -321,8 +325,8 @@ fn sim_cancel_restored_stays_cancelled() -> Outcome {
         assert_state(restored.projection(), run(16), RunState::Cancelled)?;
         assert_eq!(
             restored.projection().receipts().len(),
-            0,
-            "cancel publishes no receipt"
+            1,
+            "the reconciled effect keeps its receipt and cancel adds none"
         );
         Ok((
             restored.projection().receipts().len(),
@@ -367,7 +371,9 @@ fn sim_cancel_after_duplicate_submit_cancels_once() -> Outcome {
     })
 }
 
-/// E30: the cancel tick timing still converges on Cancelled.
+/// E30: the cancel tick timing still converges on Cancelled. A cancel landing
+/// in the dispatch tick holds `Cancelling` until the next tick reconciles the
+/// unknown; it never completes over an effect with no receipt (larry#119).
 #[test]
 fn sim_cancel_timing_decides_reconcile_before_cancel() -> Outcome {
     replay(96_u64..104, |seed| -> Sim<(usize, usize)> {
@@ -383,7 +389,16 @@ fn sim_cancel_timing_decides_reconcile_before_cancel() -> Outcome {
             runtime.tick()?;
         }
         nix(&mut runtime, 21, 20)?;
+        if early {
+            assert_state(runtime.projection(), run(20), RunState::Cancelling)?;
+            runtime.tick()?;
+        }
         assert_state(runtime.projection(), run(20), RunState::Cancelled)?;
+        assert_eq!(
+            runtime.projection().receipts().len(),
+            1,
+            "seed {seed}: the effect reconciled before the cancel completed"
+        );
         Ok((
             runtime.projection().receipts().len(),
             runtime.journal().len(),
@@ -417,6 +432,48 @@ fn sim_cancel_requires_human_unknown_cancels() -> Outcome {
             runtime.projection().receipts().len(),
             runtime.journal().len(),
         ))
+    })
+}
+
+/// E30/INVARIANTS: an observed unknown with no receipt holds cancellation open.
+/// A `Queryable` unknown is `Observed { Unknown }` and stays unresolved, with
+/// no receipt, so the run must not reach `Cancelled` while it is open.
+#[test]
+fn sim_cancel_unresolved_observed_effect_holds_cancellation_open() -> Outcome {
+    replay(128_u64..192, |_| -> Sim<(RunState, usize, usize)> {
+        let mut runtime: TestRuntime =
+            reader(ScriptedOwner::scripted([unknown(operation(28))]), 100)?;
+        dispatch(
+            &mut runtime,
+            28,
+            28,
+            &[Scope::FileRead],
+            1,
+            ReconciliationStrategy::Queryable,
+        )?;
+        assert_state(runtime.projection(), run(28), RunState::Reconciling)?;
+        assert_eq!(
+            runtime.projection().receipts().len(),
+            0,
+            "the unknown has no receipt"
+        );
+        nix(&mut runtime, 29, 28)?;
+        let state = runtime
+            .projection()
+            .run_state(run(28))
+            .ok_or("run is tracked")?;
+        assert_ne!(
+            state,
+            RunState::Cancelled,
+            "cancel must not complete while an unknown effect has no receipt"
+        );
+        let (receipts, len) = (
+            runtime.projection().receipts().len(),
+            runtime.journal().len(),
+        );
+        let restored = reopen(runtime.into_journal(), 100)?;
+        assert_state(restored.projection(), run(28), RunState::Cancelling)?;
+        Ok((state, receipts, len))
     })
 }
 
@@ -469,9 +526,11 @@ fn sim_cancel_same_tick_submit_and_cancel() -> Outcome {
     })
 }
 
-/// E30: seeded cancel delays always converge on Cancelled with no receipt.
+/// E30/R72: over an owner that never answers, every seeded cancel delay holds
+/// the run in `Cancelling` with no receipt, and the hold is bounded: once the
+/// reconciliation budget is spent a quiet tick records nothing (larry#119).
 #[test]
-fn sim_cancel_seeded_delays_converge_cancelled() -> Outcome {
+fn sim_cancel_seeded_delays_hold_unresolved_open() -> Outcome {
     replay(128_u64..136, |seed| -> Sim<(usize, usize)> {
         let mut random = seed.saturating_add(33);
         let delay = usize::try_from(halt_seed(&mut random) & 3)?;
@@ -490,12 +549,24 @@ fn sim_cancel_seeded_delays_converge_cancelled() -> Outcome {
             runtime.tick()?;
         }
         nix(&mut runtime, 27, 26)?;
-        runtime.tick()?;
-        assert_state(runtime.projection(), run(26), RunState::Cancelled)?;
+        for _ in 0..=rocco_contracts::effect::MAX_EFFECT_ATTEMPTS {
+            runtime.tick()?;
+        }
+        assert_state(runtime.projection(), run(26), RunState::Cancelling)?;
+        let held = runtime.journal().len();
+        assert!(
+            runtime.tick()?.is_idle(),
+            "seed {seed}: a spent hold is quiet"
+        );
+        assert_eq!(
+            runtime.journal().len(),
+            held,
+            "seed {seed}: a spent hold records nothing"
+        );
         assert_eq!(
             runtime.projection().receipts().len(),
             0,
-            "cancelled run receipts nothing"
+            "seed {seed}: an unanswered effect is never given a receipt"
         );
         Ok((
             runtime.projection().receipts().len(),

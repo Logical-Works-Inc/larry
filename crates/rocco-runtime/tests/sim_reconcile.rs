@@ -1,6 +1,8 @@
 //! Seeded reconciliation-strategy simulations (E56, R72).
 //! Every test drives the real `Runtime` twice from one seed and asserts tallies.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -10,6 +12,7 @@ use rocco_contracts::state::RunState;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::projection::ProjectionBackend;
 
+use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, replay, work};
 use support::{TestRuntime, assert_state, operation, run, succeeded, unknown};
 
@@ -21,10 +24,7 @@ type SeededTally = (TerminalDisposition, (usize, usize, usize));
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn spin(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(13_888_259_582_513_372_209)
-        .wrapping_add(7_225_534_248_253_489);
-    seed.rotate_left(13)
+    step(seed, 13_888_259_582_513_372_209, 7_225_534_248_253_489, 13)
 }
 
 /// Witness tally: receipts folded, owner dispatches and reconciliations seen.

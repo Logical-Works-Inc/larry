@@ -2,6 +2,8 @@
 //! Every test drives the real `Runtime` twice from one seed with two or more
 //! tenants and asserts the same counts plus the caller-visible isolation.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -14,6 +16,7 @@ use rocco_runtime::projection::ProjectionBackend;
 
 use rocco_runtime::runtime::TickReport;
 
+use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, work};
 use support::{
     TestRuntime, assert_state, command_id, operation, proposal, run, succeeded, tenant, unknown,
@@ -26,10 +29,7 @@ type TenantTally = (usize, usize, usize);
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn tenant_mix(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(15_407_997_324_636_748_307)
-        .wrapping_add(9_561_242_260_961_875);
-    seed.rotate_left(19)
+    step(seed, 15_407_997_324_636_748_307, 9_561_242_260_961_875, 19)
 }
 
 /// Counts every recorded fact plus the folded view sizes.
