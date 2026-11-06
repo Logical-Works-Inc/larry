@@ -106,7 +106,10 @@ fn run_any_order(seed: u64, schema: &Schema) -> TestResult<Vec<Vec<u8>>> {
                     "{context}: tool"
                 );
                 assert_eq!(reply["result"]["cacheScope"], "public", "{context}: scope");
-                assert!(reply["result"]["ttlMs"].is_u64(), "{context}: ttlMs");
+                assert!(
+                    reply["result"]["ttlMs"].as_u64().is_some(),
+                    "{context}: ttlMs"
+                );
             }
             Want::Refused(code) => {
                 assert_complete(&reply, &id, &context);
@@ -208,7 +211,12 @@ fn sim_version_mismatch_returns_unsupported_protocol_version() -> TestResult<()>
         assert_eq!(reply["error"]["data"]["supported"], json!(SERVED), "list");
     }
     let mut wrong_type = frame_at(&mut rng, &json!("t"), "tools/list", json!({}), MODERN)?;
-    wrong_type["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = json!(20260728);
+    wrong_type
+        .get_mut("params")
+        .and_then(|params| params.get_mut("_meta"))
+        .and_then(Value::as_object_mut)
+        .ok_or("the frame carries a _meta object")?
+        .insert("io.modelcontextprotocol/protocolVersion", json!(20260728));
     let (_, reply) = ask(&mut session, &schema, &wrong_type)?;
     assert_eq!(
         reply["error"]["code"], -32602,
@@ -241,7 +249,11 @@ fn sim_missing_or_malformed_meta_is_invalid_params() -> TestResult<()> {
     for index in 0..36 {
         let method = *pick(&mut rng, &methods)?;
         let mut params = json!({"name": "larry_submit_task"});
-        params["_meta"] = pick(&mut rng, &bad_metas)?.clone();
+        let meta = pick(&mut rng, &bad_metas)?.clone();
+        params
+            .as_object_mut()
+            .ok_or("params is an object")?
+            .insert("_meta", meta);
         let frame = json!({"jsonrpc": "2.0", "id": index, "method": method, "params": params});
         let (_, reply) = ask(&mut session, &schema, &frame)?;
         assert_eq!(
@@ -312,10 +324,16 @@ fn sim_log_level_is_honoured_and_no_message_is_sent_unasked() -> TestResult<()> 
         for index in 0..count {
             let id = json!(format!("l{seed}-{index}"));
             let mut frame = frame_at(&mut rng, &id, "tools/list", json!({}), MODERN)?;
-            if rng.below(2) == 0 {
-                frame["params"]["_meta"]["io.modelcontextprotocol/logLevel"] =
-                    json!(*pick(&mut rng, &LEVELS)?);
-            } else if let Some(meta) = frame["params"]["_meta"].as_object_mut() {
+            let with_level = rng.below(2) == 0;
+            let level = json!(*pick(&mut rng, &LEVELS)?);
+            let meta = frame
+                .get_mut("params")
+                .and_then(|params| params.get_mut("_meta"))
+                .and_then(Value::as_object_mut)
+                .ok_or("the frame carries a _meta object")?;
+            if with_level {
+                meta.insert("io.modelcontextprotocol/logLevel", level);
+            } else {
                 meta.remove("io.modelcontextprotocol/logLevel");
             }
             session.send(&lgwks_std::json::to_vec(&frame)?)?;
@@ -427,7 +445,7 @@ fn check_dialect(node: &Value, at: &str) -> TestResult<()> {
         .ok_or_else(|| format!("{at}: not an object"))?;
     for key in object.keys() {
         assert!(
-            known.contains(&key.as_str()),
+            known.contains(&key),
             "{at}: {key} is not a keyword used here"
         );
     }

@@ -102,7 +102,7 @@ impl Session {
     }
 
     /// Validates one JSON-RPC object and routes it.
-    fn handle_object(&mut self, frame: &Map<String, Value>) -> Option<Value> {
+    fn handle_object(&mut self, frame: &Map) -> Option<Value> {
         let id = match frame.get("id") {
             None => None,
             Some(value) if is_valid_id(value) => Some(value),
@@ -164,7 +164,7 @@ impl Session {
     /// session serves it (and `ping` before the handshake, which the legacy
     /// lifecycle allows). A stateless method with neither `_meta` nor a session
     /// lacks required fields; any other method is unknown.
-    fn request(&mut self, id: &Value, method: &str, params: Option<&Map<String, Value>>) -> Value {
+    fn request(&mut self, id: &Value, method: &str, params: Option<&Map>) -> Value {
         if method == "initialize" {
             return self.lifecycle.initialize(id, params);
         }
@@ -183,16 +183,12 @@ impl Session {
 
 /// Whether `value` is a legal request id: a string or an integer, never null.
 fn is_valid_id(value: &Value) -> bool {
-    value.is_string() || value.is_i64() || value.is_u64()
+    value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
 /// `tools/list`: the declared tools, shaped for the era by `finish`; no cursor
 /// is ever issued, so none is valid.
-fn list_tools(
-    id: &Value,
-    params: Option<&Map<String, Value>>,
-    finish: &dyn Fn(Value) -> Value,
-) -> Value {
+fn list_tools(id: &Value, params: Option<&Map>, finish: &dyn Fn(Value) -> Value) -> Value {
     if params.is_some_and(|map| map.contains_key("cursor")) {
         return wire::error(id, wire::INVALID_PARAMS, "invalid cursor");
     }
@@ -202,11 +198,7 @@ fn list_tools(
 /// `tools/call`: an unknown tool or a malformed call is a protocol error; a
 /// tool's own failure comes back as a result with `isError` true, shaped for
 /// the era by `finish`.
-fn call_tool(
-    id: &Value,
-    params: Option<&Map<String, Value>>,
-    finish: &dyn Fn(Value) -> Value,
-) -> Value {
+fn call_tool(id: &Value, params: Option<&Map>, finish: &dyn Fn(Value) -> Value) -> Value {
     let Some(name) = params
         .and_then(|map| map.get("name"))
         .and_then(Value::as_str)
@@ -296,7 +288,7 @@ mod tests {
         let got = replies(input, 1_048_576)?;
         assert_eq!(got[0]["result"]["resultType"], "complete", "resultType");
         assert_eq!(got[0]["result"]["cacheScope"], "public", "cache scope");
-        assert!(got[0]["result"]["ttlMs"].is_u64(), "ttlMs");
+        assert!(got[0]["result"]["ttlMs"].as_u64().is_some(), "ttlMs");
         Ok(())
     }
 

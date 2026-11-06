@@ -4,9 +4,8 @@ permissions:
   contents: read
 jobs:
   docs-check:
-    # Self-hosted for the same reason as `ci.yml`: no GitHub-hosted run in this
-    # repository has ever been assigned a runner, so this gate had never run.
-    runs-on: [self-hosted, macOS, ARM64]
+    # Runner by visibility (larry#116, see sim.yml).
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     env:
       PYTHONDONTWRITEBYTECODE: "1"

@@ -24,7 +24,7 @@ impl Lifecycle {
     }
 
     /// The handshake: negotiate a legacy revision and open the session.
-    pub(super) fn initialize(&mut self, id: &Value, params: Option<&Map<String, Value>>) -> Value {
+    pub(super) fn initialize(&mut self, id: &Value, params: Option<&Map>) -> Value {
         if self.initialized {
             return wire::error(id, wire::INVALID_REQUEST, "already initialized");
         }
@@ -60,7 +60,7 @@ impl Lifecycle {
 }
 
 /// Answers one request of an open legacy session (and a pre-initialize `ping`).
-pub(super) fn request(id: &Value, method: &str, params: Option<&Map<String, Value>>) -> Value {
+pub(super) fn request(id: &Value, method: &str, params: Option<&Map>) -> Value {
     match method {
         "ping" => wire::result(id, json!({})),
         "tools/list" => super::list_tools(id, params, &|body| body),

@@ -31,7 +31,7 @@ proven; the date is the worst case. Requirement and decision IDs stay owned by /
 | Repos moved to Logical-Works-Inc (2026-11-03) | Larry is `Logical-Works-Inc/larry`, private. |
 | Kernel deprecated by absorption; one owner per capability (logic-os-kernel#850, province#4, #7) | Larry's own journal and fold move onto `lgwks_bot`; authority comes from secure-authority. |
 | Revenue gate (province#5): nothing off the revenue slice's critical path | Face 2 is the agent gateway of the revenue slice (moo#184) and moves ahead of Face 3. |
-| Newest estate pins and `gap` issues (2026-11-03) | lgwks_std 3.2.2, lgwks_deps 5.1.2 and lgwks_bot 6.1.0 pinned in this change; thiserror cites crates#842. |
+| Newest estate pins and `gap` issues (2026-11-03) | lgwks_std 4.0.2, lgwks_deps 6.1.0 and lgwks_bot 7.1.1 pinned in this change; thiserror cites crates#842. |
 | Python banned in product repos (2026-10-13) | The governance tooling ports to Rust (larry#53) before more tooling is added. |
 | Harness² published (larry#60) | Measurable learning is a track with a matched benchmark, not a README promise. |
 | HL3 ordered (2026-11-03) | LICENSE is HL3-FULL plus Part B; Part B's Safeguards are product requirements, not just terms. |

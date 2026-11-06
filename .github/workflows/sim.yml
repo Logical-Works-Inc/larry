@@ -7,77 +7,47 @@ on:
 permissions:
   contents: read
 
-# Hybrid lanes (issue #107): every job runs on the shared self-hosted Mac for
-# speed and on GitHub-hosted runners with their own CARGO_HOME, so a host-level
-# cleanup of the Mac's shared ~/.cargo cannot fail a verdict. On 2026-11-03 such
-# a cleanup emptied the registry source dirs while `e2e/journey` compiled.
-#
-# Linux is included: the sim suites are seeded pure Rust, and
-# `tests/e2e_journey.rs` already carries a `script -qec` branch for Linux
-# (util-linux script, present on ubuntu-latest). Hosted legs install nextest;
-# the self-hosted leg keeps `cargo test` because that machine's nextest is not
-# a given.
-#
-# `macos-latest` is absent on purpose: on 2026-11-03 both of its legs sat
-# queued for 15+ minutes with no runner assigned (hosted macOS capacity for
-# this org), which breaks the 5-minute gate budget. macOS is covered by the
-# self-hosted leg and GitHub-hosted by `ubuntu-latest`; that is the hybrid.
+# Runner by visibility (larry#116): while this repository is private every job
+# runs on the self-hosted Mac (this org's hosted runners refuse to start for
+# billing); once it is public every job runs on GitHub-hosted ubuntu-latest,
+# which is free there, and no self-hosted machine ever serves a public
+# repository, where a fork PR could run code on it. `tests/e2e_journey.rs`
+# carries a `script -qec` branch for Linux (util-linux, present on
+# ubuntu-latest). Hosted legs install nextest; the self-hosted leg keeps
+# `cargo test` so a job never installs tools into the shared machine.
 
 jobs:
   # The seeded simulation suites (`crates/rocco-runtime/tests/sim_*.rs`) as a
   # check of their own, so a PR shows its deterministic-simulation verdict by
   # name instead of inside the whole-workspace `rust` lane.
   simulation:
-    name: simulation (${{ matrix.lane }})
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    name: simulation (${{ github.event.repository.private && 'self-hosted' || 'ubuntu-latest' }})
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lane: self-hosted
-            runner: '["self-hosted", "macOS", "ARM64"]'
-            hosted: false
-          - lane: ubuntu-latest
-            runner: '"ubuntu-latest"'
-            hosted: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: stable
-      # Self-hosted: one cache for both jobs, and the runner's own toolchain
-      # left in place (a long-running machine). Hosted: a fresh runner, its own
-      # CARGO_HOME, default cache settings.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: sim-${{ matrix.lane }}
-          cache-bin: ${{ matrix.hosted && 'true' || 'false' }}
-      - if: matrix.hosted
+          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          cache-bin: ${{ github.event.repository.private && 'false' || 'true' }}
+      - if: ${{ !github.event.repository.private }}
         uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
         with:
           tool: nextest
-      - if: matrix.hosted
+      - if: ${{ !github.event.repository.private }}
         run: cargo nextest run --locked -p rocco-runtime -E 'binary(/^sim_/)'
-      - if: ${{ !matrix.hosted }}
+      - if: ${{ github.event.repository.private }}
         run: cargo test --locked -p rocco-runtime --test 'sim_*'
 
   # The shipped `rocco` binary driven through a real terminal by
   # `tests/e2e_journey.rs`: every slash command a user types, exit 0 asserted.
   e2e-journey:
-    name: e2e/journey (${{ matrix.lane }})
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    name: e2e/journey (${{ github.event.repository.private && 'self-hosted' || 'ubuntu-latest' }})
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lane: self-hosted
-            runner: '["self-hosted", "macOS", "ARM64"]'
-            hosted: false
-          - lane: ubuntu-latest
-            runner: '"ubuntu-latest"'
-            hosted: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
@@ -85,13 +55,13 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: sim-${{ matrix.lane }}
-          cache-bin: ${{ matrix.hosted && 'true' || 'false' }}
-      - if: matrix.hosted
+          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          cache-bin: ${{ github.event.repository.private && 'false' || 'true' }}
+      - if: ${{ !github.event.repository.private }}
         uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
         with:
           tool: nextest
-      - if: matrix.hosted
+      - if: ${{ !github.event.repository.private }}
         run: cargo nextest run --locked -p rocco-demo --test e2e_journey
-      - if: ${{ !matrix.hosted }}
+      - if: ${{ github.event.repository.private }}
         run: cargo test --locked -p rocco-demo --test e2e_journey

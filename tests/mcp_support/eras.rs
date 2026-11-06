@@ -51,18 +51,29 @@ pub fn meta_at(rng: &mut Rng, version: &str) -> TestResult<Value> {
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientCapabilities": pick(rng, &capabilities)?
     });
+    let Some(members) = meta.as_object_mut() else {
+        return Err("meta is an object".into());
+    };
     if rng.below(2) == 0 {
-        meta["io.modelcontextprotocol/clientInfo"] =
-            json!({"name": format!("client-{}", rng.below(1000)), "version": "1.0.0"});
+        members.insert(
+            "io.modelcontextprotocol/clientInfo",
+            json!({"name": format!("client-{}", rng.below(1000)), "version": "1.0.0"}),
+        );
     }
     if rng.below(3) == 0 {
-        meta["io.modelcontextprotocol/logLevel"] = json!(pick(rng, &LEVELS)?);
+        members.insert(
+            "io.modelcontextprotocol/logLevel",
+            json!(pick(rng, &LEVELS)?),
+        );
     }
     if rng.below(4) == 0 {
-        meta["progressToken"] = json!(rng.below(1000));
+        members.insert("progressToken", json!(rng.below(1000)));
     }
     if rng.below(4) == 0 {
-        meta["traceparent"] = json!("00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01");
+        members.insert(
+            "traceparent",
+            json!("00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01"),
+        );
     }
     Ok(meta)
 }
@@ -76,7 +87,10 @@ pub fn frame_at(
     version: &str,
 ) -> TestResult<Value> {
     let mut params = params;
-    params["_meta"] = meta_at(rng, version)?;
+    let Some(members) = params.as_object_mut() else {
+        return Err("params is an object".into());
+    };
+    members.insert("_meta", meta_at(rng, version)?);
     Ok(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
 }
 

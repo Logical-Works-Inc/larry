@@ -177,7 +177,7 @@ fn check(seed: u64, index: usize, step: &Step, reply: &Value) -> TestResult<()> 
     assert_eq!(reply["id"], step.id, "seed {seed} step {index}: id");
     match step.want {
         Want::Ok => assert!(
-            reply["result"].is_object() && reply["result"]["isError"].is_null(),
+            reply["result"].as_object().is_some() && reply["result"]["isError"].is_null(),
             "seed {seed} step {index}: a plain result, got {reply}"
         ),
         Want::ToolError(code) => {
@@ -286,7 +286,7 @@ fn one_hundred_concurrent_sessions_stay_isolated() -> TestResult<()> {
             let reply = session.recv()?;
             assert_eq!(reply["id"], id, "round {round}: reply crossed sessions");
             assert_eq!(
-                reply["result"]["tools"].is_array(),
+                reply["result"]["tools"].as_array().is_some(),
                 list,
                 "round {round}: result shape for id {id}"
             );

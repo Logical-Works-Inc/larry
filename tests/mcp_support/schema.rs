@@ -46,6 +46,23 @@ const RESULT_BODIES: [(&str, &str); 5] = [
     ("ping", "EmptyResult"),
 ];
 
+/// Follows a JSON Pointer (RFC 6901) of `/`-separated, `~`-escaped segments.
+pub fn pointer<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.is_empty() {
+        return Some(root);
+    }
+    path.strip_prefix('/')?
+        .split('/')
+        .try_fold(root, |node, segment| {
+            let token = segment.replace("~1", "/").replace("~0", "~");
+            match *node {
+                Value::Object(ref members) => members.get(&token),
+                Value::Array(ref items) => items.get(token.parse::<usize>().ok()?),
+                _ => None,
+            }
+        })
+}
+
 /// One vendored official schema.
 pub struct Schema {
     /// The parsed `schema.json`, whose `$defs` every `$ref` resolves into.
@@ -101,14 +118,12 @@ impl Schema {
 
     /// Whether the schema defines `def`.
     fn defines(&self, def: &str) -> bool {
-        self.root.pointer(&format!("/$defs/{def}")).is_some()
+        pointer(&self.root, &format!("/$defs/{def}")).is_some()
     }
 
     /// Checks `value` against the schema definition named `def`.
     fn check_def(&self, def: &str, value: &Value) -> Checked {
-        let schema = self
-            .root
-            .pointer(&format!("/$defs/{def}"))
+        let schema = pointer(&self.root, &format!("/$defs/{def}"))
             .ok_or_else(|| format!("the schema has no definition {def}"))?;
         self.judge(schema, value, def, 0)
     }
@@ -126,7 +141,7 @@ impl Schema {
         };
         let next = depth.saturating_add(1);
         for (keyword, argument) in keywords {
-            let key = keyword.as_str();
+            let key = keyword;
             if ANNOTATIONS.contains(&key) {
                 continue;
             }
@@ -157,9 +172,7 @@ impl Schema {
             .as_str()
             .and_then(|text| text.strip_prefix("#/$defs/"))
             .ok_or_else(|| format!("{at}: unsupported $ref {target}"))?;
-        let schema = self
-            .root
-            .pointer(&format!("/$defs/{name}"))
+        let schema = pointer(&self.root, &format!("/$defs/{name}"))
             .ok_or_else(|| format!("{at}: dangling $ref {name}"))?;
         self.judge(schema, value, name, depth)
     }
@@ -245,11 +258,11 @@ fn check_type(argument: &Value, value: &Value, at: &str) -> Checked {
     };
     let has = |name: &&str| match *name {
         "string" => value.is_string(),
-        "integer" => value.is_i64() || value.is_u64(),
-        "number" => value.is_number(),
-        "boolean" => value.is_boolean(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.as_f64().is_some(),
+        "boolean" => value.as_bool().is_some(),
+        "object" => value.as_object().is_some(),
+        "array" => value.as_array().is_some(),
         "null" => value.is_null(),
         _ => false,
     };

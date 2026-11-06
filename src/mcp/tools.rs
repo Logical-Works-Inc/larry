@@ -79,7 +79,7 @@ fn declared() -> Vec<Value> {
 }
 
 /// Runs tool `name`; `None` means no such tool (a protocol error, not a tool error).
-pub(super) fn call(name: &str, arguments: &Map<String, Value>) -> Option<Value> {
+pub(super) fn call(name: &str, arguments: &Map) -> Option<Value> {
     match name {
         SUBMIT_TASK => Some(submit_task(arguments)),
         _ => None,
@@ -87,7 +87,7 @@ pub(super) fn call(name: &str, arguments: &Map<String, Value>) -> Option<Value> 
 }
 
 /// Validates the task, then refuses it because no executor is connected.
-fn submit_task(arguments: &Map<String, Value>) -> Value {
+fn submit_task(arguments: &Map) -> Value {
     match validate_task(arguments) {
         Err(error) => tool_error("invalid_arguments", &error.to_string()),
         Ok(()) => tool_error(
@@ -152,11 +152,8 @@ impl std::fmt::Display for TaskError {
 }
 
 /// Checks the typed task against the schema `list` advertises.
-fn validate_task(arguments: &Map<String, Value>) -> Result<(), TaskError> {
-    if arguments
-        .keys()
-        .any(|key| !ARGUMENTS.contains(&key.as_str()))
-    {
+fn validate_task(arguments: &Map) -> Result<(), TaskError> {
+    if arguments.keys().any(|key| !ARGUMENTS.contains(&key)) {
         return Err(TaskError::UnknownArgument);
     }
     text(arguments, "goal", MAX_GOAL_BYTES)?;
@@ -179,11 +176,7 @@ fn validate_task(arguments: &Map<String, Value>) -> Result<(), TaskError> {
 }
 
 /// A required, non-empty string without NUL, at most `max` bytes.
-fn text<'a>(
-    arguments: &'a Map<String, Value>,
-    key: &'static str,
-    max: usize,
-) -> Result<&'a str, TaskError> {
+fn text<'a>(arguments: &'a Map, key: &'static str, max: usize) -> Result<&'a str, TaskError> {
     let Some(value) = arguments.get(key) else {
         return Err(TaskError::Missing(key));
     };
@@ -210,7 +203,7 @@ fn check_text(key: &'static str, string: &str, max: usize) -> Result<(), TaskErr
 
 /// A required array of `text`-valid strings holding `min..=max_items` entries.
 fn text_list<'a>(
-    arguments: &'a Map<String, Value>,
+    arguments: &'a Map,
     key: &'static str,
     min: usize,
     max_items: usize,
@@ -272,7 +265,9 @@ mod tests {
         let reply = call("larry_submit_task", map)?;
         Some(
             reply
-                .pointer("/structuredContent/error/code")?
+                .get("structuredContent")?
+                .get("error")?
+                .get("code")?
                 .as_str()?
                 .to_owned(),
         )
@@ -325,7 +320,7 @@ mod tests {
     }
 
     /// An empty argument map.
-    fn serde_empty() -> lgwks_std::json::Map<String, Value> {
+    fn serde_empty() -> lgwks_std::json::Map {
         lgwks_std::json::Map::new()
     }
 }
