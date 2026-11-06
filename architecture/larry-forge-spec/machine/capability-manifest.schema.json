@@ -1,0 +1,22 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://logical.works/larry/capability-manifest.schema.json",
+  "title":"Larry Replaceable Component Capability Manifest",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["component_id","protocol","required_capabilities","optional_capabilities","effect_classes","limits","cancellation","locality","confidentiality","accounting","migration","evidence"],
+  "properties":{
+    "component_id":{"type":"string"},
+    "protocol":{"type":"object","required":["major","minor"],"properties":{"major":{"type":"integer","minimum":0},"minor":{"type":"integer","minimum":0}},"additionalProperties":false},
+    "required_capabilities":{"type":"array","items":{"type":"string"}},
+    "optional_capabilities":{"type":"array","items":{"type":"string"}},
+    "effect_classes":{"type":"array","items":{"enum":["P","O","E","A","L","M"]}},
+    "limits":{"type":"object"},
+    "cancellation":{"type":"object"},
+    "locality":{"type":"object"},
+    "confidentiality":{"type":"object"},
+    "accounting":{"type":"object"},
+    "migration":{"type":"object"},
+    "evidence":{"type":"object"}
+  }
+}

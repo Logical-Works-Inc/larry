@@ -42,7 +42,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Journal, crash recovery, replay | `lgwks_bot::journal` (`FileJournal`), larry#68 | Loco jobs or SeaORM rows: a second journal |
 | Tick, projection | `lgwks_bot` ECS world | Loco scheduler: not deterministic, not replayable |
 | Authority, grants | `lgwks_bot::cap`, secure-authority | Loco `auth`: it authenticates, it never authorizes |
-| Effect keys, retry, dispatch certainty | `lgwks_bot::effect`, `retry` | hand-rolled copies in `rocco-runtime` (larry#68) |
+| Effect keys, retry, dispatch certainty | `lgwks_bot::effect`, `retry` | hand-rolled copies in `larry-runtime` (larry#68) |
 | Receipts signed | `lgwks_std::sign` (ed25519) | forge's SipHash audit chain: not cryptographic |
 | Sealed records at rest | `lgwks_bot::sealed` | none needed |
 | Model client to 9router | `lgwks_std::http` + `json` + `retry`, ported from forge-providers | `async-openai`: a second client, more crates |

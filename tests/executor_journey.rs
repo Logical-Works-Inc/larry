@@ -1,4 +1,4 @@
-//! Journeys against the shipped `rocco exec` command (larry#85), as an operator
+//! Journeys against the shipped `larry exec` command (larry#85), as an operator
 //! lives them: pipe a task document on stdin, read one JSON report on stdout.
 //!
 //! Source: POSIX process conventions (exit status, stdout for the report, stderr
@@ -163,14 +163,14 @@ fn task_json(repo: &Path, base: &str, acceptance: &str) -> String {
     )
 }
 
-/// Starts `rocco exec` with a cleared environment, pipes `task` in and closes stdin.
+/// Starts `larry exec` with a cleared environment, pipes `task` in and closes stdin.
 /// `state` sets `LARRY_STATE_DIR` when given; `timeout_ms` sets the command timeout.
 fn spawn_exec(
     state: Option<&Path>,
     timeout_ms: Option<u64>,
     task: &str,
 ) -> Result<Child, Box<dyn Error>> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rocco"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
     command
         .arg("exec")
         .env_clear()
@@ -192,7 +192,7 @@ fn spawn_exec(
     Ok(child)
 }
 
-/// Runs `rocco exec` to its end with `task` on stdin and returns its output.
+/// Runs `larry exec` to its end with `task` on stdin and returns its output.
 fn run_exec(state: &Path, task: &str, timeout_ms: Option<u64>) -> Result<Output, Box<dyn Error>> {
     Ok(spawn_exec(Some(state), timeout_ms, task)?.wait_with_output()?)
 }
@@ -206,7 +206,7 @@ fn stderr_of(output: &Output) -> String {
 fn report_of(output: &Output) -> Result<Value, Box<dyn Error>> {
     assert!(
         output.status.success(),
-        "rocco exec must exit 0, got {:?}; stderr: {}",
+        "larry exec must exit 0, got {:?}; stderr: {}",
         output.status.code(),
         stderr_of(output)
     );

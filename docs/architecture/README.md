@@ -1,9 +1,9 @@
 ---
 type: Design
-title: Rocco final structure — components, flow and ownership
+title: Larry final structure — components, flow and ownership
 description: Navigable architecture summary of the proposed runtime; canonical decisions remain in the specification.
 resource: /docs/architecture/README.md
-tags: [rocco, architecture, structure, ownership]
+tags: [larry, architecture, structure, ownership]
 generated: {by: opencode, at: 2026-09-16}
 verified: {by: opencode, method: source inspection of /specification.md; structural gate; diagrams NOT RUN in this file}
 status: final-structure-v1.1
@@ -22,7 +22,7 @@ this file is the navigable map the Director asked to be finalized.
 
 | Layer | Owner | Contract anchor |
 |---|---|---|
-| Assistant intent, commitments, context selection, run orchestration | Rocco control plane (MD reducer; MI proposes) | D01/D02/D09 |
+| Assistant intent, commitments, context selection, run orchestration | Larry control plane (MD reducer; MI proposes) | D01/D02/D09 |
 | Persistence, replication, durable records | Logical-DB | D21/D33 (memory blocked until ready) |
 | Authenticated authority, grants, revocation | Secure-Authority | D07/D21 |
 | Process/compute containment, leases | Nova | D11/D21 |
@@ -31,7 +31,7 @@ this file is the navigable map the Director asked to be finalized.
 | Foundation crates and dependency root | Logicalworks-Crates | D21, /docs/dependencies/README.md |
 
 Ownership rule: references to pre-existing sibling identities and receipt
-protocols enter only through an explicit adapter decision (D21/D28); Rocco
+protocols enter only through an explicit adapter decision (D21/D28); Larry
 never becomes a second authority for a sibling's responsibility.
 
 ## Request lifecycle (summary)

@@ -1,7 +1,7 @@
 {
   "proposal": {
     "schema": "keel.init/v1",
-    "root": "/Users/srinji/rocco",
+    "root": ".",
     "mode": "manual",
     "state": "awaiting-human-signoff",
     "proposed_difficulty": null,
@@ -17,7 +17,7 @@
     "heavy_gates": "complete-graph-deferred-by-profile-policy",
     "knowledge": "unavailable-no-local-index",
     "config": {
-      "path": "/Users/srinji/rocco/keel.toml",
+      "path": "keel.toml",
       "action": "pending-human-signoff-not-written"
     },
     "artifacts": [],

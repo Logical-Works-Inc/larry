@@ -1,4 +1,4 @@
-//! Frame builders for the two MCP eras the suites drive `rocco mcp` through.
+//! Frame builders for the two MCP eras the suites drive `larry mcp` through.
 //!
 //! Source: MCP 2026-07-28 Basic, "Per-request protocol fields" (`_meta` keys
 //! `io.modelcontextprotocol/protocolVersion`, `clientCapabilities`,

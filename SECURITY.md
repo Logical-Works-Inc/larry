@@ -15,7 +15,7 @@ sources: [Director order 2026-11-06]
 
 Larry is alpha-stage software with **zero security guarantees**. No version is supported, hardened, audited
 or fit for production, and none receives security fixes on a schedule. Run it only where a compromise costs
-nothing: no real credentials, no real accounts, no data you cannot lose, no `rocco mcp` reachable by an
+nothing: no real credentials, no real accounts, no data you cannot lose, no `larry mcp` reachable by an
 untrusted network or peer.
 
 ## Reporting a vulnerability

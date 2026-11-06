@@ -1,4 +1,4 @@
-//! The shipped `rocco` binary driven through one user journey on a real PTY.
+//! The shipped `larry` binary driven through one user journey on a real PTY.
 //!
 //! `script(1)` supplies the terminal. The test waits for the boot screen,
 //! continues into the workspace, opens the folders, agents and changes
@@ -66,7 +66,7 @@ const MARKERS: [&str; 13] = [
 fn terminal() -> Command {
     let inner = format!(
         "stty rows 32 cols 120; exec '{}'",
-        env!("CARGO_BIN_EXE_rocco")
+        env!("CARGO_BIN_EXE_larry")
     );
     let mut command = Command::new("script");
     if cfg!(target_os = "linux") {

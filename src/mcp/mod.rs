@@ -1,4 +1,4 @@
-//! MCP server over stdio, started by `rocco mcp`.
+//! MCP server over stdio, started by `larry mcp`.
 //!
 //! Written from the Model Context Protocol specification, revision 2026-07-28
 //! (stateless: every request names its version and client capabilities in

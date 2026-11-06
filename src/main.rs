@@ -1,5 +1,5 @@
 //! Line-oriented fixture driver, not the requested native AppCUI view.
-use rocco_demo::{Demo, MAX_INPUT};
+use larry_demo::{Demo, MAX_INPUT};
 use std::io::{self, BufRead, Read, Write};
 
 /// Runs the line-oriented fixture protocol over standard input and output.

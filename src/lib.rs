@@ -1,4 +1,4 @@
-//! Effect-free fixture state behind the `rocco` workspace demo and its native AppCUI view.
+//! Effect-free fixture state behind the `larry` workspace demo and its native AppCUI view.
 //! Every command changes only this owned session; no backend is connected.
 
 use lgwks_std::json::{self, Serialize};
@@ -253,7 +253,7 @@ impl Demo {
     pub fn snapshot(&self) -> Result<String, json::Error> {
         let inspection = self.selected.map(|index| &EVENTS[index]);
         let value = json::json!({
-            "mode": "DEMO — JSON fixture harness; native AppCUI view: cargo run --bin rocco",
+            "mode": "DEMO — JSON fixture harness; native AppCUI view: cargo run --bin larry",
             "effects": "none: no execution, providers, filesystem reads or writes",
             "persistence": "session only; reset and restart discard synthetic notes",
             "scenario": if self.empty { "empty" } else { "change" },

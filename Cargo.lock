@@ -584,6 +584,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "larry-contracts"
+version = "0.1.0"
+dependencies = [
+ "lgwks_std",
+ "thiserror",
+]
+
+[[package]]
+name = "larry-demo"
+version = "0.1.0"
+dependencies = [
+ "larry-contracts",
+ "lgwks_deps",
+ "lgwks_std",
+]
+
+[[package]]
+name = "larry-runtime"
+version = "0.1.0"
+dependencies = [
+ "larry-contracts",
+ "larry-runtime",
+ "lgwks_std",
+]
+
+[[package]]
 name = "lgwks_deps"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -936,32 +962,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rocco-contracts"
-version = "0.1.0"
-dependencies = [
- "lgwks_std",
- "thiserror",
-]
-
-[[package]]
-name = "rocco-demo"
-version = "0.1.0"
-dependencies = [
- "lgwks_deps",
- "lgwks_std",
- "rocco-contracts",
-]
-
-[[package]]
-name = "rocco-runtime"
-version = "0.1.0"
-dependencies = [
- "lgwks_std",
- "rocco-contracts",
- "rocco-runtime",
 ]
 
 [[package]]

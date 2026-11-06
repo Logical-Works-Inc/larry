@@ -1,9 +1,9 @@
 ---
 type: Index
-title: Rocco specification index
+title: Larry specification index
 description: Final proposed specification v1, harness research, repository governance and falsifiable completion plan.
 resource: /index.md
-tags: [rocco, strategy, governance]
+tags: [larry, strategy, governance]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: source inspection; document validation recorded separately}
 status: final-proposed-v1.1-awaiting-architecture-approval
@@ -11,7 +11,7 @@ stale_after: 2026-10-15
 sources: [Director conversation 2026-09-15]
 ---
 
-# Rocco: a persistent assistant with an accountable runtime
+# Larry: a persistent assistant with an accountable runtime
 
 **Final proposed specification v1, not an approved implementation or runtime readiness claim.**
 
@@ -34,8 +34,8 @@ human can accomplish more with less supervision and total computation.
 
 ## Authority and scope
 
-- The Director subsequently selected the working name Rocco and explicitly
-  authorized the private `srinji-kaggss/Rocco` documentation repository. These
+- The Director subsequently selected the working name Larry and explicitly
+  authorized the private `srinji-kaggss/Larry` documentation repository. These
   documents were moved from the Forge scratchpad; no product code was imported.
 - Preserve `forge-harness` and `forge-sdk` intact as reference implementations.
   Do not silently repair, import, restructure or publish their engine code.
@@ -61,9 +61,9 @@ and targets, not claims that tests, human studies or million-user trials passed.
 
 Already settled by the Director: core + TUI first; bounded unattended work;
 adapters rather than compatibility clones; memory implementation waits for
-Logical-DB; adjustable automatic decay and user-facing tuning; private Rocco
+Logical-DB; adjustable automatic decay and user-facing tuning; private Larry
 repository with strict self-maintaining governance. Other architecture decisions
-remain proposed, not implicitly ratified by the request to finish this document.
+remain proposed until the Director ratifies each one.
 
 The 78-requirement inventory preserves R01–R43, adds R44–R70 from the
 Codex/OpenCode/OpenClaw/Letta review and R71–R78 from the 2026-09-16 SOTA

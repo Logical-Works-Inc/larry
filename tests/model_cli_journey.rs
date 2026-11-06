@@ -1,4 +1,4 @@
-//! Journeys against the shipped `rocco model` command (larry#83), as an
+//! Journeys against the shipped `larry model` command (larry#83), as an
 //! operator lives them: set `LARRY_MODEL_*`, pipe a prompt, read the reply.
 //!
 //! Source: the OpenAI chat-completions contract the 9router gateway speaks and
@@ -30,9 +30,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// Round trips the latency case samples.
 const SAMPLES: u64 = 32;
 
-/// Run `rocco model` with only `env` set and `prompt` on stdin.
-fn rocco_model(env: &[(&str, String)], prompt: &[u8]) -> Result<Output, Box<dyn Error>> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rocco"))
+/// Run `larry model` with only `env` set and `prompt` on stdin.
+fn larry_model(env: &[(&str, String)], prompt: &[u8]) -> Result<Output, Box<dyn Error>> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
         .arg("model")
         .env_clear()
         .envs(env.iter().map(|entry| (entry.0, entry.1.as_str())))
@@ -75,7 +75,7 @@ fn a_prompt_on_stdin_prints_the_gateway_reply() -> TestResult {
     for seed in 0..SAMPLES {
         mock_model::run(Config::seeded(seed), |handle| {
             let started = Instant::now();
-            let output = rocco_model(&operator(handle.addr()), b"summarise the plan\n")?;
+            let output = larry_model(&operator(handle.addr()), b"summarise the plan\n")?;
             latencies.push(started.elapsed());
             assert!(
                 output.status.success(),
@@ -103,7 +103,7 @@ fn a_prompt_on_stdin_prints_the_gateway_reply() -> TestResult {
     }
     latencies.sort_unstable();
     let line = format!(
-        "rocco model round trip over {SAMPLES} runs: p50 {:?} p95 {:?} p99 {:?}\n",
+        "larry model round trip over {SAMPLES} runs: p50 {:?} p95 {:?} p99 {:?}\n",
         percentile(&latencies, 50),
         percentile(&latencies, 95),
         percentile(&latencies, 99)
@@ -120,7 +120,7 @@ fn a_server_error_then_success_retries_through_the_binary() -> TestResult {
         ..Config::seeded(11)
     };
     mock_model::run(config, |handle| {
-        let output = rocco_model(&operator(handle.addr()), b"retry me")?;
+        let output = larry_model(&operator(handle.addr()), b"retry me")?;
         assert!(output.status.success(), "stderr {}", stderr_of(&output));
         assert_eq!(handle.served(), 2, "one 502, then the retry");
         Ok(())
@@ -140,7 +140,7 @@ fn a_rate_limit_is_reported_at_once_never_waited_out() -> TestResult {
     };
     mock_model::run(config, |handle| {
         let started = Instant::now();
-        let output = rocco_model(&operator(handle.addr()), b"busy?")?;
+        let output = larry_model(&operator(handle.addr()), b"busy?")?;
         assert!(
             !output.status.success(),
             "a 429 the check will not wait out fails"
@@ -164,7 +164,7 @@ fn a_missing_key_exits_nonzero_and_sends_nothing() -> TestResult {
     mock_model::run(Config::seeded(12), |handle| {
         let mut env = operator(handle.addr());
         env.retain(|entry| entry.0 != "LARRY_MODEL_KEY");
-        let output = rocco_model(&env, b"hello")?;
+        let output = larry_model(&env, b"hello")?;
         assert!(!output.status.success(), "a missing key fails");
         assert!(
             stderr_of(&output).contains("LARRY_MODEL_KEY"),
@@ -179,14 +179,14 @@ fn a_missing_key_exits_nonzero_and_sends_nothing() -> TestResult {
 #[test]
 fn an_empty_or_oversize_prompt_is_refused_before_sending() -> TestResult {
     mock_model::run(Config::seeded(13), |handle| {
-        let empty = rocco_model(&operator(handle.addr()), b" \n\n")?;
+        let empty = larry_model(&operator(handle.addr()), b" \n\n")?;
         assert!(!empty.status.success(), "an empty prompt fails");
         assert!(
             stderr_of(&empty).contains("empty"),
             "the diagnostic says why"
         );
         let huge = vec![b'y'; 1_048_577];
-        let oversize = rocco_model(&operator(handle.addr()), &huge)?;
+        let oversize = larry_model(&operator(handle.addr()), &huge)?;
         assert!(!oversize.status.success(), "an oversize prompt fails");
         assert!(
             stderr_of(&oversize).contains("size bound"),
@@ -200,7 +200,7 @@ fn an_empty_or_oversize_prompt_is_refused_before_sending() -> TestResult {
 #[test]
 fn a_bad_setting_or_a_dead_gateway_is_a_typed_diagnostic() -> TestResult {
     let closed = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?;
-    let dead = rocco_model(&operator(closed), b"hello")?;
+    let dead = larry_model(&operator(closed), b"hello")?;
     assert!(!dead.status.success(), "an unreachable gateway fails");
     assert!(
         stderr_of(&dead).contains("could not be reached"),
@@ -209,7 +209,7 @@ fn a_bad_setting_or_a_dead_gateway_is_a_typed_diagnostic() -> TestResult {
     );
     let mut env = operator(closed);
     env.push(("LARRY_MODEL_ATTEMPTS", String::from("many")));
-    let bad = rocco_model(&env, b"hello")?;
+    let bad = larry_model(&env, b"hello")?;
     assert!(!bad.status.success(), "a bad setting fails");
     assert!(
         stderr_of(&bad).contains("LARRY_MODEL_ATTEMPTS is not a whole number"),
@@ -228,7 +228,7 @@ fn a_gateway_slower_than_the_timeout_is_a_timeout_through_the_binary() -> TestRe
     mock_model::run(config, |handle| {
         let mut env = operator(handle.addr());
         env.push(("LARRY_MODEL_TIMEOUT_MS", String::from("200")));
-        let output = rocco_model(&env, b"slow")?;
+        let output = larry_model(&env, b"slow")?;
         handle.release_delayed();
         assert!(!output.status.success(), "a timed-out exchange fails");
         assert!(
@@ -248,10 +248,10 @@ fn a_padded_openrouter_reply_prints_its_content() -> TestResult {
         ..Config::seeded(16)
     };
     let framed = mock_model::run(padded, |handle| {
-        rocco_model(&operator(handle.addr()), b"framed")
+        larry_model(&operator(handle.addr()), b"framed")
     })?;
     let bare = mock_model::run(Config::seeded(16), |handle| {
-        rocco_model(&operator(handle.addr()), b"framed")
+        larry_model(&operator(handle.addr()), b"framed")
     })?;
     assert!(framed.status.success(), "stderr {}", stderr_of(&framed));
     assert_eq!(
@@ -268,7 +268,7 @@ fn a_refusal_shows_the_gateway_reason_without_terminal_control() -> TestResult {
         ..Config::seeded(17)
     };
     mock_model::run(config, |handle| {
-        let output = rocco_model(&operator(handle.addr()), b"expired?")?;
+        let output = larry_model(&operator(handle.addr()), b"expired?")?;
         assert!(!output.status.success(), "a 401 fails");
         let shown = stderr_of(&output);
         assert!(
@@ -288,7 +288,7 @@ fn a_refusal_shows_the_gateway_reason_without_terminal_control() -> TestResult {
 fn the_same_seed_through_the_binary_replays_one_trace() -> TestResult {
     let trace = |seed: u64| {
         mock_model::run(Config::seeded(seed), |handle| {
-            let output = rocco_model(&operator(handle.addr()), b"replay")?;
+            let output = larry_model(&operator(handle.addr()), b"replay")?;
             assert!(output.status.success(), "stderr {}", stderr_of(&output));
             Ok::<_, Box<dyn Error>>((handle.trace_hash(), output.stdout))
         })

@@ -37,4 +37,4 @@ restore.
 - No disposition is invented at cancel time: `UnknownPermanent` stays the strategy's answer, not cancel's.
 - Escalating a spent hold to a human is a later work package; this decision does not paper over it.
 - Enforced by `sim_cancel_unresolved_observed_effect_holds_cancellation_open` and
-  `sim_cancel_seeded_delays_hold_unresolved_open` in `crates/rocco-runtime/tests/sim_cancel.rs`.
+  `sim_cancel_seeded_delays_hold_unresolved_open` in `crates/larry-runtime/tests/sim_cancel.rs`.

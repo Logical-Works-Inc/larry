@@ -1,29 +1,31 @@
 [package]
-name = "rocco-demo"
+name = "larry-demo"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-default-run = "rocco"
-description = "Effect-free interaction fixtures for the Rocco AppCUI visual pass"
+default-run = "larry"
+description = "Larry, the always-on harness organ of Logic OS: executor, model client and MCP server"
 
 [workspace]
-# One repository, one workspace. `crates/rocco-contracts` was previously the
+# One repository, one workspace. `crates/larry-contracts` was previously the
 # whole of a second repository (`srinji-kaggss/rocco-runtime`) whose manifest
 # declared this same crate set; it is a member here instead. The root package
 # is an implicit member.
-members = ["crates/rocco-contracts", "crates/rocco-runtime"]
+members = ["crates/larry-contracts", "crates/larry-runtime"]
 # Edition 2024 selects resolver 3; stated explicitly because the merged
 # workspace previously ran under resolver 2 on the runtime side.
 resolver = "3"
 
-# Rocco — the specification repository, which also carries the fixture
-# implementation and the contract crate it governs. Dependency foundation:
-# Rust std + logicalworks-crates releases from crates.io, exact-pinned.
-# Every additional third-party edge is registered in contract/APPROVED.toml
-# or it does not compile its way into this workspace.
+# Larry — the specification repository, which also carries the implementation
+# and the contract crate it governs. Dependency order: Rust std, then the
+# lgwks_* estate (exact-pinned crates.io releases), then Loco.rs for the web,
+# ORM, jobs, mail and auth gaps the estate does not own, then any other OSS
+# crate only with a cited logicalworks-crates `gap` issue. Every third-party
+# edge is registered in contract/APPROVED.toml or it does not compile its way
+# into this workspace.
 
 [workspace.package]
 edition = "2024"
@@ -32,9 +34,9 @@ edition = "2024"
 license = "LicenseRef-Larry-HL3-FULL"
 repository = "https://github.com/Logical-Works-Inc/larry"
 # The real floor, and it is the library's: lgwks_std 3.2.2 declares
-# `rust-version = "1.98"` and edition 2024. The rocco-contracts manifest
+# `rust-version = "1.98"` and edition 2024. The larry-contracts manifest
 # formerly declared 1.85, which was never satisfiable against that
-# dependency — the merge corrects a false claim rather than raising a real
+# dependency — the merge corrected a false claim rather than raising a real
 # requirement.
 rust-version = "1.98"
 
@@ -50,7 +52,7 @@ lgwks_std = { version = "=4.0.2", default-features = false }
 # registered for the first crate that needs it, and the register records that
 # admission. A catalog entry is not a compile edge.
 lgwks_bot = { version = "=7.1.1" }
-# The dependency-admission storefront. rocco-demo opts into `appcui`; the
+# The dependency-admission storefront. The larry package opts into `appcui`; the
 # published storefront owns that dependency and its transitive admission.
 lgwks_deps = { version = "=6.1.0", default-features = false }
 thiserror = "=2.0.20"  # gap: Logical-Works-Inc/logicalworks-crates#842
@@ -58,14 +60,14 @@ thiserror = "=2.0.20"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # The stricter of the two former lint sets, applied to the whole workspace.
 # A member opts in with `[lints] workspace = true`.
 [dependencies]
-rocco-contracts = { path = "crates/rocco-contracts" }
+larry-contracts = { path = "crates/larry-contracts" }
 lgwks_std = { workspace = true, features = ["json", "http", "process", "hash"] }
 lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
 
 [dev-dependencies]
 # Test support only (tests/support/mock_model.rs, larry#82): the estate's BLAKE3
 # hasher for the mock endpoint's trace hash. Not a new crate and not in the
-# shipped build; the shipped `rocco` binary keeps `json` alone.
+# shipped build; the shipped `larry` binary keeps `json` alone.
 lgwks_std = { workspace = true, features = ["json", "hash"] }
 
 [lints]

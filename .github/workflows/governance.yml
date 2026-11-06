@@ -14,7 +14,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check specification and governance
-        run: python3 tools/check_governance.py --report > "$RUNNER_TEMP/rocco-governance.json"
+        run: python3 tools/check_governance.py --report > "$RUNNER_TEMP/larry-governance.json"
       - name: Exercise positive and negative controls
         if: always()
         run: python3 -m unittest discover -s tests -v
@@ -31,7 +31,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: rocco-governance-${{ github.sha }}
-          path: ${{ runner.temp }}/rocco-governance.json
+          name: larry-governance-${{ github.sha }}
+          path: ${{ runner.temp }}/larry-governance.json
           if-no-files-found: error
           retention-days: 30

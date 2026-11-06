@@ -1,4 +1,4 @@
-//! Seeded simulations of backward compatibility and schema conformance for `rocco mcp`.
+//! Seeded simulations of backward compatibility and schema conformance for `larry mcp`.
 //!
 //! Source: MCP specification 2026-07-28, Versioning and Compatibility
 //! ("Backward Compatibility with Initialization-Based Versions", the

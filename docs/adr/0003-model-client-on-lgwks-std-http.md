@@ -35,13 +35,13 @@ that pair, `ureq` or `reqwest` directly, and an async client on `lgwks_bot::rt`.
   the remaining deadline returns the 429 instead of retrying early.
 - The configured timeout is both the per-phase timeout and the whole-call deadline.
 - The caller owns the clock and cancellation: the client asks a pause function it is given, which waits and
-  returns whether to retry. Tests record waits and never sleep; `rocco model` refuses any wait and reports the
+  returns whether to retry. Tests record waits and never sleep; `larry model` refuses any wait and reports the
   refusal at once; the executor (#85) waits on its cancel token. No jitter, so one seed replays one wait
   sequence; a fleet draws it from `lgwks_std::random`.
 - Bounds: 256 messages, a 1 MiB request and a 4 MiB reply, each refused with `ModelError::BodyTooLarge`.
 - Every setting comes from `LARRY_MODEL_*` (URL, key, model, temperature, timeout, attempts 1 to 16,
   backoff, deadline); a bad one is a typed error naming the variable, never a silent default.
-- The shipped caller is `rocco model`: a prompt on stdin, the reply on stdout. It is the operator's check
+- The shipped caller is `larry model`: a prompt on stdin, the reply on stdout. It is the operator's check
   that a key and a gateway work, and the executor (#85) calls the same client.
 - From the first live run (larry#128): the default model is `ocg/deepseek-v4.1-flash`, the id 9router
   serves; a reply padded with whitespace and ending `data: [DONE]` on the document's line (OpenRouter) is

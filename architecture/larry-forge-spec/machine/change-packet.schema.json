@@ -1,0 +1,25 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://logical.works/larry/change-packet.schema.json",
+  "title":"Larry Architecture Change Packet",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["change_id","owner","semantic_surface","canonical_refs","compatibility","migration","rollback_boundary","resource_delta","security_delta","real_entrypoint_reachability","falsifiers","evidence","unknowns"],
+  "properties":{
+    "change_id":{"type":"string","minLength":1},
+    "owner":{"type":"string","minLength":1},
+    "semantic_surface":{"type":"array","minItems":1,"items":{"type":"string"}},
+    "canonical_refs":{"type":"array","minItems":1,"items":{"type":"string"}},
+    "old_revision":{"type":["string","null"]},
+    "new_revision":{"type":["string","null"]},
+    "compatibility":{"enum":["additive","behavior-preserving-replacement","migration","breaking"]},
+    "migration":{"type":"object"},
+    "rollback_boundary":{"type":"string"},
+    "resource_delta":{"type":"object"},
+    "security_delta":{"type":"object"},
+    "real_entrypoint_reachability":{"type":"object","required":["entrypoints","evidence_state"],"properties":{"entrypoints":{"type":"array","items":{"type":"string"}},"evidence_state":{"enum":["planned","present","exercised","proven"]}},"additionalProperties":true},
+    "falsifiers":{"type":"array","minItems":1,"items":{"type":"string"}},
+    "evidence":{"type":"array","items":{"type":"object"}},
+    "unknowns":{"type":"array","items":{"type":"string"}}
+  }
+}
