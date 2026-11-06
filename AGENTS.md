@@ -24,9 +24,9 @@ INVARIANTS.md and the plan before the first edit.
   Agent 365): an agent that works for a person, asks before it acts and can account for every effect.
 - Rocco now names a separate embedded harness that cannot speak (the in-app dock). The `rocco-*` crates and
   the `rocco` binary here are Larry's until a rename order.
-- The plan is [the product plan](/docs/product/README.md). specification.md owns every requirement, decision,
-  falsifier, execution cell and axis ID; INVARIANTS.md holds the runtime rules with their tests; LICENSE
-  holds the Hippocratic License 3.0 (HL3-FULL) plus Larry's Part B. Nothing here is open source.
+- The plan is [the product plan](/docs/product/README.md); the next PR is the first open line of its
+  [ship checklist](/docs/product/SHIP.md). specification.md owns every requirement, decision, falsifier,
+  cell and axis ID; INVARIANTS.md holds the runtime rules; LICENSE is HL3-FULL plus Part B, not open source.
 
 ## One owner per capability
 
@@ -89,7 +89,7 @@ GOVERNANCE.md and GitHub issues, and log.md inventory lines move only when speci
 2. Put it in its one home: an ID in specification.md, a rule in INVARIANTS.md, an order in the plan, a
    working rule here and in GOVERNANCE.md, a task in an issue. Never create a competing instruction file.
 3. Preserve stable IDs and earlier acceptance obligations; supersession names the Director's order.
-4. Update the progress tracker data when a cell or falsifier moves; CI re-renders and checks it.
+4. The shipping PR ticks its ship-checklist line; tracker data moves with a cell or falsifier (CI checks it).
 5. Each change carries a traceability line: IDs addressed, what is proven, what is NOT RUN or ESTIMATE.
 
 ## Tests and evidence

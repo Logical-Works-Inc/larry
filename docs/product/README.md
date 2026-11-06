@@ -28,7 +28,7 @@ proven; the date is the worst case. Requirement and decision IDs stay owned by /
 | Ruling | Effect on this plan |
 |---|---|
 | Rocco renamed to Larry; Rocco now names an embedded harness that cannot speak (2026-10-26) | Face 1, the no-model dock, is Rocco's. Larry keeps Faces 2 and 3 and hands low-confidence dock sessions in. |
-| Repos moved to Logical-Works-Inc (2026-11-03) | Larry is `Logical-Works-Inc/larry`, private. |
+| Repos moved to Logical-Works-Inc (2026-11-03); public alpha (2026-11-06) | Larry is `Logical-Works-Inc/larry`, public, HL3, no contributions. |
 | Kernel deprecated by absorption; one owner per capability (logic-os-kernel#850, province#4, #7) | Larry's own journal and fold move onto `lgwks_bot`; authority comes from secure-authority. |
 | Revenue gate (province#5): nothing off the revenue slice's critical path | Face 2 is the agent gateway of the revenue slice (moo#184) and moves ahead of Face 3. |
 | Newest estate pins and `gap` issues (2026-11-03) | lgwks_std 4.0.2, lgwks_deps 6.1.0 and lgwks_bot 7.1.1 pinned in this change; thiserror cites crates#842. |
@@ -51,6 +51,8 @@ the company's own system of record (Logical-DB, the workspace), typed manifest a
 open-ended browsing, a journal the company can replay bit-identically, and model neutrality.
 
 ## Tracks, in order
+
+[The ship checklist](/docs/product/SHIP.md) is each track's issues in ship order; a shipping PR ticks its line.
 
 **Track 0, estate alignment.** This change: HL3 license, newest pins, governance 1.2, INVARIANTS.md,
 this plan. Next: larry#53 (Rust governance checker, tracker, PTY journeys, reranker on lgwks_deps ML
