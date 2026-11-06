@@ -2,6 +2,8 @@
 //! Every test drives the real `Runtime` twice from one seed and asserts the
 //! same journal fingerprint plus the caller-visible report values.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -19,6 +21,7 @@ use rocco_runtime::projection::ProjectionBackend;
 
 use rocco_runtime::runtime::{Runtime, TickReport};
 
+use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, work};
 use support::{
     TestRuntime, assert_state, cancel, command_id, epoch, operation, proposal, run, runtime_with,
@@ -32,10 +35,12 @@ type Trace = Vec<(RunId, u64, EventKind, ContentDigest)>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn evolve(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_038_195_672_373);
-    seed.rotate_left(29)
+    step(
+        seed,
+        6_364_136_223_846_793_005,
+        1_442_695_038_195_672_373,
+        29,
+    )
 }
 
 /// Stable identity list of recorded events.

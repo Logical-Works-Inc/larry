@@ -2,6 +2,8 @@
 //! Every test resubmits a recorded identity and asserts the same trace plus
 //! the suppression or refusal the second sighting produces.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -14,6 +16,7 @@ use rocco_runtime::error::RuntimeError;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::projection::ProjectionBackend;
 
+use seed::step;
 use sim_kit::{Offer, Sim, dispatch, read_work, reader, replay, trace, work};
 use support::{
     TestRuntime, assert_state, cancel, command_id, operation, proposal, run, submit, succeeded,
@@ -25,10 +28,12 @@ type Outcome = Result<(), Box<dyn std::error::Error>>;
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn mix_u64(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(3_931_663_978_901_238_133)
-        .wrapping_add(2_862_931_710_398_331_809);
-    seed.rotate_left(17)
+    step(
+        seed,
+        3_931_663_978_901_238_133,
+        2_862_931_710_398_331_809,
+        17,
+    )
 }
 
 /// Standard-budget FileRead runtime over `owner`.

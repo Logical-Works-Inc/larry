@@ -4,6 +4,8 @@
 //! fence's generations and asserts the same fingerprint plus the
 //! caller-visible admission or refusal the generation produces.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -12,6 +14,7 @@ use rocco_contracts::effect::ReconciliationStrategy;
 use rocco_contracts::state::RunState;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 
+use seed::step;
 use sim_kit::{Offer, Sim, offer_runs, read_work, reader, replay, work};
 use support::{TestRuntime, assert_state, operation, run, settings, succeeded, unknown};
 
@@ -23,10 +26,7 @@ type JourneyReplay = ((usize, usize), (usize, u64));
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn advance(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(14_363_276_836_458_258_123)
-        .wrapping_add(21_593_398_131_336_969);
-    seed.rotate_left(9)
+    step(seed, 14_363_276_836_458_258_123, 21_593_398_131_336_969, 9)
 }
 
 /// Trace counts plus the generation the fence stands at.

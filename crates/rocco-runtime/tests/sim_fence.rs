@@ -2,6 +2,8 @@
 //! Every test mutates the live fence the way the authority layer owns it,
 //! then asserts the same counts plus the caller-visible refusal or admission.
 
+#[path = "sim_kit/seed.rs"]
+mod seed;
 mod sim_kit;
 mod support;
 
@@ -12,6 +14,7 @@ use rocco_contracts::state::RunState;
 use rocco_runtime::owner::fixture::ScriptedOwner;
 use rocco_runtime::projection::ProjectionBackend;
 
+use seed::step;
 use sim_kit::{Offer, Sim, offer_runs, read_work, reader, replay, trace};
 use support::{TestRuntime, assert_state, operation, run, settings, succeeded};
 
@@ -25,10 +28,7 @@ type FencedState = ((usize, usize, usize), RunState);
 
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn ratchet(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(5_773_875_523_619_008_799)
-        .wrapping_add(491_134_414_345_647);
-    seed.rotate_left(11)
+    step(seed, 5_773_875_523_619_008_799, 491_134_414_345_647, 11)
 }
 
 /// Trace counts: every refusal is a present fact, journal replays alike.
