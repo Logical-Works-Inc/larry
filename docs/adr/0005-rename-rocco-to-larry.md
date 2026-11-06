@@ -1,3 +1,16 @@
+---
+type: ADR
+title: "ADR 0005: rename Rocco to Larry across the repository"
+description: Why every package, crate, binary, path and document says Larry, and what keeps its old text until larry#53.
+resource: /docs/adr/0005-rename-rocco-to-larry.md
+tags: [larry, adr, rename, governance]
+generated: {by: claude-code, at: 2026-11-06}
+verified: {by: claude-code, method: cargo nextest run --workspace --locked (586 passed) on the renamed tree}
+status: accepted
+stale_after: 2027-02-06
+sources: [larry#131, larry#53, logicalworks-crates#872, logicalworks-crates#873]
+---
+
 # 0005: Rename Rocco to Larry
 
 Status: accepted, 2026-11-06 (larry#131)
