@@ -39,8 +39,9 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #83 model client to 9router on `lgwks_std::http`, `json`, `retry`. Proof: drives the mock endpoint;
   typed errors on timeout, 429 and malformed body: PR #127, `rocco model` ships it; 16 client cases over 64
   seeds and 8 binary journeys, 568 tests in 10.0 s; `rocco model` p50 6.4 ms, p99 12.4 ms (32 runs, mock).
-- [ ] #85 executor workspace and process control. Proof: kill -9 of the executor leaves no orphan process
-  group; the origin tree is byte-identical after a hostile command.
+- [x] #85 executor workspace and process control. Proof: kill -9 of the executor leaves no orphan process
+  group; the origin tree is byte-identical after a hostile command: PR #130, `rocco exec` ships it; 7 binary
+  journeys and 3 unit sims, 582 tests in 10.4 s; `rocco exec` p50 70.8 ms, p99 74.5 ms (32 runs, debug).
 - [ ] #86 signed receipts over the journal (ed25519). Proof: a tampered receipt is refused; a denied run
   never reports success.
 - [ ] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task
