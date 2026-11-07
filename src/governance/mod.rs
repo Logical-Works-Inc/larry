@@ -11,7 +11,7 @@ mod markdown;
 mod patterns;
 mod pyjson;
 mod pystr;
-mod receipts;
+pub(crate) mod receipts;
 
 #[cfg(test)]
 mod sim_governance;

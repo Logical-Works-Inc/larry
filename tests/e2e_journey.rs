@@ -236,6 +236,21 @@ struct Pty<'scope> {
     /// Whether output arrived since the last keys were typed: a match only counts once the
     /// view has answered, so text left on screen from before a key never passes for its reply.
     answered: bool,
+    /// The screen when the last keys were typed, until a wait consumes it.
+    before: Option<String>,
+}
+
+/// Whether `now` shows `text` as the reply to keys typed over `before`. Text already on the
+/// screen before the keys is refused, because the first chunk of a late paint would pass for
+/// the reply: on hosted ubuntu the board's card title "Workspace handoff" did, the next Esc
+/// went out mid-paint and merged with the following key (larry#148 run 42366888296).
+fn replied(before: Option<&str>, now: &str, text: &str) -> Result<bool, String> {
+    if before.is_some_and(|screen| screen.contains(text)) {
+        return Err(format!(
+            "{text:?} was on screen before the keys; wait for text only the reply paints"
+        ));
+    }
+    Ok(now.contains(text))
 }
 
 impl<'scope> Pty<'scope> {
@@ -270,6 +285,7 @@ impl<'scope> Pty<'scope> {
             raw: Vec::new(),
             screen: Screen::new(),
             answered: false,
+            before: None,
         })
     }
 
@@ -291,12 +307,14 @@ impl<'scope> Pty<'scope> {
         }
     }
 
-    /// Reads until the view has answered the last keys and the screen shows `text`.
+    /// Reads until the view has answered the last keys and the screen shows `text`, which must
+    /// not have been on screen when those keys were typed.
     fn wait_for(&mut self, text: &str) -> Journey {
         let deadline = Instant::now()
             .checked_add(PATIENCE)
             .ok_or("deadline overflows")?;
-        while !(self.answered && self.screen.text().contains(text)) {
+        let before = self.before.take();
+        while !(self.answered && replied(before.as_deref(), &self.screen.text(), text)?) {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() || !self.take(left)? {
                 return Err(format!("missing {text:?}; screen={:?}", self.screen.text()).into());
@@ -324,6 +342,7 @@ impl<'scope> Pty<'scope> {
     fn send(&mut self, keys: &str) -> Journey {
         let stdin = self.stdin.as_mut().ok_or("terminal input closed")?;
         self.answered = false;
+        self.before = Some(self.screen.text());
         stdin.write_all(keys.as_bytes())?;
         Ok(stdin.flush()?)
     }
@@ -482,6 +501,38 @@ fn e2e_journey_normalize_strips_escapes() {
     assert_eq!(normalize(b"\x1b"), "", "a lone escape yields nothing");
 }
 
+/// A reply is text the keys brought: text already on screen before them is refused, whatever
+/// the screen shows now; with no keys typed since the last wait, presence alone answers.
+#[test]
+fn a_wait_refuses_text_that_was_on_screen_before_the_keys() {
+    let board = "Review retry boundary  Workspace handoff";
+    let opened = "HOME  /  MOO  /  Workspace handoff";
+    assert_eq!(
+        replied(Some(board), opened, "MOO  /  Workspace handoff"),
+        Ok(true),
+        "the breadcrumb is new: the reply"
+    );
+    assert_eq!(
+        replied(Some(board), board, "MOO  /  Workspace handoff"),
+        Ok(false),
+        "not painted yet: keep reading"
+    );
+    assert!(
+        replied(Some(board), opened, "Workspace handoff").is_err(),
+        "a title the board already showed can never pass for the reply"
+    );
+    assert_eq!(
+        replied(None, board, "Workspace handoff"),
+        Ok(true),
+        "no keys typed: presence answers"
+    );
+    assert_eq!(
+        replied(None, board, "remember this"),
+        Ok(false),
+        "absent text is not a reply"
+    );
+}
+
 /// The screen model places text by CUP, clears on ED, skips OSC by BEL or ST, decodes UTF-8
 /// split across chunks and wraps at the right edge.
 #[test]
@@ -546,7 +597,8 @@ fn board_truth_mouse_and_draft_recovery() -> Journey {
         ("", "Calmer project home"),
         ("remember this", "remember this"),
         ("\x1b", BOOT_TEXT),
-        ("2", "Workspace handoff"),
+        // The breadcrumb, not the title: the board paints every card's title.
+        ("2", "MOO  /  Workspace handoff"),
         ("\x1b", BOOT_TEXT),
         ("3", "remember this"),
     ];

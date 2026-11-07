@@ -9,13 +9,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output, Stdio};
+use std::process::{Command, ExitCode};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use lgwks_std::json::{Value, json};
 
-/// One gate: its name, the program and arguments it runs, extra environment,
-/// and, for a journey lane, how many `... ok` lines its output must hold.
+/// One gate: its name, the program and arguments it runs, and extra environment.
 struct Lane {
     /// The lane's name in the log.
     name: &'static str,
@@ -25,26 +24,23 @@ struct Lane {
     args: &'static [&'static str],
     /// Environment set for this lane alone.
     env: &'static [(&'static str, &'static str)],
-    /// The fewest passing journeys the output must report; `None` for no count.
-    journeys: Option<usize>,
 }
 
-/// Python stays only in the lanes larry#53 has not ported yet: the reranker
-/// controls (step 3) and the demo and native PTY journeys (step 2).
-const LANES: [Lane; 11] = [
+/// No lane runs Python (larry#53): the demo and PTY journeys (step 2, ADR 0011)
+/// and the reranker's controls (step 3, ADR 0013) run in the tests lane; the
+/// reranker lane lints its feature-gated engine (larry#150).
+const LANES: [Lane; 9] = [
     Lane {
         name: "build",
         program: "cargo",
         args: &["build", "--bins", "--locked"],
         env: &[],
-        journeys: None,
     },
     Lane {
         name: "tests",
         program: "cargo",
         args: &["nextest", "run", "--workspace", "--locked"],
         env: &[],
-        journeys: None,
     },
     Lane {
         name: "clippy",
@@ -59,70 +55,52 @@ const LANES: [Lane; 11] = [
             "warnings",
         ],
         env: &[],
-        journeys: None,
     },
     Lane {
         name: "fmt",
         program: "cargo",
         args: &["fmt", "--all", "--", "--check"],
         env: &[],
-        journeys: None,
     },
     Lane {
         name: "governance",
         program: "target/debug/larry",
         args: &["governance"],
         env: &[],
-        journeys: None,
     },
     Lane {
         name: "tracker",
         program: "target/debug/larry",
         args: &["tracker", "--check"],
         env: &[],
-        journeys: None,
     },
     Lane {
         name: "reranker",
-        program: "python3",
-        args: &["-m", "unittest", "discover", "-s", "tests"],
-        env: &[("PYTHONDONTWRITEBYTECODE", "1")],
-        journeys: None,
+        program: "cargo",
+        args: &[
+            "clippy",
+            "--locked",
+            "--features",
+            "rerank",
+            "--bin",
+            "larry-rerank",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        env: &[],
     },
     Lane {
         name: "deps",
         program: "lgwks-deps",
         args: &["check", "."],
         env: &[],
-        journeys: None,
-    },
-    Lane {
-        name: "demo-cli",
-        program: "python3",
-        args: &["tools/test_demo_cli.py"],
-        env: &[("PYTHONDONTWRITEBYTECODE", "1")],
-        journeys: None,
-    },
-    // Colour off: a host FORCE_COLOR wraps "ok" in ANSI escapes and the count
-    // would read 0 against a green run.
-    Lane {
-        name: "native-pty",
-        program: "python3",
-        args: &["tools/test_native_cli.py"],
-        env: &[
-            ("NO_COLOR", "1"),
-            ("PYTHON_COLORS", "0"),
-            ("FORCE_COLOR", ""),
-            ("PYTHONDONTWRITEBYTECODE", "1"),
-        ],
-        journeys: Some(2),
     },
     Lane {
         name: "whitespace",
         program: "git",
         args: &["diff", "--check"],
         env: &[],
-        journeys: None,
     },
 ];
 
@@ -146,15 +124,6 @@ enum LocalCiError {
         lane: &'static str,
         /// Its exit code; `None` when a signal ended it.
         code: Option<i32>,
-    },
-    /// A journey lane passed while reporting too few journeys.
-    Vacuous {
-        /// The lane.
-        lane: &'static str,
-        /// The `... ok` lines found.
-        found: usize,
-        /// The fewest required.
-        needed: usize,
     },
     /// One or more lanes were red; each was reported as it failed.
     Failed(Vec<&'static str>),
@@ -187,16 +156,6 @@ impl fmt::Display for LocalCiError {
                 code: Some(code),
             } => write!(out, "lane {lane} failed with exit {code}"),
             Self::Red { lane, code: None } => write!(out, "lane {lane} was killed by a signal"),
-            Self::Vacuous {
-                lane,
-                found,
-                needed,
-            } => {
-                write!(
-                    out,
-                    "lane {lane} reported {found} journeys, expected {needed}"
-                )
-            }
             Self::Failed(ref lanes) => {
                 write!(out, "red lanes: {}; no receipt written", lanes.join(", "))
             }
@@ -241,19 +200,7 @@ fn command_line(lane: &Lane) -> String {
     line
 }
 
-/// How many lines of `output` (both streams) end in `... ok`.
-fn passing_journeys(output: &Output) -> usize {
-    let count = |stream: &[u8]| {
-        String::from_utf8_lossy(stream)
-            .lines()
-            .filter(|line| line.trim_end().ends_with("... ok"))
-            .count()
-    };
-    count(&output.stdout).saturating_add(count(&output.stderr))
-}
-
-/// Runs one lane from the checkout root; a journey lane's output is captured,
-/// echoed and counted.
+/// Runs one lane from the checkout root.
 fn run(lane: &Lane) -> Result<(), LocalCiError> {
     log(&command_line(lane))?;
     let mut command = Command::new(program(lane));
@@ -261,43 +208,17 @@ fn run(lane: &Lane) -> Result<(), LocalCiError> {
     for &(key, value) in lane.env {
         command.env(key, value);
     }
-    let spawned = |cause| LocalCiError::Spawn {
+    let status = command.status().map_err(|cause| LocalCiError::Spawn {
         lane: lane.name,
         cause,
-    };
-    let (status, found) = match lane.journeys {
-        None => (command.status().map_err(spawned)?, None),
-        Some(_) => {
-            let output = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .map_err(spawned)?;
-            io::stdout()
-                .lock()
-                .write_all(&output.stdout)
-                .map_err(LocalCiError::Log)?;
-            io::stderr()
-                .lock()
-                .write_all(&output.stderr)
-                .map_err(LocalCiError::Log)?;
-            (output.status, Some(passing_journeys(&output)))
-        }
-    };
-    if !status.success() {
-        return Err(LocalCiError::Red {
-            lane: lane.name,
-            code: status.code(),
-        });
+    })?;
+    if status.success() {
+        return Ok(());
     }
-    match (lane.journeys, found) {
-        (Some(needed), Some(found)) if found < needed => Err(LocalCiError::Vacuous {
-            lane: lane.name,
-            found,
-            needed,
-        }),
-        _ => Ok(()),
-    }
+    Err(LocalCiError::Red {
+        lane: lane.name,
+        code: status.code(),
+    })
 }
 
 /// The one line `git` prints for `args`, trimmed.
@@ -388,14 +309,6 @@ fn list() -> Result<(), LocalCiError> {
         .map_err(LocalCiError::Log)
 }
 
-/// Writes one diagnostic line to standard error.
-fn diagnose(message: &str) -> io::Result<()> {
-    let mut stderr = io::stderr().lock();
-    stderr.write_all(b"local-ci: ")?;
-    stderr.write_all(message.as_bytes())?;
-    stderr.write_all(b"\n")
-}
-
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let outcome = match (args.next(), args.next()) {
@@ -406,7 +319,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if diagnose(&error.to_string()).is_err() {
+            if larry_demo::diagnose("local-ci", &error.to_string()).is_err() {
                 return ExitCode::FAILURE;
             }
             ExitCode::FAILURE
