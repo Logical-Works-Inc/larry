@@ -33,7 +33,17 @@ jobs:
       # The reranker engine is feature-gated (larry#150, ADR 0013): lint the
       # binary with it on, so the gated path never rots unbuilt.
       - run: cargo clippy --locked --features rerank --bin larry-rerank -- -D warnings
-      - run: cargo test --workspace --all-targets --locked
+      # The test lane AGENTS.md declares and `cargo local-ci` runs (larry#154).
+      # Hosted legs install nextest; the self-hosted leg keeps `cargo test` so
+      # a job never installs tools into the shared machine (see sim.yml).
+      - if: ${{ !github.event.repository.private }}
+        uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
+        with:
+          tool: nextest
+      - if: ${{ !github.event.repository.private }}
+        run: cargo nextest run --workspace --locked
+      - if: ${{ github.event.repository.private }}
+        run: cargo test --workspace --all-targets --locked
 
   # The specification and governance lanes, carried over from Larry's
   # workflow. Action SHAs are pinned here because this job ran that way
@@ -65,6 +75,10 @@ jobs:
       - name: Check the tracker render
         if: always()
         run: target/debug/larry tracker --check
+      # `larry mascot` replaced tools/rocco_pixel.py (larry#152, ADR 0014).
+      - name: Check the mascot render
+        if: always()
+        run: target/debug/larry mascot --check
       - name: Check whitespace
         if: always()
         env:

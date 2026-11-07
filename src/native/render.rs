@@ -9,38 +9,9 @@ use super::{
 
 // ── painting primitives ──────────────────────────────────────────────────
 
-/// Blocky Larry — the 24x24 pixel raccoon, hand-authored from the canonical
-/// larry-flat.webp (Director request 2026-09-08: flatter, symmetric Larry) by
-/// tools/larry_pixel.py, which owns the blink frame and the Codex pet export.
-/// Identity features preserved per Director history: paired dark-interior
-/// ears, bandit mask, LARGE brown eyes with cream catchlights, dark nose,
-/// open smile with tongue. Voice: warm, calm, concrete — never decoration.
-pub(super) const MASCOT: [&str; 24] = [
-    "........................",
-    "...dd..............dd...",
-    "..dddd............dddd..",
-    "..dddd............dddd..",
-    "..dggd............dggd..",
-    "..dggd............dggd..",
-    "..dgg..............ggd..",
-    "..dgggg..........ggggd..",
-    "..dggggggggggggggggggd..",
-    ".dggggggggggggggggggggd.",
-    ".dggdddddddggdddddddggd.",
-    ".dggddbbbbdggdbbbbddggd.",
-    ".dggddbcbbdggdbbcbddggd.",
-    ".dggddbcbbdggdbbcbddggd.",
-    ".dggddbbbbdggdbbbbddggd.",
-    ".dggdddddddggdddddddggd.",
-    ".dggggggccccccccggggggd.",
-    ".dgggggccccccccccgggggd.",
-    ".dggggccccddddccccggggd.",
-    ".dggggccccddddccccggggd.",
-    ".dgggggccccccccccgggggd.",
-    ".dgggggcddddddddcgggggd.",
-    ".dgggggcdttttttdcgggggd.",
-    "...dddddddddddddddddd...",
-];
+// Blocky Larry, the 24x24 pixel raccoon: the one grid in `crate::mascot`, which also draws the
+// SVG, the preview and the pet package. Voice: warm, calm, concrete, never decoration.
+use crate::mascot::OPEN as MASCOT;
 
 /// Brand palette -> ANSI16 (no TRUE_COLORS in the estate build; ANSI16 also
 /// renders identically on every terminal). '.' = transparent (skip cell).

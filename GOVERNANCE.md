@@ -77,8 +77,10 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
   the 120-line law on every governed document; a split document is read as its index and parts (ADR 0015).
   Its negative controls run in the workspace tests. It checks structure, never runtime behaviour, Mermaid
   rendering or prose truth.
-- Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests.
+- Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests on
+  `cargo nextest run --workspace --locked`, the `cargo local-ci` tests lane (larry#154).
 - `issue-link` in CI: a PR whose `closingIssuesReferences` is empty fails (larry#103, ADR 0012).
+- `larry mascot --check` in CI and locally: `docs/larry-mascot.svg` equals the render of the one grid (ADR 0014).
 
 ## CI and platform enforcement
 
@@ -90,9 +92,10 @@ never claim enforcement GitHub does not apply.
 
 ## Open governance debt
 
-- larry#53: the checker, tracker and local CI are Rust (step 1, ADR 0010), the reranker too (step 3,
-  `larry-rerank`, ADR 0013), and the over-size documents are split under the law the checker now
-  enforces (step 6, ADR 0015); port the PTY journeys and pixel tool; CI to nextest.
+- larry#53: the checker, tracker and local CI (step 1, ADR 0010), the demo and PTY journeys and workspace
+  probe (step 2, ADR 0011), the reranker (step 3, ADR 0013) and the pixel mascot (step 4, ADR 0014) are
+  Rust, CI's tests run on nextest (step 5, larry#154), and the over-size documents are split under the law
+  the checker enforces (step 6, ADR 0015); the debt closes as the last of these lands on main.
 - Falsifier PRs #20 (E47), #21 (E28), #22 (E71) and #25 (E30) land at larry#68 step 5, after step 4 wires
   the runtime into the run path; the E47 port and its recipe are on PR #20. PR #50 merged 2026-11-03.
 

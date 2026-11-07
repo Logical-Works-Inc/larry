@@ -20,7 +20,7 @@ mod sim_markdown;
 #[cfg(test)]
 mod sim_parsers;
 #[cfg(test)]
-mod sim_support;
+pub(crate) mod sim_support;
 #[cfg(test)]
 mod sim_tracker;
 #[cfg(test)]
