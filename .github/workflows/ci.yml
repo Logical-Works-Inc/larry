@@ -30,7 +30,20 @@ jobs:
       # different thing from the standard it appears to enforce, and a green
       # check would mean less than a reader would take it to mean.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --locked
+      # The reranker engine is feature-gated (larry#150, ADR 0013): lint the
+      # binary with it on, so the gated path never rots unbuilt.
+      - run: cargo clippy --locked --features rerank --bin larry-rerank -- -D warnings
+      # The test lane AGENTS.md declares and `cargo local-ci` runs (larry#154).
+      # Hosted legs install nextest; the self-hosted leg keeps `cargo test` so
+      # a job never installs tools into the shared machine (see sim.yml).
+      - if: ${{ !github.event.repository.private }}
+        uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
+        with:
+          tool: nextest
+      - if: ${{ !github.event.repository.private }}
+        run: cargo nextest run --workspace --locked
+      - if: ${{ github.event.repository.private }}
+        run: cargo test --workspace --all-targets --locked
 
   # The specification and governance lanes, carried over from Larry's
   # workflow. Action SHAs are pinned here because this job ran that way
@@ -39,8 +52,6 @@ jobs:
   governance:
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
-    env:
-      PYTHONDONTWRITEBYTECODE: "1"
     # The same steps as governance.yml's docs-check.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -57,7 +68,8 @@ jobs:
       - name: Build the larry binary
         run: cargo build --locked --bin larry
       # `larry governance` replaced tools/check_governance.py (larry#53, ADR 0010);
-      # its controls run in the rust job's workspace tests.
+      # its controls and the reranker's (larry#150, ADR 0013) run in the rust
+      # job's workspace tests.
       - name: Check specification and governance
         run: target/debug/larry governance --report > "$RUNNER_TEMP/larry-governance.json"
       - name: Check the tracker render
@@ -67,10 +79,6 @@ jobs:
       - name: Check the mascot render
         if: always()
         run: target/debug/larry mascot --check
-      # The reranker's controls stay Python until larry#53 step 3 ports it.
-      - name: Exercise reranker controls
-        if: always()
-        run: python3 -m unittest discover -s tests -v
       - name: Check whitespace
         if: always()
         env:

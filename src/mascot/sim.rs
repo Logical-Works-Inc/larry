@@ -6,10 +6,11 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
 use lgwks_std::seeded::Seeded;
+
+use crate::governance::sim_support::Scratch;
 
 use super::webp::{WebpError, encode};
 use super::{
@@ -25,29 +26,6 @@ const SEEDS: u64 = 64;
 const ORDER: [usize; 19] = [
     17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 ];
-/// Distinguishes scratch roots inside one process.
-static ROOTS: AtomicU64 = AtomicU64::new(0);
-
-/// A scratch directory, removed on drop.
-struct Root(PathBuf);
-
-impl Root {
-    /// A fresh empty directory under the system temporary directory.
-    fn new() -> Check<Self> {
-        let sequence = ROOTS.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("larry-mascot-{}-{sequence}", std::process::id()));
-        fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Root {
-    fn drop(&mut self) {
-        drop(fs::remove_dir_all(&self.0));
-    }
-}
-
 /// An LSB-first bit reader over a VP8L payload.
 struct Reader<'bytes> {
     /// The payload.
@@ -546,12 +524,12 @@ fn sim_command_lines_get_their_exact_refusal() -> Check {
 
 #[test]
 fn a_drifted_svg_fails_the_check_and_writes_replace_whole() -> Check {
-    let root = Root::new()?;
-    let svg_path = root.0.join("docs").join("larry-mascot.svg");
+    let root = Scratch::new("mascot")?;
+    let svg_path = root.path().join("docs").join("larry-mascot.svg");
     let check = to_os(&[
         String::from("--check"),
         String::from("--root"),
-        root.0.display().to_string(),
+        root.path().display().to_string(),
     ]);
     let mut out: Vec<u8> = Vec::new();
     let missing = run(&check, &mut out);
@@ -582,7 +560,7 @@ fn a_drifted_svg_fails_the_check_and_writes_replace_whole() -> Check {
         matches!(run(&check, &mut out), Err(MascotError::TooLarge(_))),
         "an oversize SVG is refused before comparing"
     );
-    let pet = root.0.join("pet");
+    let pet = root.path().join("pet");
     let pet_args = to_os(&[String::from("--pet"), pet.display().to_string()]);
     run(&pet_args, &mut out)?;
     run(&pet_args, &mut out)?;
