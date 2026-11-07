@@ -48,8 +48,10 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task
   against the mock model and verifies its receipt: PR #140, 8 seeds replayed to one trace and diff, every
   fault refused unsealed, 607 tests in 11.4 s; submitted task p50 108.1 ms, p99 148.3 ms (16 runs, debug, mock).
-- [ ] #87 matched task set, Claude alone against Claude plus Flash. Proof: cost per accepted task,
-  acceptance rate, p50/p95/p99 and peak RSS printed for both arms.
+- [x] #87 matched task set, Claude alone against Claude plus Flash. Proof: cost per accepted task,
+  acceptance rate, p50/p95/p99 and peak RSS printed for both arms: PR #141, `larry eval` ships it; 5 binary
+  journeys and 5 unit sims, 617 tests in 12.1 s; matched-v1 on the mock p50 97.8 ms, p99 114.9 ms per task,
+  peak RSS 12.1 MiB (debug); scored runs are #95.
 - [ ] #124 v0.1.0 release with #87's numbers. Proof: `gh release view v0.1.0`; a clean
   `cargo install --git ... --tag v0.1.0 --locked` serves `larry mcp`.
 

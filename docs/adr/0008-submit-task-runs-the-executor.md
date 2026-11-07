@@ -48,4 +48,4 @@ Claude can check offline, never reporting success for work that did not pass.
 - A tool call holds the stdio loop until its run ends (clone, completions, commands); the MCP Tasks
   extension for long calls is not used yet, so a client's tool timeout bounds the run.
 - The tool's bounds now equal the executor's: 64 files and 16 commands (were 256 and 32 advertised).
-- Model cost per task is one completion per file; #87 measures cost per accepted task on real models.
+- Model cost per task is one completion per file; `larry eval` (#87, ADR 0009) prices each accepted task.

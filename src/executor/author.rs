@@ -71,7 +71,7 @@ impl Brief {
 
 /// A path the model may write: non-empty, bounded, NUL-free, relative, made of
 /// normal components only (no `.`, `..`, root or prefix), none of them `.git`.
-fn is_writable_path(path: &str) -> bool {
+pub(crate) fn is_writable_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= MAX_PATH_BYTES
         && !path.contains('\0')
@@ -164,10 +164,13 @@ pub(crate) fn author(
         }
         fs::write(&target, content.as_bytes())
             .map_err(|cause| refused(path, AuthorFault::Io(cause)))?;
+        let usage = completion.usage();
         authored.push(json!({
             "path": path,
             "bytes": content.len(),
             "existed": current.is_some(),
+            "prompt_tokens": usage.map(|spent| spent.prompt_tokens),
+            "completion_tokens": usage.map(|spent| spent.completion_tokens),
         }));
     }
     Ok(authored)

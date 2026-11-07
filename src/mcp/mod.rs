@@ -53,7 +53,11 @@ fn capabilities() -> Value {
 
 /// Serves MCP until the reader reaches end of input. The executor behind
 /// `larry_submit_task` is read from the environment once, as the process starts.
-pub(crate) fn serve<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<()> {
+///
+/// # Errors
+///
+/// The reader or the writer failed; a malformed or oversized frame is answered, never an error.
+pub fn serve<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<()> {
     let executor = tools::Executor::from_env(|name| std::env::var(name).ok());
     serve_bounded(reader, writer, wire::MAX_FRAME_BYTES, &executor)
 }

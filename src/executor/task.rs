@@ -190,6 +190,30 @@ impl Task {
             bytes: bytes.to_vec(),
         })
     }
+
+    /// The task a planner hands over (`larry mcp`, `larry eval`): `repo` at `HEAD`,
+    /// the brief, and each acceptance command run as `sh -c <command>`. It renders
+    /// the one task document and parses it, so every door shares one parser and
+    /// one digest names the run (ADR 0008).
+    pub(crate) fn shell(
+        repo: &str,
+        goal: &str,
+        files: &[&str],
+        acceptance: &[&str],
+    ) -> Result<Task, TaskError> {
+        let commands: Vec<lgwks_std::json::Value> = acceptance
+            .iter()
+            .map(|command| lgwks_std::json::json!(["sh", "-c", command]))
+            .collect();
+        let document = lgwks_std::json::json!({
+            "repo": repo,
+            "base": "HEAD",
+            "goal": goal,
+            "files": files,
+            "acceptance": commands,
+        });
+        Task::parse(document.to_string().as_bytes())
+    }
 }
 
 /// Why a task document was refused.
