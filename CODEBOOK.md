@@ -78,7 +78,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `theme` | View colours |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008) |
 | `governance` | `larry governance`: the structural checker over the governed documents and its report (ADR 0010) |
-| `governance::documents` | The bounded load of the top-level documents and the `docs/` tree |
+| `governance::documents` | The bounded load of the top-level documents and the `docs/` tree; split documents read whole (ADR 0015) |
 | `governance::markdown` | Frontmatter, fences, local links and GitHub heading ids |
 | `governance::inventory` | The R, D, E, C and axis inventories, traceability, cells, log drift, crash cases |
 | `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |

@@ -13,7 +13,7 @@ use lgwks_std::seeded::Seeded;
 
 use super::documents::{DOCUMENTS, MAX_DOCUMENT_BYTES, MAX_DOCUMENTS};
 use super::patterns::Patterns;
-use super::sim_support::{Scratch, SimError, SimResult, assert_refused, pick, root};
+use super::sim_support::{Scratch, SimError, SimResult, assert_refused, loaded, pick, root};
 use super::{check, pyjson, receipts, tracker};
 
 /// Seeds the scratch-tree simulations run.
@@ -30,9 +30,10 @@ fn tracker_scratch() -> Result<Scratch, SimError> {
         let relative = format!("tools/tracker/{name}");
         scratch.write(&relative, &fs::read(root().join(&relative))?)?;
     }
+    // The whole specification, index and parts (larry#155): the text the drift rule reads.
     scratch.write(
         "specification.md",
-        &fs::read(root().join("specification.md"))?,
+        loaded()?.whole("specification.md").as_bytes(),
     )?;
     Ok(scratch)
 }

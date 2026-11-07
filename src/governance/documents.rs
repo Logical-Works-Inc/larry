@@ -19,6 +19,14 @@ pub(crate) const DOCUMENTS: [&str; 7] = [
     "GOVERNANCE.md",
     "log.md",
 ];
+/// The top-level documents split into parts to meet the 120-line law (larry#155): each keeps its
+/// name as an index, and every governed document under its directory is one of its parts, in
+/// load order. The rules that read a whole document read the index and then each part's body.
+pub(crate) const SPLIT: [(&str, &str); 3] = [
+    ("specification.md", "docs/specification/"),
+    ("research-ledger.md", "docs/research-ledger/"),
+    ("log.md", "docs/log/"),
+];
 /// The directory whose `*.md` entries join the admitted set, at any depth.
 const DOCS_DIRECTORY: &str = "docs";
 /// Largest admitted document, in bytes.
@@ -60,6 +68,48 @@ impl Documents {
         })
     }
 
+    /// The whole text of `name`: its own text, then, for a split document, each part's body after
+    /// its frontmatter, in load order. A document that is not split is its own text.
+    pub(crate) fn whole(&self, name: &str) -> String {
+        let mut whole = String::from(self.text(name));
+        if let Some(directory) = parts_directory(name) {
+            for (part, text) in self.iter() {
+                if part.starts_with(directory) {
+                    whole.push_str(body(text));
+                }
+            }
+        }
+        whole
+    }
+
+    /// The physical document of `name` (its index or a part) whose text holds `needle`, first in
+    /// load order: where a control's edit of the whole document lands.
+    #[cfg(test)]
+    pub(crate) fn holder(&self, name: &str, needle: &str) -> Option<String> {
+        let directory = parts_directory(name);
+        self.iter()
+            .filter(|&(physical, _)| {
+                physical == name || directory.is_some_and(|parts| physical.starts_with(parts))
+            })
+            .find(|&(_, text)| text.contains(needle))
+            .map(|(physical, _)| String::from(physical))
+    }
+
+    /// The last physical document of `name`: where text appended to the whole document lands.
+    #[cfg(test)]
+    pub(crate) fn last_of(&self, name: &str) -> String {
+        let directory = parts_directory(name);
+        let last = self
+            .iter()
+            .filter(|&(physical, _)| directory.is_some_and(|parts| physical.starts_with(parts)))
+            .last()
+            .map(|(physical, _)| String::from(physical));
+        match last {
+            Some(part) => part,
+            None => String::from(name),
+        }
+    }
+
     /// The documents sorted by name, the order the report's digests are listed in.
     pub(crate) fn sorted(&self) -> impl Iterator<Item = (&str, &str)> {
         self.texts
@@ -82,6 +132,26 @@ impl Documents {
     pub(crate) fn remove(&mut self, name: &str) {
         self.order.retain(|kept| kept != name);
         self.texts.remove(name);
+    }
+}
+
+/// The parts directory of a split document, `None` for one that is not split.
+fn parts_directory(name: &str) -> Option<&'static str> {
+    SPLIT
+        .iter()
+        .find(|&&(index, _)| index == name)
+        .map(|&(_, directory)| directory)
+}
+
+/// The text after the frontmatter envelope (`---\n ... \n---\n`), or all of it without one.
+fn body(text: &str) -> &str {
+    let after = text.strip_prefix("---\n").and_then(|rest| {
+        rest.find("\n---\n")
+            .and_then(|end| rest.get(end.saturating_add("\n---\n".len())..))
+    });
+    match after {
+        Some(rest) => rest,
+        None => text,
     }
 }
 
