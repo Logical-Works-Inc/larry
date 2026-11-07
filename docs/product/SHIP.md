@@ -52,6 +52,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
   acceptance rate, p50/p95/p99 and peak RSS printed for both arms: PR #141, `larry eval` ships it; 5 binary
   journeys and 5 unit sims, 617 tests in 12.1 s; matched-v1 on the mock p50 97.8 ms, p99 114.9 ms per task,
   peak RSS 12.1 MiB (debug); scored runs are #95.
+- [x] #142 README lists the shipped doors and the v0.1.0 install line (part of #124): docs-check green.
 - [ ] #124 v0.1.0 release with #87's numbers. Proof: `gh release view v0.1.0`; a clean
   `cargo install --git ... --tag v0.1.0 --locked` serves `larry mcp`.
 
