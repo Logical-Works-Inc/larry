@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use lgwks_std::seeded::Seeded;
 
 use super::documents::{Documents, MAX_DOCUMENT_BYTES};
-use super::markdown;
+use super::markdown::{self, FIELDS};
 use super::patterns::{INVENTORIES, Patterns};
 use super::sim_support::{
     SimError, SimResult, assert_refused, count_of, docs_tree, errors_of, loaded, names_of, pick,
@@ -110,15 +110,31 @@ fn sim_missing_frontmatter_is_named() -> SimResult {
     Ok(())
 }
 
-/// One seeded key line of one seeded document of `names`, with its document.
+/// One seeded key line, among those `keep` admits, of one seeded document of `names`, with its
+/// document.
 fn seeded_key_line(
     rng: &mut Seeded,
     base: &Documents,
     names: &[String],
+    keep: fn(&str) -> bool,
 ) -> Result<(String, String), SimError> {
     let name = pick(rng, names)?.clone();
-    let lines = key_lines(&text_of(base, &name)?);
+    let lines: Vec<String> = key_lines(&text_of(base, &name)?)
+        .into_iter()
+        .filter(|line| keep(line))
+        .collect();
     Ok((name, pick(rng, &lines)?.clone()))
+}
+
+/// Every key line.
+fn any_key(_line: &str) -> bool {
+    true
+}
+
+/// A key line whose key is one the checker requires; renaming any other key misses nothing.
+fn required_key(line: &str) -> bool {
+    line.split_once(':')
+        .is_some_and(|(key, _)| FIELDS.contains(&key))
 }
 
 /// Ports `test_duplicate_frontmatter`: any key written twice is refused.
@@ -128,7 +144,7 @@ fn sim_duplicate_frontmatter_key_is_refused() -> SimResult {
     let names = names_of(&base);
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
-        let (name, line) = seeded_key_line(&mut rng, &base, &names)?;
+        let (name, line) = seeded_key_line(&mut rng, &base, &names, any_key)?;
         let mut documents = base.clone();
         replace_once(
             &mut documents,
@@ -145,15 +161,16 @@ fn sim_duplicate_frontmatter_key_is_refused() -> SimResult {
     Ok(())
 }
 
-/// Ports `test_docs_tree_frontmatter_is_enforced`: a renamed key in any docs-tree document is
-/// reported missing by name.
+/// Ports `test_docs_tree_frontmatter_is_enforced`: a renamed required key in any docs-tree
+/// document is reported missing by name. An extra key such as `updated` is not required, so
+/// renaming it misses nothing; seed 14 drew one once the tree gained ADR 0012.
 #[test]
 fn sim_docs_tree_frontmatter_is_enforced() -> SimResult {
     let base = loaded()?;
     let tree = docs_tree(&base);
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
-        let (name, line) = seeded_key_line(&mut rng, &base, &tree)?;
+        let (name, line) = seeded_key_line(&mut rng, &base, &tree, required_key)?;
         let Some((key, value)) = line.split_once(':') else {
             return Err(Box::new(SimError::Absent(String::from("a key line"))));
         };

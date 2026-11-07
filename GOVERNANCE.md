@@ -77,6 +77,7 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
   Its negative controls run in the workspace tests. It checks structure, never runtime behaviour, Mermaid
   rendering or prose truth.
 - Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests.
+- `issue-link` in CI: a PR whose `closingIssuesReferences` is empty fails (larry#103, ADR 0012).
 
 ## CI and platform enforcement
 
