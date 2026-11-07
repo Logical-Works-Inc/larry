@@ -28,8 +28,9 @@ struct Lane {
 
 /// No lane runs Python (larry#53): the demo and PTY journeys (step 2, ADR 0011)
 /// and the reranker's controls (step 3, ADR 0013) run in the tests lane; the
-/// reranker lane lints its feature-gated engine (larry#150).
-const LANES: [Lane; 9] = [
+/// reranker lane lints its feature-gated engine (larry#150), and the mascot
+/// lane checks the committed render (step 4, ADR 0014).
+const LANES: [Lane; 10] = [
     Lane {
         name: "build",
         program: "cargo",
@@ -72,6 +73,12 @@ const LANES: [Lane; 9] = [
         name: "tracker",
         program: "target/debug/larry",
         args: &["tracker", "--check"],
+        env: &[],
+    },
+    Lane {
+        name: "mascot",
+        program: "target/debug/larry",
+        args: &["mascot", "--check"],
         env: &[],
     },
     Lane {

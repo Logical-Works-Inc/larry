@@ -75,6 +75,10 @@ jobs:
       - name: Check the tracker render
         if: always()
         run: target/debug/larry tracker --check
+      # `larry mascot` replaced tools/rocco_pixel.py (larry#152, ADR 0014).
+      - name: Check the mascot render
+        if: always()
+        run: target/debug/larry mascot --check
       - name: Check whitespace
         if: always()
         env:
