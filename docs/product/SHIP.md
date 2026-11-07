@@ -45,8 +45,9 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #86 signed receipts over the journal (ed25519). Proof: a tampered receipt is refused; a denied run
   never reports success: PR #134, `larry verify` and `larry key` ship it; 6 binary journeys and 5 unit sims,
   598 tests in 11.0 s; verify p50 4.6 ms, p99 5.0 ms against a rerun at p50 64.7 ms (32 runs, debug).
-- [ ] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task
-  against the mock model and verifies its receipt.
+- [x] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task
+  against the mock model and verifies its receipt: PR #140, 8 seeds replayed to one trace and diff, every
+  fault refused unsealed, 607 tests in 11.4 s; submitted task p50 108.1 ms, p99 148.3 ms (16 runs, debug, mock).
 - [ ] #87 matched task set, Claude alone against Claude plus Flash. Proof: cost per accepted task,
   acceptance rate, p50/p95/p99 and peak RSS printed for both arms.
 - [ ] #124 v0.1.0 release with #87's numbers. Proof: `gh release view v0.1.0`; a clean

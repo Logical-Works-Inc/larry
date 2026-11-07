@@ -2,15 +2,15 @@
 //! and `larry key` commands (larry#85, larry#86): a temp state directory, an
 //! origin repository, the child process with a cleared environment, and the
 //! readers of its sealed JSON report. Both `tests/executor_journey.rs` and
-//! `tests/receipt_journey.rs` call every helper here.
+//! `tests/receipt_journey.rs` call every helper here. The temp directory and
+//! the origin repository live in `tests/support/origin.rs`, shared with the
+//! MCP journey (larry#123).
 
 use std::error::Error;
 use std::ffi::OsStr;
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
@@ -22,85 +22,9 @@ pub type TestResult = Result<(), Box<dyn Error>>;
 /// Polls a condition at most this many times before the journey gives up.
 pub const POLL_LIMIT: u32 = 100_000;
 
-/// A fresh directory under the system temp dir, removed when dropped.
-pub struct TempDir {
-    /// Where the directory lives.
-    path: PathBuf,
-}
-
-impl TempDir {
-    /// Creates an empty directory whose name no other test in this process uses.
-    pub fn new() -> io::Result<TempDir> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let run = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("larry-exec-{}-{run}", std::process::id()));
-        fs::remove_dir_all(&path).ok();
-        fs::create_dir_all(&path)?;
-        Ok(TempDir { path })
-    }
-
-    /// The directory path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // Cleanup is best effort: a leftover temp dir must never fail a journey.
-        fs::remove_dir_all(&self.path).ok();
-    }
-}
-
-/// A state dir for the executor and a fresh origin repository, in that order.
-pub fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
-    let state = TempDir::new()?;
-    let origin = TempDir::new()?;
-    origin_repo(origin.path())?;
-    Ok((state, origin))
-}
-
-/// Runs `git -C dir <args>` and fails with git's stderr when it exits non-zero.
-fn git(dir: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
-    let output = Command::new("git").arg("-C").arg(dir).args(args).output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "git {args:?} in {} failed: {}",
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
-    }
-}
-
-/// Makes `dir` a git repository with one commit holding `README` and `src/lib.rs`.
-/// Automatic maintenance is off before the first commit: `git commit` otherwise forks
-/// `git maintenance run --auto --detach`, whose object-database lock file can appear
-/// under `.git/objects` while a journey hashes the origin (larry#138).
-fn origin_repo(dir: &Path) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(dir.join("src"))?;
-    fs::write(dir.join("README"), "origin readme\n")?;
-    fs::write(dir.join("src").join("lib.rs"), "pub fn origin() {}\n")?;
-    git(dir, &["init", "-q"])?;
-    git(dir, &["config", "maintenance.auto", "false"])?;
-    git(dir, &["config", "gc.auto", "0"])?;
-    git(dir, &["add", "-A"])?;
-    git(
-        dir,
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-qm",
-            "init",
-        ],
-    )?;
-    Ok(())
-}
+#[path = "origin.rs"]
+mod origin;
+pub use origin::{TempDir, fixture};
 
 /// Creates a named pipe at `path`.
 pub fn make_fifo(path: &Path) -> Result<(), Box<dyn Error>> {

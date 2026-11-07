@@ -11,7 +11,9 @@
 //! No `notifications/message` is ever sent: the spec forbids it without a
 //! per-request `logLevel`, and this server emits no logs over the wire at all.
 
-use super::{INSTRUCTIONS, MODERN_VERSION, capabilities, identity, supported_versions, wire};
+use super::{
+    INSTRUCTIONS, MODERN_VERSION, capabilities, identity, supported_versions, tools::Executor, wire,
+};
 use lgwks_std::json::{Map, Value, json};
 
 /// `_meta` key: the protocol version of this request (required).
@@ -65,7 +67,12 @@ pub(super) fn missing_meta(id: &Value) -> Value {
 }
 
 /// Answers one stateless request: version, then method, then the rest of `_meta`.
-pub(super) fn request(id: &Value, method: &str, params: Option<&Map>) -> Value {
+pub(super) fn request(
+    id: &Value,
+    method: &str,
+    params: Option<&Map>,
+    executor: &Executor,
+) -> Value {
     let Some(meta) = meta_of(params) else {
         return missing_meta(id);
     };
@@ -88,7 +95,7 @@ pub(super) fn request(id: &Value, method: &str, params: Option<&Map>) -> Value {
     match method {
         "server/discover" => complete(id, discover(), true),
         "tools/list" => super::list_tools(id, params, &|body| finish(body, true)),
-        _ => super::call_tool(id, params, &|body| finish(body, false)),
+        _ => super::call_tool(id, params, executor, &|body| finish(body, false)),
     }
 }
 
@@ -161,7 +168,7 @@ fn complete(id: &Value, body: Value, cacheable: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_meta, is_stateless, request};
+    use super::{Executor, check_meta, is_stateless, request};
     use lgwks_std::json::{Map, Value, json};
 
     /// A request's params as a map.
@@ -216,9 +223,10 @@ mod tests {
             json!({"_meta": {"io.modelcontextprotocol/protocolVersion": version,
                 "io.modelcontextprotocol/clientCapabilities": {}}})
         };
-        let old = request(&id, "ping", params(&at("2025-11-25")));
+        let absent = Executor::Absent(String::from("no executor in a unit test"));
+        let old = request(&id, "ping", params(&at("2025-11-25")), &absent);
         assert_eq!(old["error"]["code"], -32022, "older revision");
-        let now = request(&id, "ping", params(&at("2026-07-28")));
+        let now = request(&id, "ping", params(&at("2026-07-28")), &absent);
         assert_eq!(now["error"]["code"], -32601, "removed method");
     }
 }
