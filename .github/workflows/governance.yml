@@ -35,8 +35,6 @@ jobs:
     # Runner by visibility (larry#116, see sim.yml).
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
-    env:
-      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -57,11 +55,9 @@ jobs:
       - name: Check the tracker render
         if: always()
         run: target/debug/larry tracker --check
-      # The governance controls run with the workspace tests (ci.yml, rust). The
-      # reranker's controls stay Python until larry#53 step 3 ports it.
-      - name: Exercise reranker controls
-        if: always()
-        run: python3 -m unittest discover -s tests -v
+      # The governance and reranker controls (larry#150, ADR 0013) run with the
+      # workspace tests (ci.yml, rust); `larry governance` above admits the
+      # BLAKE3 receipts `larry-rerank` writes.
       - name: Check whitespace
         if: always()
         env:

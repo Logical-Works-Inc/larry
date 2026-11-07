@@ -29,8 +29,9 @@ struct Lane {
     journeys: Option<usize>,
 }
 
-/// Python stays only in the lanes larry#53 has not ported yet: the reranker
-/// controls (step 3) and the demo and native PTY journeys (step 2).
+/// Python stays only in the lanes larry#53 has not ported yet: the demo and
+/// native PTY journeys (step 2). The reranker lane lints the feature-gated
+/// engine (larry#150); its controls run in the tests lane.
 const LANES: [Lane; 11] = [
     Lane {
         name: "build",
@@ -84,9 +85,19 @@ const LANES: [Lane; 11] = [
     },
     Lane {
         name: "reranker",
-        program: "python3",
-        args: &["-m", "unittest", "discover", "-s", "tests"],
-        env: &[("PYTHONDONTWRITEBYTECODE", "1")],
+        program: "cargo",
+        args: &[
+            "clippy",
+            "--locked",
+            "--features",
+            "rerank",
+            "--bin",
+            "larry-rerank",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        env: &[],
         journeys: None,
     },
     Lane {
@@ -388,14 +399,6 @@ fn list() -> Result<(), LocalCiError> {
         .map_err(LocalCiError::Log)
 }
 
-/// Writes one diagnostic line to standard error.
-fn diagnose(message: &str) -> io::Result<()> {
-    let mut stderr = io::stderr().lock();
-    stderr.write_all(b"local-ci: ")?;
-    stderr.write_all(message.as_bytes())?;
-    stderr.write_all(b"\n")
-}
-
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let outcome = match (args.next(), args.next()) {
@@ -406,7 +409,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if diagnose(&error.to_string()).is_err() {
+            if larry_demo::diagnose("local-ci", &error.to_string()).is_err() {
                 return ExitCode::FAILURE;
             }
             ExitCode::FAILURE

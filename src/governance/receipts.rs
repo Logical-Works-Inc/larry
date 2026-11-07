@@ -20,16 +20,20 @@ const RERANKER_REVISION: &str = "e61197ed45024b0ed8a2d74b80b4d909f1255473";
 const MAX_RECEIPTS: usize = 4096;
 /// Largest admitted receipt, in bytes.
 const MAX_RECEIPT_BYTES: u64 = 1_048_576;
-/// Keys every receipt must carry.
-const REQUIRED: [&str; 8] = [
+/// Keys every receipt must carry, beside exactly one digest pair of [`DIGEST_PAIRS`].
+const REQUIRED: [&str; 6] = [
     "phase",
     "model",
     "revision",
-    "query_sha256",
-    "candidates_sha256",
     "candidate_count",
     "top_k",
     "results",
+];
+/// The digest pairs a receipt may carry: SHA-256 from the retired Python tool, BLAKE3 from
+/// `larry-rerank` (larry#150, ADR 0013).
+const DIGEST_PAIRS: [[&str; 2]; 2] = [
+    ["query_sha256", "candidates_sha256"],
+    ["query_blake3", "candidates_blake3"],
 ];
 
 /// Every receipt error under `root`, in the Python order. A receipt that is not a JSON object is
@@ -118,8 +122,14 @@ fn receipt_phase(path: &Path) -> Result<String, ReceiptFault> {
         return Err(ReceiptFault::Shape);
     };
     let keys: BTreeSet<&str> = object.iter().map(|(key, _)| key).collect();
-    let required: BTreeSet<&str> = REQUIRED.iter().copied().collect();
-    let allowed: BTreeSet<&str> = REQUIRED.iter().copied().chain(["max_seconds"]).collect();
+    let Some(pair) = DIGEST_PAIRS
+        .iter()
+        .find(|pair| pair.iter().all(|key| keys.contains(key)))
+    else {
+        return Err(ReceiptFault::Shape);
+    };
+    let required: BTreeSet<&str> = REQUIRED.iter().chain(pair.iter()).copied().collect();
+    let allowed: BTreeSet<&str> = required.iter().copied().chain(["max_seconds"]).collect();
     if !required.is_subset(&keys) || !keys.is_subset(&allowed) {
         return Err(ReceiptFault::Shape);
     }
@@ -133,7 +143,7 @@ fn receipt_phase(path: &Path) -> Result<String, ReceiptFault> {
     {
         return Err(ReceiptFault::Shape);
     }
-    if !bounds_hold(&receipt) {
+    if !bounds_hold(&receipt, pair) {
         return Err(ReceiptFault::Bounds);
     }
     phase.ok_or(ReceiptFault::Shape)
@@ -144,8 +154,8 @@ fn receipt_string(receipt: &Value, key: &str) -> Option<String> {
     receipt.get(key).and_then(Value::as_str).map(String::from)
 }
 
-/// Whether the counts, bounds, hashes and result shapes of a receipt all hold.
-fn bounds_hold(receipt: &Value) -> bool {
+/// Whether the counts, bounds, `pair` digests and result shapes of a receipt all hold.
+fn bounds_hold(receipt: &Value, pair: &[&str; 2]) -> bool {
     let (Some(candidates), Some(top_k)) = (
         integer(receipt, "candidate_count"),
         integer(receipt, "top_k"),
@@ -155,7 +165,7 @@ fn bounds_hold(receipt: &Value) -> bool {
     if top_k < 1 || top_k > candidates || candidates > 256 {
         return false;
     }
-    if !seconds_hold(receipt) || !digests_hold(receipt) {
+    if !seconds_hold(receipt) || !digests_hold(receipt, pair) {
         return false;
     }
     let Some(results) = receipt.get("results").and_then(Value::as_array) else {
@@ -186,9 +196,9 @@ fn seconds_hold(receipt: &Value) -> bool {
     }
 }
 
-/// Both digests are 64 lowercase hex digits.
-fn digests_hold(receipt: &Value) -> bool {
-    ["query_sha256", "candidates_sha256"].iter().all(|key| {
+/// Both digests of `pair` are 64 lowercase hex digits.
+fn digests_hold(receipt: &Value, pair: &[&str; 2]) -> bool {
+    pair.iter().all(|key| {
         receipt
             .get(key)
             .and_then(Value::as_str)

@@ -43,9 +43,9 @@ INVARIANTS.md and the plan before the first edit.
 
 - Locate code with `codegraph`, recall estate memory with `wwfd query`, read with the Read tool.
 - Before an owned edit: `design-gate.mjs research` then `design-gate.mjs plan` from the repository root.
-- The local reranker mandate (`tools/rerank_local.py`, pre/post receipts) is retired by the Python ban
-  (2026-10-13). Retained receipts stay as history; no new receipt is required, and `larry governance`
-  still checks that they are well formed.
+- The reranker mandate (pre/post receipts) is retired by the Python ban (2026-10-13); no new receipt is
+  required. `larry-rerank` (`--features rerank`, ADR 0013) ranks with the pinned local Qwen3 when wanted,
+  and `larry governance` checks every receipt, retained SHA-256 or new BLAKE3, is well formed.
 - Answer implementation questions from the repository's own text before asking the Director.
 
 ## Dependencies
@@ -71,8 +71,8 @@ target/debug/larry governance && target/debug/larry tracker --check   # `larry t
 lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
-The checker and tracker are Rust (ADR 0010); the PTY journeys and reranker controls stay Python, in CI only,
-until larry#53 ports them; agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
+The checker, tracker and reranker are Rust (ADR 0010, 0013); the PTY journeys stay Python, in CI only, until
+larry#53 ports them; agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
 picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
 once public, never self-hosted on a public repository (larry#116). Launch the demo with
 `cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.
