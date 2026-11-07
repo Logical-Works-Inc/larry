@@ -1,8 +1,36 @@
 name: Repository governance
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+    # `edited` reruns the issue link when only the body changes.
+    types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
 jobs:
+  # Every PR closes at least one issue through `Closes #N` in its body
+  # (Director 2026-11-03, larry#103). GitHub's own link, not a regex over the
+  # body, decides: `closingIssuesReferences` holds what the merge will close.
+  issue-link:
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Require a closing issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          closes="$(gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences --jq '[.closingIssuesReferences[].number] | map("#" + tostring) | join(" ")')"
+          if [ -z "$closes" ]; then
+            echo "::error::PR #$PR closes no issue: put 'Closes #N' in its body (larry#103)"
+            exit 1
+          fi
+          echo "PR #$PR closes $closes"
   docs-check:
     # Runner by visibility (larry#116, see sim.yml).
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}

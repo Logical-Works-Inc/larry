@@ -9,7 +9,7 @@ use super::patterns::Patterns;
 use super::pystr;
 
 /// The frontmatter keys every governed document declares, verbatim from the Python `FIELDS`.
-const FIELDS: [&str; 10] = [
+pub(crate) const FIELDS: [&str; 10] = [
     "type",
     "title",
     "description",
