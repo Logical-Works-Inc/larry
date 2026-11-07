@@ -521,6 +521,11 @@ fn local_ci_runs_the_rust_gate_and_no_python_governance_lane() -> TestResult {
         Some("target/debug/larry tracker --check"),
         "tracker runs the binary"
     );
+    assert_eq!(
+        command("mascot").as_deref(),
+        Some("target/debug/larry mascot --check"),
+        "the mascot render is checked by the binary (larry#152)"
+    );
     for lane in lanes {
         let line = lane
             .get("command")

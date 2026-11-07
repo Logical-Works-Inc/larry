@@ -1,15 +1,57 @@
 //! Effect-free fixture state behind the `larry` workspace demo and its native AppCUI view.
 //! Every command changes only this owned session; no backend is connected.
 
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use lgwks_std::json::{self, Serialize};
 
 pub mod eval;
 pub mod executor;
 pub mod governance;
+pub mod mascot;
 pub mod mcp;
 pub mod model;
 pub mod native;
 pub mod theme;
+
+/// Distinguishes the temporary files of concurrent replacements inside one process.
+static REPLACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Replaces `directory/name` with `bytes` atomically: a fresh temporary sibling, written and
+/// synced, then a rename over the target, so a killed write leaves the previous whole file. A
+/// failed write removes its temporary file; the error names the target, or the temporary file
+/// when it could not be removed. The tracker page and the mascot files are written this way.
+pub(crate) fn replace_file(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), (PathBuf, io::Error)> {
+    let output = directory.join(name);
+    let sequence = REPLACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = directory.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
+    let written = write_new(&temporary, bytes).and_then(|()| fs::rename(&temporary, &output));
+    written.map_err(|cause| {
+        let path = if fs::remove_file(&temporary).is_ok() {
+            output
+        } else {
+            temporary
+        };
+        (path, cause)
+    })
+}
+
+/// Creates `path`, refusing one that already exists, and writes and syncs `bytes` into it.
+fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
 
 /// Maximum command bytes, excluding the line terminator.
 pub const MAX_INPUT: usize = 4096;

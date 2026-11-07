@@ -31,7 +31,7 @@ struct Lane {
 
 /// Python stays only in the lanes larry#53 has not ported yet: the reranker
 /// controls (step 3) and the demo and native PTY journeys (step 2).
-const LANES: [Lane; 11] = [
+const LANES: [Lane; 12] = [
     Lane {
         name: "build",
         program: "cargo",
@@ -79,6 +79,13 @@ const LANES: [Lane; 11] = [
         name: "tracker",
         program: "target/debug/larry",
         args: &["tracker", "--check"],
+        env: &[],
+        journeys: None,
+    },
+    Lane {
+        name: "mascot",
+        program: "target/debug/larry",
+        args: &["mascot", "--check"],
         env: &[],
         journeys: None,
     },

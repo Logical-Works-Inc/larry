@@ -67,15 +67,15 @@ cargo build --bins --locked
 cargo nextest run --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
-target/debug/larry governance && target/debug/larry tracker --check   # `larry tracker` regenerates the page
+target/debug/larry governance && target/debug/larry tracker --check && target/debug/larry mascot --check
 lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
-The checker and tracker are Rust (ADR 0010); the PTY journeys and reranker controls stay Python, in CI only,
-until larry#53 ports them; agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
-picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
-once public, never self-hosted on a public repository (larry#116). Launch the demo with
-`cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.
+The checker, tracker and mascot are Rust (ADR 0010, 0014); `larry tracker` and `larry mascot --svg` regenerate.
+The PTY journeys and reranker controls stay Python, in CI only, until larry#53 ports them; agents may not run
+Python locally. `cargo local-ci` mirrors CI. Each CI job picks its runner from `github.event.repository.private`:
+the self-hosted Mac while private, `ubuntu-latest` once public, never self-hosted when public (larry#116).
+Launch the demo with `cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.
 
 ## Size law
 

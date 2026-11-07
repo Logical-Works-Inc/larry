@@ -5,9 +5,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_std::json::{self, Value};
 
@@ -26,8 +24,6 @@ const OUTPUT_NAME: &str = "index.html";
 const DATA_TOKEN: &str = "__TRACKER_DATA__";
 /// Largest admitted data file, template and page, in bytes.
 const MAX_TRACKER_BYTES: u64 = 4 * 1024 * 1024;
-/// Distinguishes the temporary files of concurrent writes inside one process.
-static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Every way the tracker render or write can fail. Each variant names what failed.
 #[derive(Debug)]
@@ -147,36 +143,12 @@ pub(crate) fn render(root: &Path) -> Result<String, TrackerError> {
 /// Returns a [`TrackerError`] when the render or the write fails.
 pub fn write(root: &Path) -> Result<usize, TrackerError> {
     let page = render(root)?;
-    let directory = directory(root);
-    let output = directory.join(OUTPUT_NAME);
-    let sequence = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = directory.join(format!(
-        ".{OUTPUT_NAME}.{}.{sequence}.tmp",
-        std::process::id()
-    ));
-    let written =
-        write_new(&temporary, page.as_bytes()).and_then(|()| fs::rename(&temporary, &output));
-    match written {
-        Ok(()) => Ok(page.len()),
-        Err(cause) => {
-            let removed = fs::remove_file(&temporary);
-            let path = if removed.is_ok() { output } else { temporary };
-            Err(TrackerError::Write {
-                path,
-                cause: cause.to_string(),
-            })
-        }
-    }
-}
-
-/// Creates `path`, refusing one that already exists, and writes and syncs `bytes` into it.
-fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    crate::replace_file(&directory(root), OUTPUT_NAME, page.as_bytes())
+        .map(|()| page.len())
+        .map_err(|(path, cause)| TrackerError::Write {
+            path,
+            cause: cause.to_string(),
+        })
 }
 
 /// Whether the committed `index.html` is a file equal to the render; a missing page is stale.
