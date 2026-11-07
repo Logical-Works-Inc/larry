@@ -64,6 +64,17 @@ larry-contracts = { path = "crates/larry-contracts" }
 lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign", "pattern"] }
 lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
 
+[features]
+# The local reranker (larry#150): Candle runs the pinned Qwen3 reranker and the Hugging Face
+# tokenizer encodes its prompts, both through the lgwks_deps storefront. Off by default, so the
+# default build, tests and every CI lane skip the engine; `larry-rerank` requires it.
+rerank = ["lgwks_deps/ml-candle", "lgwks_deps/ml-tokenizers"]
+
+[[bin]]
+name = "larry-rerank"
+path = "src/bin/larry-rerank.rs"
+required-features = ["rerank"]
+
 [dev-dependencies]
 # Test support only (tests/support/mock_model.rs, larry#82): the estate's BLAKE3
 # hasher for the mock endpoint's trace hash. Not a new crate and not in the

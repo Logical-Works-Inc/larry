@@ -9,7 +9,19 @@ pub mod governance;
 pub mod mcp;
 pub mod model;
 pub mod native;
+pub mod rerank;
 pub mod theme;
+
+/// Writes `program: message` and a newline to standard error: the one diagnostic line the
+/// `larry-local-ci` and `larry-rerank` binaries print before a failing exit.
+pub fn diagnose(program: &str, message: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut stderr = std::io::stderr().lock();
+    stderr.write_all(program.as_bytes())?;
+    stderr.write_all(b": ")?;
+    stderr.write_all(message.as_bytes())?;
+    stderr.write_all(b"\n")
+}
 
 /// Maximum command bytes, excluding the line terminator.
 pub const MAX_INPUT: usize = 4096;

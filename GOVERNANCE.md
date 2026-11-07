@@ -73,7 +73,7 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - `larry governance` in CI and locally (ADR 0010): frontmatter, local links, unique contiguous R, D, E, C and axis
   inventories that cannot shrink, requirement-to-decision-and-falsifier mapping, execution-cell allocation,
   log.md inventory agreement, the crash-case fraction, four diagrams in the specification, the owner and
-  memory anchors in AGENTS.md, retained reranker receipts and the tracker render (`larry tracker --check`).
+  memory anchors in AGENTS.md, reranker receipts (SHA-256 or BLAKE3, ADR 0013) and the tracker render.
   Its negative controls run in the workspace tests. It checks structure, never runtime behaviour, Mermaid
   rendering or prose truth.
 - Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests.
@@ -89,8 +89,9 @@ never claim enforcement GitHub does not apply.
 
 ## Open governance debt
 
-- larry#53: the checker, tracker and local CI are Rust (step 1, ADR 0010); port the PTY journeys, reranker
-  and pixel tool; split the over-size documents so the checker and the 120-line law agree; CI to nextest.
+- larry#53: the checker, tracker and local CI are Rust (step 1, ADR 0010), the reranker too (step 3,
+  `larry-rerank`, ADR 0013); port the PTY journeys and pixel tool; split the over-size documents so the
+  checker and the 120-line law agree; CI to nextest.
 - Falsifier PRs #20 (E47), #21 (E28), #22 (E71) and #25 (E30) land at larry#68 step 5, after step 4 wires
   the runtime into the run path; the E47 port and its recipe are on PR #20. PR #50 merged 2026-11-03.
 

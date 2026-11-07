@@ -4,8 +4,8 @@ title: Larry codebook
 description: Module map, owners and invariants for the Larry workspace.
 resource: /CODEBOOK.md
 tags: [larry, codebook, modules]
-generated: {by: claude-code, at: 2026-11-06}
-verified: {by: claude-code, method: read of each crate root and module declaration, 2026-11-06}
+generated: {by: claude-code, at: 2026-11-07}
+verified: {by: claude-code, method: read of each crate root and module declaration, 2026-11-07}
 status: public-alpha
 stale_after: 2026-12-06
 sources: [crates/larry-contracts/src/lib.rs, crates/larry-runtime/src/lib.rs, src/lib.rs, INVARIANTS.md]
@@ -54,7 +54,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 
 | Module | Owns |
 |---|---|
-| `lib` | The effect-free DEMO session state |
+| `lib` | The effect-free DEMO session state, and `diagnose`, the binaries' one stderr line |
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
@@ -82,7 +82,10 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::markdown` | Frontmatter, fences, local links and GitHub heading ids |
 | `governance::inventory` | The R, D, E, C and axis inventories, traceability, cells, log drift, crash cases |
 | `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |
-| `governance::receipts` | The retained reranker receipts' shape |
+| `governance::receipts` | The reranker receipts' shape, SHA-256 (retained) or BLAKE3 (ADR 0013) |
+| `rerank` | `larry-rerank`: the request, its bounds, the ranking and the create-exclusive receipt (ADR 0013) |
+| `rerank::qwen` | The pinned Qwen3 reranker on Candle and its tokenizer, feature `rerank` only |
+| `rerank::sim` | Seeded ports of the Python reranker controls, bounds, ranking and receipts |
 | `governance::tracker` | `larry tracker`: the tracker page rendered from `tools/tracker/tracker.json` |
 | `governance::pyjson` | JSON printed byte for byte as CPython's `json.dumps`, for the tracker page |
 | `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
@@ -91,6 +94,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `src/main.rs` | The demo binary entry |
 | `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
+| `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
 
 ## Invariants the module map carries
