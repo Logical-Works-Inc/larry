@@ -76,11 +76,16 @@ fn git(dir: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
 }
 
 /// Makes `dir` a git repository with one commit holding `README` and `src/lib.rs`.
+/// Automatic maintenance is off before the first commit: `git commit` otherwise forks
+/// `git maintenance run --auto --detach`, whose object-database lock file can appear
+/// under `.git/objects` while a journey hashes the origin (larry#138).
 fn origin_repo(dir: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(dir.join("src"))?;
     fs::write(dir.join("README"), "origin readme\n")?;
     fs::write(dir.join("src").join("lib.rs"), "pub fn origin() {}\n")?;
     git(dir, &["init", "-q"])?;
+    git(dir, &["config", "maintenance.auto", "false"])?;
+    git(dir, &["config", "gc.auto", "0"])?;
     git(dir, &["add", "-A"])?;
     git(
         dir,
