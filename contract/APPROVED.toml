@@ -25,8 +25,10 @@
 # it yet, so it is not an edge and needs no row.
 
 [policy]
+schema = 3
 enforce = true
 repository = "https://github.com/Logical-Works-Inc/larry"
+accepted_licenses = "MIT, Apache-2.0"
 
 # The one third-party edge in the workspace. Carried from the larry-runtime
 # admission, which recorded an owner and a reason but none of the sign-off
@@ -36,6 +38,7 @@ repository = "https://github.com/Logical-Works-Inc/larry"
 crate = "thiserror"
 tier = "boundary"
 version = "=2.0.20"
+license = "MIT OR Apache-2.0"
 owner = "larry-contracts"
 capability = "error-derive"
 source = "registry"
@@ -45,6 +48,11 @@ reason = "derive-backed std::error::Error implementations on the C02 contract er
 approved_by = "srinji-kaggss (Director)"
 approved_on = "2026-09-16"
 review = "https://github.com/srinji-kaggss/larry-runtime/commit/53c751220ddef57c694647b7da14eb3b88eda1df"
+[approved.retire]
+replacement = "std::error"
+blocker = "lgwks_std exposes no derive for std::error::Error (Logical-Works-Inc/logicalworks-crates#842), so the C02 contract errors would need hand-written Display and source impls."
+cost = { cold_build_s = 1.95, crates = 8, binary_bytes = 35024, measured = "2026-11-07", command = "cargo build --locked -p thiserror@2.0.20 --target-dir <fresh> (sccache on; crates from cargo tree -e normal,build; bytes are the thiserror rlib)" }
+review = "2027-02-07"
 
 # ── bevy_ecs: SUPERSEDED, NOT AN EDGE ────────────────────────────────────────
 #
