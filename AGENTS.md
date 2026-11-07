@@ -79,10 +79,10 @@ once public, never self-hosted on a public repository (larry#116). Launch the de
 
 ## Size law
 
-A `.md` file holds at most 120 lines; a code file at most 750 code lines and 1000 in all. specification.md,
-log.md, research-ledger.md and the other over-size documents are frozen until larry#53 splits them, because
-the checker reads them by name. Until then new directions land in the plan, INVARIANTS.md, this file,
-GOVERNANCE.md and GitHub issues, and log.md inventory lines move only when specification.md moves.
+A `.md` file holds at most 120 lines, and `larry governance` refuses one past it; a code file at most 750
+code lines and 1000 in all. specification.md, log.md and research-ledger.md are indexes over parts in
+`docs/<name>/`, read as one document (larry#155, ADR 0015): a new entry goes into the last part, or a new
+part when it is full, and log.md inventory lines move only when specification.md moves.
 
 ## Self-maintenance
 

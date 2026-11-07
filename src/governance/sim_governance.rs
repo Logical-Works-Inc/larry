@@ -12,8 +12,8 @@ use lgwks_std::seeded::Seeded;
 use super::documents::Documents;
 use super::patterns::{INVENTORIES, Inventory, Patterns};
 use super::sim_support::{
-    SimError, SimResult, assert_refused, count_of, errors_of, loaded, pick, replace_once, text_of,
-    top_level,
+    SimError, SimResult, append, assert_refused, count_of, errors_of, loaded, pick, replace_once,
+    text_of, top_level, whole_of,
 };
 use super::{ANCHORS, execution_section};
 
@@ -74,7 +74,7 @@ fn renamed_row(
     patterns: &Patterns,
     choose: &RowChoice,
 ) -> Result<(&'static Inventory, String, Vec<String>), SimError> {
-    let spec = text_of(base, "specification.md")?;
+    let spec = whole_of(base, "specification.md")?;
     let index = rng.index(INVENTORIES.len())?;
     let (Some(inventory), Some(row)) = (INVENTORIES.get(index), patterns.rows.get(index)) else {
         return Err(SimError::Absent(String::from("an inventory")));
@@ -242,7 +242,7 @@ fn requirement_rows(spec: &str, patterns: &Patterns) -> Vec<String> {
 fn sim_undefined_decision_is_named_exactly() -> SimResult {
     let base = loaded()?;
     let patterns = Patterns::new()?;
-    let spec = text_of(&base, "specification.md")?;
+    let spec = whole_of(&base, "specification.md")?;
     let rows = requirement_rows(&spec, &patterns);
     let decisions = count_of(&base, "decisions")?;
     for seed in 0..SEEDS {
@@ -255,12 +255,14 @@ fn sim_undefined_decision_is_named_exactly() -> SimResult {
             decisions.saturating_add(1).saturating_add(rng.index(800)?)
         );
         let mut documents = base.clone();
-        documents.set(
+        let holder = replace_once(
+            &mut documents,
             "specification.md",
-            spec.replacen(row.as_str(), &row.replacen(old, &undefined, 1), 1),
-        );
+            row.as_str(),
+            &row.replacen(old, &undefined, 1),
+        )?;
         let errors = errors_of(&documents)?;
-        let expected = format!("specification.md: undefined D references ['{undefined}']");
+        let expected = format!("{holder}: undefined D references ['{undefined}']");
         assert!(
             errors.contains(&expected),
             "seed {seed}: expected {expected:?} in {errors:?}"
@@ -275,7 +277,7 @@ fn sim_undefined_decision_is_named_exactly() -> SimResult {
 fn sim_missing_acceptance_mapping_is_reported_with_its_row() -> SimResult {
     let base = loaded()?;
     let patterns = Patterns::new()?;
-    let spec = text_of(&base, "specification.md")?;
+    let spec = whole_of(&base, "specification.md")?;
     let rows = requirement_rows(&spec, &patterns);
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
@@ -290,10 +292,7 @@ fn sim_missing_acceptance_mapping_is_reported_with_its_row() -> SimResult {
             stripped = stripped.replace(token, "none");
         }
         let mut documents = base.clone();
-        documents.set(
-            "specification.md",
-            spec.replacen(row.as_str(), &stripped, 1),
-        );
+        replace_once(&mut documents, "specification.md", row.as_str(), &stripped)?;
         let errors = errors_of(&documents)?;
         assert!(
             errors.contains(&format!("unmapped requirement: {stripped}")),
@@ -307,7 +306,6 @@ fn sim_missing_acceptance_mapping_is_reported_with_its_row() -> SimResult {
 #[test]
 fn sim_stale_log_inventory_is_refused() -> SimResult {
     let base = loaded()?;
-    let log = text_of(&base, "log.md")?;
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let label = pick(&mut rng, &INVENTORIES)?.label;
@@ -322,7 +320,7 @@ fn sim_stale_log_inventory_is_refused() -> SimResult {
             _ => format!("{line}{label}: {count}\n"),
         };
         let mut documents = base.clone();
-        documents.set("log.md", log.replacen(&line, &stale, 1));
+        replace_once(&mut documents, "log.md", &line, &stale)?;
         assert_refused(
             &errors_of(&documents)?,
             &format!("log inventory drift: {label}, observed {count}"),
@@ -352,7 +350,7 @@ fn without_token(section: &str, id: &str) -> Result<String, SimError> {
 fn unallocated_control(mention: bool) -> SimResult {
     let base = loaded()?;
     let patterns = Patterns::new()?;
-    let spec = text_of(&base, "specification.md")?;
+    let spec = whole_of(&base, "specification.md")?;
     let section =
         execution_section(&spec).ok_or_else(|| SimError::Absent(String::from("Cell 11")))?;
     let owned: Vec<String> = patterns
@@ -364,16 +362,21 @@ fn unallocated_control(mention: bool) -> SimResult {
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let id = pick(&mut rng, &owned)?.clone();
-        let mut changed = spec.replacen(section, &without_token(section, &id)?, 1);
+        let mut documents = base.clone();
+        replace_once(
+            &mut documents,
+            "specification.md",
+            section,
+            &without_token(section, &id)?,
+        )?;
         if mention {
-            changed = changed.replacen(
+            replace_once(
+                &mut documents,
+                "specification.md",
                 "## Cell 12",
                 &format!("Unallocated case: {id}.\n\n## Cell 12"),
-                1,
-            );
+            )?;
         }
-        let mut documents = base.clone();
-        documents.set("specification.md", changed);
         let errors = errors_of(&documents)?;
         let named = errors.iter().any(|error| {
             error.starts_with("unallocated execution cases") && error.contains(&format!("'{id}'"))
@@ -428,7 +431,7 @@ fn distinct_falsifiers(
 #[test]
 fn sim_insufficient_crash_cases_are_refused() -> SimResult {
     let base = loaded()?;
-    let log = text_of(&base, "log.md")?;
+    let log = whole_of(&base, "log.md")?;
     let (line, _cases) = crash_line(&log)?;
     let falsifiers = count_of(&base, "falsifiers")?;
     let ceiling = falsifiers
@@ -439,14 +442,12 @@ fn sim_insufficient_crash_cases_are_refused() -> SimResult {
         let count = rng.index(ceiling.max(1))?.max(1);
         let cases = distinct_falsifiers(&mut rng, falsifiers, count)?;
         let mut documents = base.clone();
-        documents.set(
+        replace_once(
+            &mut documents,
             "log.md",
-            log.replacen(
-                &line,
-                &format!("planned_crash_cases: {}", cases.join(" ")),
-                1,
-            ),
-        );
+            &line,
+            &format!("planned_crash_cases: {}", cases.join(" ")),
+        )?;
         assert_refused(
             &errors_of(&documents)?,
             "planned crash fraction below 10 percent",
@@ -460,7 +461,7 @@ fn sim_insufficient_crash_cases_are_refused() -> SimResult {
 #[test]
 fn sim_duplicate_or_unknown_crash_case_is_refused() -> SimResult {
     let base = loaded()?;
-    let log = text_of(&base, "log.md")?;
+    let log = whole_of(&base, "log.md")?;
     let (line, cases) = crash_line(&log)?;
     let falsifiers = count_of(&base, "falsifiers")?;
     for seed in 0..SEEDS {
@@ -479,14 +480,12 @@ fn sim_duplicate_or_unknown_crash_case_is_refused() -> SimResult {
             }
         }
         let mut documents = base.clone();
-        documents.set(
+        replace_once(
+            &mut documents,
             "log.md",
-            log.replacen(
-                &line,
-                &format!("planned_crash_cases: {}", changed.join(" ")),
-                1,
-            ),
-        );
+            &line,
+            &format!("planned_crash_cases: {}", changed.join(" ")),
+        )?;
         assert_refused(
             &errors_of(&documents)?,
             "invalid planned crash inventory",
@@ -530,8 +529,8 @@ fn falsifier_body<'spec>(spec: &'spec str, id: &str) -> Option<&'spec str> {
 #[test]
 fn sim_skill_is_not_a_kill() -> SimResult {
     let base = loaded()?;
-    let log = text_of(&base, "log.md")?;
-    let spec = text_of(&base, "specification.md")?;
+    let log = whole_of(&base, "log.md")?;
+    let spec = whole_of(&base, "specification.md")?;
     let (line, _cases) = crash_line(&log)?;
     let falsifiers = count_of(&base, "falsifiers")?;
     for seed in 0..SEEDS {
@@ -539,14 +538,12 @@ fn sim_skill_is_not_a_kill() -> SimResult {
         let count = rng.index(5)?.saturating_add(8);
         let cases = distinct_falsifiers(&mut rng, falsifiers, count)?;
         let mut documents = base.clone();
-        documents.set(
+        replace_once(
+            &mut documents,
             "log.md",
-            log.replacen(
-                &line,
-                &format!("planned_crash_cases: {}", cases.join(" ")),
-                1,
-            ),
-        );
+            &line,
+            &format!("planned_crash_cases: {}", cases.join(" ")),
+        )?;
         let errors = errors_of(&documents)?;
         for case in &cases {
             let lacking = !falsifier_body(&spec, case).is_some_and(names_a_fault);
@@ -565,14 +562,12 @@ fn sim_skill_is_not_a_kill() -> SimResult {
 #[test]
 fn sim_inventory_can_grow() -> SimResult {
     let base = loaded()?;
-    let spec = text_of(&base, "specification.md")?;
-    let log = text_of(&base, "log.md")?;
     let requirements = count_of(&base, "requirements")?;
     let decisions = count_of(&base, "decisions")?;
     let falsifiers = count_of(&base, "falsifiers")?;
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
-        let mut grown = spec.clone();
+        let mut grown = String::new();
         let added = rng.index(3)?.saturating_add(1);
         for step in 1..=added {
             let number = requirements.saturating_add(step);
@@ -585,15 +580,13 @@ fn sim_inventory_can_grow() -> SimResult {
         }
         let total = requirements.saturating_add(added);
         let mut documents = base.clone();
-        documents.set("specification.md", grown);
-        documents.set(
+        append(&mut documents, "specification.md", &grown)?;
+        replace_once(
+            &mut documents,
             "log.md",
-            log.replacen(
-                &format!("\nrequirements: {requirements}\n"),
-                &format!("\nrequirements: {total}\n"),
-                1,
-            ),
-        );
+            &format!("\nrequirements: {requirements}\n"),
+            &format!("\nrequirements: {total}\n"),
+        )?;
         let errors = errors_of(&documents)?;
         assert!(
             errors.is_empty(),

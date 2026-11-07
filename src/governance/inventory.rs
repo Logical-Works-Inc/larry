@@ -100,8 +100,8 @@ pub(crate) fn traceability_errors(
             }
         }
     }
-    let spec = documents.text("specification.md");
-    for line in patterns.matches(&patterns.requirement_row, spec) {
+    let spec = documents.whole("specification.md");
+    for line in patterns.matches(&patterns.requirement_row, &spec) {
         if !patterns.is_match(&patterns.decision, line)
             || !patterns.is_match(&patterns.falsifier, line)
         {
