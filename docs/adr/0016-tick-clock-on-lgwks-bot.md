@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0014: the tick runs on lgwks_bot's clock"
+title: "ADR 0016: the tick runs on lgwks_bot's clock"
 description: Why larry-runtime deleted its clock and reads lgwks_bot::clock as time since the Unix epoch, with expiry on skew.
-resource: /docs/adr/0014-tick-clock-on-lgwks-bot.md
+resource: /docs/adr/0016-tick-clock-on-lgwks-bot.md
 tags: [larry, adr, runtime, clock, determinism]
 generated: {by: claude-code, at: 2026-11-07}
 verified: {by: claude-code, method: full nextest run before and after on the same 256 replay seeds}
@@ -11,7 +11,7 @@ stale_after: 2027-02-07
 sources: [larry#74, larry#68, logicalworks-crates#845, lgwks_bot 7.1.1 clock and skew]
 ---
 
-# 0014: the tick runs on lgwks_bot's clock
+# 0016: the tick runs on lgwks_bot's clock
 
 Status: accepted, 2026-11-07 (larry#74, larry#68 row 1)
 
