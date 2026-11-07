@@ -67,7 +67,7 @@ cargo build --bins --locked
 cargo nextest run --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
-lgwks-deps check .
+lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
 The governance checker, its negative controls and the PTY journeys are still Python and run only in CI until
