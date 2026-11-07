@@ -10,11 +10,11 @@ use std::fmt::Write as _;
 use lgwks_std::seeded::Seeded;
 
 use super::documents::{Documents, MAX_DOCUMENT_BYTES};
-use super::markdown::{self, FIELDS};
+use super::markdown::{self, FIELDS, MAX_LINES};
 use super::patterns::{INVENTORIES, Patterns};
 use super::sim_support::{
-    SimError, SimResult, assert_refused, count_of, docs_tree, errors_of, loaded, names_of, pick,
-    replace_once, text_of, top_level,
+    SimError, SimResult, append, assert_refused, count_of, docs_tree, errors_of, loaded, names_of,
+    pick, replace_all, replace_once, text_of, top_level, whole_of,
 };
 
 /// Seeds each control runs; each seed validates the whole tree once.
@@ -203,18 +203,18 @@ fn opener(rng: &mut Seeded) -> Result<String, SimError> {
 #[test]
 fn sim_unclosed_fence_in_the_specification_is_refused() -> SimResult {
     let base = loaded()?;
-    let spec = text_of(&base, "specification.md")?;
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let fence = "`".repeat(rng.index(4)?.saturating_add(3));
         let mut documents = base.clone();
-        documents.set(
+        let last = append(
+            &mut documents,
             "specification.md",
-            format!("{spec}\n{fence}mermaid\nflowchart TD\n"),
-        );
+            &format!("\n{fence}mermaid\nflowchart TD\n"),
+        )?;
         let errors = errors_of(&documents)?;
         assert!(
-            errors.contains(&String::from("specification.md: unclosed code fence")),
+            errors.contains(&format!("{last}: unclosed code fence")),
             "seed {seed}: {errors:?}"
         );
     }
@@ -251,16 +251,15 @@ fn sim_unclosed_indented_and_tilde_fences_are_refused() -> SimResult {
 #[test]
 fn sim_missing_visuals_are_refused() -> SimResult {
     let base = loaded()?;
-    let spec = text_of(&base, "specification.md")?;
+    let spec = whole_of(&base, "specification.md")?;
     let fences = spec.matches("```mermaid").count();
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let keep = rng.index(4)?;
         let mut documents = base.clone();
-        documents.set(
-            "specification.md",
-            spec.replacen("```mermaid", "```text", fences.saturating_sub(keep)),
-        );
+        for _ in 0..fences.saturating_sub(keep) {
+            replace_once(&mut documents, "specification.md", "```mermaid", "```text")?;
+        }
         let errors = errors_of(&documents)?;
         assert!(
             errors.contains(&String::from(
@@ -276,16 +275,54 @@ fn sim_missing_visuals_are_refused() -> SimResult {
 #[test]
 fn sim_valid_tilde_mermaid_fences_pass() -> SimResult {
     let base = loaded()?;
-    let spec = text_of(&base, "specification.md")?;
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let tildes = "~".repeat(rng.index(4)?.saturating_add(3));
         let mut documents = base.clone();
-        documents.set("specification.md", spec.replace("```", &tildes));
+        replace_all(&mut documents, "specification.md", "```", &tildes)?;
         let errors = errors_of(&documents)?;
         assert!(
             errors.is_empty(),
             "seed {seed}: tilde fences must pass: {errors:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The 120-line law (larry#155): any governed document padded to exactly `MAX_LINES` lines
+/// passes, and one line more is refused with its count. Source: the Director's size law
+/// (2026-10-10), which this checker now enforces at the boundary it states.
+#[test]
+fn sim_the_line_law_holds_at_its_boundary_for_every_document() -> SimResult {
+    let base = loaded()?;
+    let names = names_of(&base);
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let name = pick(&mut rng, &names)?.clone();
+        let text = text_of(&base, &name)?;
+        let lines = text.lines().count();
+        let room = MAX_LINES
+            .checked_sub(lines)
+            .ok_or_else(|| SimError::Absent(format!("{name} within the law")))?;
+        let mut documents = base.clone();
+        documents.set(&name, format!("{text}{}", "\n".repeat(room)));
+        let errors = errors_of(&documents)?;
+        assert!(
+            errors.is_empty(),
+            "seed {seed}: {name} at {MAX_LINES} lines passes: {errors:?}"
+        );
+        documents.set(
+            &name,
+            format!("{text}{}", "\n".repeat(room.saturating_add(1))),
+        );
+        let errors = errors_of(&documents)?;
+        let expected = format!(
+            "{name}: {} lines, over the {MAX_LINES}-line law",
+            MAX_LINES.saturating_add(1)
+        );
+        assert!(
+            errors.contains(&expected),
+            "seed {seed}: expected {expected:?} in {errors:?}"
         );
     }
     Ok(())
@@ -296,7 +333,14 @@ fn sim_valid_tilde_mermaid_fences_pass() -> SimResult {
 #[test]
 fn sim_long_fence_holds_a_shorter_content_fence() -> SimResult {
     let base = loaded()?;
-    let names = top_level();
+    // The five lines this control appends must keep the document within the line law, or the
+    // legal change it builds would not be legal (larry#155).
+    let mut names = Vec::new();
+    for name in top_level() {
+        if text_of(&base, &name)?.lines().count().saturating_add(5) <= MAX_LINES {
+            names.push(name);
+        }
+    }
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();

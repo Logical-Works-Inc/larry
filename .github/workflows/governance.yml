@@ -55,6 +55,10 @@ jobs:
       - name: Check the tracker render
         if: always()
         run: target/debug/larry tracker --check
+      # `larry mascot` replaced tools/rocco_pixel.py (larry#152, ADR 0014).
+      - name: Check the mascot render
+        if: always()
+        run: target/debug/larry mascot --check
       # The governance and reranker controls (larry#150, ADR 0013) run with the
       # workspace tests (ci.yml, rust); `larry governance` above admits the
       # BLAKE3 receipts `larry-rerank` writes.

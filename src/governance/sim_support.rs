@@ -117,19 +117,60 @@ pub(crate) fn text_of(documents: &Documents, name: &str) -> Result<String, SimEr
     }
 }
 
-/// `docs[name] = docs[name].replace(old, new, 1)`, refusing when `old` is absent.
+/// The whole text of `name`: a split document's index and parts (larry#155), else its text.
+pub(crate) fn whole_of(documents: &Documents, name: &str) -> Result<String, SimError> {
+    if documents.get(name).is_none() {
+        return Err(SimError::Absent(String::from(name)));
+    }
+    Ok(documents.whole(name))
+}
+
+/// `docs[name] = docs[name].replace(old, new, 1)` over the whole document: the edit lands in
+/// the file (index or part) that holds `old` first, whose name is returned. Refused when no
+/// file of `name` holds `old`.
 pub(crate) fn replace_once(
     documents: &mut Documents,
     name: &str,
     old: &str,
     new: &str,
+) -> Result<String, SimError> {
+    let holder = documents
+        .holder(name, old)
+        .ok_or_else(|| SimError::Absent(format!("{old:?} in {name}")))?;
+    let text = text_of(documents, &holder)?;
+    documents.set(&holder, text.replacen(old, new, 1));
+    Ok(holder)
+}
+
+/// `docs[name] = docs[name].replace(old, new)` in every file of the whole document.
+pub(crate) fn replace_all(
+    documents: &mut Documents,
+    name: &str,
+    old: &str,
+    new: &str,
 ) -> Result<(), SimError> {
-    let text = text_of(documents, name)?;
-    if !text.contains(old) {
-        return Err(SimError::Absent(format!("{old:?} in {name}")));
+    if new.contains(old) {
+        return Err(SimError::Absent(format!(
+            "a replacement of {old:?} that removes it"
+        )));
     }
-    documents.set(name, text.replacen(old, new, 1));
+    while let Some(holder) = documents.holder(name, old) {
+        let text = text_of(documents, &holder)?;
+        documents.set(&holder, text.replace(old, new));
+    }
     Ok(())
+}
+
+/// Appends `tail` to the whole document `name`, in its last file; returns that file's name.
+pub(crate) fn append(
+    documents: &mut Documents,
+    name: &str,
+    tail: &str,
+) -> Result<String, SimError> {
+    let last = documents.last_of(name);
+    let text = text_of(documents, &last)?;
+    documents.set(&last, format!("{text}{tail}"));
+    Ok(last)
 }
 
 /// One seeded element of `items`.

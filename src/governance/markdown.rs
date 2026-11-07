@@ -22,6 +22,10 @@ pub(crate) const FIELDS: [&str; 10] = [
     "sources",
 ];
 
+/// The most lines a governed document holds: the repository's size law (Director 2026-10-10),
+/// enforced here since larry#155 split every document past it.
+pub(crate) const MAX_LINES: usize = 120;
+
 /// The heading IDs of each document a fragment link has named so far, computed once per check.
 pub(crate) type HeadingCache = BTreeMap<String, BTreeSet<String>>;
 
@@ -177,6 +181,12 @@ pub(crate) fn document_errors(
     let mut errors = frontmatter_errors(name, text, patterns);
     if text.len() > MAX_DOCUMENT_BYTES {
         errors.push(format!("{name}: document exceeds byte limit"));
+    }
+    let lines = text.lines().count();
+    if lines > MAX_LINES {
+        errors.push(format!(
+            "{name}: {lines} lines, over the {MAX_LINES}-line law"
+        ));
     }
     let structure = markdown_structure(text, patterns);
     errors.extend(

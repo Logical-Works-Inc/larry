@@ -20,7 +20,7 @@ mod sim_markdown;
 #[cfg(test)]
 mod sim_parsers;
 #[cfg(test)]
-mod sim_support;
+pub(crate) mod sim_support;
 #[cfg(test)]
 mod sim_tracker;
 #[cfg(test)]
@@ -118,7 +118,7 @@ fn run(root: &Path) -> Result<Value, GovernanceError> {
     errors.extend(receipts::receipt_errors(root));
     errors.extend(tracker::drift_errors(
         root,
-        documents.text("specification.md"),
+        &documents.whole("specification.md"),
         &patterns,
     ));
     report.insert("ok", Value::from(errors.is_empty()));
@@ -158,7 +158,8 @@ fn validate(
             &mut headings,
         )?);
     }
-    let spec = documents.text("specification.md");
+    let whole_spec = documents.whole("specification.md");
+    let spec = whole_spec.as_str();
     let inventories = inventory::inspect_inventories(spec, patterns, errors);
     errors.extend(inventory::traceability_errors(
         documents,
@@ -174,7 +175,8 @@ fn validate(
             patterns.classes.list(&unallocated)
         ));
     }
-    let log = documents.text("log.md");
+    let whole_log = documents.whole("log.md");
+    let log = whole_log.as_str();
     for (&(label, count), regex) in inventories.counts.iter().zip(&patterns.log_lines) {
         if patterns.groups(regex, log, 1) != [count.to_string()] {
             errors.push(format!("log inventory drift: {label}, observed {count}"));

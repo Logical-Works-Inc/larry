@@ -67,22 +67,22 @@ cargo build --bins --locked
 cargo nextest run --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
-target/debug/larry governance && target/debug/larry tracker --check   # `larry tracker` regenerates the page
+target/debug/larry governance && target/debug/larry tracker --check && target/debug/larry mascot --check
 lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
-The checker, tracker, PTY journeys and reranker are Rust (ADR 0010, 0011, 0013), so CI runs no Python;
-agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
-picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
-once public, never self-hosted on a public repository (larry#116). Launch the demo with
+The checker, tracker, PTY journeys, reranker and mascot are Rust (ADR 0010, 0011, 0013, 0014), so CI runs no
+Python; `larry tracker` and `larry mascot --svg` regenerate. Agents may not run Python locally. `cargo local-ci`
+mirrors CI. Each CI job picks its runner from `github.event.repository.private`: the self-hosted Mac while
+private, `ubuntu-latest` once public, never self-hosted when public (larry#116). Launch the demo with
 `cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.
 
 ## Size law
 
-A `.md` file holds at most 120 lines; a code file at most 750 code lines and 1000 in all. specification.md,
-log.md, research-ledger.md and the other over-size documents are frozen until larry#53 splits them, because
-the checker reads them by name. Until then new directions land in the plan, INVARIANTS.md, this file,
-GOVERNANCE.md and GitHub issues, and log.md inventory lines move only when specification.md moves.
+A `.md` file holds at most 120 lines, and `larry governance` refuses one past it; a code file at most 750
+code lines and 1000 in all. specification.md, log.md and research-ledger.md are indexes over parts in
+`docs/<name>/`, read as one document (larry#155, ADR 0015): a new entry goes into the last part, or a new
+part when it is full, and log.md inventory lines move only when specification.md moves.
 
 ## Self-maintenance
 

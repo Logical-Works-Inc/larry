@@ -10,8 +10,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
 use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
@@ -19,36 +18,13 @@ use lgwks_std::seeded::Seeded;
 
 use super::{Candidate, Deadline, Request, RerankError, Scorer, candidates, run};
 use crate::governance::receipts::receipt_errors;
+use crate::governance::sim_support::Scratch;
 
 /// Failures propagate instead of panicking.
 type Check<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Seeds each control runs.
 const SEEDS: u64 = 64;
-
-/// Distinct scratch roots made by this test binary.
-static SCRATCHES: AtomicU64 = AtomicU64::new(0);
-
-/// A scratch working directory, removed when dropped.
-struct Root(PathBuf);
-
-impl Root {
-    /// A fresh empty directory.
-    fn new() -> Check<Self> {
-        let serial = SCRATCHES.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("larry-rerank-{}-{serial}", std::process::id()));
-        fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for Root {
-    fn drop(&mut self) {
-        // Best effort: a leftover scratch directory never fails a control.
-        drop(fs::remove_dir_all(&self.0));
-    }
-}
 
 /// A seeded engine: fixed scores per call, counting calls, refusing on demand.
 struct Stub {
@@ -276,7 +252,7 @@ fn sim_ranking_and_receipt_match_the_reference_for_every_seed() -> Check {
             scores.push(f64::from(u8::try_from(draw(&mut rng, 5)?)?) / 4.0);
         }
         let top_k = draw(&mut rng, rows.len())?.saturating_add(1);
-        let root = Root::new()?;
+        let root = Scratch::new("rerank")?;
         let mut receipts = Vec::new();
         for phase in ["pre-exec", "post-exec"] {
             let name = format!("{phase}-{seed}.json");
@@ -286,8 +262,8 @@ fn sim_ranking_and_receipt_match_the_reference_for_every_seed() -> Check {
                 calls: 0,
                 timeout: false,
             };
-            let line = run(&request, lines.as_bytes(), &root.0, &mut stub)?;
-            let written = fs::read_to_string(root.0.join("tools/receipts").join(&name))?;
+            let line = run(&request, lines.as_bytes(), root.path(), &mut stub)?;
+            let written = fs::read_to_string(root.path().join("tools/receipts").join(&name))?;
             assert_eq!(
                 written,
                 format!("{line}\n"),
@@ -295,7 +271,7 @@ fn sim_ranking_and_receipt_match_the_reference_for_every_seed() -> Check {
             );
             receipts.push((name, line));
         }
-        let errors = receipt_errors(&root.0);
+        let errors = receipt_errors(root.path());
         assert!(
             errors.is_empty(),
             "seed {seed}: governance admits: {errors:?}"
@@ -339,17 +315,17 @@ fn sim_ranking_and_receipt_match_the_reference_for_every_seed() -> Check {
             calls: 0,
             timeout: false,
         };
-        let again = run(&request, lines.as_bytes(), &root.0, &mut stub);
+        let again = run(&request, lines.as_bytes(), root.path(), &mut stub);
         assert!(
             matches!(again, Err(RerankError::Io(ref cause)) if cause.kind() == io::ErrorKind::AlreadyExists),
             "seed {seed}: an existing receipt is never overwritten: {again:?}"
         );
         assert_eq!(
-            fs::read_to_string(root.0.join("tools/receipts").join(name))?,
+            fs::read_to_string(root.path().join("tools/receipts").join(name))?,
             format!("{line}\n"),
             "seed {seed}: the first receipt is intact"
         );
-        mode_is_private(&root.0.join("tools/receipts").join(name), seed)?;
+        mode_is_private(&root.path().join("tools/receipts").join(name), seed)?;
     }
     Ok(())
 }
@@ -423,19 +399,19 @@ fn sim_bounds_and_receipt_paths_are_refused_before_the_engine() -> Check {
             args.push(value);
         }
         let request = parse(args)?;
-        let root = Root::new()?;
+        let root = Scratch::new("rerank")?;
         let mut stub = Stub {
             scores: vec![0.5; rows.len()],
             calls: 0,
             timeout: false,
         };
-        let outcome = run(&request, lines.as_bytes(), &root.0, &mut stub);
+        let outcome = run(&request, lines.as_bytes(), root.path(), &mut stub);
         let Err(error) = outcome else {
             return Err(format!("seed {seed}: {message} was admitted").into());
         };
         assert_eq!(error.to_string(), message, "seed {seed}: the exact refusal");
         assert_eq!(stub.calls, 0, "seed {seed}: the engine never ran");
-        let written = match fs::read_dir(root.0.join("tools/receipts")) {
+        let written = match fs::read_dir(root.path().join("tools/receipts")) {
             Ok(entries) => entries.count(),
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => 0,
             Err(cause) => return Err(cause.into()),
@@ -447,7 +423,7 @@ fn sim_bounds_and_receipt_paths_are_refused_before_the_engine() -> Check {
 
 #[test]
 fn a_timed_out_engine_and_a_bad_query_write_no_receipt() -> Check {
-    let root = Root::new()?;
+    let root = Scratch::new("rerank")?;
     let lines = "{\"id\":\"a\",\"text\":\"alpha\"}\n";
     let request = request("pre-exec", "late.json", &[])?;
     let mut stub = Stub {
@@ -455,14 +431,14 @@ fn a_timed_out_engine_and_a_bad_query_write_no_receipt() -> Check {
         calls: 0,
         timeout: true,
     };
-    let outcome = run(&request, lines.as_bytes(), &root.0, &mut stub);
+    let outcome = run(&request, lines.as_bytes(), root.path(), &mut stub);
     assert_eq!(
         outcome.map_err(|error| error.to_string()),
         Err(String::from("reranker exceeded its 7-second limit")),
         "the timeout surfaces"
     );
     assert!(
-        !root.0.join("tools/receipts/late.json").exists(),
+        !root.path().join("tools/receipts/late.json").exists(),
         "a timed-out run leaves no receipt"
     );
     for query in [String::new(), "q".repeat(16 * 1024 + 1)] {
@@ -474,7 +450,7 @@ fn a_timed_out_engine_and_a_bad_query_write_no_receipt() -> Check {
             String::from("--receipt"),
             String::from("tools/receipts/q.json"),
         ])?;
-        let outcome = run(&request, lines.as_bytes(), &root.0, &mut stub);
+        let outcome = run(&request, lines.as_bytes(), root.path(), &mut stub);
         assert_eq!(
             outcome.map_err(|error| error.to_string()),
             Err(String::from(

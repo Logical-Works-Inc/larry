@@ -54,7 +54,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 
 | Module | Owns |
 |---|---|
-| `lib` | The effect-free DEMO session state, and `diagnose`, the binaries' one stderr line |
+| `lib` | The effect-free DEMO session state, `replace_file` (the whole-or-nothing write) and `diagnose` (one stderr line) |
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
@@ -78,11 +78,14 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `theme` | View colours |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008) |
 | `governance` | `larry governance`: the structural checker over the governed documents and its report (ADR 0010) |
-| `governance::documents` | The bounded load of the top-level documents and the `docs/` tree |
+| `governance::documents` | The bounded load of the top-level documents and the `docs/` tree; split documents read whole (ADR 0015) |
 | `governance::markdown` | Frontmatter, fences, local links and GitHub heading ids |
 | `governance::inventory` | The R, D, E, C and axis inventories, traceability, cells, log drift, crash cases |
 | `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |
 | `governance::receipts` | The reranker receipts' shape, SHA-256 (retained) or BLAKE3 (ADR 0013) |
+| `mascot` | `larry mascot`: the one pixel grid, its SVG, preview and pet package (ADR 0014) |
+| `mascot::webp` | The lossless VP8L encoder of the pet spritesheet (RFC 9649) |
+| `mascot::sim` | Seeded encoder round trips through an RFC reader, the SVG check, the command line |
 | `rerank` | `larry-rerank`: the request, its bounds, the ranking and the create-exclusive receipt (ADR 0013) |
 | `rerank::qwen` | The pinned Qwen3 reranker on Candle and its tokenizer, feature `rerank` only |
 | `rerank::sim` | Seeded ports of the Python reranker controls, bounds, ranking and receipts |
@@ -92,7 +95,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::pystr` | CPython `str` semantics the messages need: `splitlines`, `split`, `repr`, decode errors |
 | `governance::sim_*` | Seeded ports of the Python controls, parser references, bounds and two-root checks |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker` |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |

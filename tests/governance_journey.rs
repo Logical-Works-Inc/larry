@@ -521,6 +521,11 @@ fn local_ci_runs_the_rust_gate_and_no_python_governance_lane() -> TestResult {
         Some("target/debug/larry tracker --check"),
         "tracker runs the binary"
     );
+    assert_eq!(
+        command("mascot").as_deref(),
+        Some("target/debug/larry mascot --check"),
+        "the mascot render is checked by the binary (larry#152)"
+    );
     for lane in lanes {
         let line = lane
             .get("command")
@@ -536,5 +541,34 @@ fn local_ci_runs_the_rust_gate_and_no_python_governance_lane() -> TestResult {
             "no lane runs Python: {line}"
         );
     }
+    Ok(())
+}
+
+/// CI's hosted rust job runs the very test command `cargo local-ci` runs, so a green PR and a
+/// green local run attest the same suite (larry#154): `cargo nextest run --workspace --locked`.
+#[test]
+fn ci_runs_the_test_lane_local_ci_runs() -> TestResult {
+    let listed = Command::new(env!("CARGO_BIN_EXE_larry-local-ci"))
+        .arg("--list")
+        .output()?;
+    let lanes: Value = json::from_str(&text(&listed.stdout))?;
+    let tests = lanes
+        .as_array()
+        .ok_or("--list prints an array")?
+        .iter()
+        .find(|lane| lane.get("name").and_then(Value::as_str) == Some("tests"))
+        .and_then(|lane| lane.get("command").and_then(Value::as_str))
+        .ok_or("local-ci has a tests lane")?
+        .to_owned();
+    assert_eq!(
+        tests, "cargo nextest run --workspace --locked",
+        "the declared test lane"
+    );
+    let workflow = fs::read_to_string(Path::new(ROOT).join(".github/workflows/ci.yml"))?;
+    let hosted = format!("run: {tests}");
+    assert!(
+        workflow.lines().any(|line| line.trim() == hosted),
+        "ci.yml runs `{tests}` on hosted runners"
+    );
     Ok(())
 }

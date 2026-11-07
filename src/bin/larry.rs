@@ -3,7 +3,8 @@
 //! `larry exec`, the task-document executor (larry#85), and `larry verify` and
 //! `larry key`, the receipt check and the key it trusts (larry#86), and
 //! `larry eval`, one priced arm over the matched task set (larry#87), and
-//! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010).
+//! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010), and
+//! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014).
 //! The launcher paints the fixture surface and exits when the operator
 //! quits; it performs no backend or workspace effect.
 use std::ffi::OsString;
@@ -373,8 +374,13 @@ fn main() -> ExitCode {
         [ref command, ref rest @ ..] if command == "tracker" => {
             tracker_once(rest).map_err(|error: GovernanceRun| error.to_string())
         }
+        [ref command, ref rest @ ..] if command == "mascot" => {
+            larry_demo::mascot::run(rest, &mut io::stdout().lock())
+                .map(|()| ExitCode::SUCCESS)
+                .map_err(|error: larry_demo::mascot::MascotError| error.to_string())
+        }
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance` and `tracker`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker` and `mascot`; F1 opens native help",
         )),
     };
     match outcome {
