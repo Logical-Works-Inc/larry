@@ -11,14 +11,13 @@ use std::ops::Range;
 use larry_contracts::authority::Scope;
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::ContentDigest;
-use larry_runtime::clock::FixedClock;
 use larry_runtime::journal::{Journal, JournalEntry};
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::runtime::{TickReport, restore};
 
 use crate::support::{
-    TestRuntime, command_id, epoch, operation, proposal, run, runtime_with, seeded, settings,
+    TestRuntime, clock, command_id, operation, proposal, run, runtime_with, seeded, settings,
     submit, tenant,
 };
 
@@ -85,7 +84,7 @@ pub fn reopen(journal: Journal, budget: u64) -> Sim<TestRuntime> {
     Ok(restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], budget)?,
         ScriptedOwner::new(),
-        FixedClock::new(epoch()?),
+        clock()?,
         journal,
     )?)
 }

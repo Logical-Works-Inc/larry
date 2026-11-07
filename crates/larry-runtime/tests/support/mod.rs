@@ -15,14 +15,14 @@ use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::RunState;
-use larry_runtime::clock::FixedClock;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::runtime::{Runtime, RuntimeSettings};
+use lgwks_bot::clock::Clock;
 
 /// The alias the tests use for the concrete runtime under test.
-pub type TestRuntime = Runtime<FoldProjection, ScriptedOwner, FixedClock>;
+pub type TestRuntime = Runtime<FoldProjection, ScriptedOwner>;
 
 thread_local! {
     /// The seed every fixture identity and the epoch are drawn under. Zero is
@@ -67,6 +67,14 @@ pub fn epoch() -> Result<SystemTime, Box<dyn std::error::Error>> {
         .checked_add(Duration::from_secs(1_700_000_000))
         .and_then(|base| base.checked_add(Duration::from_secs(SEED.with(Cell::get))))
         .ok_or_else(|| "fixture epoch is outside the platform time range".into())
+}
+
+/// The estate's virtual clock placed at [`epoch`]: the runtime reads it as elapsed time since
+/// the Unix epoch, and nothing moves it but an explicit `advance` (larry#74).
+pub fn clock() -> Result<Clock, Box<dyn std::error::Error>> {
+    Ok(Clock::virtual_at(
+        epoch()?.duration_since(SystemTime::UNIX_EPOCH)?,
+    ))
 }
 
 /// A run identifier from one byte.
@@ -129,7 +137,7 @@ pub fn runtime_with(
     Ok(Runtime::new(
         settings(allowed, capable, budget)?,
         owner,
-        FixedClock::new(epoch()?),
+        clock()?,
     )?)
 }
 

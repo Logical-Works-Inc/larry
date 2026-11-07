@@ -39,6 +39,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Larry needs | Owner | Rejected alternative, and why |
 |---|---|---|
 | Async runtime, net, supervision | `lgwks_bot::rt` | `tokio::main`: Loco boots on `Runtime::block_on` |
+| Tick clock, authority expiry (larry#74) | `lgwks_bot::clock`, `skew`, defaults off: 22 to 27 crates, cold 4.2 s to 6.4 s | the deleted `larry-runtime` clock |
 | Journal, crash recovery, replay | `lgwks_bot::journal` (`FileJournal`), larry#68 | Loco jobs or SeaORM rows: a second journal |
 | Tick, projection | `lgwks_bot` ECS world | Loco scheduler: not deterministic, not replayable |
 | Authority, grants | `lgwks_bot::cap`, secure-authority | Loco `auth`: it authenticates, it never authorizes |

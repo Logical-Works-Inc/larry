@@ -1,8 +1,8 @@
 //! E65 deterministic simulation families, driven through the public runtime.
 
 use super::{
-    AtomicOwner, BindingError, FixedClock, ProjectionBackend, ReconciliationStrategy, Result,
-    Runtime, RuntimeError, SEEDS, Scope, TestRuntime, assert_swap, command, grant, holder, instant,
+    AtomicOwner, BindingError, ProjectionBackend, ReconciliationStrategy, Result, Runtime,
+    RuntimeError, SEEDS, Scope, TestRuntime, assert_swap, clock_at, command, grant, holder,
     replay_authorizations, restore, runtime, settings, success_journey, swap_journey,
     swapped_field, trace,
 };
@@ -69,7 +69,7 @@ fn sim_e65_retry_after_restore_keeps_binding() -> Result {
                 lose_reply: true,
                 ..AtomicOwner::new(seed, 0)
             },
-            FixedClock::new(instant(seed)?),
+            clock_at(seed)?,
         )?;
         let command = command(
             seed,
@@ -90,7 +90,7 @@ fn sim_e65_retry_after_restore_keeps_binding() -> Result {
         let mut restored: TestRuntime = restore(
             settings(seed)?,
             AtomicOwner::new(seed, 1),
-            FixedClock::new(instant(seed)?),
+            clock_at(seed)?,
             runtime.into_journal(),
         )?;
         let before = trace(restored.journal());
@@ -176,11 +176,8 @@ fn sim_e65_full_journal_restore_preserves_display() -> Result {
     for seed in 0..SEEDS {
         let mut limited = settings(seed)?;
         limited.journal_capacity = 6;
-        let mut runtime: TestRuntime = Runtime::new(
-            limited,
-            AtomicOwner::new(seed, 0),
-            FixedClock::new(instant(seed)?),
-        )?;
+        let mut runtime: TestRuntime =
+            Runtime::new(limited, AtomicOwner::new(seed, 0), clock_at(seed)?)?;
         let command = command(
             seed,
             1,
@@ -209,7 +206,7 @@ fn sim_e65_full_journal_restore_preserves_display() -> Result {
         let mut restored: TestRuntime = restore(
             settings(seed)?,
             AtomicOwner::new(seed, 1),
-            FixedClock::new(instant(seed)?),
+            clock_at(seed)?,
             runtime.into_journal(),
         )?;
         assert_eq!(

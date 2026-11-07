@@ -9,7 +9,6 @@ use larry_contracts::authority::Scope;
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::ContentDigest;
 use larry_contracts::state::RunState;
-use larry_runtime::clock::FixedClock;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
@@ -17,7 +16,7 @@ use larry_runtime::projection::replay_authorizations;
 use larry_runtime::runtime::restore;
 use sim_kit::{Offer, Sim, dispatch, read_work, reader, reopen, replay, trace};
 use support::{
-    TestRuntime, assert_state, cancel, command_id, epoch, operation, proposal, run, runtime_with,
+    TestRuntime, assert_state, cancel, clock, command_id, operation, proposal, run, runtime_with,
     settings, submit, succeeded, tenant, unknown,
 };
 
@@ -41,7 +40,7 @@ fn sim_crash_unknown_reconciles_after_restore() -> Outcome {
         let mut restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(1))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             journal,
         )?;
         assert_state(restored.projection(), run(1), RunState::Reconciling)?;
@@ -67,7 +66,7 @@ fn sim_crash_success_receipt_not_duplicated() -> Outcome {
         let mut restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(2))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             journal,
         )?;
         assert_eq!(restored.tick()?.receipts().len(), 0, "no second receipt");
@@ -128,7 +127,7 @@ fn sim_crash_new_run_after_restore_completes() -> Outcome {
         let mut restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(5))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             runtime.into_journal(),
         )?;
         let tick = dispatch(&mut restored, 5, 5, &[Scope::FileRead], 20, strat)?;
@@ -151,7 +150,7 @@ fn sim_crash_mid_reconcile_finishes_after_restore() -> Outcome {
         let mut restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(6))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             runtime.into_journal(),
         )?;
         assert_eq!(
@@ -225,7 +224,7 @@ fn sim_crash_restore_under_smaller_sufficient_capacity() -> Outcome {
         let restored: TestRuntime = restore(
             shrunk,
             ScriptedOwner::new(),
-            FixedClock::new(epoch()?),
+            clock()?,
             runtime.into_journal(),
         )?;
         assert_state(restored.projection(), run(10), RunState::Completed)?;
@@ -245,7 +244,7 @@ fn sim_crash_resubmit_after_restore_is_duplicate() -> Outcome {
         let mut restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(11))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             runtime.into_journal(),
         )?;
         restored.offer(11, &body)?;
@@ -363,7 +362,7 @@ fn sim_crash_fenced_dispatch_replays_same_trace() -> Outcome {
         let restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(18))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             runtime.into_journal(),
         )?;
         assert_eq!(trace(restored.journal()), before, "restore keeps the trace");

@@ -61,7 +61,10 @@
 //!
 //! ## Module map
 //!
-//! - [`clock`] — the pinned time source; one instant per tick (E30).
+//! - The tick's time source is `lgwks_bot::clock::Clock`, the estate's declared clock, read
+//!   as elapsed time since the Unix epoch and sampled once per tick (E30, larry#74). A replay
+//!   or a test places a virtual clock (`Clock::virtual_at`); a live host places a wall clock
+//!   (`Clock::wall_at`), which follows monotonic time and so never reads earlier than it did.
 //! - [`journal`] — the bounded, append-only authoritative record (D04).
 //! - [`payload`] — the typed bodies of the closed event vocabulary.
 //! - [`projection`] — the read view, the ECS seam and the replay report.
@@ -77,7 +80,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod clock;
 pub mod consumer;
 pub mod error;
 pub mod gate;

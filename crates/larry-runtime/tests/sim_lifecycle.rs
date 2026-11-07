@@ -13,7 +13,6 @@ use larry_contracts::event::EventKind;
 use larry_contracts::ids::{ContentDigest, RunId, WorkerId};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::state::RunState;
-use larry_runtime::clock::FixedClock;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::{Journal, JournalEntry};
 use larry_runtime::owner::fixture::ScriptedOwner;
@@ -24,7 +23,7 @@ use larry_runtime::runtime::{Runtime, TickReport};
 use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, work};
 use support::{
-    TestRuntime, assert_state, cancel, command_id, epoch, operation, proposal, run, runtime_with,
+    TestRuntime, assert_state, cancel, command_id, operation, proposal, run, runtime_with,
     settings, submit, succeeded, tenant, unknown,
 };
 
@@ -317,7 +316,7 @@ fn sim_lifecycle_display_refused_for_fixture_owner() -> Outcome {
         let mut rt: TestRuntime = Runtime::new(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::new(),
-            FixedClock::new(epoch()?),
+            crate::support::clock()?,
         )?;
         let body = read_work(11, 1, ReconciliationStrategy::Queryable);
         let holder = WorkerId::from_bytes([7; 16]);

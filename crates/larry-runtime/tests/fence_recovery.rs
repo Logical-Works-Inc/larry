@@ -11,7 +11,6 @@ use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectOutcome, MAX_EFFECT_ATTEMPTS, ReconciliationStrategy};
 use larry_contracts::ids::{RunId, TenantId};
 use larry_contracts::state::RunState;
-use larry_runtime::clock::FixedClock;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::{EffectPhase, ProjectionBackend};
 use larry_runtime::runtime::restore;
@@ -19,7 +18,7 @@ use larry_runtime::{FenceError, FenceRefusal, RevocationFence};
 
 use fence_kit::{open_retry_safe_effect, runtime_at, settings_at, work, work_in};
 use support::{
-    TestRuntime, assert_state, command_id, epoch, operation, proposal, run, runtime, runtime_with,
+    TestRuntime, assert_state, command_id, operation, proposal, run, runtime, runtime_with,
     settings, succeeded, tenant,
 };
 
@@ -84,7 +83,7 @@ fn e63_a_proposal_cannot_declare_its_own_tenant() -> Result<(), Box<dyn std::err
     let restored: TestRuntime = restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::new(),
-        FixedClock::new(epoch()?),
+        crate::support::clock()?,
         journal,
     )?;
     let receipt = larry_contracts::effect::TerminalReceipt::publish(
@@ -117,7 +116,7 @@ fn e71_restore_fences_only_the_effects_the_new_generation_left_behind()
         Ok(restore(
             settings_at(at_epoch, 64)?,
             ScriptedOwner::new(),
-            FixedClock::new(epoch()?),
+            crate::support::clock()?,
             original.into_journal(),
         )?)
     };

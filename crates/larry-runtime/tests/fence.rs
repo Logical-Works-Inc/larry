@@ -19,12 +19,14 @@ use larry_runtime::FenceRefusal;
 use larry_runtime::journal::JournalEntry;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::{EffectPhase, ProjectionBackend};
+use larry_runtime::runtime::{Runtime, restore};
 
 use fence_kit::{
-    ManualClock, ManualRuntime, open_retry_safe_effect, runtime_at, settings_at,
-    settings_that_outlive_a_year, work, work_in,
+    open_retry_safe_effect, runtime_at, settings_at, settings_that_outlive_a_year, work, work_in,
 };
-use support::{TestRuntime, command_id, epoch, operation, proposal, run, runtime, submit, tenant};
+use support::{
+    TestRuntime, clock, command_id, epoch, operation, proposal, run, runtime, submit, tenant,
+};
 
 /// Revoking an operation while its command is still queued stops it reaching
 /// the owner at all.
@@ -138,10 +140,10 @@ fn e71_a_fenced_retry_is_a_non_event_reported_every_tick() -> Result<(), Box<dyn
 #[test]
 fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut rt = ManualRuntime::new(
+    let mut rt: TestRuntime = Runtime::new(
         settings_at(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
-        ManualClock::new(epoch()?),
+        clock()?,
     )?;
 
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
@@ -186,28 +188,36 @@ fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
     Ok(())
 }
 
-/// Neither elapsed time nor a reversed clock recharges offline authority. The
-/// fence holds no clock, so "sleep" and "rollback" are the same non-event.
-#[test]
-fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
--> Result<(), Box<dyn std::error::Error>> {
-    let clock = ManualClock::new(epoch()?);
-    let mut rt = ManualRuntime::new(
+/// One year, the span both halves of the sleep-and-rollback falsifier move time by.
+const YEAR: Duration = Duration::from_secs(365 * 24 * 3_600);
+
+/// What a fresh probe meets once a slept history is restored under a clock placed at `placed`:
+/// the fence's refusals, the reaches the owner saw and the offline allowance spent.
+type Probe = (
+    Vec<(larry_contracts::ids::OperationId, FenceRefusal)>,
+    Vec<larry_contracts::ids::OperationId>,
+    u32,
+);
+
+/// Spends the offline bound, sleeps a year (asserting the next probe is still refused), then
+/// restores that history under a clock placed at `placed` and submits one more probe.
+fn probe_after_sleep_restored_at(placed: Duration) -> Result<Probe, Box<dyn std::error::Error>> {
+    let held = clock()?;
+    let mut rt: TestRuntime = Runtime::new(
         settings_that_outlive_a_year(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
-        clock.clone(),
+        held.clone(),
     )?;
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     rt.tick()?;
-    assert_eq!(rt.fence().offline_spent(), 1);
-
-    // Sleep: a year of wall time passes with no authority contact, and a fresh
-    // probe is still refused.
-    clock.set(
-        epoch()?
-            .checked_add(Duration::from_secs(365 * 24 * 3_600))
-            .ok_or("fixture time overflow")?,
+    assert_eq!(
+        rt.fence().offline_spent(),
+        1,
+        "the one reach spent the bound"
     );
+
+    // Sleep: a year passes with no authority contact, and a fresh probe is still refused.
+    held.advance(YEAR)?;
     rt.submit(work_in(
         2,
         2,
@@ -220,33 +230,49 @@ fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
         &[(
             operation(2),
             FenceRefusal::OfflineExposureExhausted { bound: 1 }
-        )]
+        )],
+        "a year of sleep recharges nothing"
+    );
+    assert_eq!(
+        rt.owner().dispatched(),
+        &[operation(1)],
+        "only the first reach went out"
     );
 
-    // Rollback: the clock runs backwards past where it started, and a second
-    // fresh probe is refused just the same.
-    clock.set(
-        epoch()?
-            .checked_sub(Duration::from_secs(365 * 24 * 3_600))
-            .ok_or("fixture time underflow")?,
-    );
-    rt.submit(work_in(
+    let mut restored: TestRuntime = restore(
+        settings_that_outlive_a_year(SecurityEpoch::INITIAL, 1)?,
+        ScriptedOwner::new(),
+        lgwks_bot::clock::Clock::virtual_at(placed),
+        rt.into_journal(),
+    )?;
+    restored.submit(work_in(
         3,
         3,
         operation(3),
         ReconciliationStrategy::Queryable,
     )?)?;
-    let after_rollback = rt.tick()?;
+    let tick = restored.tick()?;
+    Ok((
+        tick.fenced().to_vec(),
+        restored.owner().dispatched().to_vec(),
+        restored.fence().offline_spent(),
+    ))
+}
+
+/// Neither elapsed time nor a rolled-back clock recharges offline authority. The fence holds
+/// no clock, so "sleep" and "rollback" are the same non-event. The estate clock never reads
+/// earlier within a process (larry#74), so a rollback reaches a runtime only across a restart:
+/// the same history restored under a clock placed a year before the epoch meets exactly the
+/// fence it meets restored at the epoch.
+#[test]
+fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let origin = epoch()?.duration_since(std::time::SystemTime::UNIX_EPOCH)?;
+    let rolled_back = origin.checked_sub(YEAR).ok_or("fixture time underflow")?;
+    let at_origin = probe_after_sleep_restored_at(origin)?;
+    let at_rollback = probe_after_sleep_restored_at(rolled_back)?;
     assert_eq!(
-        after_rollback.fenced(),
-        &[(
-            operation(3),
-            FenceRefusal::OfflineExposureExhausted { bound: 1 }
-        )]
-    );
-    assert_eq!(
-        rt.owner().dispatched(),
-        &[operation(1)],
+        at_rollback, at_origin,
         "time is not evidence of freshness in either direction"
     );
     Ok(())

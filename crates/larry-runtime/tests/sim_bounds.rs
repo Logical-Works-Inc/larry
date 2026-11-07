@@ -66,23 +66,19 @@ fn steer_settings() -> RuntimeSettings {
 /// Fresh steering runtime over an empty scripted owner.
 fn steer_runtime(
     journal: Option<Journal>,
-) -> Result<
-    Runtime<FoldProjection, ScriptedOwner, larry_runtime::clock::FixedClock>,
-    Box<dyn std::error::Error>,
-> {
-    use larry_runtime::clock::FixedClock;
+) -> Result<Runtime<FoldProjection, ScriptedOwner>, Box<dyn std::error::Error>> {
     use larry_runtime::runtime::{Runtime as LiveRuntime, restore};
     Ok(match journal {
         Some(journal) => restore(
             steer_settings(),
             ScriptedOwner::new(),
-            FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
+            lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO),
             journal,
         )?,
         None => LiveRuntime::new(
             steer_settings(),
             ScriptedOwner::new(),
-            FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
+            lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO),
         )?,
     })
 }
@@ -117,7 +113,7 @@ fn steer_command(
 
 /// Publishes one steer command and asserts the admission is visible.
 fn steer_publish(
-    runtime: &mut Runtime<FoldProjection, ScriptedOwner, larry_runtime::clock::FixedClock>,
+    runtime: &mut Runtime<FoldProjection, ScriptedOwner>,
     identity: u128,
     scope: TenantId,
 ) -> Outcome {
@@ -140,7 +136,7 @@ fn sim_bounds_journal_full_reports_ceiling() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             capped,
             ScriptedOwner::scripted([succeeded(operation(1))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(1, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(1, &body)?;
@@ -164,7 +160,7 @@ fn sim_bounds_retained_entries_never_exceed_ceiling() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             capped,
             ScriptedOwner::scripted([succeeded(operation(2))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(2, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(2, &body)?;
@@ -183,7 +179,7 @@ fn sim_bounds_run_table_refuses_past_ceiling() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             capped,
             ScriptedOwner::scripted([succeeded(operation(3))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let first = read_work(3, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(3, &first)?;
@@ -215,7 +211,7 @@ fn sim_bounds_per_tick_admission_gated() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             gated,
             ScriptedOwner::scripted([succeeded(operation(5)), succeeded(operation(6))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         offer_runs(
             &mut runtime,
@@ -310,7 +306,6 @@ fn sim_bounds_second_effect_on_completed_run_refused() -> Outcome {
 /// Cell 05: the projection counts one reserved effect for the run, zero elsewhere.
 #[test]
 fn sim_bounds_effect_count_tracks_reserved_effects() -> Outcome {
-    use larry_runtime::clock::FixedClock;
     use larry_runtime::runtime::restore;
     replay(22_u64..24, |_| -> Sim<(usize, usize)> {
         let mut runtime: TestRuntime =
@@ -331,7 +326,7 @@ fn sim_bounds_effect_count_tracks_reserved_effects() -> Outcome {
         let restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::new(),
-            FixedClock::new(support::epoch()?),
+            support::clock()?,
             runtime.into_journal(),
         )?;
         assert_eq!(
@@ -437,7 +432,7 @@ fn sim_bounds_full_to_capacity_restores() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             capped,
             ScriptedOwner::scripted([succeeded(operation(9))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(9, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(9, &body)?;
@@ -544,7 +539,7 @@ fn sim_bounds_zero_per_tick_admits_nothing() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             gated,
             ScriptedOwner::scripted([succeeded(operation(12))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(12, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(12, &body)?;
@@ -568,7 +563,7 @@ fn sim_bounds_second_tick_reports_same_ceiling() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             capped,
             ScriptedOwner::scripted([succeeded(operation(13))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(13, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(13, &body)?;
@@ -631,7 +626,7 @@ fn sim_bounds_seeded_capacities_replay_shape() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             capped,
             ScriptedOwner::scripted([succeeded(operation(14))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(14, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(14, &body)?;

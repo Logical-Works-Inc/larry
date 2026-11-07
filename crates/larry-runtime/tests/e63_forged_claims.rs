@@ -8,12 +8,11 @@ use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
-use larry_runtime::clock::FixedClock;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::runtime::{Runtime, RuntimeSettings};
 
-type TestRuntime = Runtime<larry_runtime::projection::FoldProjection, ScriptedOwner, FixedClock>;
+type TestRuntime = Runtime<larry_runtime::projection::FoldProjection, ScriptedOwner>;
 
 const HOSTILE_SEEDS: u64 = 1_000;
 
@@ -295,5 +294,6 @@ fn runtime_with(operation: OperationId) -> Result<TestRuntime, Box<dyn std::erro
         1,
     );
     let owner = ScriptedOwner::scripted([EffectOutcome::Succeeded { operation }]);
-    Ok(Runtime::new(settings, owner, FixedClock::new(at))?)
+    let clock = lgwks_bot::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
+    Ok(Runtime::new(settings, owner, clock)?)
 }

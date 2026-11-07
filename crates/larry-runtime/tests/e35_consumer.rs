@@ -13,7 +13,6 @@ use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::{CommandId, ContentDigest, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
-use larry_runtime::clock::FixedClock;
 use larry_runtime::consumer::{
     Consumer, ConsumerCursor, ConsumerLimits, CursorError, MAX_PAGE_BYTES, MAX_PAGE_ITEMS,
 };
@@ -24,7 +23,7 @@ use larry_runtime::projection::FoldProjection;
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 
 /// Concrete runtime, driven exclusively through public entrypoints.
-type Subject = Runtime<FoldProjection, ScriptedOwner, FixedClock>;
+type Subject = Runtime<FoldProjection, ScriptedOwner>;
 /// Errors propagate through tests instead of panicking on setup.
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -47,7 +46,7 @@ fn settings() -> RuntimeSettings {
 /// Fresh runtime or restoration of an authoritative journal in hand.
 fn subject(journal: Option<Journal>) -> TestResult<Subject> {
     let owner = ScriptedOwner::new();
-    let clock = FixedClock::new(SystemTime::UNIX_EPOCH);
+    let clock = lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO);
     Ok(match journal {
         Some(journal) => restore(settings(), owner, clock, journal)?,
         None => Runtime::new(settings(), owner, clock)?,

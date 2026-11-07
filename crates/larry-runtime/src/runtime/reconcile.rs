@@ -12,11 +12,10 @@ use crate::error::RuntimeError;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
 
-impl<P, O, C> Runtime<P, O, C>
+impl<P, O> Runtime<P, O>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
-    C: crate::clock::Clock,
 {
     // ── stage 3: reconcile ──────────────────────────────────────────────────
 

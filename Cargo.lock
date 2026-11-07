@@ -1292,6 +1292,7 @@ dependencies = [
 name = "larry-contracts"
 version = "0.1.0"
 dependencies = [
+ "lgwks_bot",
  "lgwks_std",
  "thiserror 2.0.20",
 ]
@@ -1311,6 +1312,16 @@ version = "0.1.0"
 dependencies = [
  "larry-contracts",
  "larry-runtime",
+ "lgwks_bot",
+ "lgwks_std",
+]
+
+[[package]]
+name = "lgwks_bot"
+version = "7.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef359974e2f4cfcfc321fcf18c205a0ffb4bae66eb468cc0aff446320982dbd3"
+dependencies = [
  "lgwks_std",
 ]
 
@@ -2338,7 +2349,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2827,7 +2838,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

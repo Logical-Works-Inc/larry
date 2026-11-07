@@ -61,11 +61,10 @@ pub(super) struct ReadyCommand {
     pub(super) display: Option<DisplayedEffect>,
 }
 
-impl<P, O, C> Runtime<P, O, C>
+impl<P, O> Runtime<P, O>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
-    C: crate::clock::Clock,
 {
     /// Resolves a command for display under one independently sufficient grant.
     /// The caller is the authenticated host, not a model. This does not submit,
@@ -90,7 +89,7 @@ where
         if grants.len() > 64 {
             return Err(BindingError::TooManyGrants.into());
         }
-        let at = self.clock.now();
+        let at = super::sample(&self.clock)?;
         let grant = grants
             .iter()
             .find(|grant| covers(grant, command, holder, &proposal, at))

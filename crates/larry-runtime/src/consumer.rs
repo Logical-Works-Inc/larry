@@ -407,11 +407,10 @@ fn validate<'a>(
     Ok(entries)
 }
 
-impl<P, O, C> Runtime<P, O, C>
+impl<P, O> Runtime<P, O>
 where
     P: crate::projection::ProjectionBackend + Default,
     O: crate::owner::EffectOwner,
-    C: crate::clock::Clock,
 {
     /// Captures the tenant's live watermark before history is read. `None`
     /// explicitly starts full replay; a supplied checkpoint resumes after it.

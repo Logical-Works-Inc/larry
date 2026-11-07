@@ -442,7 +442,7 @@ fn a_full_journal_backpressures_admission() -> Result<(), Box<dyn std::error::Er
     settings.journal_capacity = 3;
     let mut rt: TestRuntime =
         larry_runtime::runtime::Runtime::new(settings, ScriptedOwner::new(), {
-            larry_runtime::clock::FixedClock::new(epoch()?)
+            support::clock()?
         })?;
     let body = read_once(1);
     rt.submit(submit(command_id(1), &body)?)?;

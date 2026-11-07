@@ -15,18 +15,18 @@ use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::{CommandId, ContentDigest, OperationId, RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
-use larry_runtime::clock::FixedClock;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::{Journal, JournalEntry};
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend, replay_authorizations};
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
+use lgwks_bot::clock::Clock;
 
 /// Each simulation family exhausts this deterministic seed interval.
 const SEEDS: u64 = 1_024;
 /// Public runtime under the replacement owner contract.
-type TestRuntime = Runtime<FoldProjection, AtomicOwner, FixedClock>;
+type TestRuntime = Runtime<FoldProjection, AtomicOwner>;
 /// Fallible public journeys avoid panic-based fixture construction.
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -156,6 +156,14 @@ fn instant(seed: u64) -> Result<SystemTime> {
         .ok_or("fixture instant overflow")?)
 }
 
+/// The estate's virtual clock placed at `instant(seed)`, read as elapsed time since the Unix
+/// epoch (larry#74).
+fn clock_at(seed: u64) -> Result<Clock> {
+    Ok(Clock::virtual_at(
+        instant(seed)?.duration_since(SystemTime::UNIX_EPOCH)?,
+    ))
+}
+
 /// Deterministic identity bytes, disjoint across tenants and commands.
 fn identity(number: u64, tenant: u8) -> [u8; 16] {
     let mut bytes = [tenant; 16];
@@ -226,7 +234,7 @@ fn runtime(seed: u64, change_on: u64) -> Result<TestRuntime> {
     Ok(Runtime::new(
         settings(seed)?,
         AtomicOwner::new(seed, change_on),
-        FixedClock::new(instant(seed)?),
+        clock_at(seed)?,
     )?)
 }
 
@@ -367,7 +375,7 @@ fn success_journey(seed: u64) -> Result<ContentDigest> {
     let mut restored: TestRuntime = restore(
         settings(seed)?,
         AtomicOwner::new(seed, 0),
-        FixedClock::new(instant(seed)?),
+        clock_at(seed)?,
         runtime.into_journal(),
     )?;
     assert_eq!(
@@ -592,11 +600,8 @@ impl EffectOwner for ResolverOnly {
 /// Unsupported atomic execution cannot fall through or earn a success receipt.
 #[test]
 fn e65_unsupported_owner_and_malformed_display_refuse() -> Result {
-    let mut runtime: Runtime<FoldProjection, ResolverOnly, FixedClock> = Runtime::new(
-        settings(0)?,
-        ResolverOnly::default(),
-        FixedClock::new(instant(0)?),
-    )?;
+    let mut runtime: Runtime<FoldProjection, ResolverOnly> =
+        Runtime::new(settings(0)?, ResolverOnly::default(), clock_at(0)?)?;
     let command = command(1, 1, &[Scope::FileRead], ReconciliationStrategy::Queryable)?;
     let grant = grant(1, &[Scope::FileRead], 3, 0)?;
     let malformed = Command::new(

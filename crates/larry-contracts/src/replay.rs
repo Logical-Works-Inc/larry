@@ -235,7 +235,19 @@ pub fn decide(
     validity: &ValiditySnapshot,
 ) -> Decision {
     let denied = |reason: DenialReason| Decision::Denied { reason };
-    if request.observed_at >= validity.valid_until {
+    // The lease is judged by its estate owner (larry#74): the expiry as a reading on the
+    // observer's own timeline, whose origin is the pinned instant, so no epoch is assumed. One
+    // host, so no skew allowance.
+    let holds = match validity.valid_until.duration_since(request.observed_at) {
+        Ok(remaining) => lgwks_bot::skew::lease_holds(
+            remaining,
+            std::time::Duration::ZERO,
+            lgwks_bot::skew::SkewBound::ZERO.get(),
+        ),
+        // The expiry precedes the pinned instant: there is no remaining lease to judge.
+        Err(_) => false,
+    };
+    if !holds {
         return denied(DenialReason::AuthorityExpired);
     }
     let first_refused = request
