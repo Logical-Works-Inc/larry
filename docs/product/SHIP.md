@@ -43,7 +43,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
   group; the origin tree is byte-identical after a hostile command: PR #130, `larry exec` ships it; 7 binary
   journeys and 3 unit sims, 582 tests in 10.4 s; `larry exec` p50 70.8 ms, p99 74.5 ms (32 runs, debug).
 - [x] #86 signed receipts over the journal (ed25519). Proof: a tampered receipt is refused; a denied run
-  never reports success: PR #133, `larry verify` and `larry key` ship it; 6 binary journeys and 5 unit sims,
+  never reports success: PR #134, `larry verify` and `larry key` ship it; 6 binary journeys and 5 unit sims,
   598 tests in 11.0 s; verify p50 4.6 ms, p99 5.0 ms against a rerun at p50 64.7 ms (32 runs, debug).
 - [ ] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task
   against the mock model and verifies its receipt.
