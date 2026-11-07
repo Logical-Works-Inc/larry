@@ -399,9 +399,8 @@ fn sim_reconcile_failed_never_retries() -> Outcome {
 /// E19/E56: an unknown reconciles after a crash with a fresh owner script.
 #[test]
 fn sim_reconcile_unknown_reconciles_after_crash() -> Outcome {
-    use larry_runtime::clock::FixedClock;
     use larry_runtime::runtime::restore;
-    use support::{epoch, settings};
+    use support::{clock, settings};
     replay(120_u64..128, |_| -> Sim<(usize, usize)> {
         let mut rt: TestRuntime = mk_rec(ScriptedOwner::scripted([unknown(operation(17))]))?;
         let work = read_work(17, 1, ReconciliationStrategy::Queryable);
@@ -410,7 +409,7 @@ fn sim_reconcile_unknown_reconciles_after_crash() -> Outcome {
         let mut restored: TestRuntime = restore(
             settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
             ScriptedOwner::scripted([succeeded(operation(17))]),
-            FixedClock::new(epoch()?),
+            clock()?,
             rt.into_journal(),
         )?;
         assert_eq!(

@@ -14,6 +14,9 @@ default = ["serde"]
 serde = ["lgwks_std/json"]
 
 [dependencies]
+# Authority expiry is judged by lgwks_bot's skew judge (larry#74): a pure predicate over two
+# readings, so this crate still reads no clock.
+lgwks_bot = { workspace = true }
 lgwks_std = { workspace = true, features = ["random", "hash"] }
 thiserror = { workspace = true }
 

@@ -48,10 +48,10 @@ rust-version = "1.98"
 # out would silently keep defaults on. Select only the capabilities used by
 # each member; 0.6.6 defaults also include structured tracing.
 lgwks_std = { version = "=4.0.2", default-features = false }
-# Catalogued but currently unused by any member: the async runner edge is
-# registered for the first crate that needs it, and the register records that
-# admission. A catalog entry is not a compile edge.
-lgwks_bot = { version = "=7.1.1" }
+# The runtime's owner (larry#68). Defaults off: the clock and skew rows (larry#74) are
+# std-only modules, so no member compiles the driver, the ECS world or `script!` until a
+# row that needs one turns its feature on.
+lgwks_bot = { version = "=7.1.1", default-features = false }
 # The dependency-admission storefront. The larry package opts into `appcui`; the
 # published storefront owns that dependency and its transitive admission.
 lgwks_deps = { version = "=6.1.0", default-features = false }

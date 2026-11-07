@@ -26,7 +26,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `effect` | Intents, reconciliation strategies, terminal receipts |
 | `authority` | Grants, attenuation, boundary re-validation |
 | `binding` | Resolution of an intent to its external target |
-| `replay` | The pure authorization reducer and pinned replay |
+| `replay` | The pure authorization reducer and pinned replay; expiry on `lgwks_bot::skew::lease_holds` |
 | `error` | Every typed contract failure |
 | `workspace` | Bounded workspace projections and the Continue boundary |
 | `fixture` (test only) | Pinned instants shared by the unit tests |
@@ -35,7 +35,6 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 
 | Module | Owns |
 |---|---|
-| `clock` | The pinned time source, one instant per tick |
 | `journal` | The bounded append-only authoritative record |
 | `payload` | Typed bodies of the closed event vocabulary |
 | `projection` | The fold, effect phases and the replay report |
@@ -45,6 +44,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
 | `error` | Every refused runtime operation |
 | `runtime` | Settings, `TickReport`, stage 2 (admit, reserve, dispatch), `restore` |
+| `runtime::instant` | The tick's one pinned instant: `lgwks_bot::clock` read as time since the Unix epoch (larry#74) |
 | `runtime::display` | E65 display and admission on the real command path |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |

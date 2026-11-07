@@ -1,47 +1,22 @@
-//! Fixtures shared by the E71 fence falsifiers (`fence.rs`, `fence_recovery.rs`): a clock the test moves by
-//! hand, fence settings and the work items every probe submits.
+//! Fixtures shared by the E71 fence falsifiers (`fence.rs`, `fence_recovery.rs`): fence
+//! settings and the work items every probe submits. The clock a test moves by hand is the
+//! estate's virtual clock (`support::clock`): a clone held by the test shares the runtime's
+//! counter, so "time passed" is an `advance`, never a wait (larry#74).
 
-use std::cell::Cell;
-use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use larry_contracts::authority::{Scope, SecurityEpoch};
 use larry_contracts::command::Command;
 use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::OperationId;
 use larry_contracts::replay::ValiditySnapshot;
-use larry_runtime::clock::{Clock, FixedClock};
 use larry_runtime::owner::fixture::ScriptedOwner;
-use larry_runtime::projection::{EffectPhase, FoldProjection, ProjectionBackend};
+use larry_runtime::projection::{EffectPhase, ProjectionBackend};
 use larry_runtime::runtime::{Runtime, RuntimeSettings};
 
 use crate::support::{
-    TestRuntime, command_id, epoch, operation, proposal, run, settings, submit, tenant,
+    TestRuntime, clock, command_id, epoch, operation, proposal, run, settings, submit, tenant,
 };
-
-/// A clock the test moves by hand, so that "time passed" and "the clock ran
-/// backwards" are asserted as input changes instead of waited for.
-#[derive(Clone)]
-pub struct ManualClock(Rc<Cell<SystemTime>>);
-
-impl ManualClock {
-    pub fn new(at: SystemTime) -> Self {
-        Self(Rc::new(Cell::new(at)))
-    }
-
-    pub fn set(&self, at: SystemTime) {
-        self.0.set(at);
-    }
-}
-
-impl Clock for ManualClock {
-    fn now(&self) -> SystemTime {
-        self.0.get()
-    }
-}
-
-/// The runtime under test with a clock the test controls.
-pub type ManualRuntime = Runtime<FoldProjection, ScriptedOwner, ManualClock>;
 
 /// Settings whose fence permits `bound` mutating reaches between
 /// authentications and stands at `at_epoch`.
@@ -150,23 +125,25 @@ pub fn runtime_at(
     Ok(Runtime::new(
         settings_at(at_epoch, bound)?,
         owner,
-        FixedClock::new(epoch()?),
+        clock()?,
     )?)
 }
 
 /// Every fixture here builds what it names, in both test binaries that share it.
 #[test]
 fn fence_kit_fixtures_build_what_they_name() -> Result<(), Box<dyn std::error::Error>> {
-    let clock = ManualClock::new(epoch()?);
-    let later = epoch()?
-        .checked_add(Duration::from_secs(60))
-        .ok_or("fixture time overflow")?;
-    clock.set(later);
-    assert_eq!(clock.now(), later);
-    let manual = ManualRuntime::new(
+    let held = clock()?;
+    let placed = held.now();
+    held.advance(Duration::from_secs(60))?;
+    assert_eq!(
+        held.now().checked_sub(placed),
+        Some(Duration::from_secs(60)),
+        "an advance moves the held clock by exactly its step"
+    );
+    let manual: TestRuntime = Runtime::new(
         settings_that_outlive_a_year(SecurityEpoch::new(2), 3)?,
         ScriptedOwner::new(),
-        clock,
+        held,
     )?;
     assert_eq!(manual.fence().epoch(), SecurityEpoch::new(2));
     assert_eq!(manual.fence().offline_bound(), 3);

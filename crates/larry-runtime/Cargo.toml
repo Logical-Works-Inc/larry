@@ -20,6 +20,8 @@ description = "The Larry runtime: bounded journal, deterministic tick, admission
 # local convenience, so this crate hand-writes `Display` + `Error` instead.
 [dependencies]
 larry-contracts = { path = "../larry-contracts" }
+# The tick's clock is lgwks_bot's declared clock (larry#74); Larry keeps no clock of its own.
+lgwks_bot = { workspace = true }
 lgwks_std = { workspace = true, features = ["json"] }
 
 [features]
@@ -33,6 +35,7 @@ fixture = []
 # lgwks_* + the sibling contract crate); neither is a new third-party edge, so
 # the register is untouched.
 larry-contracts = { path = "../larry-contracts" }
+lgwks_bot = { workspace = true }
 lgwks_std = { workspace = true, features = ["json"] }
 # The crate itself with `fixture` on, so the integration tests can drive the
 # scripted owner; Cargo enables a dev-dependency's features for test targets only.

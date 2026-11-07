@@ -112,7 +112,7 @@ fn sim_fence_advanced_epoch_strands_prior_admission() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             bounded,
             ScriptedOwner::scripted([succeeded(operation(4))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         offer_runs(
             &mut runtime,
@@ -161,11 +161,8 @@ fn sim_fence_stale_refusal_reports_current_generation() -> Outcome {
         let mut bounded = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
         bounded.offline_dispatch_bound = 1;
         let owner = ScriptedOwner::scripted([succeeded(operation(6)), succeeded(operation(7))]);
-        let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
-            bounded,
-            owner,
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
-        )?;
+        let mut runtime: TestRuntime =
+            larry_runtime::runtime::Runtime::new(bounded, owner, support::clock()?)?;
         offer_runs(
             &mut runtime,
             &[(6_u8, 6_u8), (7, 7)],
@@ -258,11 +255,8 @@ fn sim_fence_tight_bound_refuses_by_name() -> Outcome {
         let mut bounded = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
         bounded.offline_dispatch_bound = 1;
         let owner = ScriptedOwner::scripted([succeeded(operation(9)), succeeded(operation(10))]);
-        let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
-            bounded,
-            owner,
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
-        )?;
+        let mut runtime: TestRuntime =
+            larry_runtime::runtime::Runtime::new(bounded, owner, support::clock()?)?;
         offer_runs(
             &mut runtime,
             &[(9_u8, 9_u8), (10, 10)],
@@ -300,11 +294,8 @@ fn sim_fence_reauthentication_recharges_spent() -> Outcome {
         let mut bounded = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
         bounded.offline_dispatch_bound = 1;
         let owner = ScriptedOwner::scripted([succeeded(operation(11)), succeeded(operation(12))]);
-        let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
-            bounded,
-            owner,
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
-        )?;
+        let mut runtime: TestRuntime =
+            larry_runtime::runtime::Runtime::new(bounded, owner, support::clock()?)?;
         let first = read_work(11, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(11, &first)?;
         runtime.tick()?;
@@ -455,7 +446,7 @@ fn sim_fence_epoch_exhaustion_refused() -> Outcome {
             let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
                 topped,
                 ScriptedOwner::new(),
-                larry_runtime::clock::FixedClock::new(support::epoch()?),
+                support::clock()?,
             )?;
             let result = runtime.fence_mut().advance_epoch();
             assert!(result.is_err(), "topped epoch refuses to advance");

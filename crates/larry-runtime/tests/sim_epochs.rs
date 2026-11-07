@@ -163,7 +163,7 @@ fn sim_epochs_stranded_stays_stranded_after_reauthenticate() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             bounded,
             ScriptedOwner::scripted([succeeded(operation(7))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         offer_runs(
             &mut runtime,
@@ -200,7 +200,7 @@ fn sim_epochs_advance_to_max_then_refuses() -> Outcome {
             let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
                 topped,
                 ScriptedOwner::new(),
-                larry_runtime::clock::FixedClock::new(support::epoch()?),
+                support::clock()?,
             )?;
             let max = runtime.fence_mut().advance_epoch()?;
             assert_eq!(
@@ -265,7 +265,7 @@ fn sim_epochs_zero_bound_fences_first_reach() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             bounded,
             ScriptedOwner::scripted([succeeded(operation(10))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(10, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(10, &body)?;
@@ -291,7 +291,7 @@ fn sim_epochs_status_query_open_when_bound_spent() -> Outcome {
         let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
             bounded,
             ScriptedOwner::scripted([unknown(operation(11)), unknown(operation(11))]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         let body = read_work(11, 1, ReconciliationStrategy::Queryable);
         runtime.offer(11, &body)?;
@@ -476,7 +476,7 @@ fn sim_epochs_high_bound_counts_every_reach() -> Outcome {
                 succeeded(operation(20)),
                 succeeded(operation(21)),
             ]),
-            larry_runtime::clock::FixedClock::new(support::epoch()?),
+            support::clock()?,
         )?;
         offer_runs(
             &mut runtime,

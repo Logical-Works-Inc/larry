@@ -127,6 +127,12 @@ pub enum RuntimeError {
         /// The state the pure algebra re-derived.
         rederived: RunState,
     },
+    /// The clock's reading, placed after the Unix epoch, is past what the platform's
+    /// `SystemTime` represents, so the tick has no instant to pin and runs no stage (E30).
+    ClockOutOfRange {
+        /// The reading since the epoch that could not be placed.
+        elapsed: std::time::Duration,
+    },
 }
 
 impl fmt::Display for RuntimeError {
@@ -206,6 +212,10 @@ impl fmt::Display for RuntimeError {
                 f,
                 "run {run} fold diverged: journal recorded {recorded}, algebra re-derived {rederived}"
             ),
+            Self::ClockOutOfRange { elapsed } => write!(
+                f,
+                "clock reading {elapsed:?} after the Unix epoch is outside the platform's time range"
+            ),
         }
     }
 }
@@ -236,7 +246,8 @@ impl std::error::Error for RuntimeError {
             | Self::DuplicateOperation { .. }
             | Self::UnresolvableOutcome { .. }
             | Self::ReceiptAlreadyPublished { .. }
-            | Self::FoldDivergence { .. } => None,
+            | Self::FoldDivergence { .. }
+            | Self::ClockOutOfRange { .. } => None,
         }
     }
 }

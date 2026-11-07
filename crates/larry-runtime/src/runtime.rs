@@ -41,10 +41,12 @@
 //! refused it.
 
 mod display;
+mod instant;
 mod live;
 mod reconcile;
 mod writers;
 
+use instant::sample;
 use live::{LiveEffect, OwnerReach, RunLive};
 
 pub use display::DisplayedEffect;
@@ -52,6 +54,8 @@ use display::ReadyCommand;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::SystemTime;
+
+use lgwks_bot::clock::Clock;
 
 use larry_contracts::authority::{BudgetUnit, SecurityEpoch};
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
@@ -223,15 +227,16 @@ impl TickReport {
 
 /// The Larry runtime.
 #[derive(Debug)]
-pub struct Runtime<P, O, C> {
+pub struct Runtime<P, O> {
     /// Authoritative append-only history.
     journal: Journal,
     /// Discardable deterministic fold of the history.
     projection: P,
     /// Injected boundary for external effects.
     owner: O,
-    /// Injected source of tick time.
-    clock: C,
+    /// Injected source of tick time: the estate's declared clock, read as elapsed time since
+    /// the Unix epoch (larry#74).
+    clock: Clock,
     /// Current authority check for mutating reaches.
     fence: RevocationFence,
     /// Bounded queue of commands awaiting admission.
@@ -248,11 +253,10 @@ pub struct Runtime<P, O, C> {
     tick_count: u64,
 }
 
-impl<P, O, C> Runtime<P, O, C>
+impl<P, O> Runtime<P, O>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
-    C: crate::clock::Clock,
 {
     /// A runtime with an empty journal and empty projection.
     ///
@@ -260,7 +264,7 @@ where
     ///
     /// Returns [`RuntimeError::RunLimitReached`] when the run capacity is
     /// zero, which would make every run untrackable.
-    pub fn new(settings: RuntimeSettings, owner: O, clock: C) -> Result<Self, RuntimeError> {
+    pub fn new(settings: RuntimeSettings, owner: O, clock: Clock) -> Result<Self, RuntimeError> {
         let projection = P::default();
         let journal = Journal::new(settings.journal_capacity)?;
         if settings.run_capacity == 0 {
@@ -378,7 +382,7 @@ where
         // on which tick they are in and the reconciliation gate below can
         // compare against it.
         self.tick_count = self.tick_count.saturating_add(1);
-        let at = self.clock.now();
+        let at = sample(&self.clock)?;
         let mut report = TickReport::default();
         self.pump_ready(at, &mut report)?;
         self.pump_reconciliation(at, &mut report)?;
@@ -711,16 +715,15 @@ pub fn replay<P: ProjectionBackend>(
 /// Returns [`RuntimeError::Codec`] or [`RuntimeError::FoldDivergence`] from
 /// the rebuild, and [`RuntimeError::RunNotTracked`] for a run the projection
 /// tracks but recorded no tenant for.
-pub fn restore<P, O, C>(
+pub fn restore<P, O>(
     settings: RuntimeSettings,
     owner: O,
-    clock: C,
+    clock: Clock,
     journal: Journal,
-) -> Result<Runtime<P, O, C>, RuntimeError>
+) -> Result<Runtime<P, O>, RuntimeError>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
-    C: crate::clock::Clock,
 {
     // The recorded history is kept as it is; only the ceiling moves, so a
     // journal that filled up mid-effect can still record the reconciliation it

@@ -20,11 +20,10 @@ use crate::payload::{
 };
 use crate::projection::ProjectionBackend;
 
-impl<P, O, C> Runtime<P, O, C>
+impl<P, O> Runtime<P, O>
 where
     P: ProjectionBackend + Default,
     O: EffectOwner,
-    C: crate::clock::Clock,
 {
     /// Establishes run ownership without exceeding the run-table bound.
     pub(super) fn track_run(&mut self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {

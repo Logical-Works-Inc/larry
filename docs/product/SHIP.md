@@ -69,7 +69,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
 
-- [ ] #74 clock. Proof: `tests/determinism.rs` green both sides; replay p50/p95/p99 and RSS both sides.
+- [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds).
 - [ ] #75 journal on FileJournal, durable across kill -9. Proof: `sim_crash_restore`, `sim_replay` and a
   kill -9 that re-executes the binary mid-append.
 - [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs`.

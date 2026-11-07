@@ -24,9 +24,115 @@ use larry_runtime::projection::{
 use larry_runtime::runtime::{Runtime, restore};
 
 use support::{
-    TestRuntime, assert_state, command_id, epoch, operation, proposal, run, runtime_with, settings,
-    submit, succeeded, tenant, unknown,
+    TestRuntime, assert_state, command_id, operation, proposal, run, runtime_with, seeded,
+    settings, submit, succeeded, tenant, unknown,
 };
+
+/// Seeds the replay figures are taken over; every seed draws its own identities and epoch.
+const REPLAY_SEEDS: u64 = 256;
+
+/// SplitMix64 (Steele, Lea and Flood, OOPSLA 2014): the seed's whole draw stream.
+const fn mix(state: u64) -> u64 {
+    let mut z = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Drives one seed's history: one to eight runs, each with a seeded cost, admitted over two ticks.
+fn seeded_history(seed: u64) -> Result<TestRuntime, Box<dyn std::error::Error>> {
+    seeded(seed, || {
+        let runs = u8::try_from(mix(seed) % 8)?.saturating_add(1);
+        let outcomes: Vec<_> = (1..=runs).map(|n| succeeded(operation(n))).collect();
+        let mut rt = runtime_with(
+            ScriptedOwner::scripted(outcomes),
+            &[Scope::FileRead],
+            &[Scope::FileRead],
+            1_000,
+        )?;
+        for n in 1..=runs {
+            let cost = mix(seed ^ u64::from(n)) % 100;
+            let body = proposal(
+                run(n),
+                tenant(1),
+                operation(n),
+                &[Scope::FileRead],
+                cost,
+                ReconciliationStrategy::IdempotentRetrySafe,
+            );
+            rt.submit(submit(command_id(n), &body)?)?;
+        }
+        rt.tick()?;
+        rt.tick()?;
+        Ok(rt)
+    })
+}
+
+/// The `rank`th percentile of `sorted`, by nearest rank, in microseconds.
+fn nearest_rank_us(sorted: &[std::time::Duration], rank: usize) -> Result<f64, String> {
+    let position = sorted
+        .len()
+        .saturating_mul(rank)
+        .div_ceil(100)
+        .saturating_sub(1);
+    let value = sorted.get(position).ok_or("no replay samples")?;
+    Ok(value.as_secs_f64() * 1_000_000.0)
+}
+
+/// Every seed's journal is the same history when driven twice, and re-folding it reproduces the
+/// live projection with every authorization bit-identical (D04, E55). The figures are the cost
+/// of that re-fold, printed so the clock row (larry#74) shows replay p50/p95/p99 and peak RSS
+/// on the same seeds before and after it moves.
+#[test]
+fn sim_replay_is_identical_for_every_seed_and_its_cost_is_printed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut samples = Vec::new();
+    for seed in 0..REPLAY_SEEDS {
+        let live = seeded_history(seed)?;
+        let again = seeded_history(seed)?;
+        let trace = fingerprint(live.journal());
+        assert!(!trace.is_empty(), "seed {seed} recorded no events");
+        assert_eq!(
+            trace,
+            fingerprint(again.journal()),
+            "seed {seed} drove two histories"
+        );
+        let mut rebuilt = FoldProjection::default();
+        let started = std::time::Instant::now();
+        larry_runtime::runtime::replay(&mut rebuilt, live.journal())?;
+        samples.push(started.elapsed());
+        assert_eq!(
+            rebuilt.receipts(),
+            live.projection().receipts(),
+            "seed {seed}"
+        );
+        assert_eq!(
+            rebuilt.run_ids(),
+            live.projection().run_ids(),
+            "seed {seed}"
+        );
+        let report = replay_authorizations(&rebuilt);
+        assert!(report.is_bit_identical(), "seed {seed}: {report:?}");
+        assert!(
+            !report.findings().is_empty(),
+            "seed {seed} authorized nothing"
+        );
+    }
+    samples.sort();
+    let pid = std::process::id().to_string();
+    let rss = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid])
+        .output()?;
+    let rss_kib: u64 = String::from_utf8(rss.stdout)?.trim().parse()?;
+    let line = format!(
+        "replay-figures seeds={REPLAY_SEEDS} p50_us={:.1} p95_us={:.1} p99_us={:.1} sampled_rss_kib={rss_kib}\n",
+        nearest_rank_us(&samples, 50)?,
+        nearest_rank_us(&samples, 95)?,
+        nearest_rank_us(&samples, 99)?,
+    );
+    std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes())?;
+    Ok(())
+}
 
 /// A stable identity for one journal entry: its run, sequence, kind tag and
 /// payload digest. Two journals with equal identity lists are the same
@@ -264,11 +370,7 @@ fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
     // Command, CommandAccepted, Admit, Start, EnterReconciling, Intent = 6
     // entries. The outcome event is the seventh and does not fit.
     limited.journal_capacity = 6;
-    let mut rt: TestRuntime = Runtime::new(
-        limited,
-        ScriptedOwner::new(),
-        larry_runtime::clock::FixedClock::new(epoch()?),
-    )?;
+    let mut rt: TestRuntime = Runtime::new(limited, ScriptedOwner::new(), support::clock()?)?;
     let body = proposal(
         run(1),
         tenant(1),
@@ -299,7 +401,7 @@ fn a_reserved_effect_survives_and_is_reconciled_not_reassumed()
     let mut restored: TestRuntime = restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::scripted([succeeded(operation(1))]),
-        larry_runtime::clock::FixedClock::new(epoch()?),
+        support::clock()?,
         journal,
     )?;
 
@@ -499,7 +601,7 @@ fn a_run_that_reserved_no_effect_does_not_block_restore() -> Result<(), Box<dyn 
     let restored: TestRuntime = restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         ScriptedOwner::new(),
-        larry_runtime::clock::FixedClock::new(epoch()?),
+        support::clock()?,
         journal,
     )?;
 

@@ -21,8 +21,8 @@
 # proc-macro is held at 0.3.6 in Cargo.lock until
 # Logical-Works-Inc/logicalworks-crates#841 lands.
 #
-# `lgwks_bot` is catalogued in the workspace manifest but no member depends on
-# it yet, so it is not an edge and needs no row.
+# `lgwks_bot` (defaults off) is an edge of larry-contracts and larry-runtime from larry#74, the
+# clock and skew rows; as an `lgwks_*` crate it is estate-owned and needs no row.
 
 [policy]
 schema = 3
