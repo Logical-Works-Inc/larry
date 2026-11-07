@@ -1,6 +1,7 @@
-//! The executor behind `larry exec` (larry#85).
+//! The executor behind `larry exec` (larry#85) and its signed receipts (larry#86).
 
 mod ledger;
+mod receipt;
 mod run;
 mod task;
 mod workspace;
@@ -11,10 +12,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ledger::Ledger;
+use lgwks_std::sign::PublicKey;
 use run::run_command;
 use workspace::{Workspace, sweep};
 
+use receipt::parse_public_key;
+pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use task::{Task, TaskError};
+
+/// The denial a task asking for model commands receives until Nova isolation
+/// lands (logicalworks-crates#846): nothing runs, and the signed report says so.
+const MODEL_COMMANDS_DENIED: &str =
+    "model_commands: isolation unavailable until Nova lands (logicalworks-crates#846)";
 
 /// Default longest an acceptance command may run, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 600_000;
@@ -33,8 +42,6 @@ pub enum ExecError {
     Input(std::io::Error),
     /// The task document was refused.
     Task(TaskError),
-    /// Isolation is not available.
-    IsolationUnavailable,
     /// Standard output could not be written.
     Output(std::io::Error),
     /// `LARRY_STATE_DIR` is unset or empty.
@@ -83,6 +90,16 @@ pub enum ExecError {
     },
     /// The workspace directory could not be created, read or removed.
     Workspace(std::io::Error),
+    /// The store holding the receipt key could not be created or made owner-only.
+    KeyStore(std::io::Error),
+    /// The OS refused entropy for a new receipt key; there is no weaker fallback.
+    Entropy(lgwks_std::random::EntropyError),
+    /// The receipt key row is missing right after its insert.
+    KeyMissing,
+    /// The stored receipt key seed is not 32 bytes.
+    KeySeedLength(std::array::TryFromSliceError),
+    /// A receipt was refused.
+    Receipt(ReceiptError),
 }
 
 impl fmt::Display for ExecError {
@@ -90,7 +107,6 @@ impl fmt::Display for ExecError {
         match *self {
             Self::Input(ref cause) => write!(out, "exec stdin unreadable: {cause}"),
             Self::Task(ref cause) => write!(out, "exec task: {cause}"),
-            Self::IsolationUnavailable => out.write_str("exec isolation unavailable"),
             Self::Output(ref cause) => write!(out, "exec output unwritable: {cause}"),
             Self::StateDirUnset => out.write_str("exec LARRY_STATE_DIR is unset or empty"),
             Self::BadTimeout { ref value } => write!(
@@ -114,6 +130,13 @@ impl fmt::Display for ExecError {
                 write!(out, "exec process group {pgid} survived its kill")
             }
             Self::Workspace(ref cause) => write!(out, "exec workspace: {cause}"),
+            Self::KeyStore(ref cause) => write!(out, "exec receipt key store: {cause}"),
+            Self::Entropy(ref cause) => write!(out, "exec receipt key entropy: {cause}"),
+            Self::KeyMissing => out.write_str("exec receipt key row is missing after its insert"),
+            Self::KeySeedLength(ref cause) => {
+                write!(out, "exec receipt key seed is not 32 bytes: {cause}")
+            }
+            Self::Receipt(ref cause) => write!(out, "verify: {cause}"),
         }
     }
 }
@@ -130,7 +153,11 @@ impl std::error::Error for ExecError {
             Self::Reap(ref cause) => Some(cause),
             Self::Spawn { ref source, .. } => Some(source),
             Self::Workspace(ref cause) => Some(cause),
-            Self::IsolationUnavailable
+            Self::KeyStore(ref cause) => Some(cause),
+            Self::Entropy(ref cause) => Some(cause),
+            Self::Receipt(ref cause) => Some(cause),
+            Self::KeySeedLength(ref cause) => Some(cause),
+            Self::KeyMissing
             | Self::StateDirUnset
             | Self::BadTimeout { .. }
             | Self::Git { .. }
@@ -141,10 +168,57 @@ impl std::error::Error for ExecError {
     }
 }
 
-/// No host fallback until Nova isolation lands (logicalworks-crates#846).
-#[must_use]
-pub const fn refuse_model_command() -> ExecError {
-    ExecError::IsolationUnavailable
+/// The non-empty `LARRY_STATE_DIR` that `read` yields.
+fn state_dir(read: &impl Fn(&str) -> Option<String>) -> Result<PathBuf, ExecError> {
+    read("LARRY_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(ExecError::StateDirUnset)
+}
+
+/// The public half of the state directory's receipt key, created on first use.
+pub fn state_public_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, ExecError> {
+    let directory = state_dir(&read)?;
+    Ok(Ledger::open(&directory)?.signing_key()?.public_key())
+}
+
+/// The key a verifier trusts: `LARRY_RECEIPT_KEY` (64 hex characters) when it is
+/// set, which needs no state directory, else the state directory's own key.
+pub fn trusted_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, ExecError> {
+    match read("LARRY_RECEIPT_KEY").filter(|value| !value.is_empty()) {
+        Some(text) => parse_public_key(&text).map_err(ExecError::Receipt),
+        None => state_public_key(read),
+    }
+}
+
+/// One sealed run report and the verdict its receipt carries.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Report {
+    /// The report with its `accepted` verdict and `receipt`.
+    json: lgwks_std::json::Value,
+    /// Whether the run was accepted.
+    accepted: bool,
+}
+
+impl Report {
+    /// The sealed report, as printed.
+    #[must_use]
+    pub const fn json(&self) -> &lgwks_std::json::Value {
+        &self.json
+    }
+
+    /// Whether the run was accepted: no denial, a diff, every command passed.
+    #[must_use]
+    pub const fn accepted(&self) -> bool {
+        self.accepted
+    }
+
+    /// Seals a report body under `key`.
+    fn sealed(body: lgwks_std::json::Value, key: &lgwks_std::sign::SecretKey) -> Report {
+        let (json, accepted) = receipt::seal(body, key);
+        Report { json, accepted }
+    }
 }
 
 /// Settings the executor reads from its environment.
@@ -162,9 +236,7 @@ pub struct Settings {
 impl Settings {
     /// Reads the settings through `read`, which yields one variable or `None`.
     pub fn from_env(read: impl Fn(&str) -> Option<String>) -> Result<Settings, ExecError> {
-        let state_dir = read("LARRY_STATE_DIR")
-            .filter(|value| !value.is_empty())
-            .ok_or(ExecError::StateDirUnset)?;
+        let state_dir = state_dir(&read)?;
         let timeout_ms = match read("LARRY_EXEC_TIMEOUT_MS") {
             None => DEFAULT_TIMEOUT_MS,
             Some(value) => match value.parse::<u64>() {
@@ -175,7 +247,7 @@ impl Settings {
         // An absent PATH is the empty string: the optional value collects to nothing.
         let path: String = read("PATH").into_iter().collect();
         Ok(Settings {
-            state_dir: PathBuf::from(state_dir),
+            state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
         })
@@ -183,12 +255,28 @@ impl Settings {
 }
 
 /// Runs a task: clones its repository at the base, runs each acceptance command in order,
-/// and returns the report with the staged diff.
-pub fn execute(task: &Task, settings: &Settings) -> Result<lgwks_std::json::Value, ExecError> {
+/// and returns the report with the staged diff, sealed under the state directory's key.
+/// A task asking for model commands is denied: nothing runs, and its sealed report is
+/// never accepted.
+pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let ledger = Ledger::open(&settings.state_dir)?;
+    let key = ledger.signing_key()?;
     ledger.reap()?;
     sweep(&settings.state_dir, &ledger.live_tasks()?)?;
     let task_id = fresh_task_id(task.bytes());
+    let task_digest = digest_hex(task.bytes());
+    if task.has_model_commands() {
+        return Ok(Report::sealed(
+            lgwks_std::json::json!({
+                "task_id": task_id,
+                "task_digest": task_digest,
+                "diff": null,
+                "results": [],
+                "denied": [MODEL_COMMANDS_DENIED],
+            }),
+            &key,
+        ));
+    }
     let workspace = Workspace::create(
         &settings.state_dir,
         task.repo(),
@@ -209,19 +297,29 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<lgwks_std::json::Valu
         results.push(result.into_json());
     }
     let diff = workspace.diff(task.base())?;
-    Ok(lgwks_std::json::json!({
-        "task_id": task_id,
-        "diff": diff,
-        "results": results,
-    }))
+    Ok(Report::sealed(
+        lgwks_std::json::json!({
+            "task_id": task_id,
+            "task_digest": task_digest,
+            "diff": diff,
+            "results": results,
+            "denied": [],
+        }),
+        &key,
+    ))
+}
+
+/// The BLAKE3 digest of `bytes`, as 64 hex characters.
+fn digest_hex(bytes: &[u8]) -> String {
+    let mut hasher = lgwks_std::hash::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize().to_hex()
 }
 
 /// Names one run: the task's BLAKE3 prefix, the process id and a per-process counter.
 fn fresh_task_id(bytes: &[u8]) -> String {
     static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut hasher = lgwks_std::hash::Hasher::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize().to_hex();
+    let digest = digest_hex(bytes);
     let prefix: String = digest.chars().take(TASK_PREFIX_CHARS).collect();
     let run = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{}-{run}", std::process::id())

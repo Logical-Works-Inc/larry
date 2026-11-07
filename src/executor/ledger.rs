@@ -1,11 +1,13 @@
-//! The ledger of process groups a run has started and not yet settled, in
-//! `<state>/executor.db` (larry#85).
+//! The ledger of process groups a run has started and not yet settled, and the
+//! receipt signing key, in `<state>/executor.db` (larry#85, larry#86).
 
 use std::fs::File;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use lgwks_deps::storefront::rusqlite;
+use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
 use lgwks_std::process::{ProcessIdentity, reap_orphaned_group};
+use lgwks_std::sign::SecretKey;
 
 use super::ExecError;
 
@@ -15,6 +17,16 @@ use super::ExecError;
 /// transaction (logicalworks-crates#872).
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS live_groups(task_id TEXT NOT NULL, pid INTEGER NOT NULL, \
     started TEXT NOT NULL, PRIMARY KEY(pid, started));";
+
+/// Schema of the receipt key table, version 2: at most one row, a 32-byte ed25519 seed.
+const KEY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS receipt_key(id INTEGER PRIMARY KEY CHECK (id = 1), \
+    seed BLOB NOT NULL CHECK (length(seed) = 32));";
+
+/// Owner-only mode for the store and its write-ahead files: the seed is the key.
+const OWNER_ONLY: u32 = 0o600;
+
+/// The store's file names under the state directory, the database first.
+const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
 
 /// The sqlite table of live process groups, keyed by pid and start time.
 #[non_exhaustive]
@@ -35,6 +47,10 @@ impl Ledger {
     /// The kernel releases the lock when its holder dies, so a `kill -9` mid-open
     /// leaves nothing to clear; a live holder keeps it for one open and one
     /// migration, each under the store's own 60 s busy bound.
+    ///
+    /// The store holds the receipt key, so it is created owner-only before SQLite
+    /// opens it (SQLite gives the write-ahead files the database's mode), and a
+    /// store left wider by an earlier release is narrowed on every open.
     pub(crate) fn open(state_dir: &Path) -> Result<Ledger, ExecError> {
         std::fs::create_dir_all(state_dir).map_err(ExecError::LedgerLock)?;
         let lock = File::options()
@@ -44,11 +60,63 @@ impl Ledger {
             .open(state_dir.join("executor.db.lock"))
             .map_err(ExecError::LedgerLock)?;
         lock.lock().map_err(ExecError::LedgerLock)?;
-        let conn =
-            lgwks_deps::sqlite::open(&state_dir.join("executor.db")).map_err(ExecError::Ledger)?;
-        lgwks_deps::sqlite::migrate(&conn, 1, &[SCHEMA]).map_err(ExecError::Ledger)?;
+        let database = state_dir.join("executor.db");
+        File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(OWNER_ONLY)
+            .open(&database)
+            .map_err(ExecError::KeyStore)?;
+        let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
+        lgwks_deps::sqlite::migrate(&conn, 2, &[SCHEMA, KEY_SCHEMA]).map_err(ExecError::Ledger)?;
+        for name in STORE_FILES {
+            match std::fs::set_permissions(
+                state_dir.join(name),
+                std::fs::Permissions::from_mode(OWNER_ONLY),
+            ) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(ExecError::KeyStore(error)),
+            }
+        }
         lock.unlock().map_err(ExecError::LedgerLock)?;
         Ok(Ledger { conn })
+    }
+
+    /// The receipt signing key, created from OS entropy on first use.
+    ///
+    /// Executors racing on a fresh store each draw a seed, and `INSERT OR IGNORE`
+    /// into the one-row table keeps the first; every racer then reads that row back,
+    /// so one state directory signs under one key.
+    pub(crate) fn signing_key(&self) -> Result<SecretKey, ExecError> {
+        if let Some(key) = self.stored_key()? {
+            return Ok(key);
+        }
+        let seed = lgwks_std::random::bytes::<32>().map_err(ExecError::Entropy)?;
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO receipt_key (id, seed) VALUES (1, ?1)",
+                rusqlite::params![seed.as_slice()],
+            )
+            .map_err(ExecError::Sql)?;
+        self.stored_key()?.ok_or(ExecError::KeyMissing)
+    }
+
+    /// The stored key, if a row exists; a row whose seed is not 32 bytes is damage.
+    fn stored_key(&self) -> Result<Option<SecretKey>, ExecError> {
+        let row = self
+            .conn
+            .query_row("SELECT seed FROM receipt_key WHERE id = 1", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .optional()
+            .map_err(ExecError::Sql)?;
+        let Some(stored) = row else {
+            return Ok(None);
+        };
+        let seed = <[u8; 32]>::try_from(stored.as_slice()).map_err(ExecError::KeySeedLength)?;
+        Ok(Some(SecretKey::from_seed(seed)))
     }
 
     /// Records a group that a task has started.
@@ -146,6 +214,7 @@ impl Ledger {
 /// Ledger tests: a dead leader and a damaged row are both settled.
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -248,6 +317,71 @@ mod tests {
                 "every concurrent first open succeeds"
             );
         }
+        Ok(())
+    }
+
+    /// Executors racing their first receipt on one fresh state directory all sign
+    /// under one key, a reopen keeps it, the store is owner-only, and another
+    /// directory (another tenant) holds another key (larry#86).
+    #[test]
+    fn sim_racing_first_uses_share_one_signing_key() -> Result<(), Box<dyn std::error::Error>> {
+        /// Racers per round: past the two executors the journeys start together.
+        const RACERS: usize = 16;
+        /// Rounds, each on a fresh directory.
+        const ROUNDS: usize = 8;
+        let mut keys_per_round: Vec<[u8; 32]> = Vec::with_capacity(ROUNDS);
+        for _round in 0..ROUNDS {
+            let directory = scratch_directory();
+            let barrier = std::sync::Barrier::new(RACERS);
+            let drawn = std::thread::scope(|scope| {
+                let racers: Vec<_> = (0..RACERS)
+                    .map(|_racer| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            Ledger::open(&directory)
+                                .and_then(|ledger| ledger.signing_key())
+                                .map(|key| key.public_key().to_bytes())
+                                .map_err(|error| error.to_string())
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| match racer.join() {
+                        Ok(outcome) => outcome,
+                        Err(_panicked) => Err("a racer panicked".to_owned()),
+                    })
+                    .collect::<Result<Vec<[u8; 32]>, String>>()
+            })?;
+            let first = *drawn.first().ok_or("every round draws a key")?;
+            assert!(
+                drawn.iter().all(|key| *key == first),
+                "every racer on one directory signs under one key"
+            );
+            let reopened = Ledger::open(&directory)?
+                .signing_key()?
+                .public_key()
+                .to_bytes();
+            assert_eq!(reopened, first, "a reopen keeps the stored key");
+            let mode = std::fs::metadata(directory.join("executor.db"))?
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the store holding the seed is owner-only"
+            );
+            keys_per_round.push(first);
+            drop(std::fs::remove_dir_all(&directory));
+        }
+        let mut distinct = keys_per_round.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            ROUNDS,
+            "each state directory draws its own key"
+        );
         Ok(())
     }
 }

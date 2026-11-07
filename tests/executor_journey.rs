@@ -11,104 +11,29 @@
 //! it truncates noisy output; it refuses bad input with a typed one-line error;
 //! and two concurrent tasks never share a workspace. Each child runs with a
 //! cleared environment, so the developer's own variables never reach a test.
+//! The exit status is 0 for an accepted run and 2 for a sealed rejected one
+//! (larry#86); `report_of` checks that it agrees with the sealed verdict.
+
+#[path = "support/exec_cli.rs"]
+mod exec_cli;
 
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Instant;
 
+use exec_cli::{
+    POLL_LIMIT, TempDir, TestResult, assert_refused, fixture, flag_of, live_group_pid, make_fifo,
+    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, task_json, text_of,
+};
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
-use lgwks_std::json::{self, Value};
-
-/// What every test here returns.
-type TestResult = Result<(), Box<dyn Error>>;
 
 /// Runs the latency case samples.
 const SAMPLES: usize = 32;
 
-/// Polls a condition at most this many times before the journey gives up.
-const POLL_LIMIT: u32 = 100_000;
-
 /// The stdout cap the executor applies to each command, in bytes.
 const STDOUT_CAP: usize = 1_048_576;
-
-/// A fresh directory under the system temp dir, removed when dropped.
-struct TempDir {
-    /// Where the directory lives.
-    path: PathBuf,
-}
-
-impl TempDir {
-    /// Creates an empty directory whose name no other test in this process uses.
-    fn new() -> io::Result<TempDir> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let run = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("larry-exec-{}-{run}", std::process::id()));
-        fs::remove_dir_all(&path).ok();
-        fs::create_dir_all(&path)?;
-        Ok(TempDir { path })
-    }
-
-    /// The directory path.
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // Cleanup is best effort: a leftover temp dir must never fail a journey.
-        fs::remove_dir_all(&self.path).ok();
-    }
-}
-
-/// A state dir for the executor and a fresh origin repository, in that order.
-fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
-    let state = TempDir::new()?;
-    let origin = TempDir::new()?;
-    origin_repo(origin.path())?;
-    Ok((state, origin))
-}
-
-/// Runs `git -C dir <args>` and fails with git's stderr when it exits non-zero.
-fn git(dir: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
-    let output = Command::new("git").arg("-C").arg(dir).args(args).output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "git {args:?} in {} failed: {}",
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
-    }
-}
-
-/// Makes `dir` a git repository with one commit holding `README` and `src/lib.rs`.
-fn origin_repo(dir: &Path) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(dir.join("src"))?;
-    fs::write(dir.join("README"), "origin readme\n")?;
-    fs::write(dir.join("src").join("lib.rs"), "pub fn origin() {}\n")?;
-    git(dir, &["init", "-q"])?;
-    git(dir, &["add", "-A"])?;
-    git(
-        dir,
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-qm",
-            "init",
-        ],
-    )?;
-    Ok(())
-}
 
 /// Collects every file and symlink under `dir` as (path relative to `root`, bytes).
 fn collect(
@@ -146,161 +71,6 @@ fn tree_digest(dir: &Path) -> Result<String, Box<dyn Error>> {
     Ok(hasher.finalize().to_hex())
 }
 
-/// Creates a named pipe at `path`.
-fn make_fifo(path: &Path) -> Result<(), Box<dyn Error>> {
-    let status = Command::new("mkfifo").arg(path).status()?;
-    assert!(status.success(), "mkfifo {} must succeed", path.display());
-    Ok(())
-}
-
-/// A task document naming `repo`, `base` and the acceptance commands as raw JSON.
-fn task_json(repo: &Path, base: &str, acceptance: &str) -> String {
-    format!(
-        r#"{{"repo":"{}","base":"{}","acceptance":{}}}"#,
-        repo.display(),
-        base,
-        acceptance
-    )
-}
-
-/// Starts `larry exec` with a cleared environment, pipes `task` in and closes stdin.
-/// `state` sets `LARRY_STATE_DIR` when given; `timeout_ms` sets the command timeout.
-fn spawn_exec(
-    state: Option<&Path>,
-    timeout_ms: Option<u64>,
-    task: &str,
-) -> Result<Child, Box<dyn Error>> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
-    command
-        .arg("exec")
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(dir) = state {
-        command.env("LARRY_STATE_DIR", dir);
-    }
-    if let Some(ms) = timeout_ms {
-        command.env("LARRY_EXEC_TIMEOUT_MS", ms.to_string());
-    }
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        // A refused task may exit before it reads stdin; the broken pipe is the refusal itself.
-        stdin.write_all(task.as_bytes()).ok();
-    }
-    Ok(child)
-}
-
-/// Runs `larry exec` to its end with `task` on stdin and returns its output.
-fn run_exec(state: &Path, task: &str, timeout_ms: Option<u64>) -> Result<Output, Box<dyn Error>> {
-    Ok(spawn_exec(Some(state), timeout_ms, task)?.wait_with_output()?)
-}
-
-/// The child's stderr as text.
-fn stderr_of(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-/// Parses a successful run's stdout as the JSON report.
-fn report_of(output: &Output) -> Result<Value, Box<dyn Error>> {
-    assert!(
-        output.status.success(),
-        "larry exec must exit 0, got {:?}; stderr: {}",
-        output.status.code(),
-        stderr_of(output)
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(json::from_str::<Value>(&text)?)
-}
-
-/// The member `key` of `value` as text.
-fn text_of<'a>(value: &'a Value, key: &str) -> Result<&'a str, Box<dyn Error>> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("report member {key} is not text").into())
-}
-
-/// The member `key` of `value` as a boolean.
-fn flag_of(value: &Value, key: &str) -> Result<bool, Box<dyn Error>> {
-    value
-        .get(key)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("report member {key} is not a boolean").into())
-}
-
-/// The member `key` of `value` as an integer.
-fn number_of(value: &Value, key: &str) -> Result<i64, Box<dyn Error>> {
-    value
-        .get(key)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("report member {key} is not an integer").into())
-}
-
-/// The `index`-th entry of the report's `results` array.
-fn result_at(report: &Value, index: usize) -> Result<&Value, Box<dyn Error>> {
-    report
-        .get("results")
-        .and_then(Value::as_array)
-        .and_then(|items| items.get(index))
-        .ok_or_else(|| format!("report has no results[{index}]").into())
-}
-
-/// Asserts a typed refusal: exit 1, exactly one stderr line, and `needle` named in it.
-fn assert_refused(output: &Output, needle: &str) {
-    let stderr = stderr_of(output);
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "a refusal must exit 1; stderr: {stderr:?}"
-    );
-    assert_eq!(
-        stderr.lines().count(),
-        1,
-        "a refusal must print exactly one stderr line, got {stderr:?}"
-    );
-    assert!(
-        stderr.contains(needle),
-        "stderr {stderr:?} must name {needle}"
-    );
-}
-
-/// The sample at percentile `per_cent` of `sorted`, nearest rank; zero when empty.
-fn percentile(sorted: &[Duration], per_cent: usize) -> Duration {
-    let rank = sorted.len().saturating_mul(per_cent).div_ceil(100);
-    match sorted.get(rank.saturating_sub(1)) {
-        Some(&sample) => sample,
-        None => Duration::ZERO,
-    }
-}
-
-/// A duration in fractional milliseconds.
-fn millis(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1000.0
-}
-
-/// Opens the executor's ledger read-only and polls it until a live group is recorded;
-/// returns that group's pid.
-fn live_group_pid(db: &Path) -> Result<i32, Box<dyn Error>> {
-    let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut attempts: u32 = 0;
-    loop {
-        match connection.query_row("SELECT pid FROM live_groups", [], |row| {
-            row.get::<_, i64>(0)
-        }) {
-            Ok(pid) => return Ok(i32::try_from(pid)?),
-            Err(error) => {
-                attempts = attempts.saturating_add(1);
-                if attempts >= POLL_LIMIT {
-                    return Err(error.into());
-                }
-                std::thread::yield_now();
-            }
-        }
-    }
-}
-
 /// Whether any member of process group `pgid` is still alive.
 fn group_alive(pgid: i32) -> Result<bool, Box<dyn Error>> {
     Ok(lgwks_std::process::process_group_exists(pgid)?)
@@ -328,7 +98,13 @@ fn a_passing_and_a_failing_command_report_their_exit_codes() -> TestResult {
         "HEAD",
         r#"[["true"],["sh","-c","echo hi; echo err >&2; exit 3"]]"#,
     );
-    let report = report_of(&run_exec(state.path(), &task, None)?)?;
+    let output = run_exec(state.path(), &task, None)?;
+    let report = report_of(&output)?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a run with a failing command is sealed as rejected"
+    );
     let passing = result_at(&report, 0)?;
     let failing = result_at(&report, 1)?;
     assert_eq!(number_of(passing, "exit_code")?, 0, "`true` must exit 0");
@@ -448,6 +224,10 @@ fn a_timed_out_command_has_its_whole_group_killed() -> TestResult {
         flag_of(result, "timed_out")?,
         "the blocked command must be reported timed out"
     );
+    assert!(
+        !flag_of(&report, "accepted")?,
+        "a timed-out run is never accepted"
+    );
     let pgid = i32::try_from(number_of(result, "pgid")?)?;
     assert!(
         !group_alive(pgid)?,
@@ -501,7 +281,8 @@ fn a_kill_9_of_the_executor_is_reaped_by_the_next_start() -> TestResult {
 
 #[test]
 fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
-    // Four refusals, each one typed line on stderr and exit 1.
+    // Three refusals, each one typed line on stderr and exit 1; nothing is sealed.
+    // A model-command task is a denial, sealed and never accepted: tests/receipt_journey.rs.
     let (state, origin) = fixture()?;
     let empty = TempDir::new()?;
     let valid = task_json(origin.path(), "HEAD", "[]");
@@ -518,16 +299,6 @@ fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
         None,
     )?;
     assert_refused(&output, "could not check out base no-such-ref");
-
-    let output = run_exec(
-        state.path(),
-        &format!(
-            r#"{{"repo":"{}","base":"HEAD","acceptance":[],"model_commands":[]}}"#,
-            origin.path().display()
-        ),
-        None,
-    )?;
-    assert_refused(&output, "isolation");
     Ok(())
 }
 

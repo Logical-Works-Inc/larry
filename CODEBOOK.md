@@ -58,7 +58,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::run` | One command in its own process group: capture, timeout, group kill |
-| `executor::ledger` | The SQLite record of live groups and the reap after a kill -9 |
+| `executor::ledger` | The SQLite record of live groups, the reap after a kill -9, the receipt key |
+| `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
 | `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
 | `model` | The blocking chat-completions client to 9router (ADR 0003) |
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
@@ -72,7 +73,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
 | `src/main.rs`, `src/mcp/` | The binary entry and the `larry mcp` server |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `larry mcp`, `larry model`, `larry exec` |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key` |
 
 ## Invariants the module map carries
 
@@ -82,5 +83,6 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone.
 - `executor::ledger` opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
+- Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
 - Test fixtures shared by several runtime test binaries live in `tests/support`, `tests/sim_kit` and
   `tests/fence_kit`, each with a test that exercises every helper.

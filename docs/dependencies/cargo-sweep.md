@@ -43,7 +43,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Tick, projection | `lgwks_bot` ECS world | Loco scheduler: not deterministic, not replayable |
 | Authority, grants | `lgwks_bot::cap`, secure-authority | Loco `auth`: it authenticates, it never authorizes |
 | Effect keys, retry, dispatch certainty | `lgwks_bot::effect`, `retry` | hand-rolled copies in `larry-runtime` (larry#68) |
-| Receipts signed | `lgwks_std::sign` (ed25519) | forge's SipHash audit chain: not cryptographic |
+| Receipts signed (larry#86, ADR 0006) | `lgwks_std::sign` (ed25519), seed in `lgwks_deps` `sqlite` | forge's SipHash audit chain: a MAC, no offline check |
 | Sealed records at rest | `lgwks_bot::sealed` | none needed |
 | Model client to 9router | `lgwks_std::http` + `json` + `retry`, ported from forge-providers | `async-openai`: a second client, more crates |
 | Code reading, diffs | `lgwks_ast` | `syn`: the estate has one reader |
