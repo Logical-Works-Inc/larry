@@ -435,7 +435,11 @@ fn sim_bounds_and_receipt_paths_are_refused_before_the_engine() -> Check {
         };
         assert_eq!(error.to_string(), message, "seed {seed}: the exact refusal");
         assert_eq!(stub.calls, 0, "seed {seed}: the engine never ran");
-        let written = fs::read_dir(root.0.join("tools/receipts"))?.count();
+        let written = match fs::read_dir(root.0.join("tools/receipts")) {
+            Ok(entries) => entries.count(),
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => 0,
+            Err(cause) => return Err(cause.into()),
+        };
         assert_eq!(written, 0, "seed {seed}: no receipt was written");
     }
     Ok(())
