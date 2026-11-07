@@ -30,9 +30,21 @@ until they are renamed.
 
 - `crates/larry-contracts`: the pure typed contracts (commands, events, effects, authority, replay).
 - `crates/larry-runtime`: the headless journal-authoritative runtime with falsifier and seeded simulation suites.
-- `larry`: the workspace demo (fixture data; nothing executes) and `larry mcp`, a stateless MCP 2026-07-28
-  server whose `larry_submit_task` tool validates a typed task and answers `executor_not_connected` until the
-  executor lands.
+- `larry`: the workspace demo (fixture data; nothing executes), and the executor's doors:
+  - `larry mcp`: a stateless MCP 2026-07-28 server. Its `larry_submit_task` tool runs a typed task through the
+    executor and reports success only when the sealed run is accepted (ADR 0008).
+  - `larry exec`: runs one task document in a fresh clone.
+  - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
+  - `larry model`: sends one completion through the configured gateway.
+  - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
+
+## Install
+
+```sh
+cargo install --git https://github.com/Logical-Works-Inc/larry --tag v0.1.0 --locked
+```
+`larry mcp` reads `LARRY_STATE_DIR` and `LARRY_MODEL_KEY`. `LARRY_MODEL_URL` defaults to a local 9router
+gateway; without these variables, every task is refused as `executor_not_connected`.
 
 Start with the [product plan](/docs/product/README.md), the [specification index](index.md), the
 [visual specification](specification.md) and the [source review](research-ledger.md). Working rules are in
