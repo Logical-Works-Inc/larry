@@ -1,7 +1,7 @@
 //! Integration journeys for the fixture domain: the published JSON view, the
 //! rejection contract, and session isolation. These drive `larry_demo`
-//! directly; the native surface has its own real-PTY suite in
-//! `tools/test_native_cli.py`.
+//! directly; the shipped driver has `tests/demo_journey.rs` and the native
+//! surface its real-PTY suite in `tests/e2e_journey.rs`.
 
 use larry_demo::{Demo, MAX_INPUT, Rejected};
 use lgwks_std::json::{self, Value};

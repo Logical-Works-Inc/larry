@@ -71,8 +71,8 @@ target/debug/larry governance && target/debug/larry tracker --check   # `larry t
 lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
-The checker, tracker and reranker are Rust (ADR 0010, 0013); the PTY journeys stay Python, in CI only, until
-larry#53 ports them; agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
+The checker, tracker, PTY journeys and reranker are Rust (ADR 0010, 0011, 0013), so CI runs no Python;
+agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
 picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
 once public, never self-hosted on a public repository (larry#116). Launch the demo with
 `cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.

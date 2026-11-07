@@ -530,6 +530,11 @@ fn local_ci_runs_the_rust_gate_and_no_python_governance_lane() -> TestResult {
             !line.contains("check_governance") && !line.contains("generate.py"),
             "no Python governance lane: {line}"
         );
+        // larry#53's proof: local CI runs no Python at all once steps 2 and 3 land.
+        assert!(
+            !line.starts_with("python") && !line.contains(".py"),
+            "no lane runs Python: {line}"
+        );
     }
     Ok(())
 }
