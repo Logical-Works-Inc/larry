@@ -60,8 +60,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [ ] #53 port the nine Python tools to Rust (governance checker and tracker first). Proof: CI and
   `.wwfd/local-ci.sh` run no Python; the over-size documents split.
 - [ ] #103 CI fails a PR with no closing issue. Proof: passes on its own PR, fails on one without `Closes`.
-- [ ] #101 E47 (PR #20), #100 E28 (PR #21), #99 E71 (PR #22), #98 E30 (PR #25): rebase each onto main and
-  merge on green, or close with the reason. Proof: the PR's named test green on main.
+- [x] #133 dependency register on lgwks-deps schema 3: PR #135, `lgwks-deps check .` prints OK (was REFUSED).
+- Moved to section 3 (2026-11-07): the falsifier PRs land after #68 step 4; see the last line there.
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
 
@@ -75,6 +75,10 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
 - [ ] #80 tick and consumer on app scope and tenant_store. Proof: `sim_lifecycle`, `sim_consumer`,
   `sim_cancel`.
+- [ ] #68 step 4: a package outside `larry-runtime` calls it on the run path (Track 2 gate). Proof: rust-surface
+  passes a new runtime `pub` item with that caller.
+- [ ] #101 E47 (PR #20), #100 E28 (PR #21), #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe
+  and the E47 patch on PR #20) and merge on green. Proof: the PR's named test green on main.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
