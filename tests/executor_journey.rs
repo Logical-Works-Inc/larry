@@ -13,6 +13,8 @@
 //! cleared environment, so the developer's own variables never reach a test.
 //! The exit status is 0 for an accepted run and 2 for a sealed rejected one
 //! (larry#86); `report_of` checks that it agrees with the sealed verdict.
+//! The fixture origin runs no background git maintenance, so nothing but the
+//! executor can change the tree a journey hashes (git-maintenance, larry#138).
 
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
@@ -21,6 +23,7 @@ use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::Command;
 use std::time::Instant;
 
 use exec_cli::{
@@ -151,6 +154,39 @@ fn a_passing_and_a_failing_command_report_their_exit_codes() -> TestResult {
         millis(percentile(&samples, 95)),
         millis(percentile(&samples, 99)),
     )?;
+    Ok(())
+}
+
+#[test]
+fn a_fixture_origin_starts_no_background_maintenance() -> TestResult {
+    // A commit in the fixture origin, traced: git prints a run_command line for every
+    // child it starts, and `maintenance run --auto --detach` would be one of them.
+    let (_state, origin) = fixture()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(origin.path())
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "probe",
+        ])
+        .env("GIT_TRACE", "1")
+        .output()?;
+    let trace = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the probe commit failed: {trace}");
+    assert!(
+        trace.contains("built-in: git commit"),
+        "GIT_TRACE must reach git for the probe to mean anything: {trace}"
+    );
+    assert!(
+        !trace.contains("maintenance run"),
+        "a fixture commit must not fork background maintenance: {trace}"
+    );
     Ok(())
 }
 
