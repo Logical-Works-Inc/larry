@@ -558,9 +558,11 @@ fn native_crash_and_fresh_terminal_recovery() -> Journey {
         pty.wait_for(BOOT_TEXT)?;
         pty.send("\r")?;
         pty.wait_for(WORKSPACE_TEXT)?;
-        pty.send("/changes\r")?;
-        pty.wait_for("CHANGES / fixture")?;
-        pty.send("/next\r")?;
+        // `/changes` only moves focus, and its header is painted with the workspace, so no text
+        // proves that reply alone; waiting for the header raced the paint (larry#158). Both
+        // commands go together, as the main journey types its steps, and the wait is for the
+        // line only the `/next` reply paints.
+        pty.send("/changes\r/next\r")?;
         pty.wait_for("src/retry.rs:12")?;
         let pid = pty.pid()?;
         let killed = Command::new("kill").args(["-9", &pid]).status()?;
