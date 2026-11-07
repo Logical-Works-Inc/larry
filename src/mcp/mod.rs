@@ -51,14 +51,24 @@ fn capabilities() -> Value {
     json!({ "tools": { "listChanged": false } })
 }
 
-/// Serves MCP until the reader reaches end of input.
+/// Serves MCP until the reader reaches end of input. The executor behind
+/// `larry_submit_task` is read from the environment once, as the process starts.
 pub(crate) fn serve<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<()> {
-    serve_bounded(reader, writer, wire::MAX_FRAME_BYTES)
+    let executor = tools::Executor::from_env(|name| std::env::var(name).ok());
+    serve_bounded(reader, writer, wire::MAX_FRAME_BYTES, &executor)
 }
 
-/// `serve` with an explicit frame bound, so a unit test can use a small one.
-fn serve_bounded<R: BufRead, W: Write>(mut reader: R, mut writer: W, max: usize) -> io::Result<()> {
-    let mut session = Session::default();
+/// `serve` with an explicit frame bound and executor, so a unit test can use small ones.
+fn serve_bounded<R: BufRead, W: Write>(
+    mut reader: R,
+    mut writer: W,
+    max: usize,
+    executor: &tools::Executor,
+) -> io::Result<()> {
+    let mut session = Session {
+        lifecycle: legacy::Lifecycle::default(),
+        executor,
+    };
     loop {
         let reply = match wire::read_frame(&mut reader, max)? {
             wire::Frame::End => return Ok(()),
@@ -77,13 +87,15 @@ fn serve_bounded<R: BufRead, W: Write>(mut reader: R, mut writer: W, max: usize)
 }
 
 /// Per-process state: only the legacy lifecycle keeps any; the stateless era keeps none.
-#[derive(Default)]
-struct Session {
+/// The executor is read once and only borrowed.
+struct Session<'run> {
     /// The initialize handshake, for clients that open with `initialize`.
     lifecycle: legacy::Lifecycle,
+    /// What `larry_submit_task` runs on.
+    executor: &'run tools::Executor,
 }
 
-impl Session {
+impl Session<'_> {
     /// Maps one frame to its reply; `None` when JSON-RPC calls for silence.
     fn handle(&mut self, bytes: &[u8]) -> Option<Value> {
         match json::from_slice::<Value>(bytes) {
@@ -169,10 +181,10 @@ impl Session {
             return self.lifecycle.initialize(id, params);
         }
         if modern::is_stateless(params) {
-            return modern::request(id, method, params);
+            return modern::request(id, method, params, self.executor);
         }
         if self.lifecycle.is_open() || method == "ping" {
-            return legacy::request(id, method, params);
+            return legacy::request(id, method, params, self.executor);
         }
         if modern::METHODS.contains(&method) {
             return modern::missing_meta(id);
@@ -198,7 +210,12 @@ fn list_tools(id: &Value, params: Option<&Map>, finish: &dyn Fn(Value) -> Value)
 /// `tools/call`: an unknown tool or a malformed call is a protocol error; a
 /// tool's own failure comes back as a result with `isError` true, shaped for
 /// the era by `finish`.
-fn call_tool(id: &Value, params: Option<&Map>, finish: &dyn Fn(Value) -> Value) -> Value {
+fn call_tool(
+    id: &Value,
+    params: Option<&Map>,
+    executor: &tools::Executor,
+    finish: &dyn Fn(Value) -> Value,
+) -> Value {
     let Some(name) = params
         .and_then(|map| map.get("name"))
         .and_then(Value::as_str)
@@ -223,7 +240,7 @@ fn call_tool(id: &Value, params: Option<&Map>, finish: &dyn Fn(Value) -> Value) 
             }
         },
     };
-    match tools::call(name, arguments) {
+    match tools::call(name, arguments, executor) {
         Some(outcome) => wire::result(id, finish(outcome)),
         None => wire::error(id, wire::INVALID_PARAMS, "unknown tool"),
     }
@@ -231,14 +248,20 @@ fn call_tool(id: &Value, params: Option<&Map>, finish: &dyn Fn(Value) -> Value) 
 
 #[cfg(test)]
 mod tests {
-    use super::{serve_bounded, supported_versions};
+    use super::{serve_bounded, supported_versions, tools::Executor};
     use lgwks_std::json::{self, Value};
     use std::io::Cursor;
 
-    /// Serves `input` and returns every reply line parsed.
+    /// Serves `input` with no executor behind it and returns every reply line parsed.
     fn replies(input: &str, max: usize) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         let mut out = Vec::new();
-        serve_bounded(Cursor::new(input.as_bytes().to_vec()), &mut out, max)?;
+        let executor = Executor::Absent(String::from("no executor in a unit test"));
+        serve_bounded(
+            Cursor::new(input.as_bytes().to_vec()),
+            &mut out,
+            max,
+            &executor,
+        )?;
         let mut parsed = Vec::new();
         for line in String::from_utf8(out)?.lines() {
             parsed.push(json::from_str(line)?);

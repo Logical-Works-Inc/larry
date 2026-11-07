@@ -5,6 +5,7 @@
 //! speaks to the real binary through its public interface and nothing else.
 
 use lgwks_std::json::{self, Value};
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 
@@ -52,10 +53,20 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts `larry mcp` with piped stdio and discarded stderr.
+    /// Starts `larry mcp` with no executor behind it: piped stdio, discarded
+    /// stderr, and an environment holding only PATH, so no developer variable
+    /// (`LARRY_STATE_DIR`, `LARRY_MODEL_KEY`) can reach the server.
     pub fn start() -> TestResult<Self> {
+        Self::start_with(&[])
+    }
+
+    /// `start` with `env` set as well: the operator's executor settings.
+    pub fn start_with(env: &[(&str, &OsStr)]) -> TestResult<Self> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
             .arg("mcp")
+            .env_clear()
+            .env("PATH", std::env::var("PATH")?)
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

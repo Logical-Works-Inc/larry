@@ -57,6 +57,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `lib` | The effect-free DEMO session state |
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
 | `executor::task` | The bounded task document and its typed refusals |
+| `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill |
 | `executor::ledger` | The SQLite record of live groups, the reap after a kill -9, the receipt key |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
@@ -72,7 +73,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native::workspace::views` | The board, truth and work scenes |
 | `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
-| `src/main.rs`, `src/mcp/` | The binary entry and the `larry mcp` server |
+| `src/main.rs`, `src/mcp/` | The binary entry and the `larry mcp` server; `larry_submit_task` runs the executor |
 | `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key` |
 
 ## Invariants the module map carries
@@ -85,4 +86,6 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `executor::ledger` opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
 - Test fixtures shared by several runtime test binaries live in `tests/support`, `tests/sim_kit` and
-  `tests/fence_kit`, each with a test that exercises every helper.
+  `tests/fence_kit`, each with a test that exercises every helper; `tests/support/origin.rs` holds the
+  origin repository the executor and MCP journeys share, `tests/support/mcp_task.rs` the operator
+  session and offline receipt check behind `larry_submit_task`.

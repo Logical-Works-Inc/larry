@@ -1,7 +1,11 @@
-//! The task document `larry exec` parses from standard input (larry#85).
+//! The task document `larry exec` parses from standard input (larry#85), and
+//! `larry_submit_task` builds over MCP: an optional brief (`goal` and `files`)
+//! asks the model to write those files before the acceptance commands run (larry#123).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+use super::author::Brief;
 
 /// Maximum bytes accepted for one task document.
 pub(crate) const MAX_TASK_BYTES: usize = 65_536;
@@ -21,6 +25,16 @@ const MAX_BASE_BYTES: usize = 256;
 /// Maximum bytes in the repository path.
 const MAX_REPO_BYTES: usize = 4096;
 
+/// Every key a task document may carry.
+const KEYS: [&str; 6] = [
+    "repo",
+    "base",
+    "acceptance",
+    "model_commands",
+    "goal",
+    "files",
+];
+
 /// One parsed `larry exec` task document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -33,6 +47,8 @@ pub struct Task {
     acceptance: Vec<Vec<String>>,
     /// Whether the document asked for model commands.
     model_commands: bool,
+    /// The goal and the files the model writes, when the document carries them.
+    brief: Option<Brief>,
     /// The document bytes it was parsed from, kept to name the run.
     bytes: Vec<u8>,
 }
@@ -62,6 +78,12 @@ impl Task {
         self.model_commands
     }
 
+    /// The goal and the files the model writes, when the document carries them.
+    #[must_use]
+    pub(crate) const fn brief(&self) -> Option<&Brief> {
+        self.brief.as_ref()
+    }
+
     /// The document bytes it was parsed from.
     #[must_use]
     pub(crate) fn bytes(&self) -> &[u8] {
@@ -78,7 +100,7 @@ impl Task {
             .map_err(TaskError::Malformed)?;
         let object = value.as_object().ok_or(TaskError::NotAnObject)?;
         for (key, _) in object {
-            if key != "repo" && key != "base" && key != "acceptance" && key != "model_commands" {
+            if !KEYS.contains(&key) {
                 return Err(TaskError::UnknownKey {
                     key: key.to_owned(),
                 });
@@ -158,11 +180,13 @@ impl Task {
                 }
             }
         }
+        let brief = Brief::parse(object)?;
         Ok(Task {
             repo: PathBuf::from(repo_text),
             base: base_text.to_owned(),
             acceptance,
             model_commands: object.contains_key("model_commands"),
+            brief,
             bytes: bytes.to_vec(),
         })
     }
@@ -231,6 +255,20 @@ pub enum TaskError {
         /// Index of the command holding the item.
         index: usize,
     },
+    /// The document carried `goal` without `files`, or `files` without `goal`.
+    IncompleteBrief,
+    /// The goal was blank, oversize, or held a NUL byte.
+    BadGoal,
+    /// The brief named no file or too many.
+    FileCount {
+        /// Number of files named.
+        count: usize,
+    },
+    /// A file path was empty, oversize, not repo-relative, inside `.git`, or a repeat.
+    BadFile {
+        /// Index of the file.
+        index: usize,
+    },
 }
 
 impl fmt::Display for TaskError {
@@ -267,6 +305,20 @@ impl fmt::Display for TaskError {
                     "task document command {index} has an item holding a NUL byte"
                 )
             }
+            Self::IncompleteBrief => {
+                out.write_str("task document needs both goal and files, or neither")
+            }
+            Self::BadGoal => out.write_str("task document goal is blank, too long or holds NUL"),
+            Self::FileCount { count } => {
+                write!(
+                    out,
+                    "task document names {count} files; 1 to 64 are allowed"
+                )
+            }
+            Self::BadFile { index } => write!(
+                out,
+                "task document file {index} is not a distinct repo-relative path outside .git"
+            ),
         }
     }
 }

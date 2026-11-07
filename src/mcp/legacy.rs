@@ -7,7 +7,9 @@
 //! offers the newest legacy one. Results keep the legacy shape (no `resultType`,
 //! no cache hints); `ping` is still a legacy method.
 
-use super::{INSTRUCTIONS, LATEST_LEGACY, LEGACY_VERSIONS, capabilities, identity, wire};
+use super::{
+    INSTRUCTIONS, LATEST_LEGACY, LEGACY_VERSIONS, capabilities, identity, tools::Executor, wire,
+};
 use lgwks_std::json::{Map, Value, json};
 
 /// The legacy session of one stdio process: the whole lifecycle is one flag.
@@ -60,11 +62,16 @@ impl Lifecycle {
 }
 
 /// Answers one request of an open legacy session (and a pre-initialize `ping`).
-pub(super) fn request(id: &Value, method: &str, params: Option<&Map>) -> Value {
+pub(super) fn request(
+    id: &Value,
+    method: &str,
+    params: Option<&Map>,
+    executor: &Executor,
+) -> Value {
     match method {
         "ping" => wire::result(id, json!({})),
         "tools/list" => super::list_tools(id, params, &|body| body),
-        "tools/call" => super::call_tool(id, params, &|body| body),
+        "tools/call" => super::call_tool(id, params, executor, &|body| body),
         _ => wire::error(id, wire::METHOD_NOT_FOUND, "method not found"),
     }
 }

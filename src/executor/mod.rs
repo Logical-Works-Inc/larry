@@ -1,5 +1,7 @@
-//! The executor behind `larry exec` (larry#85) and its signed receipts (larry#86).
+//! The executor behind `larry exec` (larry#85), its signed receipts (larry#86)
+//! and the model step that writes a brief's files before acceptance (larry#123).
 
+mod author;
 mod ledger;
 mod receipt;
 mod run;
@@ -16,6 +18,8 @@ use lgwks_std::sign::PublicKey;
 use run::run_command;
 use workspace::{Workspace, sweep};
 
+use crate::model::{ModelClient, ModelConfig, ModelError};
+pub use author::AuthorFault;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use task::{Task, TaskError};
@@ -100,6 +104,17 @@ pub enum ExecError {
     KeySeedLength(std::array::TryFromSliceError),
     /// A receipt was refused.
     Receipt(ReceiptError),
+    /// A `LARRY_MODEL_*` setting is unusable.
+    ModelConfig(ModelError),
+    /// The task carries a brief and no `LARRY_MODEL_KEY` is set, so no model can write it.
+    ModelUnconfigured,
+    /// The model step could not write one of the brief's files; nothing was sealed.
+    Author {
+        /// The repo-relative path being written.
+        path: String,
+        /// Why it could not be written.
+        fault: AuthorFault,
+    },
 }
 
 impl fmt::Display for ExecError {
@@ -137,6 +152,14 @@ impl fmt::Display for ExecError {
                 write!(out, "exec receipt key seed is not 32 bytes: {cause}")
             }
             Self::Receipt(ref cause) => write!(out, "verify: {cause}"),
+            Self::ModelConfig(ref cause) => write!(out, "exec model config: {cause}"),
+            Self::ModelUnconfigured => {
+                out.write_str("exec LARRY_MODEL_KEY is unset: a task with a goal needs the model")
+            }
+            Self::Author {
+                ref path,
+                ref fault,
+            } => write!(out, "exec could not write {path}: {fault}"),
         }
     }
 }
@@ -157,7 +180,10 @@ impl std::error::Error for ExecError {
             Self::Entropy(ref cause) => Some(cause),
             Self::Receipt(ref cause) => Some(cause),
             Self::KeySeedLength(ref cause) => Some(cause),
+            Self::ModelConfig(ref cause) => Some(cause),
+            Self::Author { ref fault, .. } => Some(fault),
             Self::KeyMissing
+            | Self::ModelUnconfigured
             | Self::StateDirUnset
             | Self::BadTimeout { .. }
             | Self::Git { .. }
@@ -222,7 +248,7 @@ impl Report {
 }
 
 /// Settings the executor reads from its environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Settings {
     /// Directory holding the ledger and the workspaces.
@@ -231,6 +257,8 @@ pub struct Settings {
     timeout: Duration,
     /// The PATH the acceptance commands and git run under.
     path: String,
+    /// The gateway a brief's files are written through; `None` without `LARRY_MODEL_KEY`.
+    model: Option<ModelConfig>,
 }
 
 impl Settings {
@@ -246,18 +274,31 @@ impl Settings {
         };
         // An absent PATH is the empty string: the optional value collects to nothing.
         let path: String = read("PATH").into_iter().collect();
+        let model = match read("LARRY_MODEL_KEY").filter(|key| !key.is_empty()) {
+            None => None,
+            Some(_) => Some(ModelConfig::from_env(&read).map_err(ExecError::ModelConfig)?),
+        };
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
+            model,
         })
     }
 }
 
-/// Runs a task: clones its repository at the base, runs each acceptance command in order,
-/// and returns the report with the staged diff, sealed under the state directory's key.
-/// A task asking for model commands is denied: nothing runs, and its sealed report is
-/// never accepted.
+/// Whether to retry a model refusal after `wait`. The executor never blocks on a
+/// clock: a retry that needs no wait goes ahead (`LARRY_MODEL_BACKOFF_MS=0`), and
+/// one that would wait stops, so the planner gets the typed refusal, with any
+/// `Retry-After`, at once and decides whether to resubmit.
+const fn backoff(wait: Duration) -> bool {
+    wait.is_zero()
+}
+
+/// Runs a task: clones its repository at the base, has the model write the brief's files
+/// when the task carries one, runs each acceptance command in order, and returns the report
+/// with the staged diff, sealed under the state directory's key. A task asking for model
+/// commands is denied: nothing runs, and its sealed report is never accepted.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let ledger = Ledger::open(&settings.state_dir)?;
     let key = ledger.signing_key()?;
@@ -277,6 +318,13 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
             &key,
         ));
     }
+    let author = match task.brief() {
+        None => None,
+        Some(brief) => {
+            let config = settings.model.clone().ok_or(ExecError::ModelUnconfigured)?;
+            Some((brief, ModelClient::new(config, backoff)))
+        }
+    };
     let workspace = Workspace::create(
         &settings.state_dir,
         task.repo(),
@@ -284,6 +332,10 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         &task_id,
         &settings.path,
     )?;
+    let authored = match author {
+        None => None,
+        Some((brief, client)) => Some(author::author(brief, workspace.path(), &client)?),
+    };
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
         let result = run_command(
@@ -297,16 +349,23 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         results.push(result.into_json());
     }
     let diff = workspace.diff(task.base())?;
-    Ok(Report::sealed(
-        lgwks_std::json::json!({
-            "task_id": task_id,
-            "task_digest": task_digest,
-            "diff": diff,
-            "results": results,
-            "denied": [],
-        }),
-        &key,
-    ))
+    let mut body = lgwks_std::json::json!({
+        "task_id": task_id,
+        "task_digest": task_digest,
+        "diff": diff,
+        "results": results,
+        "denied": [],
+    });
+    // Only a briefed run names what the model wrote, so a plain run's report keeps its shape.
+    if let Some(records) = authored
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert(
+            String::from("authored"),
+            lgwks_std::json::Value::Array(records),
+        );
+    }
+    Ok(Report::sealed(body, &key))
 }
 
 /// The BLAKE3 digest of `bytes`, as 64 hex characters.

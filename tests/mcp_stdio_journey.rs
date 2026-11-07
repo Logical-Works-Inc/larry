@@ -1,17 +1,33 @@
 //! Journeys against the shipped `larry mcp` binary, as an MCP client lives them.
 //!
-//! Source: MCP specification 2025-06-18 (lifecycle, tools, transports/stdio)
-//! and JSON-RPC 2.0 section 5 (error codes). Requirement: larry#84, a stdio
-//! MCP server inside the shipped binary, bounded, typed, never simulating a
-//! success. Every case drives the real process through its public interface.
+//! Source: MCP specification 2025-06-18 (lifecycle, tools, transports/stdio),
+//! JSON-RPC 2.0 section 5 (error codes), RFC 8032 (the receipt's ed25519) and
+//! forge#158 (a denied tool call reported as success). Requirement: larry#84, a
+//! stdio MCP server inside the shipped binary, bounded, typed, never simulating
+//! a success; larry#123, `larry_submit_task` runs the task through the model,
+//! the workspace and the receipts, and only an accepted run is a success. Every
+//! case drives the real process through its public interface, against the
+//! seeded mock model endpoint, so no test makes a paid model call.
 
+#[path = "support/http_wire.rs"]
+mod http_wire;
 mod mcp_support;
+#[path = "support/mcp_task.rs"]
+mod mcp_task;
+#[path = "support/mock_model.rs"]
+mod mock_model;
+#[path = "support/origin.rs"]
+mod origin;
 
-use lgwks_std::json::{Value, json};
+use lgwks_std::json::{self, Value, json};
 use mcp_support::{Rng, Session, TestResult};
+use mcp_task::{briefed, connected, operator, submit, verify_offline};
+use mock_model::{Config, Fault, Handle};
+use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The valid typed task the issue implies: goal, repo, files, acceptance.
 fn task() -> Value {
@@ -352,5 +368,317 @@ fn tools_list_latency_is_reported_and_bounded() -> TestResult<()> {
     std::io::stderr().lock().write_all(report.as_bytes())?;
     assert!(p99 < 1_000_000, "p99 under one second on a local pipe");
     assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+    Ok(())
+}
+
+/// Seeds the submitted-task journey runs, each twice.
+const TASK_SEEDS: u64 = 8;
+
+/// What one accepted run left: the model trace, the sealed diff, the wall time.
+struct Run {
+    /// The mock endpoint's trace hash.
+    trace: String,
+    /// The sealed diff.
+    diff: String,
+    /// Wall time of the `tools/call`, request to reply.
+    took: Duration,
+}
+
+/// One accepted submitted task on a fresh origin under seed `seed`.
+fn accepted_run(seed: u64) -> TestResult<Run> {
+    let (state, origin) = origin::fixture()?;
+    mock_model::run(Config::seeded(seed), |handle: &Handle| -> TestResult<Run> {
+        let mut session = connected(&operator(state.path(), handle.addr(), &[]))?;
+        let task = briefed(
+            origin.path(),
+            &["README", "src/new.rs"],
+            &["test -s src/new.rs", "test -s README"],
+        );
+        let started = Instant::now();
+        let result = submit(&mut session, &task)?;
+        let took = started.elapsed();
+        assert_eq!(
+            result["isError"], false,
+            "seed {seed}: accepted is a success: {result}"
+        );
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["accepted"], true, "seed {seed}: the verdict");
+        let text = result["content"][0]["text"]
+            .as_str()
+            .ok_or("a text block")?;
+        assert_eq!(
+            &json::from_str::<Value>(text)?,
+            structured,
+            "the text block is the structured content"
+        );
+        let report = &structured["report"];
+        let diff = report["diff"].as_str().ok_or("a sealed diff")?.to_owned();
+        assert!(
+            diff.contains("-origin readme"),
+            "seed {seed}: README was rewritten: {diff}"
+        );
+        assert!(
+            diff.contains("+++ b/src/new.rs"),
+            "seed {seed}: src/new.rs was written"
+        );
+        assert_eq!(
+            report["authored"][0]["path"], "README",
+            "seed {seed}: README is recorded"
+        );
+        assert_eq!(
+            report["authored"][0]["existed"], true,
+            "seed {seed}: README existed"
+        );
+        assert_eq!(
+            report["authored"][1]["existed"], false,
+            "seed {seed}: src/new.rs is new"
+        );
+        for index in 0..2 {
+            assert_eq!(
+                report["results"][index]["exit_code"], 0,
+                "seed {seed}: command {index} saw the files"
+            );
+        }
+        assert_eq!(handle.served(), 2, "seed {seed}: one completion per file");
+        let first: Value = json::from_slice(handle.requests().first().ok_or("a model request")?)?;
+        let turn = first["messages"][1]["content"]
+            .as_str()
+            .ok_or("a user turn")?;
+        assert!(
+            turn.contains("replace the readme")
+                && turn.contains("File: README")
+                && turn.contains("origin readme"),
+            "seed {seed}: the goal, the path and the current content reached the model: {turn}"
+        );
+        assert!(
+            handle
+                .authorizations()
+                .iter()
+                .all(|sent| sent.as_deref() == Some("Bearer mcp-key")),
+            "seed {seed}: the operator's key, and only it, reached the gateway"
+        );
+        let (code, verdict) = verify_offline(state.path(), report)?;
+        assert_eq!(
+            code,
+            Some(0),
+            "seed {seed}: the receipt verifies offline as accepted"
+        );
+        assert_eq!(
+            verdict["task_id"], report["task_id"],
+            "seed {seed}: the verdict names the task"
+        );
+        assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+        Ok(Run {
+            trace: handle.trace_hash(),
+            diff,
+            took,
+        })
+    })
+}
+
+/// larry#123: one task over MCP against the mock model, its receipt verified,
+/// for 8 seeds, each replayed to the same model trace and the same diff.
+#[test]
+fn a_submitted_task_runs_against_the_mock_model_and_its_receipt_verifies() -> TestResult<()> {
+    let mut samples: Vec<Duration> = Vec::new();
+    for seed in 0..TASK_SEEDS {
+        let first = accepted_run(seed)?;
+        let again = accepted_run(seed)?;
+        assert_eq!(
+            first.trace, again.trace,
+            "seed {seed}: one seed, one model trace"
+        );
+        assert_eq!(
+            first.diff, again.diff,
+            "seed {seed}: one seed, one sealed diff"
+        );
+        samples.push(first.took);
+        samples.push(again.took);
+    }
+    samples.sort_unstable();
+    let micros: Vec<u128> = samples.iter().map(Duration::as_micros).collect();
+    let line = format!(
+        "mcp submitted task (clone, 2 completions, 2 commands, seal): n={} p50={}us p95={}us p99={}us\n",
+        micros.len(),
+        percentile(&micros, 50)?,
+        percentile(&micros, 95)?,
+        percentile(&micros, 99)?
+    );
+    std::io::stderr().lock().write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// The tool error code and message of a failed `result`.
+fn failure_of(result: &Value) -> TestResult<(String, String)> {
+    assert_eq!(
+        result["isError"], true,
+        "a failure is never a success: {result}"
+    );
+    let error = &result["structuredContent"]["error"];
+    let code = error["code"].as_str().ok_or("an error code")?.to_owned();
+    let message = error["message"]
+        .as_str()
+        .ok_or("an error message")?
+        .to_owned();
+    Ok((code, message))
+}
+
+/// How many workspaces a state directory holds; none before its first run.
+fn workspaces(state: &Path) -> TestResult<usize> {
+    match fs::read_dir(state.join("ws")) {
+        Ok(entries) => Ok(entries.count()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Submits `task` with `script` faults and `extra` settings on a fresh state directory;
+/// returns the failed result's code and message and the completions served.
+fn refused_with(
+    task: &Value,
+    script: Vec<Option<Fault>>,
+    extra: &[(&'static str, &str)],
+) -> TestResult<(String, String, u64)> {
+    let state = origin::TempDir::new()?;
+    let config = Config {
+        script,
+        ..Config::seeded(21)
+    };
+    let outcome = mock_model::run(
+        config,
+        |handle: &Handle| -> TestResult<(String, String, u64)> {
+            let mut session = connected(&operator(state.path(), handle.addr(), extra))?;
+            let result = submit(&mut session, task)?;
+            handle.release_delayed();
+            assert!(
+                result["structuredContent"].get("report").is_none(),
+                "a refusal seals nothing: {result}"
+            );
+            let (code, message) = failure_of(&result)?;
+            assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+            Ok((code, message, handle.served()))
+        },
+    )?;
+    assert_eq!(
+        workspaces(state.path())?,
+        0,
+        "a refused task leaves no workspace behind"
+    );
+    Ok(outcome)
+}
+
+/// larry#123, forge#158: a rejected run, every model fault, a symlink escape, a
+/// missing model key and a bad repository are failed tool results, never success.
+#[test]
+fn a_rejected_or_refused_task_is_a_failed_tool_result_never_success() -> TestResult<()> {
+    let (state, origin) = origin::fixture()?;
+    let files = ["README"];
+    let rejected = mock_model::run(Config::seeded(20), |handle: &Handle| -> TestResult<Value> {
+        let mut session = connected(&operator(state.path(), handle.addr(), &[]))?;
+        let result = submit(&mut session, &briefed(origin.path(), &files, &["exit 3"]))?;
+        assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+        Ok(result)
+    })?;
+    let (code, _) = failure_of(&rejected)?;
+    assert_eq!(code, "task_rejected", "a failing command is a rejected run");
+    let report = &rejected["structuredContent"]["report"];
+    assert_eq!(report["accepted"], false, "sealed as rejected");
+    assert_eq!(
+        verify_offline(state.path(), report)?.0,
+        Some(2),
+        "its receipt verifies as rejected"
+    );
+
+    let task = briefed(origin.path(), &files, &["true"]);
+    let once = [("LARRY_MODEL_ATTEMPTS", "1")];
+    let faults = [
+        (Fault::ServerError { status: 502 }, "status 502"),
+        (
+            Fault::RateLimit {
+                retry_after_secs: 30,
+            },
+            "retry after 30s",
+        ),
+        (Fault::HostileRefusal { status: 401 }, "status 401"),
+    ];
+    for (fault, needle) in faults {
+        let (code, message, served) = refused_with(&task, vec![Some(fault)], &once)?;
+        assert_eq!(code, "task_refused", "{fault:?} refuses the task");
+        assert!(
+            message.contains(needle),
+            "{fault:?}: the planner sees why: {message:.160}"
+        );
+        assert!(
+            !message.chars().any(char::is_control),
+            "{fault:?}: no terminal control reaches the planner"
+        );
+        assert_eq!(served, 1, "{fault:?}: one attempt was configured");
+    }
+    let slow = [("LARRY_MODEL_TIMEOUT_MS", "200")];
+    let (code, message, _) = refused_with(&task, vec![Some(Fault::Delay)], &slow)?;
+    assert_eq!(
+        (code.as_str(), message.contains("timed out")),
+        ("task_refused", true),
+        "{message}"
+    );
+
+    // A zero-wait retry goes ahead, and a padded OpenRouter reply still parses.
+    let flaky = Config {
+        script: vec![
+            Some(Fault::ServerError { status: 503 }),
+            Some(Fault::PaddedDone),
+        ],
+        ..Config::seeded(22)
+    };
+    let retried = origin::TempDir::new()?;
+    mock_model::run(flaky, |handle: &Handle| -> TestResult<()> {
+        let mut session = connected(&operator(retried.path(), handle.addr(), &[]))?;
+        let result = submit(&mut session, &task)?;
+        assert_eq!(
+            result["isError"], false,
+            "a 503 then a padded reply is accepted: {result}"
+        );
+        assert_eq!(handle.served(), 2, "the 503 was retried once");
+        assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+        Ok(())
+    })?;
+
+    // A symlink the origin carries is never written through.
+    let outside = origin::TempDir::new()?;
+    std::os::unix::fs::symlink(outside.path(), origin.path().join("escape"))?;
+    origin::commit_all(origin.path(), "add a symlink")?;
+    let escape = briefed(origin.path(), &["escape/x.rs"], &["true"]);
+    let (code, message, served) = refused_with(&escape, Vec::new(), &[])?;
+    assert_eq!(code, "task_refused", "a symlink escape is refused");
+    assert!(
+        message.contains("symlink"),
+        "the planner sees why: {message}"
+    );
+    assert_eq!(served, 0, "the model is never asked");
+    assert_eq!(
+        fs::read_dir(outside.path())?.count(),
+        0,
+        "nothing was written outside the clone"
+    );
+
+    // No model key: the executor is not connected; a non-repository is refused.
+    let keyless = origin::TempDir::new()?;
+    let mut session = connected(&[("LARRY_STATE_DIR", keyless.path().as_os_str().to_owned())])?;
+    let (code, message) = failure_of(&submit(&mut session, &task)?)?;
+    assert_eq!(code, "executor_not_connected", "no key, no executor");
+    assert!(
+        message.contains("LARRY_MODEL_KEY"),
+        "the message names the variable: {message}"
+    );
+    assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+    let empty = origin::TempDir::new()?;
+    let (code, message, served) =
+        refused_with(&briefed(empty.path(), &files, &["true"]), Vec::new(), &[])?;
+    assert_eq!(
+        (code.as_str(), served),
+        ("task_refused", 0),
+        "a non-repository is refused before the model"
+    );
+    assert!(message.contains("could not clone"), "{message}");
     Ok(())
 }

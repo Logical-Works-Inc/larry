@@ -242,7 +242,8 @@ fn seeded_path_variants_decide_task_validity() -> TestResult<()> {
     Ok(())
 }
 
-/// The advertised size limits hold on both sides of their edge.
+/// The advertised size limits hold on both sides of their edge: the executor's
+/// bounds, 64 files (one completion each) and 16 commands (larry#123).
 #[test]
 fn seeded_task_limits_hold_on_both_sides() -> TestResult<()> {
     let mut rng = Rng(0xb0d);
@@ -250,13 +251,13 @@ fn seeded_task_limits_hold_on_both_sides() -> TestResult<()> {
     for _ in 0..18 {
         let over = rng.below(2) == 1;
         let extra = usize::from(over);
-        let mut task = json!({"goal":"g","repo":"r","files":[],"acceptance":["c"]});
+        let mut task = json!({"goal":"g","repo":"r","files":["f"],"acceptance":["c"]});
         let (key, value) = match rng.below(3) {
             0 => ("goal", json!("g".repeat(8192_usize.saturating_add(extra)))),
-            1 => ("files", json!(vec!["f"; 256_usize.saturating_add(extra)])),
+            1 => ("files", json!(vec!["f"; 64_usize.saturating_add(extra)])),
             _ => (
                 "acceptance",
-                json!(vec!["c"; 32_usize.saturating_add(extra)]),
+                json!(vec!["c"; 16_usize.saturating_add(extra)]),
             ),
         };
         task.as_object_mut()
@@ -390,7 +391,7 @@ fn seeded_unicode_payloads_survive_and_broken_utf8_is_refused() -> TestResult<()
         let goal = pool[rng.index(5)?];
         let reply = submit(
             &mut session,
-            &json!({"goal":goal,"repo":"r","acceptance":["c"]}),
+            &json!({"goal":goal,"repo":"r","files":["f"],"acceptance":["c"]}),
         )?;
         assert_eq!(
             tool_code(&reply),
