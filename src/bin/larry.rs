@@ -2,11 +2,14 @@
 //! `larry model`, one completion through the configured gateway (larry#83),
 //! `larry exec`, the task-document executor (larry#85), and `larry verify` and
 //! `larry key`, the receipt check and the key it trusts (larry#86), and
-//! `larry eval`, one priced arm over the matched task set (larry#87).
+//! `larry eval`, one priced arm over the matched task set (larry#87), and
+//! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010).
 //! The launcher paints the fixture surface and exits when the operator
 //! quits; it performs no backend or workspace effect.
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -15,7 +18,11 @@ use larry_demo::executor::{
     ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, state_public_key,
     trusted_key, verify,
 };
+use larry_demo::governance;
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
+
+/// Arguments read from the command line; no subcommand takes more than four.
+const MAX_ARGUMENTS: usize = 8;
 
 /// Exit status of a report that was produced and sealed but not accepted: a
 /// failed, timed-out or denied run. 0 means accepted; 1 means refused, no report.
@@ -202,6 +209,129 @@ fn eval_once() -> Result<(), EvalRun> {
     print_line(card.json()).map_err(EvalRun::Exec)
 }
 
+/// Why `larry governance` or `larry tracker` stopped without its verdict; each keeps its cause.
+#[derive(Debug)]
+enum GovernanceRun {
+    /// The arguments were not `[FLAG] [--root DIR]`.
+    Usage(Vec<OsString>),
+    /// No root was given and the working directory is unreadable.
+    NoDirectory(io::Error),
+    /// Standard output could not be written.
+    Stdout(io::Error),
+    /// Standard error could not be written.
+    Stderr(io::Error),
+    /// `--check` found the committed page differs from the render.
+    Stale,
+    /// The tracker could not read, render or write.
+    Tracker(governance::TrackerError),
+}
+
+impl fmt::Display for GovernanceRun {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Usage(ref rest) => write!(
+                out,
+                "usage: larry governance [--report] [--root DIR] | larry tracker [--check] [--root DIR] (got {rest:?})"
+            ),
+            Self::NoDirectory(ref cause) => {
+                write!(out, "governance: no working directory: {cause}")
+            }
+            Self::Stdout(ref cause) => write!(out, "governance: stdout unwritable: {cause}"),
+            Self::Stderr(ref cause) => write!(out, "governance: stderr unwritable: {cause}"),
+            Self::Stale => {
+                out.write_str("FAIL: tools/tracker/index.html is stale — run `larry tracker`")
+            }
+            Self::Tracker(ref cause) => write!(out, "FAIL: {cause}"),
+        }
+    }
+}
+
+/// The root and flag `larry governance` and `larry tracker` take: `[FLAG] [--root DIR]`, in any
+/// order, the root defaulting to the working directory.
+fn governance_args(rest: &[OsString], flag: &str) -> Result<(bool, PathBuf), GovernanceRun> {
+    let usage = || GovernanceRun::Usage(rest.to_vec());
+    let mut set = false;
+    let mut root: Option<PathBuf> = None;
+    let mut items = rest.iter();
+    while let Some(item) = items.next() {
+        if item == flag && !set {
+            set = true;
+        } else if item == "--root" && root.is_none() {
+            let Some(directory) = items.next() else {
+                return Err(usage());
+            };
+            root = Some(PathBuf::from(directory));
+        } else {
+            return Err(usage());
+        }
+    }
+    let root = match root {
+        Some(root) => root,
+        None => std::env::current_dir().map_err(GovernanceRun::NoDirectory)?,
+    };
+    Ok((set, root))
+}
+
+/// Writes each line to standard output and flushes.
+fn print_lines(lines: &[&str]) -> Result<(), GovernanceRun> {
+    let mut out = io::stdout().lock();
+    for line in lines {
+        out.write_all(line.as_bytes())
+            .and_then(|()| out.write_all(b"\n"))
+            .map_err(GovernanceRun::Stdout)?;
+    }
+    out.flush().map_err(GovernanceRun::Stdout)
+}
+
+/// `larry governance [--report] [--root DIR]`: the structural checker (ADR 0010). Prints the
+/// PASS block or the JSON report, or each error as a `FAIL:` line on standard error; exits 1
+/// on any error.
+fn governance_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
+    let (report_wanted, root) = governance_args(rest, "--report")?;
+    let report: governance::Report = governance::check(&root);
+    if report_wanted {
+        print_lines(&[&report.pretty()])?;
+    } else if report.ok() {
+        print_lines(&[
+            "PASS: document structure and governance inventory",
+            &report.counts_line(),
+            "NOT CHECKED BY THIS GATE: Mermaid rendering",
+            "NOT RUN: runtime, model evaluations, hardware and human trials",
+        ])?;
+    } else {
+        for error in report.errors() {
+            diagnose(&format!("FAIL: {error}")).map_err(GovernanceRun::Stderr)?;
+        }
+    }
+    Ok(if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// `larry tracker [--check] [--root DIR]`: writes `tools/tracker/index.html` atomically, or with
+/// `--check` exits 1 unless the committed page equals the render.
+fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
+    let (check_only, root) = governance_args(rest, "--check")?;
+    if check_only {
+        let current: Result<bool, governance::TrackerError> =
+            governance::tracker::is_current(&root);
+        return match current {
+            Ok(true) => print_lines(&["PASS: tools/tracker/index.html is current"])
+                .map(|()| ExitCode::SUCCESS),
+            Ok(false) => Err(GovernanceRun::Stale),
+            Err(error) => Err(GovernanceRun::Tracker(error)),
+        };
+    }
+    let written: Result<usize, governance::TrackerError> = governance::tracker::write(&root);
+    match written {
+        Ok(bytes) => print_lines(&[&format!("wrote tools/tracker/index.html ({bytes} bytes)")])
+            .map(|()| ExitCode::SUCCESS),
+        Err(error) => Err(GovernanceRun::Tracker(error)),
+    }
+}
+
 /// The exit status of a sealed verdict.
 fn verdict_status(accepted: bool) -> ExitCode {
     if accepted {
@@ -212,33 +342,39 @@ fn verdict_status(accepted: bool) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    let outcome = match (args.next(), args.next()) {
-        (None, _) => larry_demo::native::run()
+    let args: Vec<OsString> = std::env::args_os().skip(1).take(MAX_ARGUMENTS).collect();
+    let outcome = match *args.as_slice() {
+        [] => larry_demo::native::run()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| format!("DEMO terminal failed: {error}")),
-        (Some(command), None) if command == "mcp" => {
+        [ref command] if command == "mcp" => {
             larry_demo::mcp::serve(io::stdin().lock(), io::stdout().lock())
                 .map(|()| ExitCode::SUCCESS)
                 .map_err(|error| format!("MCP server failed: {error}"))
         }
-        (Some(command), None) if command == "model" => model_once()
+        [ref command] if command == "model" => model_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
-        (Some(command), None) if command == "exec" => exec_once()
+        [ref command] if command == "exec" => exec_once()
             .map(verdict_status)
             .map_err(|error| error.to_string()),
-        (Some(command), None) if command == "verify" => verify_once()
+        [ref command] if command == "verify" => verify_once()
             .map(verdict_status)
             .map_err(|error| error.to_string()),
-        (Some(command), None) if command == "key" => key_once()
+        [ref command] if command == "key" => key_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
-        (Some(command), None) if command == "eval" => eval_once()
+        [ref command] if command == "eval" => eval_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
+        [ref command, ref rest @ ..] if command == "governance" => {
+            governance_once(rest).map_err(|error: GovernanceRun| error.to_string())
+        }
+        [ref command, ref rest @ ..] if command == "tracker" => {
+            tracker_once(rest).map_err(|error: GovernanceRun| error.to_string())
+        }
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key` and `eval`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance` and `tracker`; F1 opens native help",
         )),
     };
     match outcome {

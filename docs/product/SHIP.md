@@ -61,8 +61,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #131 rename Rocco to Larry (Director 2026-11-06). Proof: the Gates green under the new names; 582 tests in
   10.3 s under `larry-demo`, `larry-contracts` and `larry-runtime` (ADR 0005).
 
-- [ ] #53 port the nine Python tools to Rust (governance checker and tracker first). Proof: CI and
-  `.wwfd/local-ci.sh` run no Python; the over-size documents split.
+- [ ] #53 port the nine Python tools to Rust; step 1 #145 (checker, tracker, `cargo local-ci`) landed, 82 ms p99.
+  Proof: CI and `cargo local-ci` run no Python; the over-size documents split.
 - [ ] #103 CI fails a PR with no closing issue. Proof: passes on its own PR, fails on one without `Closes`.
 - [x] #133 dependency register on lgwks-deps schema 3: PR #135, `lgwks-deps check .` prints OK (was REFUSED).
 - Moved to section 3 (2026-11-07): the falsifier PRs land after #68 step 4; see the last line there.

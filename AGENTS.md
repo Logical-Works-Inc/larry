@@ -44,8 +44,8 @@ INVARIANTS.md and the plan before the first edit.
 - Locate code with `codegraph`, recall estate memory with `wwfd query`, read with the Read tool.
 - Before an owned edit: `design-gate.mjs research` then `design-gate.mjs plan` from the repository root.
 - The local reranker mandate (`tools/rerank_local.py`, pre/post receipts) is retired by the Python ban
-  (2026-10-13). Retained receipts stay as history; no new receipt is required. The checker keeps reading
-  them until the Rust port (larry#53) replaces it.
+  (2026-10-13). Retained receipts stay as history; no new receipt is required, and `larry governance`
+  still checks that they are well formed.
 - Answer implementation questions from the repository's own text before asking the Director.
 
 ## Dependencies
@@ -67,11 +67,12 @@ cargo build --bins --locked
 cargo nextest run --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
+target/debug/larry governance && target/debug/larry tracker --check   # `larry tracker` regenerates the page
 lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
-The governance checker, its negative controls and the PTY journeys are still Python and run only in CI until
-larry#53 ports them to Rust; agents may not run Python locally. `.wwfd/local-ci.sh` mirrors CI. Each CI job
+The checker and tracker are Rust (ADR 0010); the PTY journeys and reranker controls stay Python, in CI only,
+until larry#53 ports them; agents may not run Python locally. `cargo local-ci` mirrors CI. Each CI job
 picks its runner from `github.event.repository.private`: the self-hosted Mac while private, `ubuntu-latest`
 once public, never self-hosted on a public repository (larry#116). Launch the demo with
 `cargo run --locked --bin larry`; fixture runs are not backend, device or fleet acceptance.

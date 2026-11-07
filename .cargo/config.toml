@@ -1,3 +1,7 @@
 # [lgwks anti-pattern contract]
 [build]
 rustc-workspace-wrapper = "clippy-driver"
+
+# `cargo local-ci`: every gate AGENTS.md declares, then the local CI receipt (larry#53).
+[alias]
+local-ci = "run --locked --bin larry-local-ci --"
