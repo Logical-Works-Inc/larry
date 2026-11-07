@@ -8,7 +8,7 @@
 //! success; a rejected run, a refusal and an unconfigured executor are typed
 //! tool errors, so no success is ever reported for work that did not pass.
 
-use larry_demo::executor::{ExecError, Report, Settings, Task, execute};
+use crate::executor::{ExecError, Report, Settings, Task, execute};
 use lgwks_std::json::{Map, Value, json};
 use std::path::{Component, Path};
 
@@ -113,14 +113,20 @@ pub(super) fn call(name: &str, arguments: &Map, executor: &Executor) -> Option<V
 
 /// Validates the task, runs it through the executor and answers with its sealed report.
 fn submit_task(arguments: &Map, executor: &Executor) -> Value {
-    if let Err(error) = validate_task(arguments) {
-        return tool_error("invalid_arguments", &error.to_string());
-    }
+    let checked = match validate_task(arguments) {
+        Ok(checked) => checked,
+        Err(error) => return tool_error("invalid_arguments", &error.to_string()),
+    };
     let settings = match *executor {
         Executor::Absent(ref reason) => return tool_error(NOT_CONNECTED, reason),
         Executor::Connected(ref settings) => settings,
     };
-    let task: Task = match Task::parse(task_document(arguments).to_string().as_bytes()) {
+    let task: Task = match Task::shell(
+        checked.repo,
+        checked.goal,
+        &checked.files,
+        &checked.acceptance,
+    ) {
         Ok(task) => task,
         Err(error) => return tool_error("invalid_arguments", &error.to_string()),
     };
@@ -132,25 +138,6 @@ fn submit_task(arguments: &Map, executor: &Executor) -> Value {
         Err(error) => return tool_error("task_refused", &error.to_string()),
     };
     finished(&report)
-}
-
-/// The `larry exec` document for a validated task: the repository at `HEAD`, the brief,
-/// and each acceptance command as `sh -c <command>`.
-fn task_document(arguments: &Map) -> Value {
-    let commands: Vec<Value> = arguments
-        .get("acceptance")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|command| json!(["sh", "-c", command]))
-        .collect();
-    json!({
-        "repo": arguments.get("repo"),
-        "base": "HEAD",
-        "goal": arguments.get("goal"),
-        "files": arguments.get("files"),
-        "acceptance": commands,
-    })
 }
 
 /// A sealed run as a tool result: the report and its verdict in structured content and,
@@ -228,26 +215,42 @@ impl std::fmt::Display for TaskError {
     }
 }
 
+/// A task that passed the schema, every string borrowed from the arguments.
+struct Checked<'args> {
+    /// The goal.
+    goal: &'args str,
+    /// The repository reference.
+    repo: &'args str,
+    /// The files the model writes.
+    files: Vec<&'args str>,
+    /// The shell acceptance commands.
+    acceptance: Vec<&'args str>,
+}
+
 /// Checks the typed task against the schema `list` advertises.
-fn validate_task(arguments: &Map) -> Result<(), TaskError> {
+fn validate_task(arguments: &Map) -> Result<Checked<'_>, TaskError> {
     if arguments.keys().any(|key| !ARGUMENTS.contains(&key)) {
         return Err(TaskError::UnknownArgument);
     }
-    text(arguments, "goal", MAX_GOAL_BYTES)?;
-    text(arguments, "repo", MAX_REPO_BYTES)?;
-    for path in text_list(arguments, "files", 1, MAX_FILES, MAX_PATH_BYTES)? {
-        if !is_repo_relative(path) {
-            return Err(TaskError::NotRepoRelative);
-        }
+    let goal = text(arguments, "goal", MAX_GOAL_BYTES)?;
+    let repo = text(arguments, "repo", MAX_REPO_BYTES)?;
+    let files = text_list(arguments, "files", 1, MAX_FILES, MAX_PATH_BYTES)?;
+    if !files.iter().all(|path| is_repo_relative(path)) {
+        return Err(TaskError::NotRepoRelative);
     }
-    text_list(
+    let acceptance = text_list(
         arguments,
         "acceptance",
         1,
         MAX_ACCEPTANCE,
         MAX_COMMAND_BYTES,
     )?;
-    Ok(())
+    Ok(Checked {
+        goal,
+        repo,
+        files,
+        acceptance,
+    })
 }
 
 /// A required, non-empty string without NUL, at most `max` bytes.

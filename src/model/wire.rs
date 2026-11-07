@@ -7,7 +7,7 @@
 
 use lgwks_std::json::{self, Value, json};
 
-use super::{Completion, Message, ModelError};
+use super::{Completion, Message, ModelError, Usage};
 
 /// Serialize a non-streaming request. Every request names the pinned model and
 /// the temperature; `stream` is never sent. A `Value` always renders, so this
@@ -37,6 +37,18 @@ pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
         .ok_or(ModelError::Malformed("the reply has no message content"))?;
     Ok(Completion {
         content: content.to_owned(),
+        usage: usage_of(&document),
+    })
+}
+
+/// The OpenAI `usage` block: both token counts as whole numbers, or `None`. A
+/// gateway that reports one count, a negative or a fraction reported nothing
+/// a cost can be built on, so nothing is invented (larry#87).
+fn usage_of(document: &Value) -> Option<Usage> {
+    let usage = &document["usage"];
+    Some(Usage {
+        prompt_tokens: usage["prompt_tokens"].as_u64()?,
+        completion_tokens: usage["completion_tokens"].as_u64()?,
     })
 }
 

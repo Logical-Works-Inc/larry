@@ -184,6 +184,28 @@ impl Drop for Workspace {
     }
 }
 
+/// Makes `dir`, whose files are already written, a repository with one commit of them, for
+/// `larry eval` to clone (larry#87). Background maintenance is off before the commit, so only
+/// the executor ever changes it (larry#138), and git runs under the executor's environment.
+pub(crate) fn seed_origin(state: &Path, path_env: &str, dir: &Path) -> Result<(), ExecError> {
+    let git = Git { state, path_env };
+    let steps: [(&'static str, &[&str]); 8] = [
+        ("init", &["init", "--quiet"]),
+        ("config", &["config", "maintenance.auto", "false"]),
+        ("config", &["config", "gc.auto", "0"]),
+        ("config", &["config", "user.name", "larry eval"]),
+        ("config", &["config", "user.email", "eval@larry.invalid"]),
+        ("config", &["config", "commit.gpgsign", "false"]),
+        ("add", &["add", "-A"]),
+        ("commit", &["commit", "--quiet", "--message", "origin"]),
+    ];
+    for (step, arguments) in steps {
+        let arguments: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+        require(git.output(Some(dir), &arguments)?, step)?;
+    }
+    Ok(())
+}
+
 /// Whether the executor that named `task_id` (`<digest>-<pid>-<counter>`) may still be running:
 /// its pid is this process or a live one. A name that carries no pid is not a run's.
 fn owner_alive(task_id: &str) -> Result<bool, ExecError> {
@@ -204,8 +226,18 @@ fn owner_alive(task_id: &str) -> Result<bool, ExecError> {
 /// Removes every `<state>/ws/*` directory that no live ledger row names and whose executor
 /// is gone: a concurrent run's workspace is kept between its clone and its first command.
 pub(crate) fn sweep(state: &Path, live: &[String]) -> Result<(), ExecError> {
-    let root = state.join("ws");
-    let entries = match std::fs::read_dir(&root) {
+    sweep_dir(&state.join("ws"), live)
+}
+
+/// Removes every `<state>/eval/origin-<pid>-<n>` directory whose `larry eval` is gone: a kill -9
+/// runs no destructor, so its origins outlive it (larry#87).
+pub(crate) fn sweep_origins(state: &Path) -> Result<(), ExecError> {
+    sweep_dir(&state.join("eval"), &[])
+}
+
+/// Removes every directory under `root` that `live` does not name and whose owner is gone.
+fn sweep_dir(root: &Path, live: &[String]) -> Result<(), ExecError> {
+    let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(ExecError::Workspace(error)),

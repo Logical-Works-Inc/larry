@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+pub(crate) use author::is_writable_path;
 use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 use run::run_command;
@@ -284,6 +285,26 @@ impl Settings {
             path,
             model,
         })
+    }
+
+    /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
+    pub(crate) fn state_dir(&self) -> &std::path::Path {
+        self.state_dir.as_path()
+    }
+
+    /// The pinned model a brief's files are written by, when a key is configured.
+    pub(crate) fn model_name(&self) -> Option<&str> {
+        self.model.as_ref().map(ModelConfig::model)
+    }
+
+    /// Makes `dir`, whose files are written, a one-commit repository under these settings.
+    pub(crate) fn seed_origin(&self, dir: &std::path::Path) -> Result<(), ExecError> {
+        workspace::seed_origin(&self.state_dir, &self.path, dir)
+    }
+
+    /// Removes the origins a dead `larry eval` left under the state directory.
+    pub(crate) fn sweep_origins(&self) -> Result<(), ExecError> {
+        workspace::sweep_origins(&self.state_dir)
     }
 }
 

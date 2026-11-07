@@ -134,7 +134,7 @@ impl ModelConfig {
     }
 
     /// The pinned model name.
-    pub(super) fn model(&self) -> &str {
+    pub(crate) fn model(&self) -> &str {
         &self.model
     }
 

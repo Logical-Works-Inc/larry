@@ -1,0 +1,117 @@
+{
+  "name": "matched-v1",
+  "tasks": [
+    {
+      "id": "fizzbuzz",
+      "files": {
+        "expected.txt": "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz\n"
+      },
+      "goal": "Write a POSIX sh script fizzbuzz.sh that prints the numbers 1 to 15, one per line, printing Fizz for multiples of 3, Buzz for multiples of 5 and FizzBuzz for multiples of both.",
+      "write": ["fizzbuzz.sh"],
+      "acceptance": ["sh fizzbuzz.sh > out.txt && cmp out.txt expected.txt"]
+    },
+    {
+      "id": "fix-sum",
+      "files": {
+        "sum.sh": "#!/bin/sh\n# Prints 1 + 2 + ... + $1.\nn=$1\ntotal=0\ni=1\nwhile [ \"$i\" -lt \"$n\" ]; do\n  total=$((total + i))\n  i=$((i + 1))\ndone\necho \"$total\"\n"
+      },
+      "goal": "sum.sh is meant to print 1 + 2 + ... + N for its argument N, but it stops one short. Fix the bug and keep the script POSIX sh.",
+      "write": ["sum.sh"],
+      "acceptance": ["test \"$(sh sum.sh 10)\" = 55", "test \"$(sh sum.sh 1)\" = 1", "test \"$(sh sum.sh 0)\" = 0"]
+    },
+    {
+      "id": "reverse-lines",
+      "files": {
+        "input.txt": "alpha\nbeta\ngamma\ndelta\n",
+        "expected.txt": "delta\ngamma\nbeta\nalpha\n"
+      },
+      "goal": "Write a POSIX sh script rev.sh that reads lines on standard input and prints them in reverse order, last line first, without using tac.",
+      "write": ["rev.sh"],
+      "acceptance": ["sh rev.sh < input.txt > out.txt && cmp out.txt expected.txt"]
+    },
+    {
+      "id": "word-count",
+      "files": {
+        "input.txt": "the quick brown fox\njumps over\n\nthe lazy dog\n"
+      },
+      "goal": "Write a POSIX sh script count.sh that prints only the number of whitespace-separated words on standard input, with no padding.",
+      "write": ["count.sh"],
+      "acceptance": ["test \"$(sh count.sh < input.txt)\" = 9", "test \"$(printf '' | sh count.sh)\" = 0"]
+    },
+    {
+      "id": "csv-column",
+      "files": {
+        "data.csv": "id,name,team\n1,ada,core\n2,grace,infra\n3,linus,kernel\n",
+        "expected.txt": "name\nada\ngrace\nlinus\n"
+      },
+      "goal": "Write a POSIX sh script col.sh that prints the second comma-separated column of the file named by its first argument, one value per line.",
+      "write": ["col.sh"],
+      "acceptance": ["sh col.sh data.csv > out.txt && cmp out.txt expected.txt"]
+    },
+    {
+      "id": "upper",
+      "files": {
+        "input.txt": "Logic OS ships\nlarry v0.1\n",
+        "expected.txt": "LOGIC OS SHIPS\nLARRY V0.1\n"
+      },
+      "goal": "Write a POSIX sh script upper.sh that copies standard input to standard output with every ASCII letter in upper case.",
+      "write": ["upper.sh"],
+      "acceptance": ["sh upper.sh < input.txt > out.txt && cmp out.txt expected.txt"]
+    },
+    {
+      "id": "palindrome",
+      "files": {
+        "README.md": "# palindrome\n\n`sh is_pal.sh WORD` exits 0 when WORD reads the same backwards, 1 otherwise.\n"
+      },
+      "goal": "Write the POSIX sh script is_pal.sh that the README describes.",
+      "write": ["is_pal.sh"],
+      "acceptance": ["sh is_pal.sh racecar", "sh is_pal.sh a", "! sh is_pal.sh larry", "! sh is_pal.sh ab"]
+    },
+    {
+      "id": "fibonacci",
+      "files": {
+        "README.md": "# fib\n\n`sh fib.sh N` prints the Nth Fibonacci number, with fib 0 = 0 and fib 1 = 1.\n"
+      },
+      "goal": "Write the POSIX sh script fib.sh that the README describes, iteratively.",
+      "write": ["fib.sh"],
+      "acceptance": ["test \"$(sh fib.sh 0)\" = 0", "test \"$(sh fib.sh 1)\" = 1", "test \"$(sh fib.sh 20)\" = 6765"]
+    },
+    {
+      "id": "dedupe",
+      "files": {
+        "input.txt": "b\na\nb\nc\na\nd\n",
+        "expected.txt": "b\na\nc\nd\n"
+      },
+      "goal": "Write a POSIX sh script dedupe.sh that prints each line of standard input the first time it appears, keeping the original order.",
+      "write": ["dedupe.sh"],
+      "acceptance": ["sh dedupe.sh < input.txt > out.txt && cmp out.txt expected.txt"]
+    },
+    {
+      "id": "gcd",
+      "files": {
+        "README.md": "# gcd\n\n`sh gcd.sh A B` prints the greatest common divisor of two positive integers.\n"
+      },
+      "goal": "Write the POSIX sh script gcd.sh that the README describes, using Euclid's algorithm.",
+      "write": ["gcd.sh"],
+      "acceptance": ["test \"$(sh gcd.sh 48 18)\" = 6", "test \"$(sh gcd.sh 17 5)\" = 1", "test \"$(sh gcd.sh 9 9)\" = 9"]
+    },
+    {
+      "id": "port-default",
+      "files": {
+        "app.sh": "#!/bin/sh\necho \"port $PORT\"\n"
+      },
+      "goal": "app.sh prints an empty port when PORT is unset. Make it print port 8080 when PORT is unset or empty, and the given PORT otherwise.",
+      "write": ["app.sh"],
+      "acceptance": ["test \"$(env -u PORT sh app.sh)\" = 'port 8080'", "test \"$(PORT= sh app.sh)\" = 'port 8080'", "test \"$(PORT=9 sh app.sh)\" = 'port 9'"]
+    },
+    {
+      "id": "two-files",
+      "files": {
+        "README.md": "# greet\n\n`sh greet.sh NAME` prints `hello, NAME` using the greeting function in lib.sh.\n"
+      },
+      "goal": "Write lib.sh defining a POSIX sh function greet that prints hello, followed by a comma, a space and its argument, and greet.sh that sources lib.sh from its own directory and calls greet with its first argument.",
+      "write": ["lib.sh", "greet.sh"],
+      "acceptance": ["test \"$(sh greet.sh ada)\" = 'hello, ada'", "cd / && test \"$(sh \"$OLDPWD/greet.sh\" bo)\" = 'hello, bo'"]
+    }
+  ]
+}

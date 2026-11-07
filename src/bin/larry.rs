@@ -1,17 +1,16 @@
 //! Native AppCUI launcher, `larry mcp`, the MCP stdio server (larry#84),
 //! `larry model`, one completion through the configured gateway (larry#83),
 //! `larry exec`, the task-document executor (larry#85), and `larry verify` and
-//! `larry key`, the receipt check and the key it trusts (larry#86).
+//! `larry key`, the receipt check and the key it trusts (larry#86), and
+//! `larry eval`, one priced arm over the matched task set (larry#87).
 //! The launcher paints the fixture surface and exits when the operator
 //! quits; it performs no backend or workspace effect.
-#[path = "../mcp/mod.rs"]
-mod mcp;
-
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use larry_demo::eval::{EvalError, MAX_SET_BYTES, PriceError, Prices, Scorecard};
 use larry_demo::executor::{
     ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, state_public_key,
     trusted_key, verify,
@@ -38,6 +37,16 @@ const REPORT_LIMIT: u64 = 268_435_457;
 const _: () = assert!(
     REPORT_LIMIT == 268_435_457 && MAX_REPORT_BYTES == 268_435_456,
     "REPORT_LIMIT is MAX_REPORT_BYTES plus one"
+);
+
+/// Set bytes `larry eval` reads: one past the set bound, so an oversize set
+/// reaches the parser's typed `TooLarge` refusal.
+const SET_LIMIT: u64 = 4_194_305;
+
+/// `SET_LIMIT` is the set bound plus one, checked at compile time.
+const _: () = assert!(
+    SET_LIMIT == 4_194_305 && MAX_SET_BYTES == 4_194_304,
+    "SET_LIMIT is MAX_SET_BYTES plus one"
 );
 
 /// The interactive check never blocks on a clock: a retry that needs no wait
@@ -160,6 +169,39 @@ fn key_once() -> Result<(), ExecError> {
     print_line(&lgwks_std::hex::encode(public.to_bytes()))
 }
 
+/// Why `larry eval` printed no scorecard; each variant keeps its cause.
+#[derive(Debug)]
+enum EvalRun {
+    /// The executor settings or standard input failed.
+    Exec(ExecError),
+    /// A price setting is missing or refused.
+    Price(PriceError),
+    /// The set was refused or a task failed outside the arm's doing.
+    Eval(EvalError),
+}
+
+impl fmt::Display for EvalRun {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Exec(ref cause) => write!(out, "eval: {cause}"),
+            Self::Price(ref cause) => write!(out, "eval price: {cause}"),
+            Self::Eval(ref cause) => write!(out, "{cause}"),
+        }
+    }
+}
+
+/// `larry eval`: run every task of the matched set on standard input as one arm (the
+/// model `LARRY_MODEL_*` pins, priced by `LARRY_EVAL_PRICE_IN`/`_OUT`) and print its
+/// scorecard. Prices and the set are checked before the first model call (larry#87).
+fn eval_once() -> Result<(), EvalRun> {
+    let settings = Settings::from_env(|name| std::env::var(name).ok()).map_err(EvalRun::Exec)?;
+    let prices = Prices::from_env(|name| std::env::var(name).ok()).map_err(EvalRun::Price)?;
+    let bytes = read_stdin(SET_LIMIT).map_err(EvalRun::Exec)?;
+    let card: Scorecard =
+        larry_demo::eval::run(&bytes, &settings, prices).map_err(EvalRun::Eval)?;
+    print_line(card.json()).map_err(EvalRun::Exec)
+}
+
 /// The exit status of a sealed verdict.
 fn verdict_status(accepted: bool) -> ExitCode {
     if accepted {
@@ -176,7 +218,7 @@ fn main() -> ExitCode {
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| format!("DEMO terminal failed: {error}")),
         (Some(command), None) if command == "mcp" => {
-            mcp::serve(io::stdin().lock(), io::stdout().lock())
+            larry_demo::mcp::serve(io::stdin().lock(), io::stdout().lock())
                 .map(|()| ExitCode::SUCCESS)
                 .map_err(|error| format!("MCP server failed: {error}"))
         }
@@ -192,8 +234,11 @@ fn main() -> ExitCode {
         (Some(command), None) if command == "key" => key_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
+        (Some(command), None) if command == "eval" => eval_once()
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(|error| error.to_string()),
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify` and `key`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key` and `eval`; F1 opens native help",
         )),
     };
     match outcome {

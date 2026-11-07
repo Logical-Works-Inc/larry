@@ -181,12 +181,23 @@ impl Message {
     }
 }
 
+/// The tokens one completion spent, as the gateway reported them (larry#87).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Usage {
+    /// Tokens the request carried.
+    pub(crate) prompt_tokens: u64,
+    /// Tokens the reply carried.
+    pub(crate) completion_tokens: u64,
+}
+
 /// The assistant's reply to one completion request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Completion {
     /// The reply's text, from the first choice.
     content: String,
+    /// The tokens spent, when the gateway reported both counts; never invented.
+    usage: Option<Usage>,
 }
 
 impl Completion {
@@ -194,5 +205,10 @@ impl Completion {
     #[must_use]
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// The tokens the gateway reported for this exchange, `None` when it did not.
+    pub(crate) const fn usage(&self) -> Option<Usage> {
+        self.usage
     }
 }

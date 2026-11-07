@@ -62,6 +62,9 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::ledger` | The SQLite record of live groups, the reap after a kill -9, the receipt key |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
 | `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
+| `eval` | `larry eval`: one arm over a matched set, origins, outcomes, the scorecard (ADR 0009) |
+| `eval::set` | The bounded task set and its typed refusals, checked before any task runs |
+| `eval::score` | Whole-number prices and costs, nearest-rank percentiles, the card |
 | `model` | The blocking chat-completions client to 9router (ADR 0003) |
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
 | `model::config` | Gateway, key (never shown), pinned model, temperature, timeout, retry |
@@ -73,8 +76,10 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native::workspace::views` | The board, truth and work scenes |
 | `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
-| `src/main.rs`, `src/mcp/` | The binary entry and the `larry mcp` server; `larry_submit_task` runs the executor |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key` |
+| `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008) |
+| `src/main.rs` | The demo binary entry |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval` |
+| `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
 
 ## Invariants the module map carries
 
