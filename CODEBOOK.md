@@ -77,8 +77,20 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008) |
+| `governance` | `larry governance`: the structural checker over the governed documents and its report (ADR 0010) |
+| `governance::documents` | The bounded load of the top-level documents and the `docs/` tree |
+| `governance::markdown` | Frontmatter, fences, local links and GitHub heading ids |
+| `governance::inventory` | The R, D, E, C and axis inventories, traceability, cells, log drift, crash cases |
+| `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |
+| `governance::receipts` | The retained reranker receipts' shape |
+| `governance::tracker` | `larry tracker`: the tracker page rendered from `tools/tracker/tracker.json` |
+| `governance::pyjson` | JSON printed byte for byte as CPython's `json.dumps`, for the tracker page |
+| `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
+| `governance::pystr` | CPython `str` semantics the messages need: `splitlines`, `split`, `repr`, decode errors |
+| `governance::sim_*` | Seeded ports of the Python controls, parser references, bounds and two-root checks |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval` |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker` |
+| `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
 
 ## Invariants the module map carries

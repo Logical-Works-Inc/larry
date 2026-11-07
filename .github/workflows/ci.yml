@@ -41,13 +41,30 @@ jobs:
     timeout-minutes: 5
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+    # The same steps as governance.yml's docs-check.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: stable
+      # The e2e job's cache already holds the `larry` binary's dependencies.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          save-if: false
+      - name: Build the larry binary
+        run: cargo build --locked --bin larry
+      # `larry governance` replaced tools/check_governance.py (larry#53, ADR 0010);
+      # its controls run in the rust job's workspace tests.
       - name: Check specification and governance
-        run: python3 tools/check_governance.py --report > "$RUNNER_TEMP/larry-governance.json"
-      - name: Exercise positive and negative controls
+        run: target/debug/larry governance --report > "$RUNNER_TEMP/larry-governance.json"
+      - name: Check the tracker render
+        if: always()
+        run: target/debug/larry tracker --check
+      # The reranker's controls stay Python until larry#53 step 3 ports it.
+      - name: Exercise reranker controls
         if: always()
         run: python3 -m unittest discover -s tests -v
       - name: Check whitespace

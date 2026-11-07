@@ -61,7 +61,7 @@ thiserror = "=2.0.20"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # A member opts in with `[lints] workspace = true`.
 [dependencies]
 larry-contracts = { path = "crates/larry-contracts" }
-lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign"] }
+lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign", "pattern"] }
 lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
 
 [dev-dependencies]
