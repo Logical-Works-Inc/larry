@@ -43,6 +43,7 @@
 mod display;
 mod instant;
 mod live;
+mod reach;
 mod reconcile;
 mod retry;
 mod writers;
@@ -501,6 +502,7 @@ where
             Some(shown) => intent.with_binding(*shown.binding()),
             None => intent,
         };
+        let proof = crate::gate::Proof::issue(&pinned, &self.clock);
         self.record_intent(run, intent, authorization)?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
@@ -508,6 +510,7 @@ where
             intent.operation,
             LiveEffect {
                 intent,
+                proof,
                 // Nothing has reached the owner yet: the reservation is
                 // durable, and the reach that follows is what sets this.
                 sent: false,
@@ -520,105 +523,6 @@ where
         );
 
         self.dispatch(run, intent, at, report)
-    }
-
-    /// Checks durability and freshness before the first mutating reach.
-    fn dispatch(
-        &mut self,
-        run: RunId,
-        intent: EffectIntent,
-        at: SystemTime,
-        report: &mut TickReport,
-    ) -> Result<(), RuntimeError> {
-        if self.projection.effect_phase(intent.operation) != Some(EffectPhase::Reserved) {
-            return Err(RuntimeError::IntentNotDurable {
-                operation: intent.operation,
-            });
-        }
-        let Some(outcome) = self.reach_owner(intent, OwnerReach::Mutate, at, report)? else {
-            // Fenced. The ordering is the point: the reservation above is
-            // already durable and the owner below was never called, so the
-            // effect reads as reserved — reserved, and genuinely never sent.
-            // No outcome is invented and no run state moves, because the
-            // effect did not fail; it did not happen.
-            return Ok(());
-        };
-        report.outcomes.push((intent.operation, outcome));
-        let sent = self
-            .live
-            .get(&intent.operation)
-            .is_some_and(|live| live.sent);
-        self.settle(run, intent, outcome, sent, report)
-    }
-
-    /// The single point at which the runtime reaches the owner.
-    ///
-    /// Both lifecycle paths funnel through here — a first dispatch and a
-    /// retry — so the fence has exactly one enforcement point and exactly one
-    /// place to audit. `Mutate` is the only reach that can change anything
-    /// outside this process, and it is the only one the fence gates.
-    /// `Observe` must stay open: a status query is how an effect that was
-    /// already dispatched when revocation landed gets resolved, and fencing
-    /// it would leave an external effect permanently unlabelled — the
-    /// "already-dispatched treatment" D48 requires, enforced by shape rather
-    /// than by convention.
-    ///
-    /// Returns `None` when the fence refused, in which case no owner call
-    /// happened and no outcome exists to record.
-    fn reach_owner(
-        &mut self,
-        intent: EffectIntent,
-        reach: OwnerReach,
-        at: SystemTime,
-        report: &mut TickReport,
-    ) -> Result<Option<EffectOutcome>, RuntimeError> {
-        Ok(match reach {
-            OwnerReach::Mutate => {
-                if let Err(refusal) = self.fence.check(&intent) {
-                    report.fenced.push((intent.operation, refusal));
-                    return Ok(None);
-                }
-                self.validate_bound_reach(&intent, at)?;
-                let previous = self.live.get(&intent.operation).copied();
-                if let Some(live) = self.live.get_mut(&intent.operation) {
-                    live.dispatches = live.dispatches.saturating_add(1);
-                    // The reach below is about to happen, so this effect may
-                    // now have reached its owner. This is the only place the
-                    // flag is set for a live effect, and it is set before the
-                    // call rather than after: a call that panicked or was lost
-                    // still may have happened, and the answer to a later status
-                    // query about it is therefore evidence.
-                    live.sent = true;
-                }
-                // The reach happens without the authority source having been
-                // re-contacted, so it consumes offline authority. Spending it
-                // here — rather than at the call site — is what keeps the
-                // accounting tied to an owner call that actually occurred.
-                let outcome = if intent.binding().is_some() {
-                    match self.owner.dispatch_bound(&intent, at) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            // Typed owner refusal guarantees no attempted effect.
-                            // Restore the witness, including a previous successful reach.
-                            if let Some(previous) = previous {
-                                self.live.insert(intent.operation, previous);
-                            }
-                            return Err(error.into());
-                        }
-                    }
-                } else {
-                    self.owner.dispatch(&intent, at)
-                };
-                self.fence.spend_offline();
-                Some(outcome)
-            }
-            OwnerReach::Observe => {
-                if let Some(live) = self.live.get_mut(&intent.operation) {
-                    live.reconciliations = live.reconciliations.saturating_add(1);
-                }
-                Some(self.owner.reconcile(&intent, at))
-            }
-        })
     }
 
     /// Records an observed outcome and, when it may terminate the effect,
@@ -746,8 +650,23 @@ where
         reserved_budget = reserved_budget.saturating_add(record.pinned.request.cost);
     }
     let leases = retry::leases(projection.authorizations());
+    // `cap::Auth` never serializes, so each recorded authorization is re-issued
+    // a proof for only the lease left on the clock now (larry#77); an intent
+    // with no recorded authorization holds none.
+    let proofs: BTreeMap<OperationId, crate::gate::Proof> = projection
+        .authorizations()
+        .iter()
+        .map(|record| {
+            let proof = crate::gate::Proof::issue(&record.pinned, &clock);
+            (record.pinned.request.operation, proof)
+        })
+        .collect();
     for intent in projection.intents() {
         let (admitted_at, valid_until) = retry::leased(&leases, intent.operation);
+        let proof = match proofs.get(&intent.operation) {
+            Some(proof) => proof.clone(),
+            None => crate::gate::Proof::lapsed(),
+        };
         let phase = projection.effect_phase(intent.operation);
         // A reservation with no recorded outcome may already have reached the
         // endpoint, and the journal cannot prove otherwise, so restoration
@@ -761,6 +680,7 @@ where
             intent.operation,
             LiveEffect {
                 intent: *intent,
+                proof,
                 // The journal proves the effect was reserved and cannot prove
                 // it was never sent, so every restored effect counts as
                 // possibly-sent — including one that merely read as `Reserved`

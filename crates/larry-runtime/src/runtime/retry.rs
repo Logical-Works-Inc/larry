@@ -347,6 +347,7 @@ mod sim {
                 .checked_add(Duration::from_secs(offset_secs))
                 .ok_or("fixture time overflow")?;
             let live = LiveEffect {
+                proof: crate::gate::Proof::lapsed(),
                 intent: EffectIntent::new(
                     EffectId::from_bytes([7; 16]),
                     OperationId::from_bytes([8; 16]),

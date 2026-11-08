@@ -34,7 +34,7 @@ where
             .collect();
 
         for operation in open {
-            let Some(live) = self.live.get(&operation).copied() else {
+            let Some(live) = self.live.get(&operation).cloned() else {
                 continue;
             };
             let Some(outcome) = self.reconcile_one(&live, operation, at, report)? else {
@@ -85,7 +85,8 @@ where
     ) -> Result<Option<EffectOutcome>, RuntimeError> {
         Ok(match live.intent.strategy.reconciliation_action() {
             larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
-                let authority_live = self.fence.check(&live.intent).is_ok();
+                let authority_live =
+                    self.fence.check(&live.intent).is_ok() && live.proof.check().is_ok();
                 let decision = retry::decide(live, max_attempts, at, authority_live)?;
                 let authority_only = decision.refusals() == [RetryRefusal::AuthorityNotLive];
                 if decision.permits_retry() || authority_only {

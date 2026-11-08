@@ -14,10 +14,12 @@ pub(super) struct RunLive {
 }
 
 /// An effect the runtime has reserved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct LiveEffect {
     /// Durable reservation associated with this live witness.
     pub(super) intent: EffectIntent,
+    /// The authority lease a mutating reach presents (larry#77).
+    pub(super) proof: crate::gate::Proof,
     /// Whether this effect may have reached its owner. Set when a mutating
     /// reach is actually taken, and set by `restore` for every recorded
     /// reservation, because the journal proves the effect was reserved and

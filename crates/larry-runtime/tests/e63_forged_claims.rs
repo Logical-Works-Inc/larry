@@ -264,6 +264,148 @@ fn e63_seeded_forged_claims_never_expand_effective_authority()
     Ok(())
 }
 
+/// A retry-safe effect whose first reach is unknown, with its lease advanced past `valid_until`,
+/// is never redispatched: the owner's dispatch count stops at the first reach and no receipt
+/// reports success. The proof refuses the reach before the owner is called (larry#77, E30).
+///
+/// Source: the E30 lease rule (a retry past the approval is consent by timeout) and the
+/// attempt-budget falsifier in `sim_reconcile.rs`, reproduced here from the public surface.
+#[test]
+fn e63_a_proof_past_its_lease_is_refused_before_the_owner_is_reached()
+-> Result<(), Box<dyn std::error::Error>> {
+    let run = RunId::from_bytes([0x91; 16]);
+    let tenant = TenantId::from_bytes([0x92; 16]);
+    let operation = OperationId::from_bytes([0x93; 16]);
+    let proposal = larry_runtime::payload::WorkProposal::new(
+        run,
+        tenant,
+        operation,
+        [Scope::FileRead].into_iter().collect(),
+        1,
+        BudgetUnit::Requests,
+        ReconciliationStrategy::IdempotentRetrySafe,
+    );
+    let command = Command::new(
+        CommandId::from_bytes([0x94; 16]),
+        tenant,
+        Vec::new(),
+        CommandContent::new(
+            CommandKind::Submit,
+            lgwks_std::json::to_vec(&proposal)?.into_boxed_slice(),
+        ),
+    )?;
+    let at = SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(1_700_000_000))
+        .ok_or("fixture epoch is outside the platform time range")?;
+    let valid_until = at
+        .checked_add(Duration::from_secs(60))
+        .ok_or("fixture validity overflow")?;
+    let settings = RuntimeSettings::with_defaults(
+        PolicySnapshot::new(1, [Scope::FileRead].into_iter().collect::<BTreeSet<_>>()),
+        CapabilitySnapshot::new([Scope::FileRead].into_iter().collect()),
+        ValiditySnapshot::new(valid_until),
+        BudgetUnit::Requests,
+        1,
+    );
+    let owner = ScriptedOwner::scripted([EffectOutcome::Unknown { operation }]);
+    let clock = lgwks_bot::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
+    let mut runtime: TestRuntime = Runtime::new(settings, owner, clock.clone())?;
+    runtime.submit(command)?;
+    runtime.tick()?;
+    let dispatched_before = runtime.owner().dispatched().len();
+    clock.advance(Duration::from_secs(120))?;
+    runtime.tick()?;
+    runtime.tick()?;
+    assert_eq!(
+        runtime.owner().dispatched().len(),
+        dispatched_before,
+        "a retry past the lease never reaches the owner"
+    );
+    assert!(
+        runtime.projection().receipts().is_empty(),
+        "no receipt reports success past the lease"
+    );
+    Ok(())
+}
+
+/// Two tenants reusing one scope on one resource: a snapshot lacking the scope is refused
+/// while the other tenant's authorized proof is accepted, and neither reaches the other's
+/// proof (larry#77, multi-tenant). Each runtime holds its own `Proof`, so one tenant's
+/// capability snapshot never authorizes the other.
+#[test]
+fn e63_two_tenants_never_share_a_proof() -> Result<(), Box<dyn std::error::Error>> {
+    let operation = OperationId::from_bytes([0x95; 16]);
+    let granted =
+        larry_runtime::owner::fixture::ScriptedOwner::scripted([EffectOutcome::Succeeded {
+            operation,
+        }]);
+    let mut authorized = runtime_for(granted, &[Scope::FileRead])?;
+    let mut denied = runtime_for(ScriptedOwner::new(), &[])?;
+    for (runtime, tenant) in [
+        (&mut authorized, TenantId::from_bytes([0xa1; 16])),
+        (&mut denied, TenantId::from_bytes([0xb1; 16])),
+    ] {
+        let proposal = larry_runtime::payload::WorkProposal::new(
+            RunId::from_bytes([0x96; 16]),
+            tenant,
+            operation,
+            [Scope::FileRead].into_iter().collect(),
+            1,
+            BudgetUnit::Requests,
+            ReconciliationStrategy::Queryable,
+        );
+        runtime.submit(Command::new(
+            CommandId::from_bytes([0x97; 16]),
+            tenant,
+            Vec::new(),
+            CommandContent::new(
+                CommandKind::Submit,
+                lgwks_std::json::to_vec(&proposal)?.into_boxed_slice(),
+            ),
+        )?)?;
+    }
+    let granted_tick = authorized.tick()?;
+    let denied_tick = denied.tick()?;
+    assert_eq!(
+        granted_tick.authorized(),
+        &[operation],
+        "the granted tenant is authorized"
+    );
+    assert_eq!(
+        denied_tick.denied(),
+        &[(
+            operation,
+            DenialReason::CapabilityMissing {
+                scope: Scope::FileRead
+            }
+        )],
+        "the tenant without the scope is refused"
+    );
+    Ok(())
+}
+
+/// Builds a runtime whose policy allows `FileRead` and whose capability snapshot is `capable`.
+fn runtime_for(
+    owner: ScriptedOwner,
+    capable: &[Scope],
+) -> Result<TestRuntime, Box<dyn std::error::Error>> {
+    let at = SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(1_700_000_000))
+        .ok_or("fixture epoch is outside the platform time range")?;
+    let valid_until = at
+        .checked_add(Duration::from_secs(3_600))
+        .ok_or("fixture validity overflow")?;
+    let settings = RuntimeSettings::with_defaults(
+        PolicySnapshot::new(1, [Scope::FileRead].into_iter().collect::<BTreeSet<_>>()),
+        CapabilitySnapshot::new(capable.iter().copied().collect()),
+        ValiditySnapshot::new(valid_until),
+        BudgetUnit::Requests,
+        1,
+    );
+    let clock = lgwks_bot::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
+    Ok(Runtime::new(settings, owner, clock)?)
+}
+
 /// Expands one seed into stable identifier bytes without OS entropy.
 fn id_bytes(seed: u64, domain: u8) -> [u8; 16] {
     let mut bytes = [domain; 16];

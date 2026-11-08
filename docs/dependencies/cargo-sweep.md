@@ -42,7 +42,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Tick clock, authority expiry (larry#74) | `lgwks_bot::clock`, `skew`, defaults off: 22 to 27 crates, cold 4.2 s to 6.4 s | the deleted `larry-runtime` clock |
 | Journal, crash recovery, replay | `lgwks_bot::journal` (`FileJournal`), larry#68 | Loco jobs or SeaORM rows: a second journal |
 | Tick, projection | `lgwks_bot` ECS world | Loco scheduler: not deterministic, not replayable |
-| Authority, grants | `lgwks_bot::cap`, secure-authority | Loco `auth`: it authenticates, it never authorizes |
+| Authority, grants (larry#77) | `lgwks_bot::gate` `GrantSet`, `cap::Auth`; policy from secure-authority | the `BTreeSet` coverage loops in `larry-contracts`; Loco `auth`: it authenticates, it never authorizes |
 | Effect keys, retry, dispatch certainty (larry#78) | `lgwks_bot::effect`, `retry`, defaults off: no new crate | the inline attempt counter in `larry-runtime` (larry#68) |
 | Receipts signed (larry#86, ADR 0006) | `lgwks_std::sign` (ed25519), seed in `lgwks_deps` `sqlite` | forge's SipHash audit chain: a MAC, no offline check |
 | Sealed records at rest | `lgwks_bot::sealed` | none needed |
