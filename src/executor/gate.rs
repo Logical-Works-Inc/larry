@@ -27,6 +27,10 @@ use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::FoldProjection;
+use larry_runtime::protocol::{
+    MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, ProtocolCapability, ProtocolOffer,
+    ProtocolVersionRange,
+};
 use larry_runtime::runtime::{Runtime, RuntimeSettings};
 use lgwks_bot::clock::Clock;
 
@@ -391,9 +395,31 @@ pub(super) fn admit_and_run(
         }
         Err(other) => return Err(ExecError::Gate(other)),
     };
-    runtime
-        .submit_displayed(command, shown)
-        .map_err(ExecError::Gate)?;
+    // The ingress negotiates before the command is queued (E47): the
+    // executor offers the runtime's own version range and the SubmitCommand
+    // capability only, and it is headless — a task's question can wait for
+    // no human here.
+    let offered = BTreeSet::from([ProtocolCapability::SubmitCommand]);
+    let offer = ProtocolOffer::new(
+        tenant,
+        ProtocolVersionRange::new(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION),
+        offered,
+        true,
+        false,
+    );
+    if let Err(error) = runtime.submit_protocol(&offer, command, Some(shown)) {
+        // A protocol refusal is a sealed denial exactly like a policy
+        // refusal: nothing reached the queue, so nothing ran.
+        return match error {
+            RuntimeError::Protocol(refusal) => Ok(denied_report(
+                task_id,
+                task_digest,
+                &format!("gate: protocol: {refusal}"),
+                key,
+            )),
+            other => Err(ExecError::Gate(other)),
+        };
+    }
     let tick = runtime.tick().map_err(ExecError::Gate)?;
 
     // The body ran inside the bound reach; its outcome is the run's outcome.

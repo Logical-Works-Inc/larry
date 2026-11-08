@@ -63,14 +63,9 @@ fn sim_e65_bound_execution_and_replay() -> Result {
 #[test]
 fn sim_e65_retry_after_restore_keeps_binding() -> Result {
     for seed in 0..SEEDS {
-        let mut runtime: TestRuntime = Runtime::new(
-            settings(seed)?,
-            AtomicOwner {
-                lose_reply: true,
-                ..AtomicOwner::new(seed, 0)
-            },
-            clock_at(seed)?,
-        )?;
+        let mut owner = AtomicOwner::new(seed, 0);
+        owner.lose_reply = true;
+        let mut runtime: TestRuntime = Runtime::new(settings(seed)?, owner, clock_at(seed)?)?;
         let command = command(
             seed,
             1,
@@ -101,7 +96,7 @@ fn sim_e65_retry_after_restore_keeps_binding() -> Result {
             "refused retry writes no invented outcome"
         );
         assert!(
-            restored.owner().executed.is_empty(),
+            restored.owner().executed().is_empty(),
             "restoration must not swap targets"
         );
     }
@@ -199,7 +194,7 @@ fn sim_e65_full_journal_restore_preserves_display() -> Result {
             "fault must fall after reservation and before outcome, seed {seed}"
         );
         assert_eq!(
-            runtime.owner().executed.len(),
+            runtime.owner().executed().len(),
             1,
             "effect happened before outcome loss"
         );
@@ -220,7 +215,7 @@ fn sim_e65_full_journal_restore_preserves_display() -> Result {
             "status of original operation remains queryable"
         );
         assert!(
-            restored.owner().executed.is_empty(),
+            restored.owner().executed().is_empty(),
             "changed target cannot be dispatched by recovery"
         );
         assert!(

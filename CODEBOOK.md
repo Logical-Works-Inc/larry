@@ -38,6 +38,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `journal` | The bounded append-only authoritative record |
 | `payload` | Typed bodies of the closed event vocabulary |
 | `projection` | The fold, effect phases and the replay report |
+| `protocol` | E47 version and capability negotiation: the offer, its typed refusals |
 | `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
 | `fence` (private) | Dispatch-time freshness: epoch, revocation, offline bound |
 | `owner` | The effect-owner trait; test doubles under `fixture` only |
@@ -46,6 +47,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `runtime` | Settings, `TickReport`, stage 2 (admit, reserve, dispatch), `restore` |
 | `runtime::instant` | The tick's one pinned instant: `lgwks_bot::clock` read as time since the Unix epoch (larry#74) |
 | `runtime::display` | E65 display and admission on the real command path |
+| `runtime::ingress` | `submit_protocol`: negotiate, tenant check and bounded backoff before the queue (E47) |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |
 | `runtime::reach` | The one owner reach: the fence, then the `cap::Auth` proof, then the call (larry#77) |
@@ -109,8 +111,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - Only `runtime::writers` appends to the journal; every append folds the projection after it.
 - `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
-- `executor::ledger` records a group's leader before the wait and removes it only once the group is gone.
-- `executor::ledger` opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
+- `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
 - Test fixtures shared by several runtime test binaries live in `tests/support`, `tests/sim_kit` and
   `tests/fence_kit`, each with a test that exercises every helper; `tests/support/origin.rs` holds the
