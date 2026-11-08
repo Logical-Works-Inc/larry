@@ -36,14 +36,19 @@ jobs:
       # The test lane AGENTS.md declares and `cargo local-ci` runs (larry#154).
       # Hosted legs install nextest; the self-hosted leg keeps `cargo test` so
       # a job never installs tools into the shared machine (see sim.yml).
+      # The install is bounded and may fail; without nextest the same lane runs
+      # under cargo test (PR #165: a hung download ate a whole job).
       - if: ${{ !github.event.repository.private }}
+        id: nextest
+        continue-on-error: true
+        timeout-minutes: 3
         uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
         with:
           tool: nextest
-      - if: ${{ !github.event.repository.private }}
-        run: cargo nextest run --workspace --locked
-      - if: ${{ github.event.repository.private }}
-        run: cargo test --workspace --all-targets --locked
+      - if: ${{ !github.event.repository.private && steps.nextest.outcome == 'success' }}
+        run: cargo nextest run --locked --workspace
+      - if: ${{ github.event.repository.private || steps.nextest.outcome != 'success' }}
+        run: cargo test --locked --workspace --all-targets
 
   # The specification and governance lanes, carried over from Larry's
   # workflow. Action SHAs are pinned here because this job ran that way

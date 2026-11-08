@@ -1,4 +1,4 @@
-//! The hosted lanes of `.github/workflows/sim.yml` never pass or cancel without running their
+//! The hosted test lanes of `.github/workflows/sim.yml` and `ci.yml` never pass or cancel without running their
 //! tests. Source: PR #165, whose e2e/journey job hung 15 minutes in the nextest download and was
 //! cancelled before a test ran; GitHub Actions workflow syntax (`timeout-minutes` and
 //! `continue-on-error` on a step, `steps.<id>.outcome`). Requirement: each lane's install is
@@ -15,7 +15,7 @@ fn job<'a>(text: &'a str, key: &str) -> Result<&'a str, String> {
     let marker = format!("\n  {key}:\n");
     let (_, rest) = text
         .split_once(marker.as_str())
-        .ok_or(format!("sim.yml has no {key} job"))?;
+        .ok_or(format!("the workflow has no {key} job"))?;
     Ok(match rest.split_once("\n  # ") {
         Some((body, _)) => body,
         None => rest,
@@ -44,12 +44,21 @@ fn assert_lane(text: &str, key: &str, target: &str) -> Check {
     Ok(())
 }
 
+/// The text of the workflow file `name` under `.github/workflows`.
+fn workflow(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(".github/workflows")
+        .join(name);
+    Ok(std::fs::read_to_string(path)?)
+}
+
 #[test]
 fn every_hosted_lane_runs_its_tests_even_when_the_nextest_install_hangs() -> Check {
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/sim.yml"),
-    )?;
-    assert_lane(&text, "simulation", "-p larry-runtime")?;
-    assert_lane(&text, "e2e-journey", "-p larry-demo --test e2e_journey")?;
+    let sim = workflow("sim.yml")?;
+    assert_lane(&sim, "simulation", "-p larry-runtime")?;
+    assert_lane(&sim, "e2e-journey", "-p larry-demo --test e2e_journey")?;
+    // The rust lane hung in the same download on PR #165's second run.
+    let ci = workflow("ci.yml")?;
+    assert_lane(&ci, "rust", "--workspace")?;
     Ok(())
 }
