@@ -81,8 +81,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
   `sim_cancel`.
 - [x] #68 step 4 (#164): every executor task passes the runtime gate, `LARRY_POLICY` (ADR 0019): PR #165, 734 tests;
   `larry exec` p50 63.6/62.6 ms, p99 111.7/66.1 ms (64 runs, debug), peak RSS 10.9/11.8 MiB.
-- [ ] #101 E47 (PR #20), #100 E28 (PR #21), #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe
-  and the E47 patch on PR #20) and merge on green. Proof: the PR's named test green on main.
+- [x] #101 E47 protocol negotiation before ingress, the executor its caller (ADR 0020): PR #166, 742 tests.
+- [ ] #100 E28 (PR #21), #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe on PR #20), merge on green.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
