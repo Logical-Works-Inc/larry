@@ -58,6 +58,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 |---|---|
 | `lib` | The effect-free DEMO session state, `replace_file` (the whole-or-nothing write) and `diagnose` (one stderr line) |
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
+| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal (ADR 0019) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill |
@@ -114,4 +115,5 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - Test fixtures shared by several runtime test binaries live in `tests/support`, `tests/sim_kit` and
   `tests/fence_kit`, each with a test that exercises every helper; `tests/support/origin.rs` holds the
   origin repository the executor and MCP journeys share, `tests/support/mcp_task.rs` the operator
-  session and offline receipt check behind `larry_submit_task`.
+  session and offline receipt check behind `larry_submit_task`, `tests/support/larry_cli.rs` the
+  `larry` child and its sealed-report readers.

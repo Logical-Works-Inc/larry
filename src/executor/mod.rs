@@ -2,18 +2,22 @@
 //! and the model step that writes a brief's files before acceptance (larry#123).
 
 mod author;
+mod gate;
 mod ledger;
 mod receipt;
 mod run;
 mod task;
 mod workspace;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) use author::is_writable_path;
+use larry_contracts::authority::Scope;
+use larry_runtime::error::RuntimeError;
 use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 use run::run_command;
@@ -54,6 +58,11 @@ pub enum ExecError {
     /// `LARRY_EXEC_TIMEOUT_MS` is not a whole number of milliseconds in 1..=86400000.
     BadTimeout {
         /// The value that was refused.
+        value: String,
+    },
+    /// `LARRY_POLICY` names a scope the executor does not know.
+    BadPolicy {
+        /// The name that was refused.
         value: String,
     },
     /// The sqlite ledger could not be opened or migrated.
@@ -116,6 +125,8 @@ pub enum ExecError {
         /// Why it could not be written.
         fault: AuthorFault,
     },
+    /// The admission gate refused to run the task.
+    Gate(RuntimeError),
 }
 
 impl fmt::Display for ExecError {
@@ -129,6 +140,9 @@ impl fmt::Display for ExecError {
                 out,
                 "exec LARRY_EXEC_TIMEOUT_MS is not a timeout in 1..=86400000: {value}"
             ),
+            Self::BadPolicy { ref value } => {
+                write!(out, "exec LARRY_POLICY is not a scope name: {value}")
+            }
             Self::Ledger(ref cause) => write!(out, "exec ledger: {cause}"),
             Self::LedgerLock(ref cause) => write!(out, "exec ledger lock: {cause}"),
             Self::Sql(ref cause) => write!(out, "exec ledger statement: {cause}"),
@@ -161,6 +175,7 @@ impl fmt::Display for ExecError {
                 ref path,
                 ref fault,
             } => write!(out, "exec could not write {path}: {fault}"),
+            Self::Gate(ref cause) => write!(out, "exec gate: {cause}"),
         }
     }
 }
@@ -183,15 +198,23 @@ impl std::error::Error for ExecError {
             Self::KeySeedLength(ref cause) => Some(cause),
             Self::ModelConfig(ref cause) => Some(cause),
             Self::Author { ref fault, .. } => Some(fault),
+            Self::Gate(ref cause) => Some(cause),
             Self::KeyMissing
             | Self::ModelUnconfigured
             | Self::StateDirUnset
             | Self::BadTimeout { .. }
+            | Self::BadPolicy { .. }
             | Self::Git { .. }
             | Self::NotARepo { .. }
             | Self::BadBase { .. }
             | Self::GroupSurvived { .. } => None,
         }
+    }
+}
+
+impl From<RuntimeError> for ExecError {
+    fn from(cause: RuntimeError) -> Self {
+        Self::Gate(cause)
     }
 }
 
@@ -260,6 +283,8 @@ pub struct Settings {
     path: String,
     /// The gateway a brief's files are written through; `None` without `LARRY_MODEL_KEY`.
     model: Option<ModelConfig>,
+    /// The scopes `LARRY_POLICY` admits; what the gate authorizes tasks against.
+    policy: BTreeSet<Scope>,
 }
 
 impl Settings {
@@ -284,6 +309,7 @@ impl Settings {
             timeout: Duration::from_millis(timeout_ms),
             path,
             model,
+            policy: gate::policy(&read)?,
         })
     }
 
@@ -319,7 +345,9 @@ const fn backoff(wait: Duration) -> bool {
 /// Runs a task: clones its repository at the base, has the model write the brief's files
 /// when the task carries one, runs each acceptance command in order, and returns the report
 /// with the staged diff, sealed under the state directory's key. A task asking for model
-/// commands is denied: nothing runs, and its sealed report is never accepted.
+/// commands is denied: nothing runs, and its sealed report is never accepted. Every other
+/// task runs only after the admission gate authorized it (larry#164): the task body is the
+/// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let ledger = Ledger::open(&settings.state_dir)?;
     let key = ledger.signing_key()?;
@@ -339,6 +367,24 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
             &key,
         ));
     }
+    gate::admit_and_run(task, settings, &task_id, &task_digest, &key, || {
+        run_task(task, settings, &task_id, &task_digest, &ledger, &key)
+    })
+}
+
+/// The task body the gate authorizes: clones the repository at the base, has
+/// the model write the brief's files when the task carries one, runs each
+/// acceptance command in order, and returns the report with the staged diff,
+/// sealed under the state directory's key. It runs at most once, inside the
+/// gate's bound owner reach.
+fn run_task(
+    task: &Task,
+    settings: &Settings,
+    task_id: &str,
+    task_digest: &str,
+    ledger: &Ledger,
+    key: &lgwks_std::sign::SecretKey,
+) -> Result<Report, ExecError> {
     let author = match task.brief() {
         None => None,
         Some(brief) => {
@@ -350,7 +396,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         &settings.state_dir,
         task.repo(),
         task.base(),
-        &task_id,
+        task_id,
         &settings.path,
     )?;
     let authored = match author {
@@ -364,8 +410,8 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
             workspace.path(),
             &settings.path,
             settings.timeout,
-            &ledger,
-            &task_id,
+            ledger,
+            task_id,
         )?;
         results.push(result.into_json());
     }
@@ -386,7 +432,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
             lgwks_std::json::Value::Array(records),
         );
     }
-    Ok(Report::sealed(body, &key))
+    Ok(Report::sealed(body, key))
 }
 
 /// The BLAKE3 digest of `bytes`, as 64 hex characters.

@@ -1302,6 +1302,8 @@ name = "larry-demo"
 version = "0.1.0"
 dependencies = [
  "larry-contracts",
+ "larry-runtime",
+ "lgwks_bot",
  "lgwks_deps",
  "lgwks_std",
 ]

@@ -56,12 +56,19 @@ lgwks_bot = { version = "=7.1.1", default-features = false }
 # published storefront owns that dependency and its transitive admission.
 lgwks_deps = { version = "=6.1.0", default-features = false }
 thiserror = "=2.0.20"  # gap: Logical-Works-Inc/logicalworks-crates#842
+# The runtime gate (larry#164): the executor submits every task through it, so
+# a task body runs only inside the runtime's authorized owner call.
+larry-runtime = { path = "crates/larry-runtime" }
 
 # The stricter of the two former lint sets, applied to the whole workspace.
 # A member opts in with `[lints] workspace = true`.
 [dependencies]
 larry-contracts = { path = "crates/larry-contracts" }
+larry-runtime = { workspace = true }
 lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign", "pattern"] }
+# The runtime gate's clock (larry#164): the estate's declared clock, which
+# larry-runtime already declares; no feature is needed beyond its default.
+lgwks_bot = { workspace = true }
 lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
 
 [features]

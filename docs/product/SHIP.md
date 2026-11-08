@@ -79,8 +79,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
 - [ ] #80 tick and consumer on app scope and tenant_store. Proof: `sim_lifecycle`, `sim_consumer`,
   `sim_cancel`.
-- [ ] #68 step 4: a package outside `larry-runtime` calls it on the run path (Track 2 gate). Proof: rust-surface
-  passes a new runtime `pub` item with that caller.
+- [x] #68 step 4 (#164): every executor task passes the runtime gate, `LARRY_POLICY` (ADR 0019): PR #165, 734 tests;
+  `larry exec` p50 63.6/62.6 ms, p99 111.7/66.1 ms (64 runs, debug), peak RSS 10.9/11.8 MiB.
 - [ ] #101 E47 (PR #20), #100 E28 (PR #21), #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe
   and the E47 patch on PR #20) and merge on green. Proof: the PR's named test green on main.
 

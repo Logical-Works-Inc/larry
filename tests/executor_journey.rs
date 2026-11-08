@@ -20,17 +20,21 @@
 mod exec_cli;
 
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
 use exec_cli::{
-    POLL_LIMIT, TempDir, TestResult, assert_refused, fixture, flag_of, live_group_pid, make_fifo,
-    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, task_json, text_of,
+    POLL_LIMIT, TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of,
+    live_group_pid, make_fifo, millis, number_of, percentile, report_of, result_at, run_exec,
+    spawn_exec, spawn_larry, task_json, text_of,
 };
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
+use lgwks_std::json::{self, Value};
 
 /// Runs the latency case samples.
 const SAMPLES: usize = 32;
@@ -388,5 +392,177 @@ fn two_tasks_at_once_never_share_a_workspace() -> TestResult {
         before,
         "two concurrent tasks must leave the origin byte-identical"
     );
+    Ok(())
+}
+
+// ── the admission gate (larry#164) ───────────────────────────────────────────
+
+/// A task document with a brief: `goal` and `files` the model writes before
+/// the acceptance commands run.
+fn brief_json(repo: &Path, goal: &str, files: &str, acceptance: &str) -> String {
+    format!(
+        r#"{{"repo":"{}","base":"HEAD","goal":"{goal}","files":{files},"acceptance":{acceptance}}}"#,
+        repo.display()
+    )
+}
+
+/// Whether any entry under `root`, at any depth, is named `name`.
+fn has_entry_named(root: &Path, name: &str) -> Result<bool, Box<dyn Error>> {
+    let mut found = false;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            found = found || path.ends_with(name);
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The verdict `larry verify` printed for `report` bytes, trusting `state`'s key.
+fn verified_verdict(state: &Path, report: &[u8]) -> Result<Value, Box<dyn Error>> {
+    let output = spawn_larry("verify", &[("LARRY_STATE_DIR", state.as_os_str())], report)?
+        .wait_with_output()?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a genuine denied receipt verifies as rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(json::from_str::<Value>(&String::from_utf8_lossy(
+        &output.stdout,
+    ))?)
+}
+
+#[test]
+fn exec_denies_a_brief_task_when_the_policy_lacks_file_write() -> TestResult {
+    // Source: OWASP ASVS 4.0.3 §4.1.3 (deny by default) and §4.1.1 (the
+    // privilege check happens where the action is served). The policy admits
+    // read, spawn and model invoke but not file write, so a brief that needs a
+    // file written is denied: nothing runs, no connection reaches the model
+    // endpoint, and the sealed report is genuine but rejected (larry#164).
+    let (state, origin) = fixture()?;
+    // The endpoint the brief's model would call is bound but never answered.
+    // A connection attempt completes the TCP handshake into this listener's
+    // backlog, so one accepted connection is proof a request was attempted;
+    // none may be.
+    let endpoint = TcpListener::bind(("127.0.0.1", 0))?;
+    endpoint.set_nonblocking(true)?;
+    let url = format!("http://127.0.0.1:{}/v1", endpoint.local_addr()?.port());
+    let task = brief_json(
+        origin.path(),
+        "write the note",
+        r#"["note.txt"]"#,
+        r#"[["true"]]"#,
+    );
+    let env: [(&str, &OsStr); 4] = [
+        ("LARRY_STATE_DIR", state.path().as_os_str()),
+        (
+            "LARRY_POLICY",
+            OsStr::new("file.read,process.spawn,model.invoke"),
+        ),
+        ("LARRY_MODEL_KEY", OsStr::new("mock-key")),
+        ("LARRY_MODEL_URL", OsStr::new(url.as_str())),
+    ];
+    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    assert!(
+        endpoint.accept().is_err(),
+        "the gate denies before the model step, so no connection may reach the endpoint"
+    );
+    assert_eq!(output.status.code(), Some(2), "a gate denial exits 2");
+    let report = report_of(&output)?;
+    assert!(
+        !flag_of(&report, "accepted")?,
+        "a gate denial is never accepted"
+    );
+    assert_eq!(
+        denial_lines(&report)?,
+        vec![String::from("gate: policy_refuses: file.write")],
+        "the denial names the first scope the policy refuses"
+    );
+    assert_eq!(
+        report.get("diff").map(Value::is_null),
+        Some(true),
+        "a denied run seals no diff"
+    );
+    assert!(
+        result_at(&report, 0).is_err(),
+        "no command result exists after the denial"
+    );
+    let verdict = verified_verdict(state.path(), &output.stdout)?;
+    assert!(flag_of(&verdict, "verified")?, "the receipt is genuine");
+    assert!(
+        !flag_of(&verdict, "accepted")?,
+        "the verdict says not accepted"
+    );
+    assert_eq!(
+        text_of(&verdict, "task_id")?,
+        text_of(&report, "task_id")?,
+        "the verdict names the denied task"
+    );
+    Ok(())
+}
+
+#[test]
+fn exec_denies_every_command_when_the_policy_is_empty() -> TestResult {
+    // Source: OWASP ASVS 4.0.3 §4.1.3 (deny by default). An empty policy
+    // admits nothing, so the first required scope in Scope order (file.read)
+    // is named, the acceptance command that would create the marker never
+    // runs, and neither the state directory nor the origin changes (larry#164).
+    let (state, origin) = fixture()?;
+    let before = tree_digest(origin.path())?;
+    let task = task_json(
+        origin.path(),
+        "HEAD",
+        r#"[["sh","-c","echo pwned > marker"]]"#,
+    );
+    let env: [(&str, &OsStr); 2] = [
+        ("LARRY_STATE_DIR", state.path().as_os_str()),
+        ("LARRY_POLICY", OsStr::new("")),
+    ];
+    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an empty policy denies with a sealed report"
+    );
+    let report = report_of(&output)?;
+    assert!(
+        !flag_of(&report, "accepted")?,
+        "an empty policy accepts nothing"
+    );
+    assert_eq!(
+        denial_lines(&report)?,
+        vec![String::from("gate: policy_refuses: file.read")],
+        "the first required scope in Scope order is named"
+    );
+    assert!(
+        !has_entry_named(state.path(), "marker")?,
+        "no marker file may exist anywhere under the state directory"
+    );
+    assert_eq!(
+        tree_digest(origin.path())?,
+        before,
+        "an empty policy must leave the origin byte-identical"
+    );
+    Ok(())
+}
+
+#[test]
+fn exec_refuses_an_unknown_policy_name() -> TestResult {
+    // Source: OWASP ASVS 4.0.3 §4.1.1. A policy name the executor does not
+    // know is refused before anything is read or run: one typed line naming
+    // it, exit 1, nothing sealed (larry#164).
+    let (state, origin) = fixture()?;
+    let task = task_json(origin.path(), "HEAD", "[]");
+    let env: [(&str, &OsStr); 2] = [
+        ("LARRY_STATE_DIR", state.path().as_os_str()),
+        ("LARRY_POLICY", OsStr::new("file.read,root")),
+    ];
+    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    assert_refused(&output, "root");
     Ok(())
 }
