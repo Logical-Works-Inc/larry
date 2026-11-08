@@ -46,9 +46,9 @@ jobs:
         with:
           tool: nextest
       - if: ${{ !github.event.repository.private && steps.nextest.outcome == 'success' }}
-        run: cargo nextest run --locked --workspace
+        run: cargo nextest run --workspace --locked
       - if: ${{ github.event.repository.private || steps.nextest.outcome != 'success' }}
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --workspace --all-targets --locked
 
   # The specification and governance lanes, carried over from Larry's
   # workflow. Action SHAs are pinned here because this job ran that way
