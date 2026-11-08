@@ -71,11 +71,11 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 - [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds).
 - [ ] #75 journal on FileJournal, durable across kill -9. Proof: `sim_crash_restore`, `sim_replay` and a
-  kill -9 that re-executes the binary mid-append.
-- [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs`.
+  kill -9 that re-executes the binary mid-append. Waits: lgwks_bot 7.1.1 journals only its own effects.
+- [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs`. Waits: broker gaps.
 - [ ] #77 gate on GrantSet and cap::Auth. Proof: `e63_forged_claims`, `sim_denials`.
-- [ ] #78 effect lifecycle on lgwks_bot::effect and retry. Proof: `lifecycle`, `sim_reconcile`,
-  `sim_duplicates`.
+- [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay
+  p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
 - [ ] #80 tick and consumer on app scope and tenant_store. Proof: `sim_lifecycle`, `sim_consumer`,
   `sim_cancel`.
