@@ -26,7 +26,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `effect` | Intents, reconciliation strategies, terminal receipts |
 | `authority` | Grants, attenuation, boundary re-validation |
 | `binding` | Resolution of an intent to its external target |
-| `replay` | The pure authorization reducer and pinned replay; expiry on `lgwks_bot::skew::lease_holds` |
+| `replay` | The pure authorization reducer and pinned replay; expiry on `lgwks_bot::skew::lease_holds`, coverage on `lgwks_bot::gate::GrantSet` (larry#77) |
 | `error` | Every typed contract failure |
 | `workspace` | Bounded workspace projections and the Continue boundary |
 | `fixture` (test only) | Pinned instants shared by the unit tests |
@@ -38,7 +38,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `journal` | The bounded append-only authoritative record |
 | `payload` | Typed bodies of the closed event vocabulary |
 | `projection` | The fold, effect phases and the replay report |
-| `gate` | The pure authorization reducer at admission |
+| `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
 | `fence` (private) | Dispatch-time freshness: epoch, revocation, offline bound |
 | `owner` | The effect-owner trait; test doubles under `fixture` only |
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
@@ -48,6 +48,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `runtime::display` | E65 display and admission on the real command path |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |
+| `runtime::reach` | The one owner reach: the fence, then the `cap::Auth` proof, then the call (larry#77) |
 | `runtime::retry` | The effect key an intent derives and the retry decision on `lgwks_bot::retry` (larry#78, ADR 0017) |
 | `runtime::writers` | Every journal writer and the run-state `advance` |
 

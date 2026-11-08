@@ -93,7 +93,8 @@ never claim enforcement GitHub does not apply.
 ## Open governance debt
 
 - larry#53 closed 2026-11-07: no Python is tracked or run in CI or `cargo local-ci` (ADR 0010 to 0015).
-- larry#68 Track 1: row 1 (clock, ADR 0016) and row 5 (effect retry, ADR 0017) run on lgwks_bot. Rows 2
+- larry#68 Track 1: row 1 (clock, ADR 0016), row 4 (gate, ADR 0018) and row 5 (effect retry, ADR 0017) run
+  on lgwks_bot. Rows 2
   (#75, the journal) and 3 (#76, the fence) wait on lgwks_bot gaps written on those issues and on
   logicalworks-crates#845; until then their INVARIANTS lines stay review-only.
 - Falsifier PRs #20 (E47), #21 (E28), #22 (E71) and #25 (E30) land at larry#68 step 5, after step 4 wires

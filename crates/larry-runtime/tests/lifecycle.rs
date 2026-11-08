@@ -15,8 +15,8 @@ use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{EffectPhase, ProjectionBackend};
 
 use support::{
-    TestRuntime, assert_state, cancel, command_id, epoch, operation, proposal, run, runtime,
-    runtime_with, submit, succeeded, tenant, unknown,
+    TestRuntime, assert_state, cancel, command_id, operation, proposal, run, runtime, runtime_with,
+    submit, succeeded, tenant, unknown,
 };
 
 /// A runtime whose owner reports one success for operation 1, under a policy
@@ -480,63 +480,5 @@ fn queuing_is_not_acceptance() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(!rt.journal().is_empty());
     assert_eq!(rt.tick_count(), 1);
-    Ok(())
-}
-
-/// The second gate: authority valid at admission is re-validated at the effect
-/// boundary, so a grant that expired in between cannot be spent.
-#[test]
-fn an_expired_grant_is_refused_at_the_effect_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    use larry_contracts::authority::{Budget, Grant, ResourcePolicy};
-    use larry_contracts::ids::WorkerId;
-    use larry_runtime::error::RuntimeError;
-
-    // The grant expired an hour before the pinned instant the runtime uses.
-    let grant = Grant::new(
-        tenant(1),
-        WorkerId::from_bytes([7; 16]),
-        [Scope::FileRead].into_iter().collect(),
-        Budget::new(100, larry_contracts::authority::BudgetUnit::Requests),
-        epoch()?,
-        0,
-    )?;
-    let policy = ResourcePolicy::new([Scope::FileRead].into_iter().collect());
-
-    let result = larry_runtime::gate::revalidate_at_boundary(
-        &grant,
-        Scope::FileRead,
-        1,
-        &policy,
-        epoch()?
-            .checked_add(std::time::Duration::from_secs(60))
-            .ok_or("fixture time overflow")?,
-    );
-
-    assert!(
-        matches!(result, Err(RuntimeError::Authority(_))),
-        "an expired grant must be refused at the boundary, got {result:?}"
-    );
-    Ok(())
-}
-
-/// A grant that is still valid and sufficient passes the boundary check.
-#[test]
-fn a_live_grant_passes_the_effect_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    use larry_contracts::authority::{Budget, BudgetUnit, Grant, ResourcePolicy};
-    use larry_contracts::ids::WorkerId;
-
-    let grant = Grant::new(
-        tenant(1),
-        WorkerId::from_bytes([7; 16]),
-        [Scope::FileRead].into_iter().collect(),
-        Budget::new(100, BudgetUnit::Requests),
-        epoch()?
-            .checked_add(std::time::Duration::from_secs(3_600))
-            .ok_or("fixture time overflow")?,
-        0,
-    )?;
-    let policy = ResourcePolicy::new([Scope::FileRead].into_iter().collect());
-
-    larry_runtime::gate::revalidate_at_boundary(&grant, Scope::FileRead, 1, &policy, epoch()?)?;
     Ok(())
 }

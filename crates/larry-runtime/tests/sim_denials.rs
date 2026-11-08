@@ -9,6 +9,8 @@ mod seed;
 mod sim_kit;
 mod support;
 
+use std::time::{Duration, SystemTime};
+
 use larry_contracts::authority::Scope;
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::ContentDigest;
@@ -388,6 +390,100 @@ fn sim_denials_capability_subset_denies_extra_scope() -> Outcome {
         );
         Ok(trace(runtime.journal()))
     })
+}
+
+/// The five scopes, in the order the coverage oracle and the generator draw them.
+const ALL_SCOPES: [Scope; 5] = [
+    Scope::FileRead,
+    Scope::FileWrite,
+    Scope::NetworkEgress,
+    Scope::ProcessSpawn,
+    Scope::ModelInvoke,
+];
+
+/// A subset of [`ALL_SCOPES`] drawn from one generator state: each scope in or out by a bit.
+fn subset(state: &mut u64) -> std::collections::BTreeSet<Scope> {
+    let mask = advance(state);
+    ALL_SCOPES
+        .iter()
+        .enumerate()
+        .filter(|pair| (mask >> pair.0) & 1 == 1)
+        .map(|pair| *pair.1)
+        .collect()
+}
+
+/// The reference coverage rule the gate must match: validity, then the first required scope
+/// the policy refuses, then the first it lacks a capability for, then the budget.
+fn reference(
+    required: &std::collections::BTreeSet<Scope>,
+    policy: &std::collections::BTreeSet<Scope>,
+    capabilities: &std::collections::BTreeSet<Scope>,
+) -> Option<DenialReason> {
+    if let Some(scope) = required.iter().find(|scope| !policy.contains(*scope)) {
+        return Some(DenialReason::PolicyRefuses { scope: *scope });
+    }
+    required
+        .iter()
+        .find(|scope| !capabilities.contains(*scope))
+        .map(|scope| DenialReason::CapabilityMissing { scope: *scope })
+}
+
+/// D36: over 512 seeds, the gate's coverage verdict matches the reference rule exactly, for
+/// random scope subsets including the empty and the full set. Same seed, same result.
+///
+/// Source: the fixed check order of D36 (policy before capability) and the lgwks_bot
+/// `GrantSet::admit` coverage the gate now delegates to (larry#77).
+#[test]
+fn sim_denials_coverage_matches_the_reference_rule_for_every_seed() -> Outcome {
+    let mut verdicts = Vec::with_capacity(512);
+    for seed in 0..512_u64 {
+        let mut state = seed.saturating_add(0x77);
+        let required = subset(&mut state);
+        let policy = subset(&mut state);
+        let capabilities = subset(&mut state);
+        let pinned = larry_contracts::replay::PinnedInputs::new(
+            larry_contracts::replay::EffectRequest::new(
+                operation(30),
+                required.clone(),
+                1,
+                larry_contracts::authority::BudgetUnit::Requests,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+            ),
+            larry_contracts::replay::PolicySnapshot::new(1, policy.clone()),
+            larry_contracts::replay::BudgetSnapshot::new(
+                10,
+                larry_contracts::authority::BudgetUnit::Requests,
+            ),
+            larry_contracts::replay::CapabilitySnapshot::new(capabilities.clone()),
+            larry_contracts::replay::ValiditySnapshot::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            ),
+        );
+        let decided = pinned.decide();
+        let expected = match reference(&required, &policy, &capabilities) {
+            Some(reason) => larry_contracts::replay::Decision::Denied { reason },
+            None => larry_contracts::replay::Decision::Authorized,
+        };
+        assert_eq!(
+            decided, expected,
+            "seed {seed}: gate disagrees with the reference rule"
+        );
+        assert_eq!(
+            decided,
+            pinned.decide(),
+            "seed {seed}: the decision is deterministic"
+        );
+        verdicts.push(decided);
+    }
+    let denied = verdicts
+        .iter()
+        .filter(|verdict| matches!(verdict, larry_contracts::replay::Decision::Denied { .. }))
+        .count();
+    assert!(
+        denied > 0 && denied < verdicts.len(),
+        "the seeds cover both verdicts"
+    );
+    Ok(())
 }
 
 /// D36: seeded scope and authority sets authorize exactly when allowed.

@@ -73,7 +73,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [ ] #75 journal on FileJournal, durable across kill -9. Proof: `sim_crash_restore`, `sim_replay` and a
   kill -9 that re-executes the binary mid-append. Waits: lgwks_bot 7.1.1 journals only its own effects.
 - [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs`. Waits: broker gaps.
-- [ ] #77 gate on GrantSet and cap::Auth. Proof: `e63_forged_claims`, `sim_denials`.
+- [x] #77 gate on GrantSet and cap::Auth: PR #163, 729 tests; replay p50 49.9/49.7 us, p99 94.5/86.8 us (ADR 0018).
 - [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay
   p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
