@@ -44,6 +44,7 @@ mod display;
 mod instant;
 mod live;
 mod reconcile;
+mod retry;
 mod writers;
 
 use instant::sample;
@@ -472,6 +473,8 @@ where
         if let Some(shown) = display {
             shown.constrain(&mut pinned);
         }
+        let admitted_at = pinned.request.observed_at;
+        let valid_until = pinned.validity.valid_until;
         let authorization = match crate::gate::authorize(&pinned) {
             Ok(record) => record,
             Err(RuntimeError::Denied { operation, reason }) => {
@@ -511,6 +514,8 @@ where
                 dispatches: 0,
                 reconciliations: 0,
                 dispatched_at_tick: self.tick_count,
+                admitted_at,
+                valid_until,
             },
         );
 
@@ -740,7 +745,9 @@ where
     for record in projection.authorizations() {
         reserved_budget = reserved_budget.saturating_add(record.pinned.request.cost);
     }
+    let leases = retry::leases(projection.authorizations());
     for intent in projection.intents() {
+        let (admitted_at, valid_until) = retry::leased(&leases, intent.operation);
         let phase = projection.effect_phase(intent.operation);
         // A reservation with no recorded outcome may already have reached the
         // endpoint, and the journal cannot prove otherwise, so restoration
@@ -767,6 +774,8 @@ where
                 // rather than waiting a tick for a dispatch that already
                 // happened before the crash.
                 dispatched_at_tick: 0,
+                admitted_at,
+                valid_until,
             },
         );
     }

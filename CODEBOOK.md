@@ -48,6 +48,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `runtime::display` | E65 display and admission on the real command path |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |
+| `runtime::retry` | The effect key an intent derives and the retry decision on `lgwks_bot::retry` (larry#78, ADR 0017) |
 | `runtime::writers` | Every journal writer and the run-state `advance` |
 
 ## Root crate (the `larry` binary)

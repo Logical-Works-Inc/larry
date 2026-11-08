@@ -1,6 +1,8 @@
 //! The runtime's private witnesses: which tenant owns a run, what the runtime
 //! knows about each reserved effect, and which way it is about to reach an owner.
 
+use std::time::SystemTime;
+
 use larry_contracts::effect::EffectIntent;
 use larry_contracts::ids::TenantId;
 
@@ -40,6 +42,12 @@ pub(super) struct LiveEffect {
     /// querying an endpoint in the instant it was called would be a fabricated
     /// timeout rather than an observed one.
     pub(super) dispatched_at_tick: u64,
+    /// The instant the authorization pinned its observation (E30). With
+    /// `valid_until`, the effect's authority lease, which bounds a retry.
+    pub(super) admitted_at: SystemTime,
+    /// The end of the authority's validity (E30). A retry past it is refused,
+    /// because the approval behind the effect no longer stands.
+    pub(super) valid_until: SystemTime,
 }
 
 /// Which way the runtime is about to reach the owner.
