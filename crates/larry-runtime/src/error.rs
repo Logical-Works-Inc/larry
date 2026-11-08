@@ -140,6 +140,8 @@ pub enum RuntimeError {
         /// The identifier that was all-zero: `run`, `tenant` or `operation`.
         field: &'static str,
     },
+    /// Protocol negotiation or protocol-bound command ingress was refused.
+    Protocol(crate::protocol::ProtocolError),
 }
 
 impl fmt::Display for RuntimeError {
@@ -227,6 +229,7 @@ impl fmt::Display for RuntimeError {
                 f,
                 "operation {operation} has an all-zero {field}; no effect key can be formed"
             ),
+            Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
         }
     }
 }
@@ -241,6 +244,7 @@ impl std::error::Error for RuntimeError {
             Self::Transition(ref err) => Some(err),
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
+            Self::Protocol(ref err) => Some(err),
             Self::UnsupportedDecision(_)
             | Self::UnsupportedCommand(_)
             | Self::UnsupportedEvent(_)
@@ -303,5 +307,11 @@ impl From<lgwks_std::json::Error> for RuntimeError {
 impl From<larry_contracts::binding::BindingError> for RuntimeError {
     fn from(error: larry_contracts::binding::BindingError) -> Self {
         Self::Binding(error)
+    }
+}
+
+impl From<crate::protocol::ProtocolError> for RuntimeError {
+    fn from(err: crate::protocol::ProtocolError) -> Self {
+        Self::Protocol(err)
     }
 }

@@ -5,8 +5,13 @@
 #[path = "sim/e65_display_binding.rs"]
 mod simulation;
 
+/// The atomic-compare-and-dispatch owner double and its helpers.
+#[path = "support/atomic.rs"]
+mod atomic;
+
 use std::time::{Duration, SystemTime};
 
+use atomic::{AtomicOwner, holder, resolved, swapped_field};
 use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope, SecurityEpoch};
 use larry_contracts::binding::{
     BindingError, BindingField, EffectTarget, MAX_BOUND_FIELD_BYTES, ResolvedEffect,
@@ -30,125 +35,6 @@ type TestRuntime = Runtime<FoldProjection, AtomicOwner>;
 /// Fallible public journeys avoid panic-based fixture construction.
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// A deterministic owner whose fourth observation is the atomic effect boundary.
-#[derive(Debug, Clone)]
-struct AtomicOwner {
-    /// Single seed controls bytes, identity, time and fault location.
-    seed: u64,
-    /// Observation number that swaps one field; zero never swaps.
-    change_on: u64,
-    /// Observations already made.
-    observations: u64,
-    /// Whether the effect's response is deliberately lost.
-    lose_reply: bool,
-    /// Bounded by the runtime queue/workload in these tests.
-    executed: Vec<(TenantId, OperationId, ResolvedEffect)>,
-}
-
-impl AtomicOwner {
-    /// Starts an isolated owner without an ambient clock or network.
-    fn new(seed: u64, change_on: u64) -> Self {
-        Self {
-            seed,
-            change_on,
-            observations: 0,
-            lose_reply: false,
-            executed: Vec::new(),
-        }
-    }
-
-    /// Atomically observes the same scripted state used by execution.
-    fn observe(&mut self) -> std::result::Result<ResolvedEffect, BindingError> {
-        self.observations = self.observations.saturating_add(1);
-        resolved(
-            self.seed,
-            self.change_on != 0 && self.observations >= self.change_on,
-        )
-    }
-}
-
-impl EffectOwner for AtomicOwner {
-    fn resolve(
-        &mut self,
-        _intent: &EffectIntent,
-    ) -> std::result::Result<Option<ResolvedEffect>, BindingError> {
-        self.observe().map(Some)
-    }
-
-    fn dispatch_bound(
-        &mut self,
-        intent: &EffectIntent,
-        _at: SystemTime,
-    ) -> std::result::Result<EffectOutcome, BindingError> {
-        let current = self.observe()?;
-        intent
-            .binding()
-            .ok_or(BindingError::MissingDisplay)?
-            .resolved()
-            .verify(&current)?;
-        // The validated resolved value itself is executed, never a second lookup.
-        self.executed
-            .push((intent.tenant, intent.operation, current));
-        Ok(if self.lose_reply {
-            EffectOutcome::Unknown {
-                operation: intent.operation,
-            }
-        } else {
-            EffectOutcome::Succeeded {
-                operation: intent.operation,
-            }
-        })
-    }
-
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        // Any legacy dispatch is an observable test failure, not a fallback.
-        self.observations = u64::MAX;
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
-    }
-
-    fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Succeeded {
-            operation: intent.operation,
-        }
-    }
-}
-
-/// Seed-selected field with a separate oracle from the digest implementation.
-fn swapped_field(seed: u64) -> BindingField {
-    match seed & 7 {
-        0 => BindingField::Resource,
-        1 => BindingField::Symlink,
-        2 => BindingField::Recipient,
-        3 => BindingField::Account,
-        4 => BindingField::Payload,
-        5 => BindingField::Adapter,
-        6 => BindingField::Schema,
-        _ => BindingField::PolicyEpoch,
-    }
-}
-
-/// Opaque fixture identities vary by seed; exactly one field changes.
-fn resolved(seed: u64, changed: bool) -> std::result::Result<ResolvedEffect, BindingError> {
-    let original = seed.to_be_bytes();
-    let replacement = seed.saturating_add(1).to_be_bytes();
-    let field = seed & 7;
-    let bytes = |index| {
-        if changed && field == index {
-            replacement.as_slice()
-        } else {
-            original.as_slice()
-        }
-    };
-    let target = EffectTarget::new(bytes(0), bytes(1), bytes(2), bytes(3), bytes(4), bytes(5))?;
-    Ok(ResolvedEffect::new(
-        target,
-        if changed && field == 6 { 2 } else { 1 },
-        SecurityEpoch::new(u64::from(changed && field == 7)),
-    ))
-}
-
 /// Seed-controlled time remains within portable SystemTime ranges.
 fn instant(seed: u64) -> Result<SystemTime> {
     Ok(SystemTime::UNIX_EPOCH
@@ -169,11 +55,6 @@ fn identity(number: u64, tenant: u8) -> [u8; 16] {
     let mut bytes = [tenant; 16];
     bytes[..8].copy_from_slice(&number.to_be_bytes());
     bytes
-}
-
-/// Host-authenticated holder used by both tenants without sharing their grants.
-fn holder() -> WorkerId {
-    WorkerId::from_bytes([42; 16])
 }
 
 /// One independently covering host grant.
@@ -281,7 +162,7 @@ fn swap_journey(seed: u64, change_on: u64) -> Result<ContentDigest> {
     runtime.submit_displayed(command, display)?;
     assert_swap(runtime.tick(), swapped_field(seed));
     assert!(
-        runtime.owner().executed.is_empty(),
+        runtime.owner().executed().is_empty(),
         "swap must execute nothing, seed {seed}"
     );
     assert!(
@@ -356,7 +237,7 @@ fn success_journey(seed: u64) -> Result<ContentDigest> {
         2,
         "both independently authorized tenants finish"
     );
-    for &(tenant, operation, target) in &runtime.owner().executed {
+    for &(tenant, operation, target) in runtime.owner().executed() {
         assert_eq!(
             target,
             resolved(seed, false)?,
@@ -392,7 +273,7 @@ fn success_journey(seed: u64) -> Result<ContentDigest> {
         "terminal recovery must not redispatch"
     );
     assert!(
-        restored.owner().executed.is_empty(),
+        restored.owner().executed().is_empty(),
         "recovery is not fresh consent"
     );
     assert_eq!(
@@ -441,7 +322,7 @@ fn e65_missing_and_cross_command_display_refuse() -> Result {
         "exact accepted retry needs no new display"
     );
     assert_eq!(
-        runtime.owner().executed.len(),
+        runtime.owner().executed().len(),
         1,
         "duplicate cannot execute twice"
     );
