@@ -133,6 +133,13 @@ pub enum RuntimeError {
         /// The reading since the epoch that could not be placed.
         elapsed: std::time::Duration,
     },
+    /// A Larry id is all-zero and cannot name an lgwks_bot effect key (larry#78).
+    EffectIdentity {
+        /// The operation whose key could not be formed.
+        operation: OperationId,
+        /// The identifier that was all-zero: `run`, `tenant` or `operation`.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for RuntimeError {
@@ -216,6 +223,10 @@ impl fmt::Display for RuntimeError {
                 f,
                 "clock reading {elapsed:?} after the Unix epoch is outside the platform's time range"
             ),
+            Self::EffectIdentity { operation, field } => write!(
+                f,
+                "operation {operation} has an all-zero {field}; no effect key can be formed"
+            ),
         }
     }
 }
@@ -247,7 +258,8 @@ impl std::error::Error for RuntimeError {
             | Self::UnresolvableOutcome { .. }
             | Self::ReceiptAlreadyPublished { .. }
             | Self::FoldDivergence { .. }
-            | Self::ClockOutOfRange { .. } => None,
+            | Self::ClockOutOfRange { .. }
+            | Self::EffectIdentity { .. } => None,
         }
     }
 }

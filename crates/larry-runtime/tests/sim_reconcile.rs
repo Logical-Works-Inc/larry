@@ -6,6 +6,8 @@ mod seed;
 mod sim_kit;
 mod support;
 
+use std::time::Duration;
+
 use larry_contracts::authority::Scope;
 use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy, TerminalDisposition};
 use larry_contracts::state::RunState;
@@ -516,5 +518,121 @@ fn sim_reconcile_human_success_authorizes_at_gate() -> Outcome {
         assert_eq!(tick.authorized(), &[operation(22)], "gate authorizes");
         assert_eq!(tick.outcomes().len(), 1, "one outcome observed");
         Ok(witness_tally(&rt))
+    })
+}
+
+/// A `FileRead` runtime over `owner` on `clock`, which the test keeps a handle
+/// to so it can move time past the authority's validity.
+fn timed_reader(owner: ScriptedOwner, clock: lgwks_bot::clock::Clock) -> Sim<TestRuntime> {
+    Ok(larry_runtime::runtime::Runtime::new(
+        support::settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+        owner,
+        clock,
+    )?)
+}
+
+/// Source: E30 (expiry is a pinned input), R72/E56 (no blind resend). A retry
+/// past the authority's validity is refused by the estate rule: the effect is
+/// dispatched once, never again, and stays open with no receipt.
+#[test]
+fn sim_reconcile_retry_past_authority_expiry_dispatches_once_and_stays_open() -> Outcome {
+    replay(160_u64..168, |_| -> Sim<(usize, usize, usize)> {
+        let late = support::clock()?;
+        let mut rt: TestRuntime = timed_reader(
+            ScriptedOwner::scripted([unknown(operation(23))]),
+            late.clone(),
+        )?;
+        let work = read_work(23, 1, ReconciliationStrategy::IdempotentRetrySafe);
+        rt.offer(23, &work)?;
+        rt.tick()?;
+        late.advance(Duration::from_secs(3_601))?;
+        rt.tick()?;
+        rt.tick()?;
+        assert_eq!(
+            rt.owner().dispatched(),
+            &[operation(23)],
+            "past expiry the owner is never asked to perform the effect again"
+        );
+        assert_eq!(
+            rt.projection().receipts().len(),
+            0,
+            "an expired retry invents no receipt"
+        );
+        assert_state(rt.projection(), run(23), RunState::Reconciling)?;
+        Ok(witness_tally(&rt))
+    })
+}
+
+/// Source: E30 (expiry is a pinned input), R72/E56 (no blind resend). A refused
+/// retry leaves reconciliation, so the journal stops growing and no tick reports
+/// the effect as reconciled again.
+#[test]
+fn sim_reconcile_a_refused_retry_leaves_reconciliation_and_the_journal_stops_growing() -> Outcome {
+    replay(168_u64..176, |_| -> Sim<(usize, usize, usize)> {
+        let late = support::clock()?;
+        let mut rt: TestRuntime = timed_reader(
+            ScriptedOwner::scripted([unknown(operation(24))]),
+            late.clone(),
+        )?;
+        let work = read_work(24, 1, ReconciliationStrategy::IdempotentRetrySafe);
+        rt.offer(24, &work)?;
+        rt.tick()?;
+        late.advance(Duration::from_secs(3_601))?;
+        rt.tick()?;
+        let settled = rt.journal().len();
+        for _ in 0..5 {
+            let tick = rt.tick()?;
+            assert!(
+                tick.reconciled().is_empty(),
+                "a refused effect is not reconciled again"
+            );
+        }
+        assert_eq!(
+            rt.journal().len(),
+            settled,
+            "the journal stops growing once the retry is refused"
+        );
+        Ok(witness_tally(&rt))
+    })
+}
+
+/// Source: E30 (expiry is a pinned input), R72/E56 (no blind resend). After a
+/// restore past the lease, the fresh owner is never asked to perform the effect:
+/// the restored retry is refused by the estate rule, not replayed.
+#[test]
+fn sim_reconcile_a_restored_retry_past_expiry_never_redispatches() -> Outcome {
+    use larry_runtime::runtime::restore;
+    use support::settings;
+    replay(176_u64..184, |_| -> Sim<(usize, usize)> {
+        let early = support::clock()?;
+        let mut rt: TestRuntime =
+            timed_reader(ScriptedOwner::scripted([unknown(operation(25))]), early)?;
+        let work = read_work(25, 1, ReconciliationStrategy::IdempotentRetrySafe);
+        rt.offer(25, &work)?;
+        rt.tick()?;
+        let late = support::clock()?;
+        late.advance(Duration::from_secs(3_601))?;
+        let mut restored: TestRuntime = restore(
+            settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+            ScriptedOwner::new(),
+            late,
+            rt.into_journal(),
+        )?;
+        let before = restored.journal().len();
+        for _ in 0..3 {
+            restored.tick()?;
+        }
+        assert!(
+            restored.owner().dispatched().is_empty(),
+            "a restored retry past expiry never reaches the owner"
+        );
+        assert!(
+            restored.journal().len() <= before.saturating_add(1),
+            "the journal grows by at most one refusal record"
+        );
+        Ok((
+            restored.journal().len(),
+            restored.projection().receipts().len(),
+        ))
     })
 }

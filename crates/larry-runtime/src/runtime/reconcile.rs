@@ -7,10 +7,11 @@ use larry_contracts::effect::EffectOutcome;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
 use larry_contracts::state::{RunState, TransitionEvent};
 
-use super::{LiveEffect, OwnerReach, Runtime, TickReport};
+use super::{LiveEffect, OwnerReach, Runtime, TickReport, retry};
 use crate::error::RuntimeError;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
+use lgwks_bot::retry::RetryRefusal;
 
 impl<P, O> Runtime<P, O>
 where
@@ -69,8 +70,12 @@ where
     ///   permanent unknown rather than an invented success or failure (R72, E56).
     ///
     /// A retry is a mutating reach and the fence gates it; a status query is
-    /// an observation and the fence leaves it open. Returns `None` only when
-    /// the fence refused the retry.
+    /// an observation and the fence leaves it open. A retry is decided by the
+    /// estate rule (`retry::decide`, lgwks_bot RQ-009). A refusal for authority
+    /// alone is left to the fence, which reports it. Any other refusal spends
+    /// the dispatch budget and records one `Unknown`, so the effect leaves
+    /// reconciliation rather than being re-asked every tick. Returns `None`
+    /// only when the fence refused the retry.
     fn reconcile_one(
         &mut self,
         live: &LiveEffect,
@@ -79,14 +84,21 @@ where
         report: &mut TickReport,
     ) -> Result<Option<EffectOutcome>, RuntimeError> {
         Ok(match live.intent.strategy.reconciliation_action() {
-            larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts }
-                if live.dispatches < max_attempts =>
-            {
-                self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
-            }
-            larry_contracts::effect::ReconciliationAction::RetryBounded { .. } => {
-                // Budget spent. The effect stays visibly unresolved.
-                Some(EffectOutcome::Unknown { operation })
+            larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
+                let authority_live = self.fence.check(&live.intent).is_ok();
+                let decision = retry::decide(live, max_attempts, at, authority_live)?;
+                let authority_only = decision.refusals() == [RetryRefusal::AuthorityNotLive];
+                if decision.permits_retry() || authority_only {
+                    self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
+                } else {
+                    // The estate rule refused the retry. The effect stays
+                    // visibly unresolved, and the budget is spent so it leaves
+                    // reconciliation rather than being re-asked every tick.
+                    if let Some(open) = self.live.get_mut(&operation) {
+                        open.dispatches = max_attempts;
+                    }
+                    Some(EffectOutcome::Unknown { operation })
+                }
             }
             larry_contracts::effect::ReconciliationAction::Observe => {
                 self.reach_owner(live.intent, OwnerReach::Observe, at, report)?
