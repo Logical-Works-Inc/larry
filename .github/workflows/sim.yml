@@ -33,13 +33,18 @@ jobs:
         with:
           shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
           cache-bin: ${{ github.event.repository.private && 'false' || 'true' }}
+      # A hung tool download once ate the whole job (PR #165): the install is
+      # bounded, and a lane without nextest runs the same tests with cargo test.
       - if: ${{ !github.event.repository.private }}
+        id: nextest
+        continue-on-error: true
+        timeout-minutes: 3
         uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
         with:
           tool: nextest
-      - if: ${{ !github.event.repository.private }}
+      - if: ${{ !github.event.repository.private && steps.nextest.outcome == 'success' }}
         run: cargo nextest run --locked -p larry-runtime -E 'binary(/^sim_/)'
-      - if: ${{ github.event.repository.private }}
+      - if: ${{ github.event.repository.private || steps.nextest.outcome != 'success' }}
         run: cargo test --locked -p larry-runtime --test 'sim_*'
 
   # The shipped `larry` binary driven through a real terminal by
@@ -58,10 +63,13 @@ jobs:
           shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
           cache-bin: ${{ github.event.repository.private && 'false' || 'true' }}
       - if: ${{ !github.event.repository.private }}
+        id: nextest
+        continue-on-error: true
+        timeout-minutes: 3
         uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
         with:
           tool: nextest
-      - if: ${{ !github.event.repository.private }}
+      - if: ${{ !github.event.repository.private && steps.nextest.outcome == 'success' }}
         run: cargo nextest run --locked -p larry-demo --test e2e_journey
-      - if: ${{ github.event.repository.private }}
+      - if: ${{ github.event.repository.private || steps.nextest.outcome != 'success' }}
         run: cargo test --locked -p larry-demo --test e2e_journey

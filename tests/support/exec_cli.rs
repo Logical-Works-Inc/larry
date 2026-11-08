@@ -8,13 +8,12 @@
 
 use std::error::Error;
 use std::ffi::OsStr;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, Output};
 use std::time::Duration;
 
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
-use lgwks_std::json::{self, Value};
+use lgwks_std::json::Value;
 
 /// What every test here returns.
 pub type TestResult = Result<(), Box<dyn Error>>;
@@ -25,6 +24,10 @@ pub const POLL_LIMIT: u32 = 100_000;
 #[path = "origin.rs"]
 mod origin;
 pub use origin::{TempDir, fixture};
+
+#[path = "larry_cli.rs"]
+mod larry_cli;
+pub use larry_cli::{denial_lines, flag_of, report_of, spawn_larry, stderr_of};
 
 /// Creates a named pipe at `path`.
 pub fn make_fifo(path: &Path) -> Result<(), Box<dyn Error>> {
@@ -41,30 +44,6 @@ pub fn task_json(repo: &Path, base: &str, acceptance: &str) -> String {
         base,
         acceptance
     )
-}
-
-/// Starts `larry <subcommand>` with only PATH and `env` set, writes `input` to its
-/// stdin and closes it.
-pub fn spawn_larry(
-    subcommand: &str,
-    env: &[(&str, &OsStr)],
-    input: &[u8],
-) -> Result<Child, Box<dyn Error>> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
-    command
-        .arg(subcommand)
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .envs(env.iter().copied())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        // A refused input may exit before it reads stdin; the broken pipe is the refusal itself.
-        stdin.write_all(input).ok();
-    }
-    Ok(child)
 }
 
 /// Starts `larry exec` with a cleared environment, pipes `task` in and closes stdin.
@@ -94,44 +73,12 @@ pub fn run_exec(
     Ok(spawn_exec(Some(state), timeout_ms, task)?.wait_with_output()?)
 }
 
-/// The child's stderr as text.
-pub fn stderr_of(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-/// Parses a sealed run's stdout as the JSON report: exit 0 for an accepted run,
-/// 2 for a rejected one, and the exit status always agrees with the sealed verdict.
-pub fn report_of(output: &Output) -> Result<Value, Box<dyn Error>> {
-    let code = output.status.code();
-    assert!(
-        matches!(code, Some(0 | 2)),
-        "larry exec must print a sealed report (exit 0 or 2), got {code:?}; stderr: {}",
-        stderr_of(output)
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
-    let report = json::from_str::<Value>(&text)?;
-    assert_eq!(
-        flag_of(&report, "accepted")?,
-        code == Some(0),
-        "the exit status agrees with the sealed verdict"
-    );
-    Ok(report)
-}
-
 /// The member `key` of `value` as text.
 pub fn text_of<'a>(value: &'a Value, key: &str) -> Result<&'a str, Box<dyn Error>> {
     value
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("report member {key} is not text").into())
-}
-
-/// The member `key` of `value` as a boolean.
-pub fn flag_of(value: &Value, key: &str) -> Result<bool, Box<dyn Error>> {
-    value
-        .get(key)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("report member {key} is not a boolean").into())
 }
 
 /// The member `key` of `value` as an integer.

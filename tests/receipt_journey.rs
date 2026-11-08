@@ -24,9 +24,9 @@ use std::process::Output;
 use std::time::Instant;
 
 use exec_cli::{
-    TempDir, TestResult, assert_refused, fixture, flag_of, live_group_pid, make_fifo, millis,
-    number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry, task_json,
-    text_of,
+    TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid, make_fifo,
+    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry,
+    task_json, text_of,
 };
 use lgwks_std::json::{self, Value};
 
@@ -271,14 +271,9 @@ fn a_denied_run_never_reports_success() -> TestResult {
         !flag_of(&report, "accepted")?,
         "a denied task is never accepted"
     );
-    let denials = report
-        .get("denied")
-        .and_then(Value::as_array)
-        .ok_or("the report lists its denials")?;
     assert!(
-        denials
+        denial_lines(&report)?
             .iter()
-            .filter_map(Value::as_str)
             .any(|denial| denial.starts_with("model_commands")),
         "the denial names model_commands"
     );

@@ -34,8 +34,9 @@ const NOT_CONNECTED: &str = "executor_not_connected";
 /// What `larry_submit_task` runs on: the executor's settings, or why there are none.
 #[derive(Debug)]
 pub(super) enum Executor {
-    /// `LARRY_STATE_DIR` and the model settings were read.
-    Connected(Settings),
+    /// `LARRY_STATE_DIR` and the model settings were read. Boxed so the
+    /// settings (which now carry the policy set too) stay off the enum's size.
+    Connected(Box<Settings>),
     /// The settings could not be read; the reason names the variable.
     Absent(String),
 }
@@ -44,7 +45,7 @@ impl Executor {
     /// Reads the executor's settings through `read` once, when the server starts.
     pub(super) fn from_env(read: impl Fn(&str) -> Option<String>) -> Executor {
         match Settings::from_env(read) {
-            Ok(settings) => Executor::Connected(settings),
+            Ok(settings) => Executor::Connected(Box::new(settings)),
             Err(error) => Executor::Absent(error.to_string()),
         }
     }
