@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 3 of 18
 description: Part 3 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/03-cell-02-candidate-architecture-graph.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -44,12 +44,12 @@ call. Begin with a modular Rust core and out-of-process untrusted workers. A
 deployment can embed trusted components; fleet deployments place the same
 contracts across workers. Do not build an independent service for every box.
 
-**Ownership rule:** Rocco owns assistant-domain intent, commitments, context
+**Ownership rule:** Larry owns assistant-domain intent, commitments, context
 selection and run orchestration. Logical-DB owns persistence/replication; Moo
 owns workspace transactions; Nova owns process/compute containment;
 Secure-Authority owns authenticated authority; Sentinel owns external access.
 References to pre-existing kernel/Braid identities and receipt protocols require
-an explicit adapter decision, not a Rocco replacement. No cross-repository
+an explicit adapter decision, not a Larry replacement. No cross-repository
 charter amendment is fabricated by this candidate.
 
 ### Runtime control flow: one request through verified completion

@@ -24,7 +24,7 @@ written but never called, and there was no revocation fence, no security epoch
 and no offline bound anywhere in the runtime. That is E71, and it is now
 implemented.
 
-`SecurityEpoch` is a monotone newtype in `rocco-contracts::authority`. It has no
+`SecurityEpoch` is a monotone newtype in `larry-contracts::authority`. It has no
 decrement and no subtraction: the only movement it offers is `successor` and
 `later_of`, both upward, which is what makes a replayed old device, grant or
 policy snapshot a non-event instead of an authorization. `EffectIntent` carries
@@ -62,8 +62,8 @@ unchanged; the inventory stays 96/53/80/13/9. This implements R87, D48 and E71
 and redefines nothing.
 
 Evidence: 29 new tests, 161 total (was 132). E71 is carried by 15 integration
-falsifiers in `crates/rocco-runtime/tests/fence.rs`, 11 unit tests in
-`crates/rocco-runtime/src/fence.rs` and 3 in `rocco-contracts::authority`,
+falsifiers in `crates/larry-runtime/tests/fence.rs`, 11 unit tests in
+`crates/larry-runtime/src/fence.rs` and 3 in `larry-contracts::authority`,
 covering revocation during queue, the ordering between the durable intent and
 the owner call, partition, sleep, clock rollback, a replayed older snapshot,
 epoch exhaustion, epoch exhaustion at the runtime boundary, the retry-versus-

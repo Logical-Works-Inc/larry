@@ -3,7 +3,7 @@ type: Design
 title: docs/architecture/visual-pass.md, part 3 of 3
 description: Part 3 of /docs/architecture/visual-pass.md, in order; the index lists every part.
 resource: /docs/architecture/visual-pass/03-excellence-and-open-evidence.md
-tags: [rocco, demo, appcui, fixtures, evidence]
+tags: [larry, demo, appcui, fixtures, evidence]
 generated: {by: agent:rust-coder, at: 2026-09-17}
 updated: {by: agent:claude-code, at: 2026-09-18, note: Forge terminal language pass}
 verified: {by: agent:rust-coder, method: source inspection; execution receipts in log}
@@ -39,7 +39,7 @@ multi-tenancy/fastest-correct-Rust, physical hardware, native visual interaction
 branch/condition coverage and independent review remain unverified. Measured
 Rust line coverage from a fresh isolated native-pass target is 118/118 in
 `src/lib.rs`, 320/372 in `src/native.rs`, 0/43 in `src/main.rs` and 0/11 in
-`src/bin/rocco.rs`, 438/544 overall (80.51%). The separately executed PTY and
+`src/bin/larry.rs`, 438/544 overall (80.51%). The separately executed PTY and
 JSON CLI suites are not included. Native uncovered paths include runtime entry,
 close, conversation eviction, help/scroll/navigation branches and some input
 paths. The initial reused-target coverage report double-counted the old library

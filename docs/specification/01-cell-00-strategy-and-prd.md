@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 1 of 18
 description: Part 1 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/01-cell-00-strategy-and-prd.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -24,7 +24,7 @@ longer prompts can increase this burden rather than solve it.
 deterministic ownership of commitments, resources and effects. Put cognitive tax
 on engineering once, rather than on every user and every model turn.
 
-**Product sentence.** Rocco is the assistant that remembers what matters, acts
+**Product sentence.** Larry is the assistant that remembers what matters, acts
 within your standing agreement, coordinates work and can show what got
 done. Its personality is a presentation and relationship capability, not a source
 of authority or a claim of consciousness.
@@ -42,7 +42,7 @@ in the weak-model lane. Personality quality is evaluated separately from task
 correctness; neither is allowed to purchase improvements by degrading the other.
 
 **Strategic boundaries, not dropped requirements:** no new database, security
-authority, browser engine, editor or container runtime inside Rocco. No permanent
+authority, browser engine, editor or container runtime inside Larry. No permanent
 agent committee by default. No opaque self-improvement of permissions. No model
 training prerequisite for ordinary use. No product claim from unit-test counts.
 Phone/app/web remain required surfaces with different delivery dependencies.

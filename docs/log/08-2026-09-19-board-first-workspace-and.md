@@ -12,8 +12,8 @@ sources: [Director conversations 2026-09-15 through 2026-09-17, /specification.m
 ---
 ## 2026-09-19: board-first workspace and visual-fidelity correction
 
-Director correction: the earlier mockup looked like a drawing. Rocco must be a
-lightweight terminal workspace for a human, Rocco the System and an AI: start
+Director correction: the earlier mockup looked like a drawing. Larry must be a
+lightweight terminal workspace for a human, Larry the System and an AI: start
 with Kanban state, open work as Continue, retain dedicated chat without making
 the whole page chat, and make disconnected fixture data visibly honest.
 

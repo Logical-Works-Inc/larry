@@ -129,6 +129,58 @@ fn the_lock_holds_appcui_proc_macro_at_the_release_appcui_was_built_with()
     Ok(())
 }
 
+/// The one governed document whose title names the old name: the record of the rename itself.
+const RENAME_RECORD: &str = "docs/adr/0005-rename-rocco-to-larry.md";
+
+/// Whether a document's frontmatter `title:` or `tags:` line names Rocco in any case. The body
+/// may still name real things spelt the old way (ADR 0005); the title and tags say what it is.
+fn frontmatter_names_rocco(text: &str) -> bool {
+    let Some(frontmatter) = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map(|(head, _)| head)
+    else {
+        return false;
+    };
+    frontmatter
+        .lines()
+        .filter(|line| line.starts_with("title:") || line.starts_with("tags:"))
+        .any(|line| line.to_lowercase().contains("rocco"))
+}
+
+#[test]
+fn every_governed_document_is_titled_and_tagged_larry() -> Result<(), Box<dyn std::error::Error>> {
+    // larry#178: ADR 0005 renamed the repository, and 54 split documents kept `tags: [rocco, ...]`
+    // and Rocco titles until this check existed.
+    let documents = super::documents::load(root())?;
+    let named: Vec<&str> = documents
+        .iter()
+        .filter(|&(name, text)| name != RENAME_RECORD && frontmatter_names_rocco(text))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        named.is_empty(),
+        "these documents are still titled or tagged Rocco: {named:?}"
+    );
+    let tagged = "---\ntitle: Larry part\ntags: [rocco, prd]\n---\nbody\n";
+    let titled = "---\ntitle: ROCCO notes\ntags: [larry]\n---\nbody\n";
+    let history = "---\ntitle: Larry log\ntags: [larry]\n---\n`srinji-kaggss/Rocco` was its name\n";
+    assert!(frontmatter_names_rocco(tagged), "an old tag is caught");
+    assert!(
+        frontmatter_names_rocco(titled),
+        "an old title is caught in any case"
+    );
+    assert!(
+        !frontmatter_names_rocco(history),
+        "history in the body is allowed"
+    );
+    assert!(
+        !frontmatter_names_rocco("tags: [rocco]\n"),
+        "no frontmatter, nothing to judge"
+    );
+    Ok(())
+}
+
 #[test]
 fn governance_names_the_locked_lgwks_deps() -> Result<(), Box<dyn std::error::Error>> {
     let lock = std::fs::read_to_string(root().join("Cargo.lock"))?;

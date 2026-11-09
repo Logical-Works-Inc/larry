@@ -3,7 +3,7 @@ type: Evidence
 title: docs/dependencies/ADAPTER-MANIFEST.md, part 1 of 2
 description: Part 1 of /docs/dependencies/ADAPTER-MANIFEST.md, in order; the index lists every part.
 resource: /docs/dependencies/adapter-manifest/01-purpose-and-authority.md
-tags: [rocco, adapters, licenses, dependencies, evidence, c01]
+tags: [larry, adapters, licenses, dependencies, evidence, c01]
 generated: {by: opencode, at: 2026-09-16}
 updated: {by: agent:claude-code, at: 2026-09-18, note: one-repo consolidation corrected the consumption section}
 verified: {by: opencode, method: read sibling and lgwks Cargo.toml license fields, contract/APPROVED.toml and pinned-revision presence checks, ledger receipts and specification Cell 11 allocation lines; no integration executed}
@@ -34,7 +34,7 @@ READ-level inspection findings are quoted from
 per D21, no sibling may be called production-ready from its name or README,
 and no integration has been exercised.
 
-| Order | Canonical owner | Ledger-pinned revision | Rocco consumes | License evidence | Readiness |
+| Order | Canonical owner | Ledger-pinned revision | Larry consumes | License evidence | Readiness |
 |---|---|---|---|---|---|
 | 1 | Logicalworks-Crates | `30ae69deca86eb25c95e113296eb2d08f50526a7` (local HEAD, READ) | std/bot/deps foundation, lgwks_ast parser, dependency storefront | Apache-2.0 — READ, all four `crates/*/Cargo.toml` | UNKNOWN |
 | 2 | Logical-DB | `e4e1ead86042cc917e959c3f5fb2206ff61f9319` (commit present, READ) | durable records, sync, restore; memory persistence | Apache-2.0 — READ, workspace Cargo.toml | UNKNOWN |

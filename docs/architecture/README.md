@@ -6,15 +6,18 @@ resource: /docs/architecture/README.md
 tags: [larry, architecture, structure, ownership]
 generated: {by: opencode, at: 2026-09-16}
 verified: {by: opencode, method: source inspection of /specification.md; structural gate; diagrams NOT RUN in this file}
-status: final-structure-v1.1
-stale_after: 2026-10-16
+status: final-structure-v1.2
+stale_after: 2026-12-09
+updated: {by: claude-code, at: 2026-11-09, note: implementation status, R and D ranges made current}
 sources: [Director conversation 2026-09-16, /specification.md, /docs/dependencies/README.md]
 ---
 
 # Final structure
 
-**Status: proposed architecture, approval pending. Nothing here is
-implemented; all runtime acceptance is NOT RUN.** The binding versions of
+**Status: proposed architecture, approval pending. The control plane runs in
+`crates/larry-runtime` on lgwks_bot, and the falsifiers /INVARIANTS.md names
+pass in CI; sibling owners are still test doubles and every other runtime
+acceptance is NOT RUN.** The binding versions of
 every diagram, decision and target live in /specification.md (Cells 02–07);
 this file is the navigable map the Director asked to be finalized.
 
@@ -62,8 +65,8 @@ it does not rewrite an accepted external effect into a non-event.
 
 ## File-specific excellence record
 
-Requirements R01–R78 referenced by anchor only. Axes: decoupled ownership
+Requirements R01–R96 referenced by anchor only. Axes: decoupled ownership
 and idiomatic structure presentation. Predicted outcome: one final navigable
 map with zero competing definitions. Verification: structural gate, link and
-traceability checks. Unresolved: D01–D41 ratification, P1–P8 proofs and all
-runtime results remain NOT RUN.
+traceability checks. Unresolved: D01–D53 ratification, P1–P8 proofs and every
+runtime result /INVARIANTS.md does not name remain NOT RUN.

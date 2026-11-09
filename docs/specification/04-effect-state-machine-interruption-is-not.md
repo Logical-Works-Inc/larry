@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 4 of 18
 description: Part 4 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/04-effect-state-machine-interruption-is-not.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -46,7 +46,7 @@ the diagram does not require compensation to succeed or imply universal reversal
 
 ### Implementation status: the runtime exists (2026-09-20)
 
-`crates/rocco-runtime` implements the control flow above as a deterministic,
+`crates/larry-runtime` implements the control flow above as a deterministic,
 bounded tick over an authoritative journal. This is an implementation record,
 not a new decision: no requirement, decision, falsifier or execution cell is
 added, and the inventory stays 96/53/80/13/9.
@@ -81,7 +81,7 @@ admission, evidence obligations and lifecycle. Deterministic means repeatable
 given recorded inputs, not omniscient about ethics or semantic correctness.
 Uncertainty must remain representable. Domain validators and independent human
 judgment remain necessary. Reject a second LLM that can silently authorize the
-first LLM's effects. E01; owner Rocco control plane.
+first LLM's effects. E01; owner Larry control plane.
 
 ### D02 — continuity is a durable commitment graph, not an immortal context
 
@@ -92,7 +92,7 @@ valid time and supersession. Unfinished commitments and explicit corrections
 cannot disappear through summarization or relevance decay. Only an authorized
 cancel/supersede transition closes them. One principal assistant renders this
 state across models/devices; worker identity remains inspectable. Reject a
-permanent full-transcript prompt and opaque model-only memory. E02; owner Rocco
+permanent full-transcript prompt and opaque model-only memory. E02; owner Larry
 memory semantics over Logical-DB storage.
 
 ### D03 — persona is an explicit, scoped relationship model

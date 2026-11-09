@@ -56,7 +56,7 @@ No generic filesystem/process tool is introduced by this surface change.
 
 ## ADR-W04 — A terminal workspace needs depth, not decorative telemetry (superseded visually by W05)
 
-Decision: Rocco uses a dark spatial shell, a persistent work rail, large
+Decision: Larry uses a dark spatial shell, a persistent work rail, large
 coloured work cards, an independent purple System attention stack, and a
 separate Human + AI work pane. Green means selected focus, teal means work
 surface, amber marks synthetic/disconnected data, and every one of those
@@ -74,14 +74,14 @@ cycles status nor depicts a model, Moo, or any process as working.
 
 Rejected: the prior sparse transparent board (it read as an annotated drawing,
 not a place to work); a full monitoring dashboard (would manufacture telemetry
-Rocco does not have); the measured frame-loop animation and ambient
+Larry does not have); the measured frame-loop animation and ambient
 shimmer/rotating cards (would turn a glanceable workspace into an attention
 demand). The accepted tradeoff is ANSI16 depth and static density over web-like
 gradients and continuous animation.
 
 ## ADR-W05 — Quiet Torque: Porsche hierarchy wrapped around Jira work
 
-Decision: correct W04's initially over-coloured terminal translation. Rocco now
+Decision: correct W04's initially over-coloured terminal translation. Larry now
 uses a black baseline, gray structural lines, white reading text, and exactly
 one blue selected-work surface. Amber and red retain only warning/error meaning
 and remain paired with words. System and unselected work are outlined neutral

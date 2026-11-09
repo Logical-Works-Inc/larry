@@ -1,9 +1,9 @@
 ---
 type: ADR
-title: Rocco runtime — the lowest invariant, made executable
+title: Larry runtime — the lowest invariant, made executable
 description: The journal-authoritative deterministic runtime, its ECS seam, the deferred authority question and the pending Bevy dependency admission.
 resource: /docs/architecture/runtime.md
-tags: [rocco, runtime, determinism, replay, ecs, bevy]
+tags: [larry, runtime, determinism, replay, ecs, bevy]
 generated: {by: claude-code, at: 2026-09-20}
 verified: {by: claude-code, method: cargo build/test/clippy/fmt, lgwks-deps check, check_governance.py, unittest, all local; no hosted CI}
 status: implementation-verified-locally-owner-integration-pending
@@ -13,10 +13,10 @@ sources: [/specification.md, /AGENTS.md, /contract/APPROVED.toml, /log.md, Direc
 
 # Outcome
 
-`crates/rocco-runtime` is the first code in this repository that *drives* the
+`crates/larry-runtime` is the first code in this repository that *drives* the
 C02 contract algebra rather than describing it. Before this change the finite
 run-state model, the pure authorization reducer, the effect intents and the
-terminal receipts all existed in `rocco-contracts` as pure functions and values
+terminal receipts all existed in `larry-contracts` as pure functions and values
 with nothing to sequence them; the specification's runtime control flow was a
 diagram, not a program.
 

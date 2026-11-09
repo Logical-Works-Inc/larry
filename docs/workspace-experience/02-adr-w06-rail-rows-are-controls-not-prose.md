@@ -36,14 +36,14 @@ other terminals or human acceptance.
 
 Read local Forge `forge-tui/src/theme.rs` and `render.rs`: its selected list
 uses a single slate-light surface and a leading highlight symbol while the
-rest remains quiet. Rocco adopts that interaction grammar, not Forge's
+rest remains quiet. Larry adopts that interaction grammar, not Forge's
 Ratatui source or dependencies. Rejected: making every row blue, a hover
 animation, or a toolbar—the first recreates the colour fatigue the Director
 rejected; the others add attention and runtime work without clarifying action.
 Accepted tradeoff: one small, stable selection surface is less spectacular than
 a web control, but it is natural in a terminal and maps directly to action.
 
-MEASURED after W06: the mouse-enabled debug `rocco` binary completed a
+MEASURED after W06: the mouse-enabled debug `larry` binary completed a
 300.124-second 120x32 macOS PTY probe with 0 idle output bytes, 0.0% delta
 CPU, 7,824KiB sampled peak RSS, 0.892ms p95 input, 216.412ms first paint,
 59.635ms quit-to-reap, and a reaped zero exit. Receipt:
@@ -85,7 +85,7 @@ W05's prior receipt is historical context only. The current W06 metric receipt
 names the mouse-enabled binary above. Neither local debug-build observation
 proves Ryzen, other terminals, fleet scale or human acceptance.
 
-MEASURED after W05: the actual debug `rocco` binary completed a 300.361-second
+MEASURED after W05: the actual debug `larry` binary completed a 300.361-second
 120x32 macOS PTY probe with 0 idle output bytes, 0.0% delta CPU, 8,992KiB
 sampled peak RSS, 1.052ms p95 input, 153.504ms first paint, 73.695ms
 quit-to-reap and a reaped zero exit. Receipt:

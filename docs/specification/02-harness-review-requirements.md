@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 2 of 18
 description: Part 2 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/02-harness-review-requirements.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -73,7 +73,7 @@ evidence.
 
 These requirements assume that a weak, confused, misaligned or deliberately
 hostile model can emit any bytes. They preserve Nova as the sole sandbox owner:
-Rocco admits effects, Secure-Authority authenticates and attenuates authority,
+Larry admits effects, Secure-Authority authenticates and attenuates authority,
 Nova contains execution, Sentinel mediates external connections, Moo owns
 workspace integration and Logical-DB owns durable security state. No prose or
 model behavior is part of the trusted computing base.

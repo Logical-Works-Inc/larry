@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 10 of 18
 description: Part 10 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/10-d33-user-controls-are-real-and-memory.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -87,7 +87,7 @@ adapters without query or idempotency support; such effects hold visibly
 without blocking unrelated work. Cancellation does not release money an
 unresolved effect may already have spent; compensation carries its own
 authority and budget, and compensation chains are depth-bounded. E55/E56;
-owner Rocco control plane with adapter contracts.
+owner Larry control plane with adapter contracts.
 
 ### D37 — ecosystem protocol adapters: Agent Skills, MCP, A2A
 
@@ -97,7 +97,7 @@ and D06 promotion. Pin one target MCP schema revision per adapter; map MCP
 elicitation onto durable scoped questions and route MCP sampling requests
 through the MD authority gate like any effect; unsupported protocol
 features are declared refusals. Make an explicit A2A adapter decision for
-federation: which agent-card fields map to Rocco capability manifests and
+federation: which agent-card fields map to Larry capability manifests and
 which identity claims are refused. These are compatibility surfaces, not
 authority transfers. E57; owner tool integration.
 

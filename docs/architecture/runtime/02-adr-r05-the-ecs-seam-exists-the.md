@@ -3,7 +3,7 @@ type: ADR
 title: docs/architecture/runtime.md, part 2 of 3
 description: Part 2 of /docs/architecture/runtime.md, in order; the index lists every part.
 resource: /docs/architecture/runtime/02-adr-r05-the-ecs-seam-exists-the.md
-tags: [rocco, runtime, determinism, replay, ecs, bevy]
+tags: [larry, runtime, determinism, replay, ecs, bevy]
 generated: {by: claude-code, at: 2026-09-20}
 verified: {by: claude-code, method: cargo build/test/clippy/fmt, lgwks-deps check, check_governance.py, unittest, all local; no hosted CI}
 status: implementation-verified-locally-owner-integration-pending

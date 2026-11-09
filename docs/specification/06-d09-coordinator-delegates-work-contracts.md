@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 6 of 18
 description: Part 6 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/06-d09-coordinator-delegates-work-contracts.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -23,7 +23,7 @@ summaries are optional projections. Replanning cancels obsolete descendants.
 Moo owns conflicting workspace claims. No shared writable prompt or infinite
 agent-to-agent debate. Principal assistant remains responsible for integration;
 human sees one status with drill-down, not every worker's narration. E08; owner
-Rocco scheduler, consuming Moo coordination.
+Larry scheduler, consuming Moo coordination.
 
 ### D10 — speculation is a budgeted effect class
 
@@ -74,7 +74,7 @@ Separate objective validity, subjective acceptance and unavailable evidence.
 No model self-report or exit zero alone produces success. A receipt binds request,
 policy, artifacts, tests/observations, versions, effect disposition, cleanup and
 remaining uncertainty. Receipts attest evidence, not universal correctness.
-Domain owners supply observations; Rocco does not fabricate signatures or a new
+Domain owners supply observations; Larry does not fabricate signatures or a new
 global receipt authority. E13; owner completion reducer and domain verifiers.
 
 ### D14 — messaging UI plus a distinct system voice

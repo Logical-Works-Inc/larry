@@ -17,10 +17,10 @@ Director clarified the delegation boundary and authorized necessary estate
 admission, then explicitly selected "Authorize release continuation". The
 estate optional default-off AppCUI feature and register landed in commits
 4c4dcb2 and 822307d, PR #7. Real `cargo publish --locked -p lgwks_deps`
-published 0.1.8; fresh download confirmed its feature. Rocco now pins published
+published 0.1.8; fresh download confirmed its feature. Larry now pins published
 `lgwks_deps = =0.1.8` plus `lgwks_std = =0.6.3`, with no path dependency.
 
-`src/native.rs` and `src/bin/rocco.rs` add the real input-driven AppCUI view:
+`src/native.rs` and `src/bin/larry.rs` add the real input-driven AppCUI view:
 quiet default conversation, compact DEMO header/footer, optional folder drawer
 and vertical parent/clone rail, manual live fixture events, selectable anchors,
 diff inspection, anchored feedback/hold and remembered Continue. Input, pane
@@ -53,11 +53,11 @@ source, including Linux/macOS/Windows AppCUI feature lanes. Parent independent
 review remains pending. Existing default-branch grid advisory
 GHSA-38c5-483c-4qqp remains reported, not silently fixed outside scope.
 
-Native UI launch: `cargo run --locked --bin rocco`. Remaining limits: no full
+Native UI launch: `cargo run --locked --bin larry`. Remaining limits: no full
 editor or real backend, no physical Ryzen/fleet/human/performance comparisons,
 no production durable recovery or authenticated tenancy proof. Pre-exec receipt
 is `tools/receipts/20260917-appcui-admission-pre-exec.json`; post-exec receipt
-is `tools/receipts/20260917-appcui-admission-post-exec.json`. Rocco edits remain
+is `tools/receipts/20260917-appcui-admission-post-exec.json`. Larry edits remain
 scoped for parent integration; estate release is real, not a dry-run claim.
 
 ## 2026-09-17: visual-pass independent fixture scaffolding
@@ -73,8 +73,8 @@ view: all missing visual work and simulated behavior is inventoried in
 [visual-pass evidence](/docs/architecture/visual-pass.md).
 
 The real gate initially walked up to an unrelated home evaluation workspace
-and failed (exit 2); an explicit Rocco contract diagnosis refused its missing
-register (exit 2). Rocco now has an independent Cargo workspace, lockfile and
+and failed (exit 2); an explicit Larry contract diagnosis refused its missing
+register (exit 2). Larry now has an independent Cargo workspace, lockfile and
 fail-closed register with no fabricated third-party approvals. The new graph
 printed `OK . — 0 semantic approvals, every authored external edge is owned`.
 The published foundation is self-exempt; this verdict does not admit AppCUI.

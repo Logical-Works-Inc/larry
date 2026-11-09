@@ -3,7 +3,7 @@ type: Research
 title: research-ledger.md, part 3 of 7
 description: Part 3 of /research-ledger.md, in order; the index lists every part.
 resource: /docs/research-ledger/03-evidence-semantics.md
-tags: [rocco, research, codegraph, evidence, persona]
+tags: [larry, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
 status: specification-v1.2-source-review-complete-runtime-unverified
@@ -82,7 +82,7 @@ types sound right. This is bounded reuse triage, not authorization to repair it.
 | S07 | [Rhai operation limits](https://rhai.rs/book/safety/max-operations.html), [security guidance](https://rhai.rs/book/print.html), [native purity/volatility](https://rhai.rs/book/plugins/module.html) | Context7 CLI library then docs; fuel/limits required, native callbacks and optimizer behavior need separate audit |
 | S08 | Local Anthropic cookbook `tool_use/context_engineering/context_engineering_tools.ipynb`, `automatic-context-compaction.ipynb`, `memory_cookbook.ipynb` | READ separates tool clearing, lossy compaction and durable notes; measure each rather than bundle every mechanism |
 | S09 | Local cookbook `patterns/agents/prompts/research_lead_agent.md` | READ crisp task boundaries/useful parallelism; reject its universal subagent minimum as unsuitable for Forge efficiency |
-| S10 | [Qwen/Qwen3-Reranker-0.6B](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B), model card read 2026-09-17; pinned `e61197ed45024b0ed8a2d74b80b4d909f1255473` | READ: 0.6B text reranker, 32k context, local Transformers scoring with yes/no logits; model card's claimed capabilities are DOC, not Rocco retrieval acceptance. Use as on-demand relevance ranking after scope filtering, never as an authority or instruction source. |
+| S10 | [Qwen/Qwen3-Reranker-0.6B](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B), model card read 2026-09-17; pinned `e61197ed45024b0ed8a2d74b80b4d909f1255473` | READ: 0.6B text reranker, 32k context, local Transformers scoring with yes/no logits; model card's claimed capabilities are DOC, not Larry retrieval acceptance. Use as on-demand relevance ranking after scope filtering, never as an authority or instruction source. |
 
 arXiv API command returned an Atom feed with all three requested identities:
 `curl --fail --silent --show-error --max-time 20 'https://export.arxiv.org/api/query?id_list=2308.10144,2305.16291,2312.07104&max_results=3'`.

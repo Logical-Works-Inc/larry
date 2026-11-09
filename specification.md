@@ -1,30 +1,32 @@
 ---
 type: Design
-title: Rocco final proposed specification and completion notebook
+title: Larry final proposed specification and completion notebook
 description: Continuity-first assistant runtime PRD, candidate decisions, architecture, evidence gates and implementation sequence.
 resource: /specification.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
 stale_after: 2026-10-15
+updated: {by: claude-code, at: 2026-11-09, note: the Rocco rename finished (ADR 0005) and the runtime falsifier line made current}
 sources:
   - Director requirements and corrections in conversations 2026-09-15 and 2026-09-16
   - /research-ledger.md
   - /Users/srinji/.okf/governance/contract/frontier-universal-assurance.md
 ---
 
-# Rocco specification v1.2 — frontload the cognitive work
+# Larry specification v1.2 — frontload the cognitive work
 
-**Approval: pending. Runtime experiments: NOT RUN. Human participants: 0.**
+**Approval: pending. Runtime falsifiers: those /INVARIANTS.md names run in CI; the rest NOT RUN. Human participants: 0.**
 This is a concrete decision package, not a collection of equally ranked options.
 Except for the expressly settled Director decisions in Cell 12, decisions below
 are recommendations until ratified. Metrics marked TARGET
 are acceptance proposals, not measurements or promises. Source claims and source
 inspection are distinguished in the [research ledger](research-ledger.md).
 
-Rocco is the Director-selected working name for the new private repository.
-Forge was the earlier scratchpad name, not a second runtime. The existing
+Larry is the Director-selected name; the repository began as the private Rocco,
+was renamed Larry on 2026-11-06 (ADR 0005) and is the public alpha
+`Logical-Works-Inc/larry`. Forge was the earlier scratchpad name, not a second runtime. The existing
 `forge-harness` and `forge-sdk` remain historical
 source repositories only. Final means the current requirements, dispositions and
 execution plan are assembled; it does not mean every proof or product test passed.

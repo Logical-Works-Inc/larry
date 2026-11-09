@@ -3,7 +3,7 @@ type: Research
 title: research-ledger.md, part 2 of 7
 description: Part 2 of /research-ledger.md, in order; the index lists every part.
 resource: /docs/research-ledger/02-2026-09-19-board-first-workspace-and.md
-tags: [rocco, research, codegraph, evidence, persona]
+tags: [larry, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
 status: specification-v1.2-source-review-complete-runtime-unverified
@@ -26,7 +26,7 @@ Continue without claiming execution. Cline's welcome prompt was rejected for
 this entry point; OpenCode's independently scoped context panel was retained.
 The backend agent adapted Forge's baseline/fence guard with MIT notice, not
 its synthetic Moo allocator. CodeGraph source receipts and test boundaries are
-in `crates/rocco-contracts/WORKSPACE-EVIDENCE.md`. No sibling was edited.
+in `crates/larry-contracts/WORKSPACE-EVIDENCE.md`. No sibling was edited.
 
 The local query layer was used before implementation and again at the routing
 pivot. Initial Python failures and the isolated metadata repair are retained
@@ -73,12 +73,12 @@ READ: local AppCUI 0.5.1 `backend.rs` documents Termios as the macOS default
 and limits mouse support to Windows/NCurses; its CrossTerm implementation
 enables mouse capture and decodes terminal pointer events. The user-facing
 consequence was independently reproduced: injected SGR pointer bytes rendered
-as input under Termios. Rocco now selects CrossTerm from the already-admitted
+as input under Termios. Larry now selects CrossTerm from the already-admitted
 AppCUI package, rather than claiming an event-handler unit test made the macOS
 terminal clickable.
 
 READ: local Forge `forge-tui/src/theme.rs` and `render.rs` place selection on
-one small slate-light list surface with a leading highlight symbol. Rocco
+one small slate-light list surface with a leading highlight symbol. Larry
 reimplements that calm control grammar in AppCUI with an ANSI blue focus row;
 no Ratatui code, dependency, or broad colour palette was copied. MEASURED: the
 native 120x32 PTY journey sends an SGR click to rail row three and reaches its
@@ -110,7 +110,7 @@ Director AppCUI choice and estate-use instruction. No cryptographic human
 signature is required by the inspected policy; the earlier extra-signoff claim
 was wrong. After explicit release-continuation authorization, publish uploaded
 `lgwks_deps` 0.1.8 from 822307da2c7adefccd09b449af2998c75deea42b. Fresh Cargo
-download confirmed `appcui` and Rocco pins that published artifact, not a path.
+download confirmed `appcui` and Larry pins that published artifact, not a path.
 Source: https://crates.io/crates/lgwks_deps/0.1.8 and
 https://github.com/srinji-kaggss/logicalworks-crates/pull/7.
 The native view and tests use that real dependency; backend and workspace

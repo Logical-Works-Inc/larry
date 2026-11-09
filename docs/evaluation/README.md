@@ -6,8 +6,9 @@ resource: /docs/evaluation/README.md
 tags: [larry, evaluation, falsifiers, benchmarks]
 generated: {by: opencode, at: 2026-09-16}
 verified: {by: opencode, method: structural gate and source review of /specification.md Cell 09/10 and /research-ledger.md; nothing executed}
-status: final-structure-v1.1
-stale_after: 2026-10-16
+status: final-structure-v1.2
+stale_after: 2026-12-09
+updated: {by: claude-code, at: 2026-11-09, note: larry eval, the benchmark issues and E63–E80 added}
 sources: [Director conversation 2026-09-16, /specification.md, /research-ledger.md]
 ---
 
@@ -15,8 +16,10 @@ sources: [Director conversation 2026-09-16, /specification.md, /research-ledger.
 
 Canonical targets: /specification.md Cells 05–10; canonical source claims:
 /research-ledger.md. This file organizes how the inventory is navigated.
-Every benchmark, persona run and human study is NOT RUN; nothing here is a
-score or an acceptance claim.
+`larry eval` scores one arm over the matched set `eval/matched-v1.json`, run
+so far only on the mock endpoint (larry#87, ADR 0009); the Terminal-Bench and
+Harness-Bench runners (#93, #94) and the scored runs (#95) follow. Every scored
+benchmark, persona run and human study is NOT RUN; nothing here is a score.
 
 ## Lanes
 
@@ -41,6 +44,7 @@ score or an acceptance claim.
   replay identity, permanent reconciliation dispositions, ecosystem
   adapters, telemetry cost attribution, budget-lease reclaim, memory edge
   semantics, contamination control and adversarial honesty/revocation.
+- E63–E80 bind the 2026-09-17 hostile-model security requirements (R79–R96).
 - Allocation to execution cells C00–C12 is recorded in Cell 11 and checked
   mechanically; every case must run before full product acceptance.
 

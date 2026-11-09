@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 16 of 18
 description: Part 16 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/16-cell-10-weak-model-and-truthful-persona.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -53,7 +53,7 @@ sample. Exact release hashes and use-specific permissions need verification
 before a run. This task does not modify MatrAIx or download its data.
 
 **Two different experiments:** (a) does the simulator express its assigned
-persona under neutral instructions? (b) does Rocco adapt appropriately to that
+persona under neutral instructions? (b) does Larry adapt appropriately to that
 simulated user's stated preferences while completing the task honestly? Passing
 (a) does not prove (b). Also evaluate the assistant's own stable persona and its
 ability to respect a user who does NOT want persona mirroring.
@@ -81,7 +81,7 @@ No demographic realism or population claims without validation against people.
 - Its transcript fallback checks words such as `tracking`; that is a heuristic,
   not evidence that a real delivery problem was solved.
 - Upstream reporting permits missing LLM signal facets and merges them with
-  deterministic facets. Rocco must tag measurement method/origin/confidence and
+  deterministic facets. Larry must tag measurement method/origin/confidence and
   preserve missingness; absent judge output cannot improve pass rates.
 - High adherence with incorrect work fails task acceptance. Charming sycophancy
   fails truthfulness. Low satisfaction with a correct necessary boundary is

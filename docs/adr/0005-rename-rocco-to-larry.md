@@ -43,6 +43,10 @@ code", then "Rename Rocco to Larry".
   docs/architecture/visual-pass.md, docs/architecture/runtime.md, docs/dependencies/ADAPTER-MANIFEST.md) keep their
   Rocco text: the size law refuses any edit to them and the Python checker reads them by name, so larry#53 renames
   them as it splits them. Every other document reads Larry; the Git history keeps the original words.
+- larry#53 split them without renaming; larry#178 renamed them and their parts (2026-11-09). Names that still exist
+  under the old spelling keep it: `srinji-kaggss/Rocco` and `srinji-kaggss/rocco-runtime`, the
+  `rocco-macos-arm64` runner, the deleted `tools/rocco_pixel.py`, the `rocco-raccoon` receipts, lgwks-frontend's
+  `rocco-rank.js`, quoted Director words and log.md's record of the original naming. Rocco is now the embedded dock.
 - Touching each renamed file put it under today's gates whole: over-size files were split (native, workspace,
   authority, the fence tests, three forge-spec documents, WORKSPACE-EVIDENCE) and every `unwrap_or`/`map_or`
   default became an explicit case.

@@ -3,7 +3,7 @@ type: Research
 title: research-ledger.md, part 5 of 7
 description: Part 5 of /research-ledger.md, in order; the index lists every part.
 resource: /docs/research-ledger/05-h01-codex-explicit-protocol-and.md
-tags: [rocco, research, codegraph, evidence, persona]
+tags: [larry, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
 status: specification-v1.2-source-review-complete-runtime-unverified
@@ -26,7 +26,7 @@ Structure: Rust workspace, core execution, app-server and generated protocol,
 separate execution environments, TUI/CLI and SDK surfaces. Directory structure
 alone is not proof that every crate is a clean architectural boundary.
 
-| Source relative to checkout | Observed semantics | Rocco consequence |
+| Source relative to checkout | Observed semantics | Larry consequence |
 |---|---|---|
 | codex-rs/app-server/README.md:20–89 | DOC bidirectional RPC, thread/turn/item primitives, initialization, bounded ingress and overload response | R44/R51/R52/R63: separate admission, execution and observation; capability negotiation and bounded transport |
 | codex-rs/app-server/README.md:142–182 | DOC read/resume/fork distinctions, effective settings, historical boundaries and cancellation | R59/R61: read is not resume; fork is not copied effect authority |
@@ -36,7 +36,7 @@ alone is not proof that every crate is a clean architectural boundary.
 | codex-rs/core/src/tools/approvals.rs:24–52,110–129,165–187 | READ actions bind environment/path; typed rejection, timeout and abort | R46/R64: uniform effect admission and remote-native identities |
 
 DOC counterexample: the README describes `thread/shellCommand` as unsandboxed.
-Rocco explicitly does not adopt a manual-command bypass. Similarly, upstream
+Larry explicitly does not adopt a manual-command bypass. Similarly, upstream
 hard-delete APIs do not supersede this repository's reversible-removal rule.
 Context7 CLI resolved `/openai/codex` and retrieved thread lifecycle and client
 capability documentation. This corroborated protocol concepts, not runtime tests.
@@ -91,7 +91,7 @@ Local `/Users/srinji/letta`, clean inspected revision
 [Pinned upstream](https://github.com/letta-ai/letta/tree/6d8cb7fd48938b629aad5770faa051a8d42e1e9f).
 Structure: Python API over persisted agent state and relationships, message/run
 services, explicit summarization and background memory work. This motivates
-requirements, not a second Rocco database or immediate memory implementation.
+requirements, not a second Larry database or immediate memory implementation.
 
 | Source relative to checkout | READ finding | Requirement |
 |---|---|---|
@@ -108,7 +108,7 @@ licenses before executing. No benchmark was downloaded or run.
 
 | Source / observed revision | Purpose and limitation |
 |---|---|
-| [SWE-bench](https://github.com/SWE-bench/SWE-bench), `02e7a74ffd0b707aab73d203fe87bdc7c76afc8e` | Coding issue resolution. README warns cached run/instance IDs can reuse earlier patch results; new predictions need new run identity. Its recommended large evaluator host is not proof of Rocco's physical client baseline. |
+| [SWE-bench](https://github.com/SWE-bench/SWE-bench), `02e7a74ffd0b707aab73d203fe87bdc7c76afc8e` | Coding issue resolution. README warns cached run/instance IDs can reuse earlier patch results; new predictions need new run identity. Its recommended large evaluator host is not proof of Larry's physical client baseline. |
 | [tau-bench](https://github.com/sierra-research/tau2-bench), `2174a603f6d014ef94473ffa95957f6ce27100db` | Tool-user-policy interaction. Current README calls it tau3; banking grading changed in v1.0.1. Never mix those scores silently. |
 | [LongMemEval](https://github.com/xiaowu0162/LongMemEval), `9e0b455f4ef0e2ab8f2e582289761153549043fc` | Memory extraction, updates, temporal/multi-session reasoning and abstention. Cleaned data and V2 are mentioned; V2 was not audited here. Its model-judge score is not crash durability. |
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo), `089ed468cf3ed0322acc66b0211f26d9d90dbf60` | Prompt injection attacks/defenses. Finite suite coverage is not general security assurance. |

@@ -3,7 +3,7 @@ type: Research
 title: research-ledger.md, part 1 of 7
 description: Part 1 of /research-ledger.md, in order; the index lists every part.
 resource: /docs/research-ledger/01-2026-09-20-hardening-pass-what-the-rules.md
-tags: [rocco, research, codegraph, evidence, persona]
+tags: [larry, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
 status: specification-v1.2-source-review-complete-runtime-unverified

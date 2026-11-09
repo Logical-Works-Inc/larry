@@ -4,11 +4,11 @@ title: Larry
 description: Larry, the agent harness from Logical Works that asks before it acts and accounts for every effect. Public alpha.
 resource: /README.md
 tags: [larry, specification, agent-runtime]
-generated: {by: claude-code, at: 2026-11-06}
-verified: {by: claude-code, method: repository read 2026-11-06; not runtime verification}
+generated: {by: claude-code, at: 2026-11-09}
+verified: {by: claude-code, method: repository read and src/bin/larry.rs subcommands 2026-11-09; not runtime verification}
 status: public-alpha
-stale_after: 2026-12-06
-sources: [Director orders 2026-09-15 to 2026-11-06]
+stale_after: 2026-12-09
+sources: [Director orders 2026-09-15 to 2026-11-09]
 ---
 
 # Larry
@@ -23,13 +23,14 @@ sources: [Director orders 2026-09-15 to 2026-11-06]
 Larry is an always-on agent harness: a persistent assistant with disposable workers, explicit authority,
 accountable effects and measurable learning. Every effect passes one journal: a durable intent before the call,
 a recorded authorization, a fence re-check at dispatch and a receipt after it. Replay is bit-identical, tenants
-never share state, and cancellation stops new work. The `larry-*` crate and `larry` binary names are Larry's
-until they are renamed.
+never share state, and cancellation stops new work. A question to a person survives a restart, and its
+expiry is never consent.
 
 ## What is here
 
 - `crates/larry-contracts`: the pure typed contracts (commands, events, effects, authority, replay).
-- `crates/larry-runtime`: the headless journal-authoritative runtime with falsifier and seeded simulation suites.
+- `crates/larry-runtime`: the headless journal-authoritative runtime on `lgwks_bot` (clock, journal file, fence,
+  gate, retry), with falsifier and seeded simulation suites.
 - `larry`: the workspace demo (fixture data; nothing executes), and the executor's doors:
   - `larry mcp`: a stateless MCP 2026-07-28 server. Its `larry_submit_task` tool runs a typed task through the
     executor and reports success only when the sealed run is accepted (ADR 0008).
@@ -40,6 +41,8 @@ until they are renamed.
   - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`) over `LARRY_STATE_DIR`;
     `larry serve key <tenant>` prints a tenant's bearer key once, `GET /healthz` is open liveness,
     `GET /t/{tenant}/healthz` the keyed tenant probe, and SIGTERM drains it (ADR 0021, ADR 0022).
+  - `larry governance`, `larry tracker` and `larry mascot`: the repository's own document, tracker and
+    mascot checks (ADR 0010, ADR 0014).
 
 ## Install
 

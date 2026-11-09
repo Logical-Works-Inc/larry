@@ -29,7 +29,7 @@ owns nothing; any other crate only with a `gap` issue on its manifest line. Labe
 | `loco-rs =1.2.0` (`cli`, `with-db`, `db-sqlite`, `auth`) + `lgwks_bot =6.1.0` (`rt`, `net`), deps at `opt-level 0` | 544 | 87.5 s | 393 MB | resolves; over the 60 s budget under this load |
 | `loco-rs` (`db-sqlite`) + `lgwks_deps =5.1.2` (`sqlite`) | none | none | none | refused: `libsqlite3-sys` 0.37 (sqlx) and 0.39 (rusqlite) both link `sqlite3` |
 | `rmcp =3.8.0` (`server`, `transport-io`), deps at `opt-level 3` | 62 | 69.5 s | 545 MB | resolves |
-| Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.0.1 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
+| Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.1.1 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
 | Larry's branch for larry#88 on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | resolves |
 
 Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u | wc -l`,
@@ -42,7 +42,8 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 |---|---|---|
 | Async runtime, net, supervision | `lgwks_bot::rt` | `tokio::main`: one process driver, `lgwks_bot::block_on` |
 | Tick clock, authority expiry (larry#74) | `lgwks_bot::clock`, `skew`, defaults off: 22 to 27 crates, cold 4.2 s to 6.4 s | the deleted `larry-runtime` clock |
-| Journal, crash recovery, replay | `lgwks_bot::journal` (`FileJournal`), larry#68 | Loco jobs or SeaORM rows: a second journal |
+| Journal, crash recovery, replay (larry#75) | `lgwks_bot::journal::RecordJournal`, group-committed (ADR 0023) | Loco jobs or SeaORM rows: a second journal |
+| Dispatch fence, offline exposure (larry#76, #99) | `lgwks_bot::broker` (ADR 0024, 0026) | the `larry-runtime` revocation fence |
 | Tick, projection | `lgwks_bot` ECS world | Loco scheduler: not deterministic, not replayable |
 | Authority, grants (larry#77) | `lgwks_bot::gate` `GrantSet`, `cap::Auth`; policy from secure-authority | the `BTreeSet` coverage loops in `larry-contracts`; Loco `auth`: it authenticates, it never authorizes |
 | Effect keys, retry, dispatch certainty (larry#78) | `lgwks_bot::effect`, `retry`, defaults off: no new crate | the inline attempt counter in `larry-runtime` (larry#68) |
@@ -91,7 +92,7 @@ approvals and an audit chain. They move onto the estate (larry#71) rather than b
 
 ## Speed to production
 
-1. larry#68 rows 1 and 2: the journal on `FileJournal`, so kill -9 loses nothing.
+1. larry#68 rows 1 to 5 (shipped): clock, the journal on `RecordJournal` (kill -9 loses nothing), fence, gate, retry.
 2. Track 3 executor (larry#71): Director's own code daily, no customer data, no web layer, so no Loco cost.
 3. Track 2 gateway (larry#70): `larry serve` on the app edge over the same runtime, two tenants, receipts.
 4. Benchmarks (larry#72, larry#65) run on what shipped.

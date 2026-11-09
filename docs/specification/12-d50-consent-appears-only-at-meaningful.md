@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 12 of 18
 description: Part 12 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/12-d50-consent-appears-only-at-meaningful.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -47,7 +47,7 @@ verification.
 
 ### D53 — make the strongest honest promise
 
-Choose this claim: even if every model response is adversarial, Rocco preserves
+Choose this claim: even if every model response is adversarial, Larry preserves
 declared authority, information-flow, isolation, resource and recovery invariants
 through supported paths and stated platform assumptions. Do not claim every
 authorized activity is harmless, every fact true, remote revocation instantaneous

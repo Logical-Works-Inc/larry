@@ -10,19 +10,19 @@ status: active
 stale_after: 2026-10-15
 sources: [Director conversations 2026-09-15 through 2026-09-17, /specification.md, /research-ledger.md]
 ---
-## 2026-09-18: one repository — the contract crate merges into Rocco
+## 2026-09-18: one repository — the contract crate merges into Larry
 
 Director order, verbatim: "NO ITS ONE REPO. FIX IT", following "Why is it not 1
 repo?". The Director authorized both paths. `srinji-kaggss/rocco-runtime` was a
-second repository holding `crates/rocco-contracts` (C02, 3,657 LOC across nine
+second repository holding `crates/larry-contracts` (C02, 3,657 LOC across nine
 modules); the crate is now a member of this repository's workspace and the
 second repository is no longer part of the project.
 
 Inventory unchanged: 96/53/80/13/9. No specification item moved or was
 redefined; the merge changed where code lives, not what it must do.
 
-ONE MANIFEST. `Cargo.toml` is now both the `rocco-demo` package and the
-workspace root, with `members = ["crates/rocco-contracts"]`. This is one
+ONE MANIFEST. `Cargo.toml` is now both the `larry-demo` package and the
+workspace root, with `members = ["crates/larry-contracts"]`. This is one
 workspace with one Cargo.lock, one lint set and one dependency register. The
 root package previously declared `[workspace]` alone, and the runtime manifest
 declared the same crate set from the other side; both are replaced.
@@ -31,10 +31,10 @@ ONE LINT SET — the stricter of the two. `missing_docs = "deny"`,
 `unsafe_code = "forbid"`, and `clippy::unwrap_used`/`expect_used`/`panic`/
 `todo`/`unimplemented`/`dbg_macro` all denied, plus `all = "warn"`. Two
 consequences had to be paid rather than waived. First, `missing_docs` reached
-`rocco-demo`, which had never been held to it: ten `Rejected` variants, the
-`rocco` binary, and `tests/demo.rs` had no crate or item documentation, and
+`larry-demo`, which had never been held to it: ten `Rejected` variants, the
+`larry` binary, and `tests/demo.rs` had no crate or item documentation, and
 each got a real doc comment naming what it means. Second, `unwrap_used` reached
-`rocco-demo`'s test code. Rather than lower the lint, the two allow sites are
+`larry-demo`'s test code. Rather than lower the lint, the two allow sites are
 scoped to the code that is itself the test — the `native` test module and the
 `demo` integration crate — and each states why an unwrap is the right failure
 there. No production path is exempted.
@@ -49,7 +49,7 @@ held four rows: the checker's own ladder treats `lgwks_std` as rung 2
 (workspace stdlib+, self-exempt) and `lgwks_deps` as the estate storefront, so
 neither needs a row, and `lgwks_bot` is a catalog entry no member depends on.
 The single real third-party edge is `thiserror =2.0.20` for
-`rocco-contracts`, registered in the schema the tool enforces — with
+`larry-contracts`, registered in the schema the tool enforces — with
 `tier`, `capability`, `source`, `allowed_consumers`, `allowed_kinds` and a
 sign-off naming the Director's own admission commit
 (`rocco-runtime@53c7512`, 2026-09-16) rather than a freshly invented approval.
@@ -61,12 +61,12 @@ the merge is the first time the register was validated at all. And
 `lgwks_deps` moved `=0.1.7` → `=0.1.8`, because 0.1.8 is the published release
 carrying the `appcui` feature the native surface builds against.
 
-The `rocco-contracts` manifest declared `rust-version = "1.85"`. That was
+The `larry-contracts` manifest declared `rust-version = "1.85"`. That was
 never satisfiable: its own dependency `lgwks_std 0.6.3` declares
 `rust-version = "1.98"`. The merge sets one workspace floor of 1.98 and thereby
 corrects a false claim rather than raising a real requirement.
 
-Resolver moved 2 → 3, matching edition 2024 on the `rocco-demo` side; the
+Resolver moved 2 → 3, matching edition 2024 on the `larry-demo` side; the
 runtime workspace had pinned 2.
 
 ONE CI. `.github/workflows/ci.yml` now carries both former workflows as two
@@ -76,7 +76,7 @@ Two conventions coexist in the file (tag refs in one job, SHA pins in the
 other) because merging did not change either.
 
 MEASURED on this Mac after the merge: `cargo test --workspace --all-targets`
-passes 82 tests (57 from `rocco-contracts`, 19 from `rocco_demo`, 6 integration)
+passes 82 tests (57 from `larry-contracts`, 19 from `larry_demo`, 6 integration)
 — the contracts suite runs here, in this workspace, not in a second repository.
 `cargo clippy --workspace --all-targets --locked -- -D warnings` clean;
 `cargo fmt --all -- --check` clean; `lgwks-deps check .` OK; 45 governance unit

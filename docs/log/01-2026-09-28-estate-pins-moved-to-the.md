@@ -14,12 +14,12 @@ sources: [Director conversations 2026-09-15 through 2026-09-17, /specification.m
 
 The Director authorized the estate release (logicalworks-crates PR #174,
 merge 9658b732). lgwks_std 0.7.0, lgwks_deps 0.1.13 and lgwks_bot 0.5.0 are
-published on crates.io and tagged. Rocco's exact pins move to them. lgwks_bot is
+published on crates.io and tagged. Larry's exact pins move to them. lgwks_bot is
 catalogued but has no consumer, so the lockfile does not change for it.
 
 One consumer break: lgwks_std 0.7.0 removes `Uuid::from_bytes` in favour of
 `impl From<[u8; 16]> for Uuid`, whose behaviour is identical. The id macro in
-`rocco-contracts/src/ids.rs` now calls `Uuid::from(raw)`. Rocco's own
+`larry-contracts/src/ids.rs` now calls `Uuid::from(raw)`. Larry's own
 `from_bytes` API is unchanged. The lockfile gains `tracing-subscriber` and its
 tree transitively through the estate crates. `lgwks-deps check .` confirms that no
 new authored edge was added.
@@ -77,7 +77,7 @@ has local build/test/lint evidence, while authenticated authority, E65's
 trusted display-to-dispatch binding, real owner adapters, durability, hosted
 CI and independent acceptance remain open.
 
-The commit gate identified a duplicate `RetryPolicy` name. Rocco's old enum
+The commit gate identified a duplicate `RetryPolicy` name. Larry's old enum
 did not own delay, backoff, deadline or jitter; it selected one of three
 reconciliation actions: bounded idempotent re-dispatch, observation, or a
 permanent unknown. That is not representable by `lgwks_std::retry::RetryPolicy`,

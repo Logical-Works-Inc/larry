@@ -5,10 +5,11 @@ description: Final proposed specification v1, harness research, repository gover
 resource: /index.md
 tags: [larry, strategy, governance]
 generated: {by: opencode, at: 2026-09-15}
+updated: {by: claude-code, at: 2026-11-09, note: repository, inventory counts and decision range re-read from log.md and the specification}
 verified: {by: opencode, method: source inspection; document validation recorded separately}
-status: final-proposed-v1.1-awaiting-architecture-approval
-stale_after: 2026-10-15
-sources: [Director conversation 2026-09-15]
+status: final-proposed-v1.2-awaiting-architecture-approval
+stale_after: 2026-12-09
+sources: [Director conversation 2026-09-15, /log.md, /docs/adr/0005-rename-rocco-to-larry.md]
 ---
 
 # Larry: a persistent assistant with an accountable runtime
@@ -34,9 +35,11 @@ human can accomplish more with less supervision and total computation.
 
 ## Authority and scope
 
-- The Director subsequently selected the working name Larry and explicitly
-  authorized the private `srinji-kaggss/Larry` documentation repository. These
-  documents were moved from the Forge scratchpad; no product code was imported.
+- The Director selected the working name Rocco and authorized a private
+  `srinji-kaggss/Rocco` documentation repository; these documents were moved
+  there from the Forge scratchpad, and no product code was imported. It is now
+  `Logical-Works-Inc/larry`, a public alpha since 2026-11-06, renamed Larry
+  (ADR 0005), and it carries the implementation the specification governs.
 - Preserve `forge-harness` and `forge-sdk` intact as reference implementations.
   Do not silently repair, import, restructure or publish their engine code.
 - The Director has authorized specification finalization and repo governance. Notable
@@ -54,20 +57,23 @@ human can accomplish more with less supervision and total computation.
 
 ## How to approve
 
-Approve or amend decisions by `D01`–`D35`, or approve the specification as a package
+Approve or amend decisions by `D01`–`D53`, or approve the specification as a package
 with explicit exceptions. Record the exact document revision and approver;
 never infer approval from silence or a model review. Approval adopts decisions
 and targets, not claims that tests, human studies or million-user trials passed.
 
 Already settled by the Director: core + TUI first; bounded unattended work;
 adapters rather than compatibility clones; memory implementation waits for
-Logical-DB; adjustable automatic decay and user-facing tuning; private Larry
-repository with strict self-maintaining governance. Other architecture decisions
-remain proposed until the Director ratifies each one.
+Logical-DB; adjustable automatic decay and user-facing tuning; one Larry
+repository with strict self-maintaining governance, public alpha under HL3
+(2026-11-06). Other architecture decisions remain proposed until the Director
+ratifies each one.
 
-The 78-requirement inventory preserves R01–R43, adds R44–R70 from the
-Codex/OpenCode/OpenClaw/Letta review and R71–R78 from the 2026-09-16 SOTA
-gap research. There are 62 planned falsifiers, not 62 passes.
+The 96-requirement inventory preserves R01–R43, adds R44–R70 from the
+Codex/OpenCode/OpenClaw/Letta review, R71–R78 from the 2026-09-16 SOTA gap
+research and R79–R96 from the 2026-09-17 hostile-model security review. There
+are 80 planned falsifiers (E01–E80), not 80 passes; the ones that run are named
+with their tests in /INVARIANTS.md.
 
 ## File-specific excellence record
 

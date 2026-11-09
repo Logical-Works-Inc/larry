@@ -5,7 +5,7 @@ description: Every PR left in the plan, in ship order, with the proof that close
 resource: /docs/product/SHIP.md
 tags: [larry, plan, checklist, ship]
 generated: {by: claude-code, at: 2026-11-06}
-verified: {by: claude-code, method: gh issue list and each issue's proof clause read 2026-11-06}
+verified: {by: claude-code, method: gh issue list, each issue's proof clause and git log read 2026-11-09}
 status: live
 stale_after: 2026-12-06
 sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-checklist.md]
@@ -65,7 +65,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #103 `issue-link` fails a PR closing no issue. Proof (#149): run 42364512157 red without `Closes`, 42364569033 green.
 - [x] #133 dependency register on lgwks-deps schema 3: PR #135, `lgwks-deps check .` prints OK (was REFUSED).
 - [x] #170 hardening: clipboard-win off yanked 5.4.1, 34 locked to newest, appcui_proc_macro held (crates#841): PR #171.
-- Moved to section 3 (2026-11-07): the falsifier PRs land after #68 step 4; see the last line there.
+- [x] #178 every document current: the Rocco rename finished, counts, pins, falsifier state, ruleset re-read.
+- [ ] #177 gap: pin the ci.yml `rust` job's three actions to commit SHAs (Director 2026-11-09: not yet).
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
 
@@ -81,9 +82,9 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #68 step 4 (#164): every executor task passes the runtime gate, `LARRY_POLICY` (ADR 0019): PR #165, 734 tests;
   `larry exec` p50 63.6/62.6 ms, p99 111.7/66.1 ms (64 runs, debug), peak RSS 10.9/11.8 MiB.
 - [x] #101 E47 protocol negotiation before ingress, the executor its caller (ADR 0020): PR #166, 742 tests.
-- [x] #100 E28 durable admission before the acknowledgement, corrections at a safe boundary (ADR 0025): PR #174.
+- [x] #100 E28 durable admission before the acknowledgement, corrections at a safe boundary (ADR 0025): PR #174, 785 tests.
 - [x] #99 E71 a restart recharges no offline authority, old settings revive nothing (ADR 0026): PR #175, 790 tests.
-- [x] #98 E30 durable scoped questions, expiry never consent (ADR 0027), PR #25 ported: PR #176.
+- [x] #98 E30 durable scoped questions, expiry never consent (ADR 0027), PR #25 ported: PR #176, 797 tests.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
@@ -115,6 +116,5 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 ## Holds and open design
 
-- Memory (cell C03) waits for Logical-DB; no substitute store. Real owners (Nova, Moo, Secure-Authority)
-  arrive through #85 and Track 2; until then every owner is a test double.
+- Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2.
 - #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.
