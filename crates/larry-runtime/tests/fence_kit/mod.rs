@@ -145,8 +145,8 @@ fn fence_kit_fixtures_build_what_they_name() -> Result<(), Box<dyn std::error::E
         ScriptedOwner::new(),
         held,
     )?;
-    assert_eq!(manual.fence().epoch(), SecurityEpoch::new(2));
-    assert_eq!(manual.fence().offline_bound(), 3);
+    assert_eq!(manual.fence().epoch()?, SecurityEpoch::new(2));
+    assert_eq!(manual.fence().offline_bound()?, 3);
     assert_eq!(
         work_in(2, 2, operation(2), ReconciliationStrategy::Queryable)?.id(),
         command_id(2)
@@ -157,7 +157,7 @@ fn fence_kit_fixtures_build_what_they_name() -> Result<(), Box<dyn std::error::E
     assert_eq!(
         runtime_at(SecurityEpoch::new(5), 0, ScriptedOwner::new())?
             .fence()
-            .epoch(),
+            .epoch()?,
         SecurityEpoch::new(5)
     );
     Ok(())

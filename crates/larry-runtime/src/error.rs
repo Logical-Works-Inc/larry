@@ -133,13 +133,16 @@ pub enum RuntimeError {
         /// The reading since the epoch that could not be placed.
         elapsed: std::time::Duration,
     },
-    /// A Larry id is all-zero and cannot name an lgwks_bot effect key (larry#78).
+    /// A Larry field cannot name an lgwks_bot effect key (larry#76, larry#78).
     EffectIdentity {
         /// The operation whose key could not be formed.
         operation: OperationId,
-        /// The identifier that was all-zero: `run`, `tenant` or `operation`.
+        /// `run`, `tenant` or `operation` when all-zero, or `admission_epoch`
+        /// when it is past the last broker generation.
         field: &'static str,
     },
+    /// The dispatch fence refused a change or a read (larry#76).
+    Fence(crate::fence::FenceError),
     /// Protocol negotiation or protocol-bound command ingress was refused.
     Protocol(crate::protocol::ProtocolError),
     /// The journal's file refused (larry#75): another writer holds it, its
@@ -243,8 +246,9 @@ impl fmt::Display for RuntimeError {
             ),
             Self::EffectIdentity { operation, field } => write!(
                 f,
-                "operation {operation} has an all-zero {field}; no effect key can be formed"
+                "operation {operation}'s {field} names no effect key: all-zero or past the last generation"
             ),
+            Self::Fence(ref err) => write!(f, "dispatch fence refused: {err}"),
             Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
             Self::Durable(ref err) => write!(f, "journal file refused: {err}"),
             Self::DurableRepeat { index } => write!(
@@ -271,6 +275,7 @@ impl std::error::Error for RuntimeError {
             Self::Codec(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
             Self::Durable(ref err) => Some(err),
+            Self::Fence(ref err) => Some(err),
             Self::DurableRepeat { .. } | Self::DurabilityShort { .. } => None,
             Self::UnsupportedDecision(_)
             | Self::UnsupportedCommand(_)
@@ -340,6 +345,12 @@ impl From<larry_contracts::binding::BindingError> for RuntimeError {
 impl From<lgwks_bot::journal::JournalError> for RuntimeError {
     fn from(err: lgwks_bot::journal::JournalError) -> Self {
         Self::Durable(err)
+    }
+}
+
+impl From<crate::fence::FenceError> for RuntimeError {
+    fn from(err: crate::fence::FenceError) -> Self {
+        Self::Fence(err)
     }
 }
 

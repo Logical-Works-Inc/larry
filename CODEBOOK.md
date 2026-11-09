@@ -40,7 +40,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `projection` | The fold, effect phases and the replay report |
 | `protocol` | E47 version and capability negotiation: the offer, its typed refusals |
 | `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
-| `fence` (private) | Dispatch-time freshness: epoch, revocation, offline bound |
+| `fence` (private) | Dispatch-time freshness on one `lgwks_bot::broker` environment, and `effect_key`, the one key an intent derives (larry#76, ADR 0024) |
 | `owner` | The effect-owner trait; test doubles under `fixture` only |
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
 | `error` | Every refused runtime operation |
@@ -50,8 +50,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `runtime::ingress` | `submit_protocol`: negotiate, tenant check and bounded backoff before the queue (E47) |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |
-| `runtime::reach` | The one owner reach: the fence, then the `cap::Auth` proof, then the call (larry#77) |
-| `runtime::retry` | The effect key an intent derives and the retry decision on `lgwks_bot::retry` (larry#78, ADR 0017) |
+| `runtime::reach` | The one owner reach: the warrant, the `cap::Auth` proof, the handoff re-check, the call, the count (larry#76, #77) |
+| `runtime::retry` | The retry decision on `lgwks_bot::retry` over `fence::effect_key` (larry#78, ADR 0017) |
 | `runtime::writers` | Every journal writer and the run-state `advance` |
 
 ## Root crate (the `larry` binary)

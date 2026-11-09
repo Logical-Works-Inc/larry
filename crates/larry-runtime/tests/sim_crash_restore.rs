@@ -366,7 +366,7 @@ fn sim_crash_fenced_dispatch_replays_same_trace() -> Outcome {
         let body = read_work(18, 1, strat);
         runtime.offer(18, &body)?;
         assert!(
-            runtime.fence_mut().revoke(operation(18)),
+            runtime.fence_mut().revoke(operation(18))?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;

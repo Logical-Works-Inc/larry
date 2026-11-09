@@ -38,7 +38,7 @@ fn e71_revocation_before_admission_fences_the_effect_at_the_boundary()
     // journal knows nothing about it.
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     assert_eq!(rt.journal().len(), 0);
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.fence_mut().revoke(operation(1))?);
 
     let tick = rt.tick()?;
 
@@ -81,7 +81,7 @@ fn e71_the_fence_sits_between_the_durable_intent_and_the_owner_call()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut rt = runtime()?;
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.fence_mut().revoke(operation(1))?);
     let tick = rt.tick()?;
 
     let intents_recorded = rt
@@ -114,7 +114,7 @@ fn e71_a_fenced_retry_is_a_non_event_reported_every_tick() -> Result<(), Box<dyn
 {
     let (mut rt, op) = open_retry_safe_effect(64)?;
     let before = rt.journal().len();
-    assert!(rt.fence_mut().revoke(op));
+    assert!(rt.fence_mut().revoke(op)?);
 
     let tick = rt.tick()?;
     assert_eq!(
@@ -149,7 +149,7 @@ fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     let first = rt.tick()?;
     assert_eq!(first.authorized(), &[operation(1)]);
-    assert_eq!(rt.fence().offline_spent(), 1);
+    assert_eq!(rt.fence().offline_spent()?, 1);
 
     // The authority source is unreachable, so the next reach is refused. The
     // probe is a fresh command in its own run, because a command is admitted
@@ -174,10 +174,10 @@ fn e71_a_partition_spends_the_offline_bound_and_authentication_recharges_it()
     // Reaching the authority source recharges it, and the reserved effect goes
     // out on its declared retry path.
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
+        rt.fence_mut().authenticate(SecurityEpoch::INITIAL)?,
         SecurityEpoch::INITIAL
     );
-    assert_eq!(rt.fence().offline_spent(), 0);
+    assert_eq!(rt.fence().offline_spent()?, 0);
     let third = rt.tick()?;
     assert!(third.fenced().is_empty());
     assert_eq!(
@@ -211,7 +211,7 @@ fn probe_after_sleep_restored_at(placed: Duration) -> Result<Probe, Box<dyn std:
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     rt.tick()?;
     assert_eq!(
-        rt.fence().offline_spent(),
+        rt.fence().offline_spent()?,
         1,
         "the one reach spent the bound"
     );
@@ -255,7 +255,7 @@ fn probe_after_sleep_restored_at(placed: Duration) -> Result<Probe, Box<dyn std:
     Ok((
         tick.fenced().to_vec(),
         restored.owner().dispatched().to_vec(),
-        restored.fence().offline_spent(),
+        restored.fence().offline_spent()?,
     ))
 }
 
@@ -284,20 +284,20 @@ fn e71_neither_sleeping_nor_a_rolled_back_clock_recharges_offline_authority()
 fn e71_a_replayed_older_snapshot_never_lowers_the_fence() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut rt = runtime()?;
-    assert_eq!(rt.fence().epoch(), SecurityEpoch::INITIAL);
+    assert_eq!(rt.fence().epoch()?, SecurityEpoch::INITIAL);
     assert_eq!(rt.fence_mut().advance_epoch()?, SecurityEpoch::new(1));
     // The snapshot the attacker holds says generation zero.
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
+        rt.fence_mut().authenticate(SecurityEpoch::INITIAL)?,
         SecurityEpoch::new(1)
     );
-    assert_eq!(rt.fence().epoch(), SecurityEpoch::new(1));
+    assert_eq!(rt.fence().epoch()?, SecurityEpoch::new(1));
     // A genuine advance still moves in the other direction.
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::new(4)),
+        rt.fence_mut().authenticate(SecurityEpoch::new(4))?,
         SecurityEpoch::new(4)
     );
-    assert_eq!(rt.fence().epoch(), SecurityEpoch::new(4));
+    assert_eq!(rt.fence().epoch()?, SecurityEpoch::new(4));
     Ok(())
 }
 

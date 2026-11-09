@@ -8,16 +8,10 @@
 //! supplies the facts that rule reads and owns no second copy of it.
 
 use std::collections::BTreeMap;
-use std::num::{NonZeroU64, NonZeroU128};
 use std::time::{Duration, SystemTime};
 
-use larry_contracts::effect::{EffectIntent, ReconciliationStrategy};
 use larry_contracts::ids::OperationId;
 use larry_contracts::replay::ReplayRecord;
-use lgwks_bot::effect::{
-    ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch, EnvironmentId,
-    FlowRevision, Id128, RunId as BotRunId,
-};
 use lgwks_bot::retry::{
     DedupScope, DeduplicationContract, LateArrival, RetryDecision, RetryFacts, retry_admissible,
 };
@@ -25,39 +19,7 @@ use lgwks_std::retry::RetryPolicy;
 
 use super::LiveEffect;
 use crate::error::RuntimeError;
-
-/// The flow revision of a Larry run. Larry admits no flow document, so its
-/// revision is this domain-separated constant, one per binary.
-const FLOW: &[u8] = b"larry.runtime.v1.flow";
-
-/// The domain separator of the action digest.
-const ACTION: &[u8] = b"larry.effect.v1";
-
-/// A Larry identifier as a non-zero lgwks_bot identifier, or a typed refusal
-/// naming the field that was all-zero.
-fn bot_id(
-    bytes: &[u8; 16],
-    operation: OperationId,
-    field: &'static str,
-) -> Result<Id128, RuntimeError> {
-    match NonZeroU128::new(u128::from_be_bytes(*bytes)) {
-        Some(value) => Ok(Id128::from_nonzero(value)),
-        None => Err(RuntimeError::EffectIdentity { operation, field }),
-    }
-}
-
-/// The strategy's tag inside the action digest. The wildcard is a strategy
-/// this build does not know; `reconcile_one` refuses it before any retry is
-/// decided, so its tag only has to differ from the declared ones.
-fn strategy_tag(strategy: ReconciliationStrategy) -> u8 {
-    match strategy {
-        ReconciliationStrategy::Queryable => 0,
-        ReconciliationStrategy::IdempotentRetrySafe => 1,
-        ReconciliationStrategy::RequiresHuman => 2,
-        ReconciliationStrategy::AlwaysCompensate => 3,
-        _ => u8::MAX,
-    }
-}
+use crate::fence::effect_key;
 
 /// The authority lease each recorded authorization pinned, keyed by operation.
 ///
@@ -97,42 +59,6 @@ fn span(from: SystemTime, to: SystemTime) -> Duration {
         Ok(elapsed) => elapsed,
         Err(_) => Duration::ZERO,
     }
-}
-
-/// The lgwks_bot key for the next attempt at a Larry effect.
-///
-/// The run, the operation (as the action) and the attempt map one to one.
-/// The tenant is the environment's owner boundary until #76 hands broker
-/// environments over. The epoch is one past the recorded admission epoch, so
-/// a key is never epoch zero.
-pub(super) fn effect_key(intent: &EffectIntent, attempts: u8) -> Result<EffectKey, RuntimeError> {
-    let operation = intent.operation;
-    let identity = EffectIdentity::new(
-        BotRunId::new(bot_id(intent.run.as_bytes(), operation, "run")?),
-        EnvironmentId::new(bot_id(intent.tenant.as_bytes(), operation, "tenant")?),
-        FlowRevision::new(lgwks_std::hash::blake3(FLOW)),
-    );
-    let attempt = match NonZeroU64::new(u64::from(attempts)) {
-        Some(value) => value,
-        None => NonZeroU64::MIN,
-    };
-    let epoch = NonZeroU64::MIN.saturating_add(intent.admission_epoch.value());
-    let mut hasher = lgwks_std::hash::Hasher::new();
-    hasher.update(ACTION);
-    hasher.update(intent.operation.as_bytes());
-    hasher.update(intent.run.as_bytes());
-    hasher.update(intent.tenant.as_bytes());
-    hasher.update(&[strategy_tag(intent.strategy)]);
-    match intent.binding() {
-        Some(binding) => hasher.update(binding.digest().as_bytes()),
-        None => hasher.update(&[0_u8]),
-    };
-    Ok(identity.key(
-        ActionId::new(bot_id(intent.operation.as_bytes(), operation, "operation")?),
-        AttemptId::new(attempt),
-        ActionDigest::new(hasher.finalize()),
-        EnvironmentEpoch::new(epoch),
-    ))
 }
 
 /// Whether an open effect may be sent again now, by lgwks_bot's RQ-009 rule.
@@ -192,8 +118,8 @@ mod tests {
     use larry_contracts::effect::{EffectIntent, ReconciliationStrategy};
     use larry_contracts::ids::{EffectId, OperationId, RunId, TenantId};
 
-    use super::effect_key;
     use crate::error::RuntimeError;
+    use crate::fence::effect_key;
 
     /// An intent for `operation`, `run` and `tenant` under the retry-safe strategy.
     fn intent(operation: OperationId, run: RunId, tenant: TenantId) -> EffectIntent {

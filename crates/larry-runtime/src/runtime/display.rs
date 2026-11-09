@@ -94,7 +94,8 @@ where
             .iter()
             .find(|grant| covers(grant, command, holder, &proposal, at))
             .ok_or(BindingError::NoCoveringGrant)?;
-        let intent = proposal.intent(command.tenant(), self.fence.epoch());
+        let epoch = self.fence.epoch()?;
+        let intent = proposal.intent(command.tenant(), epoch);
         let resolved = self
             .owner
             .resolve(&intent)?
@@ -103,12 +104,12 @@ where
             b"larry/e65/approval/v1\0",
             digest.as_bytes(),
             &lgwks_std::json::to_vec(grant)?,
-            &self.fence.epoch().value().to_be_bytes(),
+            &epoch.value().to_be_bytes(),
         ]);
         Ok(DisplayedEffect {
             command: digest,
             grant: grant.clone(),
-            epoch: self.fence.epoch(),
+            epoch,
             binding: EffectBinding::new(
                 resolved,
                 approval,
@@ -148,7 +149,8 @@ where
         display: Option<&DisplayedEffect>,
         at: SystemTime,
     ) -> Result<(), RuntimeError> {
-        let intent = proposal.intent(command.tenant(), self.fence.epoch());
+        let epoch = self.fence.epoch()?;
+        let intent = proposal.intent(command.tenant(), epoch);
         if let Some(shown) = display {
             if command_digest(command)? != shown.command {
                 return Err(BindingError::Changed {
@@ -156,7 +158,7 @@ where
                 }
                 .into());
             }
-            if shown.epoch != self.fence.epoch() {
+            if shown.epoch != epoch {
                 return Err(BindingError::Changed {
                     field: BindingField::SecurityEpoch,
                 }

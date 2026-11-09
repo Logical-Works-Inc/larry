@@ -45,9 +45,10 @@
 //! deterministic doubles in `owner::fixture`, compiled only for tests or under
 //! the opt-in `fixture` feature so no shipped build carries one. Nothing in this crate
 //! contacts Moo, Sentinel, Nova, Logical-DB, Secure-Authority or a network.
-//! Persistence is Logical-DB's and the memory hold is intact; the journal is
-//! bounded and in-memory, and durability across process death is not claimed.
-//! P1–P8 remain proof obligations.
+//! The memory hold is intact. A journal from [`journal::Journal::open`] is a
+//! bounded `lgwks_bot::journal::RecordJournal` file that survives a kill -9
+//! (larry#75); [`journal::Journal::new`] stays memory-only. P1–P8 remain
+//! proof obligations.
 //!
 //! ## The ECS seam
 //!
@@ -70,7 +71,8 @@
 //! - [`projection`] — the read view, the ECS seam and the replay report.
 //! - [`gate`] — the pure authorization reducer and the boundary re-check.
 //! - [`RevocationFence`] — dispatch-time freshness: epoch, revocation,
-//!   offline bound. The module behind it is private and this crate re-exports
+//!   offline bound, on one `lgwks_bot::broker` environment (larry#76). The
+//!   module behind it is private and this crate re-exports
 //!   the three types below rather than opening a fourth namespace; the host
 //!   needs a control surface for the fence, not the ability to reach past it.
 //! - [`owner`] — the canonical-owner trait and, for tests, its deterministic

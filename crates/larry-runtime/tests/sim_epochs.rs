@@ -30,8 +30,8 @@ fn advance(seed: &mut u64) -> u64 {
 }
 
 /// Trace counts plus the generation the fence stands at.
-fn epoch_tally(runtime: &TestRuntime) -> (usize, u64) {
-    (runtime.journal().len(), runtime.fence().epoch().value())
+fn epoch_tally(runtime: &TestRuntime) -> Result<(usize, u64), larry_runtime::FenceError> {
+    Ok((runtime.journal().len(), runtime.fence().epoch()?.value()))
 }
 
 /// E71: submitting at the initial generation dispatches without refusal.
@@ -50,11 +50,11 @@ fn sim_epochs_initial_generation_dispatches() -> Outcome {
         );
         assert_eq!(tick.fenced().len(), 0, "initial generation fences nothing");
         assert_eq!(
-            runtime.fence().epoch(),
+            runtime.fence().epoch()?,
             SecurityEpoch::INITIAL,
             "the fence never moved"
         );
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -69,7 +69,7 @@ fn sim_epochs_two_advances_stand_two_above() -> Outcome {
         let two = one.successor().ok_or("the next epoch must advance")?;
         runtime.fence_mut().advance_epoch()?;
         runtime.fence_mut().advance_epoch()?;
-        let (first_fp, first_two) = (epoch_tally(&runtime), runtime.fence().epoch() == two);
+        let (first_fp, first_two) = (epoch_tally(&runtime)?, runtime.fence().epoch()? == two);
         assert!(first_two, "seed {seed}: two generations above");
         assert!(first_two, "seed {seed}: two generations above");
         Ok((first_fp, first_two))
@@ -85,16 +85,16 @@ fn sim_epochs_authenticate_newer_jumps_forward() -> Outcome {
         let body = read_work(2, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(2, &body)?;
         runtime.tick()?;
-        assert_eq!(runtime.fence().offline_spent(), 1, "one reach spent");
+        assert_eq!(runtime.fence().offline_spent()?, 1, "one reach spent");
         let newer = SecurityEpoch::new(9);
-        let stood = runtime.fence_mut().authenticate(newer);
+        let stood = runtime.fence_mut().authenticate(newer)?;
         assert_eq!(stood, newer, "authentication jumps to the newer generation");
         assert_eq!(
-            runtime.fence().offline_spent(),
+            runtime.fence().offline_spent()?,
             0,
             "authentication recharges"
         );
-        let (first_fp, first_jumped) = (epoch_tally(&runtime), runtime.fence().epoch() == newer);
+        let (first_fp, first_jumped) = (epoch_tally(&runtime)?, runtime.fence().epoch()? == newer);
         assert!(first_jumped, "seed {seed}: fence jumps forward");
         assert!(first_jumped, "seed {seed}: fence jumps forward");
         Ok((first_fp, first_jumped))
@@ -110,9 +110,9 @@ fn sim_epochs_authenticate_same_recharges_without_moving() -> Outcome {
         let body = read_work(3, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(3, &body)?;
         runtime.tick()?;
-        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
         assert_eq!(stood, SecurityEpoch::INITIAL, "generation never moved");
-        let (first_fp, first_spent) = (epoch_tally(&runtime), runtime.fence().offline_spent());
+        let (first_fp, first_spent) = (epoch_tally(&runtime)?, runtime.fence().offline_spent()?);
         assert_eq!(first_spent, 0, "seed {seed}: spent recharged");
         Ok((first_fp, first_spent))
     })
@@ -131,7 +131,7 @@ fn sim_epochs_revoked_stays_fenced_after_advance() -> Outcome {
             ReconciliationStrategy::IdempotentRetrySafe,
         )?;
         assert!(
-            runtime.fence_mut().revoke(operation(4)),
+            runtime.fence_mut().revoke(operation(4))?,
             "withdrawal reports the change"
         );
         runtime.tick()?;
@@ -150,7 +150,7 @@ fn sim_epochs_revoked_stays_fenced_after_advance() -> Outcome {
             &[operation(5), operation(6)],
             "unrevoked operations dispatch"
         );
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -173,10 +173,10 @@ fn sim_epochs_stranded_stays_stranded_after_reauthenticate() -> Outcome {
         )?;
         runtime.tick()?;
         runtime.fence_mut().advance_epoch()?;
-        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
         assert_eq!(
             stood,
-            runtime.fence().epoch(),
+            runtime.fence().epoch()?,
             "authentication reports standing"
         );
         let tick = runtime.tick()?;
@@ -186,17 +186,19 @@ fn sim_epochs_stranded_stays_stranded_after_reauthenticate() -> Outcome {
             refusal.contains("StaleEpoch"),
             "re-authentication cannot refresh an old admission, got {refusal}"
         );
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
-/// E71/D48: advancing to u64::MAX then once more refuses without wrapping.
+/// E71/D48: advancing to the top epoch then once more refuses without
+/// wrapping. The top is `u64::MAX - 1`: epoch `n` is broker generation
+/// `n + 1`, so `u64::MAX` has none (larry#76).
 #[test]
 fn sim_epochs_advance_to_max_then_refuses() -> Outcome {
     for seed in 48_u64..56 {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut topped = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
-            topped.security_epoch = SecurityEpoch::new(u64::MAX.saturating_sub(1));
+            topped.security_epoch = SecurityEpoch::new(u64::MAX.saturating_sub(2));
             let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
                 topped,
                 ScriptedOwner::new(),
@@ -205,8 +207,8 @@ fn sim_epochs_advance_to_max_then_refuses() -> Outcome {
             let max = runtime.fence_mut().advance_epoch()?;
             assert_eq!(
                 max,
-                SecurityEpoch::new(u64::MAX),
-                "advance reaches the maximum"
+                SecurityEpoch::new(u64::MAX - 1),
+                "advance reaches the top epoch"
             );
             let refused = runtime.fence_mut().advance_epoch();
             assert!(refused.is_err(), "past-maximum advance refuses");
@@ -235,22 +237,22 @@ fn sim_epochs_spent_survives_advance_clears_on_authenticate() -> Outcome {
         let body = read_work(9, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(9, &body)?;
         runtime.tick()?;
-        assert_eq!(runtime.fence().offline_spent(), 1, "one reach spent");
+        assert_eq!(runtime.fence().offline_spent()?, 1, "one reach spent");
         runtime.fence_mut().advance_epoch()?;
         assert_eq!(
-            runtime.fence().offline_spent(),
+            runtime.fence().offline_spent()?,
             1,
             "advancing never recharges"
         );
-        let here = runtime.fence().epoch();
-        let stood = runtime.fence_mut().authenticate(here);
+        let here = runtime.fence().epoch()?;
+        let stood = runtime.fence_mut().authenticate(here)?;
         assert_eq!(
-            runtime.fence().offline_spent(),
+            runtime.fence().offline_spent()?,
             0,
             "authentication recharges"
         );
         let _ = stood;
-        let (first_fp, first_spent) = (epoch_tally(&runtime), runtime.fence().offline_spent());
+        let (first_fp, first_spent) = (epoch_tally(&runtime)?, runtime.fence().offline_spent()?);
         assert_eq!(first_spent, 0, "seed {seed}: recharged to zero");
         Ok((first_fp, first_spent))
     })
@@ -276,7 +278,7 @@ fn sim_epochs_zero_bound_fences_first_reach() -> Outcome {
             "zero bound dispatches nothing"
         );
         assert_eq!(tick.receipts().len(), 0, "fenced reach receipts nothing");
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -311,7 +313,7 @@ fn sim_epochs_status_query_open_when_bound_spent() -> Outcome {
             runtime.owner().dispatched().is_empty(),
             "fenced reach dispatches nothing"
         );
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -328,7 +330,7 @@ fn sim_epochs_revoked_query_stays_open_without_resolution() -> Outcome {
         let body = read_work(12, 1, ReconciliationStrategy::Queryable);
         runtime.offer(12, &body)?;
         assert!(
-            runtime.fence_mut().revoke(operation(12)),
+            runtime.fence_mut().revoke(operation(12))?,
             "withdrawal reports the change"
         );
         let first = runtime.tick()?;
@@ -347,7 +349,7 @@ fn sim_epochs_revoked_query_stays_open_without_resolution() -> Outcome {
             );
             assert_state(runtime.projection(), run(12), RunState::Reconciling)?;
         }
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -370,7 +372,7 @@ fn sim_epochs_seeded_journeys_replay_refusal_counts() -> Outcome {
         )?;
         if revoke_first {
             assert!(
-                runtime.fence_mut().revoke(operation(13)),
+                runtime.fence_mut().revoke(operation(13))?,
                 "withdrawal reports the change"
             );
         }
@@ -380,7 +382,7 @@ fn sim_epochs_seeded_journeys_replay_refusal_counts() -> Outcome {
         let tick = runtime.tick()?;
         Ok((
             (tick.authorized().len(), tick.fenced().len()),
-            epoch_tally(&runtime),
+            epoch_tally(&runtime)?,
         ))
     })
 }
@@ -392,11 +394,11 @@ fn sim_epochs_newer_then_older_keeps_newer() -> Outcome {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut runtime: TestRuntime = reader(ScriptedOwner::new(), 100)?;
             let newer = SecurityEpoch::new(7);
-            let stood = runtime.fence_mut().authenticate(newer);
+            let stood = runtime.fence_mut().authenticate(newer)?;
             assert_eq!(stood, newer, "authentication jumps forward");
-            let kept = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+            let kept = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
             let _ = seed;
-            Ok(kept == newer && runtime.fence().epoch() == newer)
+            Ok(kept == newer && runtime.fence().epoch()? == newer)
         };
         assert!(drive()?, "seed {seed}: newer generation kept");
         assert!(drive()?, "seed {seed}: newer generation kept twice alike");
@@ -426,7 +428,7 @@ fn sim_epochs_three_withdrawals_fence_three_reaches() -> Outcome {
             );
             runtime.offer(number, &body)?;
             assert!(
-                runtime.fence_mut().revoke(operation(effect)),
+                runtime.fence_mut().revoke(operation(effect))?,
                 "each withdrawal reports the change"
             );
         }
@@ -437,7 +439,7 @@ fn sim_epochs_three_withdrawals_fence_three_reaches() -> Outcome {
             runtime.owner().dispatched().is_empty(),
             "no withdrawn reach dispatches"
         );
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -448,7 +450,7 @@ fn sim_epochs_withdrawal_before_submit_still_fences() -> Outcome {
         let mut runtime: TestRuntime =
             reader(ScriptedOwner::scripted([succeeded(operation(18))]), 100)?;
         assert!(
-            runtime.fence_mut().revoke(operation(18)),
+            runtime.fence_mut().revoke(operation(18))?,
             "withdrawal reports the change"
         );
         let body = read_work(18, 1, ReconciliationStrategy::IdempotentRetrySafe);
@@ -459,7 +461,7 @@ fn sim_epochs_withdrawal_before_submit_still_fences() -> Outcome {
             runtime.owner().dispatched().is_empty(),
             "withdrawn reach dispatches nothing"
         );
-        Ok(epoch_tally(&runtime))
+        Ok(epoch_tally(&runtime)?)
     })
 }
 
@@ -487,7 +489,7 @@ fn sim_epochs_high_bound_counts_every_reach() -> Outcome {
         let tick = runtime.tick()?;
         assert_eq!(tick.authorized().len(), 3, "high bound admits every reach");
         assert_eq!(tick.fenced().len(), 0, "high bound fences nothing");
-        let (first_fp, first_spent) = (epoch_tally(&runtime), runtime.fence().offline_spent());
+        let (first_fp, first_spent) = (epoch_tally(&runtime)?, runtime.fence().offline_spent()?);
         assert_eq!(first_spent, 3, "seed {seed}: three reaches spent");
         Ok((first_fp, first_spent))
     })

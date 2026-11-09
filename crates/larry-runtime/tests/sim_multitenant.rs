@@ -221,7 +221,7 @@ fn sim_multitenant_revoke_is_per_operation() -> Outcome {
             rt.offer(num, &body)?;
         }
         assert!(
-            rt.fence_mut().revoke(operation(8)),
+            rt.fence_mut().revoke(operation(8))?,
             "withdrawal reports the change"
         );
         let tick = rt.tick()?;
@@ -677,7 +677,7 @@ fn sim_multitenant_fence_names_only_its_operation() -> Outcome {
             rt.offer(num, &body)?;
         }
         assert!(
-            rt.fence_mut().revoke(operation(39)),
+            rt.fence_mut().revoke(operation(39))?,
             "withdrawal reports the change"
         );
         assert!(

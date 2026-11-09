@@ -274,7 +274,7 @@ where
             return Err(RuntimeError::RunLimitReached { capacity: 0 });
         }
         let remaining_budget = settings.initial_budget;
-        let fence = RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound);
+        let fence = RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound)?;
         Ok(Self {
             journal,
             projection,
@@ -511,7 +511,7 @@ where
         // revocation, or record an effect — or re-attribute a run after a
         // restart — to a tenant it does not own (D42, E63).
         let tenant = self.tenant_of(run)?;
-        let intent = proposal.intent(tenant, self.fence.epoch());
+        let intent = proposal.intent(tenant, self.fence.epoch()?);
         let intent = match display {
             Some(shown) => intent.with_binding(*shown.binding()),
             None => intent,
@@ -734,7 +734,7 @@ where
         projection,
         owner,
         clock,
-        fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound),
+        fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound)?,
         ready: VecDeque::new(),
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
         settings,

@@ -122,7 +122,7 @@ fn e71_restore_fences_only_the_effects_the_new_generation_left_behind()
     };
 
     let mut advanced = reopened(SecurityEpoch::new(1))?;
-    assert_eq!(advanced.fence().epoch(), SecurityEpoch::new(1));
+    assert_eq!(advanced.fence().epoch()?, SecurityEpoch::new(1));
     let tick = advanced.tick()?;
     assert_eq!(
         tick.fenced(),
@@ -167,7 +167,7 @@ fn e71_a_fenced_effect_keeps_its_reservation_and_that_is_a_known_limit()
     let mut rt = runtime()?;
     assert_eq!(rt.remaining_budget(), 100);
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.fence_mut().revoke(operation(1))?);
     let tick = rt.tick()?;
 
     assert_eq!(tick.fenced().len(), 1);
@@ -335,11 +335,11 @@ fn e71_a_zero_bound_stops_every_effect_permanently() -> Result<(), Box<dyn std::
     );
 
     assert_eq!(
-        rt.fence_mut().authenticate(SecurityEpoch::INITIAL),
+        rt.fence_mut().authenticate(SecurityEpoch::INITIAL)?,
         SecurityEpoch::INITIAL
     );
     assert_eq!(
-        rt.fence().offline_spent(),
+        rt.fence().offline_spent()?,
         0,
         "authentication cleared the count"
     );
@@ -390,7 +390,7 @@ fn a_fenced_effect_leaves_the_run_visibly_unfinished() -> Result<(), Box<dyn std
         operation(1),
         ReconciliationStrategy::RequiresHuman,
     )?)?;
-    assert!(rt.fence_mut().revoke(operation(1)));
+    assert!(rt.fence_mut().revoke(operation(1))?);
     rt.tick()?;
     let state = rt.projection().run_state(run(1));
     assert_eq!(state, Some(RunState::Reconciling));
@@ -400,13 +400,18 @@ fn a_fenced_effect_leaves_the_run_visibly_unfinished() -> Result<(), Box<dyn std
 }
 
 /// Epoch exhaustion refuses rather than wrapping, because a wrapped epoch would
-/// alias a withdrawn generation with a live one.
+/// alias a withdrawn generation with a live one. `u64::MAX` has no broker
+/// generation, so the top a fence stands at is the epoch below it (larry#76).
 #[test]
 fn e71_epoch_exhaustion_refuses_at_the_runtime_boundary() -> Result<(), Box<dyn std::error::Error>>
 {
-    let mut fence = RevocationFence::new(SecurityEpoch::new(u64::MAX), 64);
+    assert!(matches!(
+        RevocationFence::new(SecurityEpoch::new(u64::MAX), 64),
+        Err(FenceError::EpochExhausted)
+    ));
+    let mut fence = RevocationFence::new(SecurityEpoch::new(u64::MAX - 1), 64)?;
     assert_eq!(fence.advance_epoch(), Err(FenceError::EpochExhausted));
-    assert_eq!(fence.epoch(), SecurityEpoch::new(u64::MAX));
+    assert_eq!(fence.epoch()?, SecurityEpoch::new(u64::MAX - 1));
     Ok(())
 }
 
@@ -419,13 +424,16 @@ fn the_host_control_surface_is_withdrawal_refresh_and_reading()
     let mut rt = runtime()?;
     let fence: &mut RevocationFence = rt.fence_mut();
     assert!(!fence.is_revoked(operation(9)));
-    assert!(fence.revoke(operation(9)));
+    assert!(fence.revoke(operation(9))?);
     assert!(fence.is_revoked(operation(9)));
-    assert_eq!(fence.offline_bound(), larry_runtime::MAX_OFFLINE_DISPATCHES);
-    assert_eq!(fence.offline_spent(), 0);
-    assert_eq!(fence.epoch(), SecurityEpoch::INITIAL);
     assert_eq!(
-        fence.authenticate(SecurityEpoch::new(2)),
+        fence.offline_bound()?,
+        larry_runtime::MAX_OFFLINE_DISPATCHES
+    );
+    assert_eq!(fence.offline_spent()?, 0);
+    assert_eq!(fence.epoch()?, SecurityEpoch::INITIAL);
+    assert_eq!(
+        fence.authenticate(SecurityEpoch::new(2))?,
         SecurityEpoch::new(2)
     );
     assert_eq!(fence.advance_epoch()?, SecurityEpoch::new(3));

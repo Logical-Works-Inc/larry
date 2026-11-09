@@ -51,7 +51,7 @@ fn sim_fence_revoked_operation_refused_before_reach() -> Outcome {
         let body = read_work(1, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(1, &body)?;
         assert!(
-            runtime.fence_mut().revoke(operation(1)),
+            runtime.fence_mut().revoke(operation(1))?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
@@ -83,14 +83,14 @@ fn sim_fence_revoke_is_one_way_idempotent() -> Outcome {
             "fresh fence withdraws none"
         );
         assert!(
-            runtime.fence_mut().revoke(operation(2)),
+            runtime.fence_mut().revoke(operation(2))?,
             "first withdrawal reports change"
         );
         assert!(
             runtime.fence().is_revoked(operation(2)),
             "withdrawal visible by name"
         );
-        Ok(runtime.fence_mut().revoke(operation(2)))
+        Ok(runtime.fence_mut().revoke(operation(2))?)
     })
 }
 
@@ -128,7 +128,7 @@ fn sim_fence_advanced_epoch_strands_prior_admission() -> Outcome {
         );
         assert_eq!(first.fenced().len(), 1, "bound fences second reach");
         let next = runtime.fence_mut().advance_epoch()?;
-        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
         assert_eq!(stood, next, "authentication stands at new generation");
         let tick = runtime.tick()?;
         assert_eq!(tick.fenced().len(), 1, "stranded admission fenced");
@@ -171,10 +171,10 @@ fn sim_fence_stale_refusal_reports_current_generation() -> Outcome {
         )?;
         runtime.tick()?;
         let current = runtime.fence_mut().advance_epoch()?;
-        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
         assert_eq!(stood, current, "authentication stands at advanced epoch");
         assert_eq!(
-            runtime.fence().epoch(),
+            runtime.fence().epoch()?,
             current,
             "fence reports its generation"
         );
@@ -240,7 +240,7 @@ fn sim_fence_default_bound_admits_both() -> Outcome {
         )?;
         let tick = runtime.tick()?;
         assert_eq!(tick.authorized().len(), 2, "default bound admits both");
-        assert_eq!(runtime.fence().offline_spent(), 2, "two reaches spent");
+        assert_eq!(runtime.fence().offline_spent()?, 2, "two reaches spent");
         Ok((
             fence_counts(&runtime, tick.fenced().len()),
             trace(runtime.journal()),
@@ -299,10 +299,10 @@ fn sim_fence_reauthentication_recharges_spent() -> Outcome {
         let first = read_work(11, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(11, &first)?;
         runtime.tick()?;
-        assert_eq!(runtime.fence().offline_spent(), 1, "one reach spent");
-        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+        assert_eq!(runtime.fence().offline_spent()?, 1, "one reach spent");
+        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
         assert_eq!(stood, SecurityEpoch::INITIAL, "re-auth stands at initial");
-        assert_eq!(runtime.fence().offline_spent(), 0, "re-auth recharges");
+        assert_eq!(runtime.fence().offline_spent()?, 0, "re-auth recharges");
         let second = read_work(12, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(12, &second)?;
         let tick = runtime.tick()?;
@@ -325,14 +325,14 @@ fn sim_fence_dispatch_spends_one_reach() -> Outcome {
     replay(72_u64..80, |_| -> Sim<u32> {
         let mut runtime = mk_fence(ScriptedOwner::scripted([succeeded(operation(13))]))?;
         assert_eq!(
-            runtime.fence().offline_spent(),
+            runtime.fence().offline_spent()?,
             0,
             "fresh fence spent nothing"
         );
         let body = read_work(13, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(13, &body)?;
         runtime.tick()?;
-        Ok(runtime.fence().offline_spent())
+        Ok(runtime.fence().offline_spent()?)
     })
 }
 
@@ -348,7 +348,7 @@ fn sim_fence_revocation_isolates_sibling() -> Outcome {
             ReconciliationStrategy::IdempotentRetrySafe,
         )?;
         assert!(
-            runtime.fence_mut().revoke(operation(14)),
+            runtime.fence_mut().revoke(operation(14))?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
@@ -377,7 +377,7 @@ fn sim_fence_starts_at_settings_epoch() -> Outcome {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let runtime = mk_fence(ScriptedOwner::new())?;
             let _ = seed;
-            Ok(runtime.fence().epoch() == SecurityEpoch::INITIAL)
+            Ok(runtime.fence().epoch()? == SecurityEpoch::INITIAL)
         };
         assert!(
             drive()?,
@@ -393,7 +393,7 @@ fn sim_fence_starts_at_settings_epoch() -> Outcome {
 fn sim_fence_reports_configured_bound() -> Outcome {
     replay(96_u64..104, |_| -> Sim<u32> {
         let runtime = mk_fence(ScriptedOwner::new())?;
-        Ok(runtime.fence().offline_bound())
+        Ok(runtime.fence().offline_bound()?)
     })
 }
 
@@ -408,7 +408,7 @@ fn sim_fence_advance_returns_next_generation() -> Outcome {
                 .ok_or("initial epoch advances")?;
             let next = runtime.fence_mut().advance_epoch()?;
             let _ = seed;
-            Ok(next == wanted && runtime.fence().epoch() == next)
+            Ok(next == wanted && runtime.fence().epoch()? == next)
         };
         assert!(drive()?, "seed {seed}: advance returns next generation");
         assert!(drive()?, "seed {seed}: advance replay");
@@ -423,9 +423,9 @@ fn sim_fence_authenticate_older_never_moves_back() -> Outcome {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut runtime = mk_fence(ScriptedOwner::new())?;
             let newer = runtime.fence_mut().advance_epoch()?;
-            let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+            let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
             let _ = seed;
-            Ok(stood == newer && runtime.fence().epoch() == newer)
+            Ok(stood == newer && runtime.fence().epoch()? == newer)
         };
         assert!(
             drive()?,
@@ -436,13 +436,30 @@ fn sim_fence_authenticate_older_never_moves_back() -> Outcome {
     Ok(())
 }
 
-/// E71/D48: the epoch space is refused at u64::MAX, never wrapped.
+/// E71/D48: the epoch space is refused at its top, never wrapped: a runtime
+/// cannot start at `u64::MAX` (it has no broker generation), and one at the
+/// epoch below it cannot advance (larry#76).
 #[test]
 fn sim_fence_epoch_exhaustion_refused() -> Outcome {
     for seed in 120_u64..128 {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut topped = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
             topped.security_epoch = SecurityEpoch::new(u64::MAX);
+            let refused: Result<TestRuntime, _> = larry_runtime::runtime::Runtime::new(
+                topped.clone(),
+                ScriptedOwner::new(),
+                support::clock()?,
+            );
+            assert!(
+                matches!(
+                    refused,
+                    Err(larry_runtime::error::RuntimeError::Fence(
+                        larry_runtime::FenceError::EpochExhausted
+                    ))
+                ),
+                "u64::MAX has no generation, so no runtime starts there"
+            );
+            topped.security_epoch = SecurityEpoch::new(u64::MAX - 1);
             let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
                 topped,
                 ScriptedOwner::new(),
@@ -474,7 +491,7 @@ fn sim_fence_report_carries_operation_identity() -> Outcome {
         let body = read_work(16, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(16, &body)?;
         assert!(
-            runtime.fence_mut().revoke(operation(16)),
+            runtime.fence_mut().revoke(operation(16))?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
@@ -494,7 +511,7 @@ fn sim_fence_revoked_reason_reported() -> Outcome {
         let body = read_work(17, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(17, &body)?;
         assert!(
-            runtime.fence_mut().revoke(operation(17)),
+            runtime.fence_mut().revoke(operation(17))?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
@@ -518,13 +535,13 @@ fn sim_fence_withdrawal_records_no_fact() -> Outcome {
         let mut runtime = mk_fence(ScriptedOwner::new())?;
         let before = runtime.journal().len();
         assert!(
-            runtime.fence_mut().revoke(operation(18)),
+            runtime.fence_mut().revoke(operation(18))?,
             "withdrawal reports change"
         );
         runtime.fence_mut().advance_epoch()?;
-        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL);
+        let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
         assert_eq!(
-            runtime.fence().epoch(),
+            runtime.fence().epoch()?,
             stood,
             "authenticate reports standing epoch"
         );
@@ -542,7 +559,7 @@ fn sim_fence_second_tick_after_refusal_replays() -> Outcome {
         let body = read_work(19, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(19, &body)?;
         assert!(
-            runtime.fence_mut().revoke(operation(19)),
+            runtime.fence_mut().revoke(operation(19))?,
             "withdrawal reports change"
         );
         runtime.tick()?;
@@ -568,7 +585,7 @@ fn sim_fence_seeded_target_refuses_sibling_dispatches() -> Outcome {
             ReconciliationStrategy::IdempotentRetrySafe,
         )?;
         assert!(
-            runtime.fence_mut().revoke(refused),
+            runtime.fence_mut().revoke(refused)?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
@@ -598,7 +615,7 @@ fn sim_fence_revoke_after_success_changes_nothing() -> Outcome {
         runtime.offer(22, &body)?;
         runtime.tick()?;
         assert!(
-            runtime.fence_mut().revoke(operation(22)),
+            runtime.fence_mut().revoke(operation(22))?,
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
