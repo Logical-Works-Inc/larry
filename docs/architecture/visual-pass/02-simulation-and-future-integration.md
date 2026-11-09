@@ -3,7 +3,7 @@ type: Design
 title: docs/architecture/visual-pass.md, part 2 of 3
 description: Part 2 of /docs/architecture/visual-pass.md, in order; the index lists every part.
 resource: /docs/architecture/visual-pass/02-simulation-and-future-integration.md
-tags: [rocco, demo, appcui, fixtures, evidence]
+tags: [larry, demo, appcui, fixtures, evidence]
 generated: {by: agent:rust-coder, at: 2026-09-17}
 updated: {by: agent:claude-code, at: 2026-09-18, note: Forge terminal language pass}
 verified: {by: agent:rust-coder, method: source inspection; execution receipts in log}
@@ -66,7 +66,7 @@ The recorded admission sequence was:
    obligations, macro expansion through the facade (especially absolute crate
    paths), update closure assertions/docs/feature matrix/lockfile, and run the
    real estate admission, test, lint and package-smoke gates.
-5. Rocco pins the published 0.1.8 and enables AppCUI. No local path
+5. Larry pins the published 0.1.8 and enables AppCUI. No local path
    patch, copied vendor tree, direct AppCUI edge, imaginary version or permissive
    register bridges this boundary. Parent independent review remains pending.
 

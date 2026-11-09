@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 18 of 18
 description: Part 18 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/18-open-architecture-question-recorded-2026.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval

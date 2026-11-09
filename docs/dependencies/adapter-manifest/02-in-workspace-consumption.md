@@ -3,7 +3,7 @@ type: Evidence
 title: docs/dependencies/ADAPTER-MANIFEST.md, part 2 of 2
 description: Part 2 of /docs/dependencies/ADAPTER-MANIFEST.md, in order; the index lists every part.
 resource: /docs/dependencies/adapter-manifest/02-in-workspace-consumption.md
-tags: [rocco, adapters, licenses, dependencies, evidence, c01]
+tags: [larry, adapters, licenses, dependencies, evidence, c01]
 generated: {by: opencode, at: 2026-09-16}
 updated: {by: agent:claude-code, at: 2026-09-18, note: one-repo consolidation corrected the consumption section}
 verified: {by: opencode, method: read sibling and lgwks Cargo.toml license fields, contract/APPROVED.toml and pinned-revision presence checks, ledger receipts and specification Cell 11 allocation lines; no integration executed}
@@ -23,8 +23,8 @@ superseded, and the version and key names it recorded no longer match.
 - READ 2026-09-18, `contract/APPROVED.toml` in this repository, validated by
   `lgwks-deps check .` (exit 0, "1 semantic approvals, every authored external
   edge is owned"). The register holds `[policy]` and exactly one `[[approved]]`
-  row: `thiserror =2.0.20`, tier `boundary`, owner `rocco-contracts`,
-  capability `error-derive`, allowed consumer `rocco-contracts`.
+  row: `thiserror =2.0.20`, tier `boundary`, owner `larry-contracts`,
+  capability `error-derive`, allowed consumer `larry-contracts`.
 - The `lgwks_*` edges carry no row by design: `lgwks_std` is ladder rung 2
   (workspace stdlib+, self-exempt) and `lgwks_deps` is the estate's own
   admission storefront, so the checker reports both as owned without one. The

@@ -1,6 +1,6 @@
 ---
 type: Log
-title: Rocco decisions and change evidence
+title: Larry decisions and change evidence
 description: Accepted directions, scoped corrections and current specification inventory.
 resource: /log.md
 tags: [governance, decisions, evidence]
@@ -33,7 +33,7 @@ Counts are document structure, not implemented features or passing tests.
 7. [2026-09-20: the runtime, implemented — the lowest invariant](/docs/log/07-2026-09-20-the-runtime-implemented-the.md)
 8. [2026-09-19: board-first workspace and visual-fidelity correction](/docs/log/08-2026-09-19-board-first-workspace-and.md)
 9. [2026-09-18: mac-safe keys and default terminal background](/docs/log/09-2026-09-18-mac-safe-keys-and-default.md)
-10. [2026-09-18: one repository — the contract crate merges into Rocco](/docs/log/10-2026-09-18-one-repository-the-contract.md)
+10. [2026-09-18: one repository — the contract crate merges into Larry](/docs/log/10-2026-09-18-one-repository-the-contract.md)
 11. [2026-09-19: command_mode and full PTY pass](/docs/log/11-2026-09-19-command_mode-and-full-pty.md)
 12. [2026-09-17: native AppCUI pass implemented through published estate](/docs/log/12-2026-09-17-native-appcui-pass.md)
 13. [2026-09-17: mandated local reranker evidence for repository execution](/docs/log/13-2026-09-17-mandated-local-reranker.md)

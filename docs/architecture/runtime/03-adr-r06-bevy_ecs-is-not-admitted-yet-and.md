@@ -3,7 +3,7 @@ type: ADR
 title: docs/architecture/runtime.md, part 3 of 3
 description: Part 3 of /docs/architecture/runtime.md, in order; the index lists every part.
 resource: /docs/architecture/runtime/03-adr-r06-bevy_ecs-is-not-admitted-yet-and.md
-tags: [rocco, runtime, determinism, replay, ecs, bevy]
+tags: [larry, runtime, determinism, replay, ecs, bevy]
 generated: {by: claude-code, at: 2026-09-20}
 verified: {by: claude-code, method: cargo build/test/clippy/fmt, lgwks-deps check, check_governance.py, unittest, all local; no hosted CI}
 status: implementation-verified-locally-owner-integration-pending
@@ -13,7 +13,7 @@ sources: [/specification.md, /AGENTS.md, /contract/APPROVED.toml, /log.md, Direc
 # ADR-R06 — `bevy_ecs` is not admitted yet, and this change adds no dependency edge
 
 Status: **pending Director sign-off.** The runtime compiles against Rust `std`,
-`lgwks_std` and `rocco-contracts` only. `lgwks-deps check .` reports one
+`lgwks_std` and `larry-contracts` only. `lgwks-deps check .` reports one
 semantic approval and every authored external edge owned, with no new row.
 
 The dependency law in `/AGENTS.md` admits a new third-party crate only with an
@@ -23,7 +23,7 @@ Director's name would be a fabricated approval, which is the exact failure this
 register exists to prevent. The row text, ready to sign or to refuse, is in
 `/contract/APPROVED.toml` as a comment.
 
-`thiserror` is likewise not used here. Its register row names `rocco-contracts`
+`thiserror` is likewise not used here. Its register row names `larry-contracts`
 as the single `allowed_consumers` entry, so this crate hand-writes `Display` and
 `std::error::Error` rather than widening a signed row as a local convenience.
 
@@ -33,9 +33,9 @@ Local gates, run from the repository root on 2026-09-20:
 
 - `cargo build --bins --locked` — passed.
 - `cargo test --workspace --all-targets --locked` — 131 passed, 0 failed
-  (57 `rocco-contracts` unit, 12 `rocco-contracts` workspace, 30 `rocco-demo`
-  unit, 6 `rocco-demo` integration, 2 `rocco-runtime` unit, 8 `rocco-runtime`
-  determinism, 16 `rocco-runtime` lifecycle).
+  (57 `larry-contracts` unit, 12 `larry-contracts` workspace, 30 `larry-demo`
+  unit, 6 `larry-demo` integration, 2 `larry-runtime` unit, 8 `larry-runtime`
+  determinism, 16 `larry-runtime` lifecycle).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — passed.
 - `cargo fmt --all -- --check` — passed.
 - `lgwks-deps check .` — `OK . — 1 semantic approvals, every authored external

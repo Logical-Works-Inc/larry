@@ -38,9 +38,9 @@ after measuring ~566 KiB for the ten-command journey (~5.5 KiB per repaint,
 backend/model/persistence, no physical-Ryzen/fleet/human evidence; PTY
 journeys still drive F-key escape sequences where the harness sends them.
 
-## 2026-09-19: blocky Rocco raccoon mascot (Clawd-role translation)
+## 2026-09-19: blocky Larry raccoon mascot (Clawd-role translation)
 
-Director steering: Rocco must do for Logical Works what Clawd does for Claude
+Director steering: Larry must do for Logical Works what Clawd does for Claude
 Code — a quiet terminal companion whose adoption is psychological acceptance;
 "extremely cohesive to bring calm and create attachment"; blocky; same size as
 Clawd; canonical asset is the webp, not the SVG. Evidence gathered: ChatGPT
@@ -59,12 +59,12 @@ blink frame), emitting the `MASCOT` const for `src/native.rs` (half-block
 ▀/▄ rendering on Transparent cells, ANSI16 brand mapping — estate build has
 no TRUE_COLORS), a Codex pet package written to `~/.codex/pets/rocco/`
 (pet.json + spritesheet.webp, idle block with 2-frame blink), and
-`docs/rocco-mascot.svg`. The mascot perches centered on the empty Conversation
+`docs/larry-mascot.svg`. The mascot perches centered on the empty Conversation
 landing only, below the safe-fixture lines; it leaves once the conversation
 starts and never renders on terminals too small to hold it unclipped.
 Deliberate scoped exception to the Transparent rule: the 24x12 mascot cells
 paint brand colors (Black/Gray/White/Olive/Red); all UI chrome stays
-Transparent. Visual proof: docs/rocco-mascot.svg rendered and inspected in
+Transparent. Visual proof: docs/larry-mascot.svg rendered and inspected in
 BrowserOS (mask + eyes + muzzle + tongue read correctly).
 
 MEASURED: 9 native + 6 lib Rust tests pass (new: mascot perch/leave,

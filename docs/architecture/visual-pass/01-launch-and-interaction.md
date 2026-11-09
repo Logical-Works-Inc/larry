@@ -3,7 +3,7 @@ type: Design
 title: docs/architecture/visual-pass.md, part 1 of 3
 description: Part 1 of /docs/architecture/visual-pass.md, in order; the index lists every part.
 resource: /docs/architecture/visual-pass/01-launch-and-interaction.md
-tags: [rocco, demo, appcui, fixtures, evidence]
+tags: [larry, demo, appcui, fixtures, evidence]
 generated: {by: agent:rust-coder, at: 2026-09-17}
 updated: {by: agent:claude-code, at: 2026-09-18, note: Forge terminal language pass}
 verified: {by: agent:rust-coder, method: source inspection; execution receipts in log}
@@ -17,7 +17,7 @@ Requires Rust 1.98 and Python 3.11+ for verification:
 
 ```sh
 cargo build --locked
-cargo run --locked --bin rocco
+cargo run --locked --bin larry
 ```
 In the native UI, type `/next`, `/feedback bound retries`, `/next`,
 `/inspect 2`, `/next`, `/continue`, `/next`, `/quit`, each followed by Enter.
@@ -77,7 +77,7 @@ is preserved, and Forge's accent language — the part that makes the surface
 recognisable — is rendered.
 
 Forge's whimsical activity line and sensor dashboard do not map onto a
-fixture with no model and no telemetry, so they carry Rocco's real state
+fixture with no model and no telemetry, so they carry Larry's real state
 instead: the canary chip reports CLEAR/HELD/END from the actual work state, the
 activity suffix reads `DEMO fixture · no model called`, and the dashboard's
 Changes/Files/Agents tabs show the same synthetic events the JSON view does.
@@ -98,5 +98,5 @@ runaway-output bound moved 512 KiB to 1 MiB (`OUTPUT_BOUND` in
 and a crash closes the PTY and fails distinctly.
 sixteen messages are retained, evicting the oldest when full. Notes reject at
 sixteen without losing existing notes. The JSON driver remains available via
-`cargo run --locked --bin rocco-demo`; its EOF/quit exits, while oversized or invalid UTF-8 transport input exits
+`cargo run --locked --bin larry-demo`; its EOF/quit exits, while oversized or invalid UTF-8 transport input exits
 nonzero. Recoverable invalid commands emit an error and the unchanged view.

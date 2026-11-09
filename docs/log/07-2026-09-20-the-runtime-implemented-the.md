@@ -19,7 +19,7 @@ the question of whether an ECS world may ever hold authority; take the full C02
 runtime slice; update specification, this log, a new runtime ADR and the
 dependency register.
 
-Semantic change: `crates/rocco-runtime` is a new workspace member and the first
+Semantic change: `crates/larry-runtime` is a new workspace member and the first
 code in this repository that drives the C02 contract algebra rather than
 describing it. It is a deterministic, bounded tick over an append-only journal:
 admission with identity-based duplicate suppression, the pure authorization gate
@@ -42,8 +42,8 @@ implementation of C02, not a new decision, and the two open questions it raises
 are recorded in Cell 12 as open rather than ratified.
 
 Evidence: `cargo build --bins --locked` passed; `cargo test --workspace
---all-targets --locked` passed 131 tests (57 + 12 `rocco-contracts`, 30 + 6
-`rocco-demo`, 2 + 8 + 16 `rocco-runtime`); `cargo clippy --workspace
+--all-targets --locked` passed 131 tests (57 + 12 `larry-contracts`, 30 + 6
+`larry-demo`, 2 + 8 + 16 `larry-runtime`); `cargo clippy --workspace
 --all-targets --locked -- -D warnings` passed; `cargo fmt --all -- --check`
 passed; `lgwks-deps check .` returned `OK . — 1 semantic approvals, every
 authored external edge is owned`, with **no new registered edge**;

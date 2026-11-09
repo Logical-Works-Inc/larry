@@ -1,9 +1,9 @@
 ---
 type: Evidence
 title: C01 exact adapter, API and source-license manifest
-description: Sibling reuse contracts, license audit, ecosystem protocol boundaries, E57 obligations and runtime consumption recorded for Rocco work package C01.
+description: Sibling reuse contracts, license audit, ecosystem protocol boundaries, E57 obligations and runtime consumption recorded for Larry work package C01.
 resource: /docs/dependencies/ADAPTER-MANIFEST.md
-tags: [rocco, adapters, licenses, dependencies, evidence, c01]
+tags: [larry, adapters, licenses, dependencies, evidence, c01]
 generated: {by: opencode, at: 2026-09-16}
 updated: {by: agent:claude-code, at: 2026-09-18, note: one-repo consolidation corrected the consumption section}
 verified: {by: opencode, method: read sibling and lgwks Cargo.toml license fields, contract/APPROVED.toml and pinned-revision presence checks, ledger receipts and specification Cell 11 allocation lines; no integration executed}

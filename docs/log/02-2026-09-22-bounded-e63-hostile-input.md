@@ -12,7 +12,7 @@ sources: [Director conversations 2026-09-15 through 2026-09-17, /specification.m
 ---
 ## 2026-09-22: bounded E63 hostile-input runtime corpus
 
-Director direction: finish a bounded core slice from the current Rocco
+Director direction: finish a bounded core slice from the current Larry
 specification and live issues, using deep implementation research. Live issue
 #4 is architecture/governance-only and explicitly leaves runtime experiments
 NOT RUN, so it was not treated as authorization for a separate routing engine.
@@ -51,9 +51,9 @@ Receipts: `tools/receipts/20260922-c02-effect-binding-pre-exec-retry.json` and
 The first pre-exec attempt using the default Python failed before receipt
 creation because it lacked NumPy; the approved already-provisioned
 `/Users/srinji/.local/bin/python` rerun completed and wrote the retained
-receipt. Scoped `cargo clippy -p rocco-runtime --test hostile_input --locked
--- -D warnings`, `cargo test -p rocco-runtime --test hostile_input --locked`
-(4 passed), and `cargo check -p rocco-runtime --all-targets --locked` exit 0.
+receipt. Scoped `cargo clippy -p larry-runtime --test hostile_input --locked
+-- -D warnings`, `cargo test -p larry-runtime --test hostile_input --locked`
+(4 passed), and `cargo check -p larry-runtime --all-targets --locked` exit 0.
 The inherited root demo strict-lint failure remains outside this runtime slice;
 the final whole-workspace strict Clippy run reports 371 diagnostics in
 `src/native.rs` and `src/native/workspace.rs`. It prevents

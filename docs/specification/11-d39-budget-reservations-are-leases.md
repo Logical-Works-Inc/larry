@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 11 of 18
 description: Part 11 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/11-d39-budget-reservations-are-leases.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -50,16 +50,16 @@ Choose a reference-monitor contract in which the model can be replaced byte for
 byte by a hostile proposal generator. Security facts come only from protected
 runtime state and authenticated owner observations. Models, prompts, memory,
 plugins and tool payloads stay outside the trusted computing base; their failure
-may prevent useful work but cannot widen authority. E63; owner Rocco admission.
+may prevent useful work but cannot widen authority. E63; owner Larry admission.
 
 ### D43 — bind resolved effects and mediate them at their owners
 
 Choose canonical effect parsing and exact binding over approval of persuasive
-descriptions. Rocco admits; Secure-Authority supplies authenticated attenuated
+descriptions. Larry admits; Secure-Authority supplies authenticated attenuated
 authority; Nova contains processes, inherited handles, filesystem exposure, IPC
 and resources; Sentinel mediates actual egress; Moo resolves and integrates
 workspace objects; Logical-DB durably fences state. Wasmtime or another engine
-may be a Nova mechanism, never a second Rocco sandbox owner. Missing Nova hostile-
+may be a Nova mechanism, never a second Larry sandbox owner. Missing Nova hostile-
 code containment is `Unsupported`, including when `NativeTrusted` exists. E64/E65.
 
 ### D44 — provenance and compartment-scoped information flow are distinct
@@ -70,7 +70,7 @@ received, including retained state and control choices. A model cannot assert or
 remove those labels. Enforce at sinks; release is a narrow authorized transform
 or exact human declassification. Keep invocations and memory compartments small
 enough to avoid global taint explosion; reset or rebuild a compartment without
-discarding durable obligations. E66/E67; owner Rocco IFC with domain sinks.
+discarding durable obligations. E66/E67; owner Larry IFC with domain sinks.
 
 ### D45 — authorized compositions consume shared impact envelopes
 
@@ -95,7 +95,7 @@ owners Secure-Authority secret broker and Sentinel egress.
 Choose access filtering before retrieval and ranking, with scope on existence
 metadata, embeddings, summaries, KV caches, learning records, artifacts and
 notifications. Messages carry information-flow restrictions, not grants.
-Consensus and copying cannot manufacture release authority. E70; owner Rocco
+Consensus and copying cannot manufacture release authority. E70; owner Larry
 collaboration over Secure-Authority and Logical-DB.
 
 ### D48 — freshness and recovery are executable-owner fences

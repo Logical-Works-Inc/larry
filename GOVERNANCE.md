@@ -1,20 +1,21 @@
 ---
 type: Contract
 title: Larry repository governance
-description: Authority, change control, enforcement and evidence boundaries for Larry, version 1.3.
+description: Authority, change control, enforcement and evidence boundaries for Larry, version 1.4.
 resource: /GOVERNANCE.md
 tags: [governance, assurance, traceability, larry]
-generated: {by: claude-code, at: 2026-11-07}
-verified: {by: claude-code, method: gh repo view, the three workflow files and lgwks-deps check read 2026-11-07}
+generated: {by: claude-code, at: 2026-11-09}
+verified: {by: claude-code, method: the three workflow files, gh issue list and git log read 2026-11-09}
 status: active
-stale_after: 2026-12-07
-sources: [Director orders 2026-09-15 to 2026-11-06, /AGENTS.md, /specification.md, larry#68, larry#116, larry#133]
+stale_after: 2026-12-09
+sources: [Director orders 2026-09-15 to 2026-11-09, /AGENTS.md, /specification.md, larry#68, larry#116, larry#133, larry#177]
 ---
 
 # Larry governance
 
-Governance version 1.3 (2026-11-07): the public flip, runners by visibility, the dependency register gate
-and the falsifier order. Version 1.2 (2026-11-03) folded in the Logical-Works-Inc move, the Python ban, the
+Governance version 1.4 (2026-11-09): the falsifier ports landed, the action-pin gap filed, every
+document renamed Larry. Version 1.3 (2026-11-07): the public flip, runners by visibility, the dependency
+register gate and the falsifier order. Version 1.2 (2026-11-03) folded in the Logical-Works-Inc move, the Python ban, the
 120-line law, the dependency relaxation, the kernel absorption and the HL3 license. AGENTS.md is the operating entry point; specification.md owns product
 requirements; research-ledger.md owns source claims; log.md owns accepted directions up to 2026-10-13;
 INVARIANTS.md owns runtime rules and their tests; the product plan owns the order of work; LICENSE owns the
@@ -86,8 +87,10 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 
 The three workflows (`ci`, `governance`, `sim`) pick their runner from the repository's visibility
 (larry#116): `ubuntu-latest` now that it is public, never self-hosted on a public repository; read-only
-permissions and finite timeouts. `main` has no branch protection and no ruleset (read 2026-11-03): CODEOWNERS routes review but enforces
-nothing, so the merge gate is the green CI run plus the guard. Re-read protection before each delivery and
+permissions and finite timeouts. `main` has no branch protection; the organization ruleset
+`protect-default-branch` (active, no bypass) refuses only a force push and a deletion of it (read
+2026-11-09). It requires no check or review, and CODEOWNERS routes review but enforces nothing, so the
+merge gate is the green CI run plus the guard. Re-read protection before each delivery and
 never claim enforcement GitHub does not apply.
 
 ## Open governance debt
@@ -96,11 +99,14 @@ never claim enforcement GitHub does not apply.
 - larry#68 Track 1: row 1 (clock, ADR 0016), row 2 (the journal file on `RecordJournal`, ADR 0023), row 3
   (the fence on `broker`, ADR 0024), row 4 (gate, ADR 0018) and row 5 (effect retry, ADR 0017) run on
   lgwks_bot. Rows 6 and 7 (#79 projection, #80 tick and consumer) stay review-only until they land.
-- Step 4 wired the runtime into the run path (#164) and E47 landed as #101 (PR #166). Falsifier PRs #21
-  (E28), #22 (E71) and #25 (E30) port onto main with the recipe on PR #20. PR #50 merged 2026-11-03.
-- Supply chain (larry#170, 2026-11-09): `cargo audit` reads RustSec locally; Dependabot shows no alert and no
-  code scanning analysis exists. The `rust` job in ci.yml still uses mutable action tags; pinning it needs
-  the Director to name ci.yml.
+- Step 4 wired the runtime into the run path (#164). The falsifier PRs are ported and closed: E47 as #166
+  (PR #20), E28 as #174 (PR #21), E71 as #175 (PR #22), E30 as #176 (PR #25).
+- Supply chain (larry#170; re-read 2026-11-09): `cargo audit` (0.22.2) finds no vulnerability and one allowed
+  warning, `paste` 1.0.15 unmaintained (RUSTSEC-2024-0436); Dependabot shows no alert and no code scanning
+  analysis exists. `lgwks-deps freshness .` finds 83 locked packages behind, every one through a lgwks_* crate.
+- Gap larry#177: the `rust` job in ci.yml runs `actions/checkout@v4`, `dtolnay/rust-toolchain@stable` and
+  `Swatinem/rust-cache@v2` by mutable tag; every other action is SHA-pinned. Director 2026-11-09: not pinned
+  yet, marked as a gap.
 
 Every runtime acceptance claim still needs full behaviour and failure coverage, declared resource limits,
 retained failures, physical baselines, cross-tenant tests and the real delivery endpoint. Until then those

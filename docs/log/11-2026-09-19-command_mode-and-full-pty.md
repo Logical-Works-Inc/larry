@@ -46,7 +46,7 @@ Forge region structure read from `forge-tui/src/render.rs` — transcript, a
 one-row input line (`❯` prompt, right-pinned dim hint), a rule, and a two-row
 MI/MD status hub, with a right-hand dashboard at Forge's 100-column threshold
 holding its 34% share behind a left rule. Forge's activity line and sensor
-dashboard carry Rocco's real fixture state (CLEAR/HELD/END canary, `DEMO
+dashboard carry Larry's real fixture state (CLEAR/HELD/END canary, `DEMO
 fixture · no model called`); no cost, latency or sensor number is invented.
 Forge remains reference reading only: no Forge code is imported, copied or
 ported, per the Director correction of 2026-09-16. Simulated paths stay

@@ -24,7 +24,7 @@ can repair from inside.
 The estate already answers this. Every sibling repository runs a self-hosted
 runner on this machine, each installed as a user LaunchAgent under
 `~/Library/LaunchAgents`, and their workflows ask for it with
-`runs-on: [self-hosted, macOS, ARM64]`. Rocco was the only repository without
+`runs-on: [self-hosted, macOS, ARM64]`. Larry was the only repository without
 one. A runner is now registered to this repository as `rocco-macos-arm64`
 (labels `self-hosted, macOS, ARM64` plus the repository label), installed the
 same way, and both workflows ask for it.

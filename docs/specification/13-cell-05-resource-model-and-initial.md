@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 13 of 18
 description: Part 13 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/13-cell-05-resource-model-and-initial.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval

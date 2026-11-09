@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 7 of 18
 description: Part 7 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/07-d17-collaboration-federates-contracts.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -91,8 +91,8 @@ Choose contracts first and exact revision/artifact pins after compatibility
 testing. Foundation surfaces are `std`, `lgwks_std`, `lgwks_bot`, `lgwks_deps`,
 with `lgwks_ast` as the existing parser. Third-party dependencies go through
 the estate's admission/storefront process. No copied vendor tree or dual engine.
-Moo's current SQLite implementation does not license Rocco to introduce a second
-SQLite store; consume Moo's workspace contract while Rocco persists through
+Moo's current SQLite implementation does not license Larry to introduce a second
+SQLite store; consume Moo's workspace contract while Larry persists through
 Logical-DB. Never call a sibling production-ready from its name or README.
 Missing semantics are integration work in their owner, not an excuse to duplicate
 them. E22; owner integration/reuse ledger.

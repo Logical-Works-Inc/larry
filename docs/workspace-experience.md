@@ -1,6 +1,6 @@
 ---
 type: ADR
-title: Board-first Rocco workspace
+title: Board-first Larry workspace
 description: Multi-step workspace, attention contract, and explicit demo-to-owner truth path.
 resource: /docs/workspace-experience.md
 tags: [architecture, experience, workspace, evidence]
@@ -13,7 +13,7 @@ sources: [/specification.md, /research-ledger.md, /log.md, Director instructions
 
 # Outcome and authority
 
-The Director requests an ADHD-friendly, lightweight workspace with Rocco the
+The Director requests an ADHD-friendly, lightweight workspace with Larry the
 system and an AI, not a chat page decorated with a dashboard. Start with a
 mini-Jira Kanban state update; opening work automatically invokes Continue.
 Moo powers the workspace. The Director explicitly authorizes one backend

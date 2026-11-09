@@ -108,7 +108,7 @@ Local gate verification: checker passed with 70 requirements, 35 decisions,
 passed 34 tests. Four tests drive isolated Python subprocess journeys: successful
 CLI, failing CLI, JSON report and actual SIGKILL followed by successful re-run
 with unchanged document digests. One of four is a crash/recovery journey for the
-read-only GOVERNANCE CHECKER, not evidence that any Rocco runtime crash case passed.
+read-only GOVERNANCE CHECKER, not evidence that any Larry runtime crash case passed.
 No test changes the repository documents. `git diff --check` passed locally.
 
 Structural coverage remains separately labeled: the standard-library in-process

@@ -3,7 +3,7 @@ type: Design
 title: specification.md, part 17 of 18
 description: Part 17 of /specification.md, in order; the index lists every part.
 resource: /docs/specification/17-cell-11-completion-sequence-and.md
-tags: [rocco, prd, architecture, continuity, efficiency, reinforcement-learning]
+tags: [larry, prd, architecture, continuity, efficiency, reinforcement-learning]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: bounded source inspection and external critique; not runtime verification}
 status: final-proposed-v1.2-awaiting-architecture-approval
@@ -87,7 +87,7 @@ require sibling work, but this governance task does not authorize those edits.
 
 ## Cell 12 — unresolved decisions and approval package
 
-**Director-settled:** Rocco working name and private documentation repository;
+**Director-settled:** the Larry name (Rocco until 2026-11-06) and one repository;
 core + TUI first; bounded unattended work; adapters rather than clones; defer
 memory implementation until Logical-DB is ready; adjustable automatic decay and
 user-facing behavioral scales. Strict self-updating governance applies to this

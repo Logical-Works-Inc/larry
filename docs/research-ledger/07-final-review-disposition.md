@@ -3,7 +3,7 @@ type: Research
 title: research-ledger.md, part 7 of 7
 description: Part 7 of /research-ledger.md, in order; the index lists every part.
 resource: /docs/research-ledger/07-final-review-disposition.md
-tags: [rocco, research, codegraph, evidence, persona]
+tags: [larry, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
 status: specification-v1.2-source-review-complete-runtime-unverified

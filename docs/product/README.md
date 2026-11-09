@@ -5,7 +5,7 @@ description: What Larry ships against Copilot, Muse, Duet, Dots and Harness², i
 resource: /docs/product/README.md
 tags: [larry, product, competitors, copilot, operator, executor, learning]
 generated: {by: claude-code, at: 2026-11-03}
-verified: {by: claude-code, method: plan-v1 of 2026-10-22 reconciled against ~/.codex/AGENTS.md, province#3 to #10 and logic-os-kernel#850; no runtime run}
+verified: {by: claude-code, method: plan-v1 of 2026-10-22 reconciled against ~/.codex/AGENTS.md, province#3 to #10 and logic-os-kernel#850; track state re-read from git log and gh 2026-11-09; no runtime run}
 status: plan-v2
 stale_after: 2026-12-03
 sources:
@@ -27,11 +27,11 @@ proven; the date is the worst case. Requirement and decision IDs stay owned by /
 
 | Ruling | Effect on this plan |
 |---|---|
-| Larry renamed to Larry; Larry now names an embedded harness that cannot speak (2026-10-26) | Face 1, the no-model dock, is Larry's. Larry keeps Faces 2 and 3 and hands low-confidence dock sessions in. |
+| Rocco renamed to Larry; Rocco now names an embedded harness that cannot speak (2026-10-26; repository renamed 2026-11-06, ADR 0005) | Face 1, the no-model dock, is Rocco's. Larry keeps Faces 2 and 3 and takes in the dock's low-confidence sessions. |
 | Repos moved to Logical-Works-Inc (2026-11-03); public alpha (2026-11-06) | Larry is `Logical-Works-Inc/larry`, public, HL3, no contributions. |
 | Kernel deprecated by absorption; one owner per capability (logic-os-kernel#850, province#4, #7) | Larry's own journal and fold move onto `lgwks_bot`; authority comes from secure-authority. |
 | Revenue gate (province#5): nothing off the revenue slice's critical path | Face 2 is the agent gateway of the revenue slice (moo#184) and moves ahead of Face 3. |
-| Newest estate pins and `gap` issues (2026-11-03) | lgwks_std 4.0.2, lgwks_deps 6.1.0 and lgwks_bot 7.1.1 pinned in this change; thiserror cites crates#842. |
+| Newest estate pins and `gap` issues (2026-11-03) | Every change moves to the newest release: lgwks_std 4.1.1, lgwks_deps 6.2.1 and lgwks_bot 8.1.1 on 2026-11-09; thiserror cites crates#842. |
 | Python banned in product repos (2026-10-13) | The governance tooling ports to Rust (larry#53) before more tooling is added. |
 | Harness² published (larry#60) | Measurable learning is a track with a matched benchmark, not a README promise. |
 | HL3 ordered (2026-11-03) | LICENSE is HL3-FULL plus Part B; Part B's Safeguards are product requirements, not just terms. |
@@ -54,10 +54,10 @@ open-ended browsing, a journal the company can replay bit-identically, and model
 
 [The ship checklist](/docs/product/SHIP.md) is each track's issues in ship order; a shipping PR ticks its line.
 
-**Track 0, estate alignment.** This change: HL3 license, newest pins, governance 1.2, INVARIANTS.md,
-this plan. Next: larry#53 (Rust governance checker, tracker, PTY journeys, reranker on lgwks_deps ML
-features, pixel tool, over-size documents split) and the falsifier PRs #20, #21, #22, #25, #50 rebased
-and merged on green or closed with a reason.
+**Track 0, estate alignment.** Shipped: HL3 license, newest pins, governance 1.2 to 1.4, INVARIANTS.md,
+this plan, larry#53 (Rust governance checker, tracker, PTY journeys, reranker on lgwks_deps ML features,
+pixel tool, over-size documents split) and the rename (larry#131, #178). The falsifier PRs are merged or
+ported and closed: #50 merged; #20, #21, #22 and #25 ported as #166, #174, #175 and #176.
 
 **Track 1, the runtime on the estate.** Move the journal, deterministic tick and projection onto
 `lgwks_bot`'s journal and ECS world through `lgwks_bot::app`, keeping every rule in INVARIANTS.md and every
@@ -66,7 +66,8 @@ existing falsifier green before and after. Authority checks consume secure-autho
 logicalworks-crates and ported there with its tests, never kept as a second copy here. The crate's
 2026-10-26 deprecation is lifted (Director 2026-11-03: "Larry-runtime can be edited and it should be
 decoupled"); larry#68 is the port map, one row per PR, and its first row keeps the test doubles out of
-every shipped build.
+every shipped build. Clock, journal file, fence, gate and retry run on lgwks_bot (#74 to #78); the
+projection (#79) and the tick and consumer (#80) are the rows left.
 
 **Track 2, Face 2: the operator agent (the Copilot answer).** The revenue slice's agent gateway (moo#184).
 A model limited to each app's manifest of typed actions with a risk class. Reads run in the client;
@@ -86,8 +87,8 @@ Canada, so customer data never takes this path; Face 2 picks a host per tenant.
 propose, probe and compose run as journalled steps; no grader verdict reaches the improver; lessons live
 in Logical-DB per tenant. Never a fork or wrapper of Harness² (Python, file-tree state).
 
-**Larry handoff.** Larry's dock (page-transition Markov chain plus BM25 over walkthroughs, extending
-lgwks-frontend `src/lib/larry-rank.js`) hands a low-confidence session to Larry's Face 2 with its context.
+**Rocco handoff.** Rocco's dock (page-transition Markov chain plus BM25 over walkthroughs, extending
+lgwks-frontend `src/lib/rocco-rank.js`) hands a low-confidence session to Larry's Face 2 with its context.
 
 ## Falsifiers
 

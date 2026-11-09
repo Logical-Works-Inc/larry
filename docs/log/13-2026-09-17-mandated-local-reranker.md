@@ -12,7 +12,7 @@ sources: [Director conversations 2026-09-15 through 2026-09-17, /specification.m
 ---
 ## 2026-09-17: mandated local reranker evidence for repository execution
 
-Director direction: Rocco repository work now uses the local,
+Director direction: Larry repository work now uses the local,
 on-demand `tools/rerank_local.py` before and after non-read-only execution.
 The tool pins `Qwen/Qwen3-Reranker-0.6B` at
 `e61197ed45024b0ed8a2d74b80b4d909f1255473`, accepts already access-filtered
@@ -74,7 +74,7 @@ unchanged authority and no stronger-model/cloud fallback. The Ryzen 3 4300U
 8 GiB and 4 GiB profiles, local-admission p95 <=50 ms and human estimate of 0–1
 routine interventions are targets, NOT RUN measurements.
 
-No Rust file changed in Rocco, Secure-Authority or Nova. No runtime, model,
+No Rust file changed in Larry, Secure-Authority or Nova. No runtime, model,
 hardware, coverage, fleet or human result is claimed. The prior Wasmtime owner
 assumption was corrected before specification delivery: an engine can only be a
 Nova implementation mechanism. Failed research/browser receipts and source limits

@@ -1,9 +1,9 @@
 ---
 type: Research
-title: Rocco research and reuse ledger
+title: Larry research and reuse ledger
 description: Bounded source inspection, primary-source receipts and external review dispositions; not runtime acceptance.
 resource: /research-ledger.md
-tags: [rocco, research, codegraph, evidence, persona]
+tags: [larry, research, codegraph, evidence, persona]
 generated: {by: opencode, at: 2026-09-15}
 verified: {by: opencode, method: CodeGraph current source and browser or GitHub API reads}
 status: specification-v1.2-source-review-complete-runtime-unverified
