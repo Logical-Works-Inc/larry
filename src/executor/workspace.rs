@@ -208,7 +208,8 @@ pub(crate) fn seed_origin(state: &Path, path_env: &str, dir: &Path) -> Result<()
 
 /// Whether the executor that named `task_id` (`<digest>-<pid>-<counter>`) may still be running:
 /// its pid is this process or a live one. A name that carries no pid is not a run's.
-fn owner_alive(task_id: &str) -> Result<bool, ExecError> {
+/// The workspace sweep and the journal recovery (larry#75) both ask it.
+pub(crate) fn owner_alive(task_id: &str) -> Result<bool, ExecError> {
     let Some(pid) = task_id
         .split('-')
         .nth(1)

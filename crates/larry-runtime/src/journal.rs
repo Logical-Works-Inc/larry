@@ -15,8 +15,19 @@
 //! The journal never grows without bound: it has a fixed entry ceiling and
 //! refuses the append that would exceed it. Refusal is backpressure, not a
 //! silent drop (Cell 05).
+//!
+//! A journal opened with [`Journal::open`] is durable (larry#75): each entry
+//! the index takes is staged, and [`Journal::sync`] puts every staged entry in
+//! its `lgwks_bot::journal::RecordJournal` file in one write and one sync. The
+//! runtime syncs before every owner reach and before every tick returns, so no
+//! fact an owner or a caller saw is ever missing from the file; the next open
+//! replays it through the same acceptance rules. [`Journal::new`] stays
+//! memory-only, and a clone is always memory-only: the file has one writer.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+
+mod durable;
 
 use larry_contracts::command::{Command, CommandAcceptance, accept};
 use larry_contracts::event::{Event, EventSequence, assign_sequence, validate_append};
@@ -40,7 +51,7 @@ pub enum JournalEntry {
 /// [`BTreeMap`], never a `HashMap`, so no operation on the journal depends on
 /// hash iteration order. That is a determinism requirement, not a style
 /// preference.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Journal {
     /// Recorded facts in append order.
     entries: Vec<JournalEntry>,
@@ -52,9 +63,103 @@ pub struct Journal {
     pub(crate) consumer_index: crate::consumer::ConsumerIndex,
     /// Maximum retained entries.
     capacity: usize,
+    /// The file every entry reaches before the index, when opened durable.
+    durable: Option<durable::Backing>,
+}
+
+impl Clone for Journal {
+    /// The same history, memory-only: the file keeps its one writer, so a
+    /// clone never appends to it.
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            command_index: self.command_index.clone(),
+            last_sequence: self.last_sequence.clone(),
+            consumer_index: self.consumer_index.clone(),
+            capacity: self.capacity,
+            durable: None,
+        }
+    }
 }
 
 impl Journal {
+    /// Opens the durable journal at `path`, bounded to `capacity` entries,
+    /// creating the file when it is absent and replaying every entry it holds.
+    ///
+    /// Each replayed entry passes the same rules a live append does: a command
+    /// identity is accepted once, events are gap-free per run, and digests are
+    /// re-derived from the parts. A torn tail a killed writer left is taken
+    /// back by the store before replay.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Durable`] when the store refuses (another writer holds
+    /// the file, committed bytes break the chain, a ceiling, the device),
+    /// [`RuntimeError::Codec`] for a record that does not decode,
+    /// [`RuntimeError::DurableRepeat`] for a command recorded twice,
+    /// [`RuntimeError::Sequence`] for an event out of order, and
+    /// [`RuntimeError::JournalFull`] when the file holds more than `capacity`.
+    pub fn open(path: &Path, capacity: usize) -> Result<Self, RuntimeError> {
+        let mut journal = Self::new(capacity)?;
+        let (backing, entries) = durable::Backing::open(path)?;
+        for (index, entry) in entries.into_iter().enumerate() {
+            match entry {
+                JournalEntry::Command(command) => {
+                    if journal.accept_command(command)? != CommandAcceptance::Initial {
+                        return Err(RuntimeError::DurableRepeat { index });
+                    }
+                }
+                JournalEntry::Event(event) => journal.record(event)?,
+            }
+        }
+        journal.durable = Some(backing);
+        Ok(journal)
+    }
+
+    /// Whether this journal is backed by a file (test inspection).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn is_durable(&self) -> bool {
+        self.durable.is_some()
+    }
+
+    /// How many entries the index holds that the file has not synced yet;
+    /// always zero for a memory-only journal (test inspection).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn unsynced(&self) -> usize {
+        match self.durable.as_ref() {
+            Some(backing) => backing.unsynced(),
+            None => 0,
+        }
+    }
+
+    /// Puts every entry taken since the last sync in the file, in one write
+    /// and one sync. A memory-only journal, or one with nothing staged, is a
+    /// no-op that touches no device.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Durable`] when the store refuses or cannot say whether
+    /// the bytes landed, after which every later sync refuses too, and
+    /// [`RuntimeError::DurabilityShort`] when its promise is under a crash.
+    pub(crate) fn sync(&mut self) -> Result<(), RuntimeError> {
+        match self.durable.as_mut() {
+            Some(backing) => backing.sync(),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether opening took back an append a killed writer never finished
+    /// (test inspection).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn torn_tail_repaired(&self) -> bool {
+        self.durable
+            .as_ref()
+            .is_some_and(durable::Backing::torn_tail_repaired)
+    }
+
     /// A journal bounded to `capacity` entries.
     ///
     /// # Errors
@@ -72,6 +177,7 @@ impl Journal {
             command_index: BTreeMap::new(),
             last_sequence: BTreeMap::new(),
             capacity,
+            durable: None,
         })
     }
 
@@ -181,9 +287,10 @@ impl Journal {
         let acceptance = accept(self.command(command.id()), &command)?;
         if acceptance == CommandAcceptance::Initial {
             self.reserve_one()?;
+            let id = command.id();
             let index = self.entries.len();
-            self.command_index.insert(command.id(), index);
-            self.append_indexed(JournalEntry::Command(command));
+            self.append_indexed(JournalEntry::Command(command))?;
+            self.command_index.insert(id, index);
         }
         Ok(acceptance)
     }
@@ -199,15 +306,26 @@ impl Journal {
         let run = event.run();
         validate_append(self.last_sequence(run), event.sequence())?;
         self.reserve_one()?;
-        self.last_sequence.insert(run, event.sequence());
-        self.append_indexed(JournalEntry::Event(event));
+        let sequence = event.sequence();
+        self.append_indexed(JournalEntry::Event(event))?;
+        self.last_sequence.insert(run, sequence);
         Ok(())
     }
 
-    /// Publishes the derived descriptor and the accepted fact together.
-    fn append_indexed(&mut self, entry: JournalEntry) {
+    /// Stages the accepted fact for the file first, when there is one, then
+    /// publishes the derived descriptor and the fact together.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Codec`] when the entry does not encode; the index has
+    /// not taken the entry.
+    fn append_indexed(&mut self, entry: JournalEntry) -> Result<(), RuntimeError> {
+        if let Some(backing) = self.durable.as_mut() {
+            backing.stage(&entry)?;
+        }
         self.consumer_index.record(&entry, self.entries.len());
         self.entries.push(entry);
+        Ok(())
     }
 
     /// Refuses an append once the configured entry bound is reached.

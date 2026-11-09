@@ -127,6 +127,8 @@ pub enum ExecError {
     },
     /// The admission gate refused to run the task.
     Gate(RuntimeError),
+    /// The task journals directory could not be created, listed or tidied (larry#75).
+    Journals(std::io::Error),
 }
 
 impl fmt::Display for ExecError {
@@ -176,6 +178,7 @@ impl fmt::Display for ExecError {
                 ref fault,
             } => write!(out, "exec could not write {path}: {fault}"),
             Self::Gate(ref cause) => write!(out, "exec gate: {cause}"),
+            Self::Journals(ref cause) => write!(out, "exec journals: {cause}"),
         }
     }
 }
@@ -199,6 +202,7 @@ impl std::error::Error for ExecError {
             Self::ModelConfig(ref cause) => Some(cause),
             Self::Author { ref fault, .. } => Some(fault),
             Self::Gate(ref cause) => Some(cause),
+            Self::Journals(ref cause) => Some(cause),
             Self::KeyMissing
             | Self::ModelUnconfigured
             | Self::StateDirUnset
@@ -359,6 +363,8 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let key = ledger.signing_key()?;
     ledger.reap()?;
     sweep(&settings.state_dir, &ledger.live_tasks()?)?;
+    // Every journal a killed executor left is settled before a new task runs (larry#75).
+    gate::recover(&settings.state_dir, &settings.policy)?;
     let task_id = fresh_task_id(task.bytes());
     let task_digest = digest_hex(task.bytes());
     if task.has_model_commands() {

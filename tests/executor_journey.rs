@@ -150,6 +150,11 @@ fn a_passing_and_a_failing_command_report_their_exit_codes() -> TestResult {
         );
     }
     samples.sort();
+    assert_eq!(
+        journals(state.path(), "journal")?.len(),
+        0,
+        "a returned task removes its journal (larry#75)"
+    );
     let mut err = io::stderr().lock();
     writeln!(
         err,
@@ -316,6 +321,103 @@ fn a_kill_9_of_the_executor_is_reaped_by_the_next_start() -> TestResult {
         rows, 0,
         "the live_groups table must be empty after the reap"
     );
+    Ok(())
+}
+
+/// The files under `<state>/journals` with extension `ext`, sorted.
+fn journals(state: &Path, ext: &str) -> Result<Vec<std::path::PathBuf>, Box<dyn Error>> {
+    let mut found = Vec::new();
+    let listing = match fs::read_dir(state.join("journals")) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in listing {
+        let path = entry?.path();
+        if path.extension() == Some(OsStr::new(ext)) {
+            found.push(path);
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+#[test]
+fn a_kill_9_mid_task_leaves_a_journal_the_next_start_restores_without_rerunning() -> TestResult {
+    // larry#75: SIGKILL inside the task body, then a torn append on top of the
+    // file. The next start takes the torn tail back, restores the dead run,
+    // settles it as unknown and keeps the file; the body never runs again.
+    // Source: write-ahead-log recovery (replay, truncate the torn tail) and the
+    // RequiresHuman rule that an ambiguous reach is never retried blind.
+    use larry_contracts::state::RunState;
+    use larry_runtime::journal::Journal;
+    use larry_runtime::projection::{FoldProjection, ProjectionBackend};
+    use larry_runtime::runtime::replay;
+
+    let (state, origin) = fixture()?;
+    let scratch = TempDir::new()?;
+    let ready = scratch.path().join("ready");
+    let hold = scratch.path().join("hold");
+    let marker = scratch.path().join("ran");
+    make_fifo(&ready)?;
+    make_fifo(&hold)?;
+    let acceptance = format!(
+        r#"[["sh","-c","echo ran >> {}; echo up > {}; cat < {}"]]"#,
+        marker.display(),
+        ready.display(),
+        hold.display()
+    );
+    let task = task_json(origin.path(), "HEAD", &acceptance);
+    let mut child = spawn_exec(Some(state.path()), None, &task)?;
+    let _ready_open = fs::File::open(&ready)?;
+    child.kill()?;
+    child.wait()?;
+
+    let left = journals(state.path(), "journal")?;
+    if left.len() != 1 {
+        return Err(format!("the killed task leaves one journal, found {left:?}").into());
+    }
+    let journal = left.first().ok_or("one journal")?;
+    let whole = fs::read(journal)?;
+    assert!(!whole.is_empty(), "the killed task's facts are on disk");
+    let torn = whole.get(..7).ok_or("the journal holds a frame")?;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(journal)?
+        .write_all(torn)?;
+
+    let next = task_json(origin.path(), "HEAD", "[]");
+    report_of(&run_exec(state.path(), &next, None)?)?;
+    assert_eq!(
+        journals(state.path(), "journal")?,
+        Vec::<std::path::PathBuf>::new(),
+        "no journal is left running: the dead one is recovered, the new one removed"
+    );
+    let recovered = journal.with_extension("recovered");
+    assert_eq!(
+        journals(state.path(), "recovered")?,
+        vec![recovered.clone()],
+        "the dead task's journal is kept as recovered"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker)?,
+        "ran\n",
+        "the recovered task's body never runs again"
+    );
+
+    // Opening it again replays cleanly: the recovery took the torn tail back.
+    let kept = Journal::open(&recovered, 4096)?;
+    let mut folded = FoldProjection::default();
+    replay(&mut folded, &kept)?;
+    let runs = folded.run_ids();
+    assert_eq!(runs.len(), 1, "the dead task's one run is restored");
+    for id in runs {
+        assert_eq!(
+            folded.run_state(id),
+            Some(RunState::OutcomeUnknown),
+            "the dead run settles as unknown, never as done or retried"
+        );
+    }
     Ok(())
 }
 

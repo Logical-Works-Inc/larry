@@ -1,20 +1,33 @@
 //! Seeded crash-and-restore simulations (E19, E72, E02).
 //! Every test crashes the real `Runtime` by taking its journal, restores a
 //! fresh runtime, and asserts the same trace on two identical runs.
+//!
+//! The file family crashes harder (larry#75): the runtime
+//! is dropped over a journal opened on disk, so only what lgwks_bot's
+//! `RecordJournal` synced survives, and a kill inside an append is the prefix
+//! of a real frame left at the tail. Source: the write-ahead-log recovery
+//! rule (replay the log, truncate a torn tail at the first invalid frame, refuse
+//! committed bytes that break the chain) and crates#875.
 
 mod sim_kit;
 mod support;
 
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use larry_contracts::authority::Scope;
 use larry_contracts::effect::ReconciliationStrategy;
-use larry_contracts::ids::ContentDigest;
+use larry_contracts::ids::{ContentDigest, TenantId};
 use larry_contracts::state::RunState;
 use larry_runtime::error::RuntimeError;
+use larry_runtime::journal::{Journal, JournalEntry};
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::projection::replay_authorizations;
 use larry_runtime::runtime::restore;
-use sim_kit::{Offer, Sim, dispatch, read_work, reader, reopen, replay, trace};
+use lgwks_bot::journal::JournalError;
+use sim_kit::{Offer, Sim, dispatch, read_work, reader, reopen, replay, trace, work};
 use support::{
     TestRuntime, assert_state, cancel, clock, command_id, operation, proposal, run, runtime_with,
     settings, submit, succeeded, tenant, unknown,
@@ -434,5 +447,189 @@ fn sim_crash_unknown_permanent_stays_unknown() -> Outcome {
         let restored = reopen(runtime.into_journal(), 100)?;
         assert_state(restored.projection(), run(23), RunState::OutcomeUnknown)?;
         Ok(trace(restored.journal()))
+    })
+}
+
+/// A journal file for `name` and `seed` in the OS temporary directory, absent
+/// when the drive starts so both replays of a seed start from nothing.
+fn journal_file(name: &str, seed: u64) -> Sim<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "larry-sim-{}-{name}-{seed}.journal",
+        std::process::id()
+    ));
+    remove(&path)?;
+    Ok(path)
+}
+
+/// Removes `path` if it exists.
+fn remove(path: &Path) -> Sim<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The `FileRead` runtime over the durable journal at `path`, replaying what
+/// the file already holds.
+fn durable(owner: ScriptedOwner, path: &Path) -> Sim<TestRuntime> {
+    let settings = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
+    let journal = Journal::open(path, settings.journal_capacity)?;
+    Ok(restore(settings, owner, clock()?, journal)?)
+}
+
+/// The tenant an entry is recorded under.
+fn tenant_of(entry: &JournalEntry) -> Option<TenantId> {
+    match *entry {
+        JournalEntry::Command(ref command) => Some(command.tenant()),
+        JournalEntry::Event(ref event) => Some(event.tenant()),
+        _ => None,
+    }
+}
+
+/// larry#75: dropping the runtime loses no acknowledged entry; the file
+/// reopens to the same trace, the run finishes, and the finish is on disk too.
+#[test]
+fn sim_crash_restore_from_the_file_after_a_drop_keeps_every_acknowledged_entry() -> Outcome {
+    replay(160_u64..168, |seed| -> Sim<ContentDigest> {
+        let path = journal_file("drop", seed)?;
+        let mut runtime = durable(ScriptedOwner::scripted([unknown(operation(24))]), &path)?;
+        let strat = ReconciliationStrategy::Queryable;
+        dispatch(&mut runtime, 24, 24, &[Scope::FileRead], 5, strat)?;
+        let before = (trace(runtime.journal()), runtime.journal().len());
+        drop(runtime);
+        let mut restored = durable(ScriptedOwner::scripted([succeeded(operation(24))]), &path)?;
+        assert_eq!(
+            (trace(restored.journal()), restored.journal().len()),
+            before,
+            "seed {seed}: the file holds every acknowledged entry"
+        );
+        assert_eq!(
+            restored.tick()?.reconciled(),
+            &[operation(24)],
+            "seed {seed}: the reopened run reconciles"
+        );
+        assert_state(restored.projection(), run(24), RunState::Completed)?;
+        let after = trace(restored.journal());
+        drop(restored);
+        assert_eq!(
+            trace(&Journal::open(&path, 4096)?),
+            after,
+            "seed {seed}: the reconciliation reached the file"
+        );
+        remove(&path)?;
+        Ok(after)
+    })
+}
+
+/// larry#75: a kill inside an append leaves part of a frame; the next open
+/// takes it back, keeps every acknowledged entry and the run restores.
+#[test]
+fn sim_a_torn_tail_is_taken_back_and_the_run_restores() -> Outcome {
+    replay(168_u64..176, |seed| -> Sim<(ContentDigest, u64)> {
+        let path = journal_file("torn", seed)?;
+        let mut runtime = durable(ScriptedOwner::scripted([unknown(operation(25))]), &path)?;
+        let strat = ReconciliationStrategy::Queryable;
+        dispatch(&mut runtime, 25, 25, &[Scope::FileRead], 5, strat)?;
+        let before = trace(runtime.journal());
+        drop(runtime);
+        let whole = fs::read(&path)?;
+        let length = u64::try_from(whole.len())?;
+        // The prefix of a real frame, 1 to 40 bytes by seed: what an append
+        // the kill interrupted leaves behind.
+        let torn = usize::try_from(seed % 40)?.saturating_add(1);
+        let partial = whole.get(..torn).ok_or("the file holds a frame")?;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(partial)?;
+        let restored = durable(ScriptedOwner::new(), &path)?;
+        assert_eq!(
+            trace(restored.journal()),
+            before,
+            "seed {seed}: every acknowledged entry survives"
+        );
+        assert_eq!(
+            fs::metadata(&path)?.len(),
+            length,
+            "seed {seed}: the partial frame is gone from the file"
+        );
+        assert_state(restored.projection(), run(25), RunState::Reconciling)?;
+        drop(restored);
+        remove(&path)?;
+        Ok((before, length))
+    })
+}
+
+/// larry#75: two tenants' journals are two files; after a crash each file
+/// holds only its own tenant's entries and runs.
+#[test]
+fn sim_two_tenants_journals_stay_separate_across_a_crash() -> Outcome {
+    replay(176_u64..184, |seed| -> Sim<Vec<ContentDigest>> {
+        let paths = [
+            journal_file("tenant-1", seed)?,
+            journal_file("tenant-2", seed)?,
+        ];
+        let strat = ReconciliationStrategy::IdempotentRetrySafe;
+        for (n, path) in (1_u8..).zip(&paths) {
+            let mut runtime = durable(ScriptedOwner::scripted([succeeded(operation(n))]), path)?;
+            runtime.offer(n, &work(n, n, n, 1, strat))?;
+            runtime.tick()?;
+        }
+        let mut traces = Vec::new();
+        for (n, path) in (1_u8..).zip(&paths) {
+            let restored = durable(ScriptedOwner::new(), path)?;
+            let journal = restored.journal();
+            assert!(!journal.is_empty(), "seed {seed}: tenant {n} recorded");
+            for entry in journal.entries() {
+                assert_eq!(
+                    tenant_of(entry),
+                    Some(tenant(n)),
+                    "seed {seed}: file {n} holds only its tenant's entries"
+                );
+            }
+            assert_state(restored.projection(), run(n), RunState::Completed)?;
+            let other = run(3_u8.saturating_sub(n));
+            assert!(
+                restored.projection().run_state(other).is_none(),
+                "seed {seed}: file {n} never holds the other tenant's run"
+            );
+            traces.push(trace(journal));
+            drop(restored);
+            remove(path)?;
+        }
+        assert_ne!(traces.first(), traces.get(1), "two tenants, two histories");
+        Ok(traces)
+    })
+}
+
+/// larry#75: the file has one writer; a second opener is refused while the
+/// first holds it, and the refusal costs the holder nothing.
+#[test]
+fn sim_a_second_opener_is_refused_while_the_first_holds_the_file() -> Outcome {
+    replay(184_u64..192, |seed| -> Sim<usize> {
+        let path = journal_file("locked", seed)?;
+        let owner = ScriptedOwner::scripted([succeeded(operation(26)), succeeded(operation(27))]);
+        let mut first = durable(owner, &path)?;
+        let strat = ReconciliationStrategy::IdempotentRetrySafe;
+        dispatch(&mut first, 26, 26, &[Scope::FileRead], 1, strat)?;
+        match Journal::open(&path, 4096) {
+            Err(RuntimeError::Durable(JournalError::Locked { .. })) => {}
+            other => {
+                return Err(
+                    format!("seed {seed}: a second opener must be locked out: {other:?}").into(),
+                );
+            }
+        }
+        dispatch(&mut first, 27, 27, &[Scope::FileRead], 1, strat)?;
+        let held = first.journal().len();
+        drop(first);
+        assert_eq!(
+            Journal::open(&path, 4096)?.len(),
+            held,
+            "seed {seed}: the holder kept appending"
+        );
+        remove(&path)?;
+        Ok(held)
     })
 }

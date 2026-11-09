@@ -82,6 +82,10 @@ where
                     return Ok(None);
                 }
                 self.validate_bound_reach(&intent, at)?;
+                // Group commit (larry#75): every fact recorded so far, the
+                // intent among them, is on disk before the owner can act on
+                // it. A file that refuses means the owner is never called.
+                self.journal.sync()?;
                 let previous = self.live.get(&intent.operation).cloned();
                 if let Some(live) = self.live.get_mut(&intent.operation) {
                     live.dispatches = live.dispatches.saturating_add(1);
@@ -116,6 +120,7 @@ where
                 Some(outcome)
             }
             OwnerReach::Observe => {
+                self.journal.sync()?;
                 if let Some(live) = self.live.get_mut(&intent.operation) {
                     live.reconciliations = live.reconciliations.saturating_add(1);
                 }

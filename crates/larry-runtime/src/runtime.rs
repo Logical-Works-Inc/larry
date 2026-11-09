@@ -353,11 +353,11 @@ where
 
     /// Consumes the runtime and returns its journal.
     ///
-    /// This is the hand-off point to a durable store: the journal is the whole
-    /// state, so persisting it is persisting the runtime. Durable persistence
-    /// is Logical-DB's and the memory hold is intact — this method moves bytes
-    /// between two in-memory values and claims nothing about surviving a
-    /// process.
+    /// The journal is the whole state, so holding it is holding the runtime.
+    /// A journal from [`Journal::open`] keeps its file and anything staged
+    /// since the last tick; [`Journal::sync`] puts that in the file
+    /// (larry#75). A memory-only journal moves between two in-memory values
+    /// and claims nothing about surviving a process.
     #[must_use]
     pub fn into_journal(self) -> Journal {
         self.journal
@@ -379,12 +379,25 @@ where
     ///
     /// # Errors
     ///
-    /// Propagates every typed refusal from the stages below.
+    /// Propagates every typed refusal from the stages below, then the
+    /// journal's sync refusal (larry#75).
     pub fn tick(&mut self) -> Result<TickReport, RuntimeError> {
         // The tick counter advances before any stage runs, so the stages agree
         // on which tick they are in and the reconciliation gate below can
         // compare against it.
         self.tick_count = self.tick_count.saturating_add(1);
+        let staged = self.stages();
+        // Whatever the stages recorded is a fact, refused stage or not, so it
+        // reaches the file before the tick returns: one sync per tick plus one
+        // per owner reach, never one per entry (group commit, larry#75).
+        let synced = self.journal.sync();
+        let report = staged?;
+        synced?;
+        Ok(report)
+    }
+
+    /// The tick's three stages, in order.
+    fn stages(&mut self) -> Result<TickReport, RuntimeError> {
         let at = sample(&self.clock)?;
         let mut report = TickReport::default();
         self.pump_ready(at, &mut report)?;
