@@ -1,37 +1,43 @@
-//! Seeded simulation of `larry serve`'s edge answers (larry#88).
+//! Seeded simulation of `larry serve`'s edge answers (larry#88) behind per-tenant
+//! bearer keys (larry#89).
 //!
 //! Source: RFC 9110 sections 15.5.1, 15.5.5 and 15.5.6 (`400`, `404`, `405`),
-//! the lgwks_bot app edge's documented refusals (a path without `/t/{tenant}/`,
-//! a tenant outside 1..=64 bytes of `[A-Za-z0-9_-]`, a verb other than GET or
-//! POST, a body that does not decode as the route's input) and the estate's
+//! RFC 6750 section 3 (`401` for a missing or wrong bearer token), the
+//! lgwks_bot app edge's documented order (tenant name, then the authenticator,
+//! then the verb, then the body, crates#880) and refusals, and the estate's
 //! seeded-simulation rule (one seed, same seed same trace hash). Requirement
 //! proved: across every request family the seed draws, including the 1 and 64
-//! byte tenant boundaries and one past them, the shipped binary answers exactly
-//! what an independent reference answers; the same seed on a fresh host gives
-//! the same trace hash; and many tenants at once, two of them on one path, are
-//! each answered with no cross-talk.
+//! byte tenant boundaries and one past them, no key, another tenant's key and a
+//! tampered key, the shipped binary answers exactly what an independent
+//! reference answers; the same seed on a fresh host and store gives the same
+//! trace hash; and many keyed tenants at once, two of them on one path, are each
+//! answered as themselves with no cross-talk.
 
 #[path = "support/serve_cli.rs"]
 mod serve_cli;
 
 use std::error::Error;
+use std::path::Path;
 use std::sync::Barrier;
 
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
-use serve_cli::{Serving, exchange, get, probe_body};
+use serve_cli::{Serving, exchange, fresh_state_dir, get, issue_key, probe_body};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
 /// The seed the sequential passes draw from, identical in both.
-const SIM_SEED: u64 = 0x5EED_0088;
+const SIM_SEED: u64 = 0x5EED_0089;
 
 /// Requests one sequential pass sends.
 const CASES: usize = 384;
 
+/// Keyed tenants one sequential pass draws from, the two boundary names among them.
+const KEYED: usize = 6;
+
 /// The seeds the concurrent case sweeps.
-const CONCURRENT_SEEDS: [u64; 4] = [1, 2, 0x5EED_0088, 0xDEAD_BEEF];
+const CONCURRENT_SEEDS: [u64; 4] = [1, 2, 0x5EED_0089, 0xDEAD_BEEF];
 
 /// Threads sending at once: 100, each sending [`PER_THREAD`] probes, so 1,000
 /// probes per seed.
@@ -40,8 +46,8 @@ const THREADS: usize = 100;
 /// Probes each thread sends.
 const PER_THREAD: usize = 10;
 
-/// Distinct tenants the concurrent probes spread over.
-const TENANTS: u64 = 64;
+/// Distinct keyed tenants the concurrent probes spread over.
+const TENANTS: usize = 64;
 
 /// Bytes a tenant name may hold.
 const TENANT_MAX: usize = 64;
@@ -61,6 +67,9 @@ const NO_TENANT: &str = "name a tenant: /t/{tenant}/...";
 /// The edge's answer to a tenant that is not a valid name.
 const BAD_TENANT: &str = "the tenant is not a valid name";
 
+/// The edge's answer to a request with no valid key for its tenant.
+const UNKNOWN: &str = "name yourself";
+
 /// The app's answer to a path or verb with no route.
 const NO_ROUTE: &str = "no such route";
 
@@ -78,10 +87,20 @@ struct Case {
     path: String,
     /// The request body.
     body: Vec<u8>,
+    /// The bearer key sent, if any.
+    key: Option<String>,
     /// The expected status.
     status: u16,
     /// The expected body.
     answer: String,
+}
+
+/// A tenant with its current key.
+struct Keyed {
+    /// The tenant name.
+    name: String,
+    /// Its key.
+    key: String,
 }
 
 /// A byte of `alphabet`, drawn.
@@ -91,7 +110,7 @@ fn pick(rng: &mut Seeded, alphabet: &[u8]) -> Result<u8, Box<dyn Error>> {
         .ok_or("an empty alphabet")?)
 }
 
-/// A valid tenant of `len` bytes.
+/// A valid tenant name of `len` bytes.
 fn tenant(rng: &mut Seeded, len: usize) -> Result<String, Box<dyn Error>> {
     let mut name = Vec::with_capacity(len);
     for _ in 0..len {
@@ -100,26 +119,50 @@ fn tenant(rng: &mut Seeded, len: usize) -> Result<String, Box<dyn Error>> {
     Ok(String::from_utf8(name)?)
 }
 
-/// A valid tenant length: the 1 and 64 byte boundaries one draw in four each.
-fn valid_len(rng: &mut Seeded) -> Result<usize, Box<dyn Error>> {
-    Ok(match rng.index(4)? {
-        0 => 1,
-        1 => TENANT_MAX,
-        _ => rng.index(TENANT_MAX)?.saturating_add(1),
-    })
-}
-
 /// One of `items`, drawn.
 fn choose<T: Copy>(rng: &mut Seeded, items: &[T]) -> Result<T, Box<dyn Error>> {
     Ok(*items.get(rng.index(items.len())?).ok_or("no items")?)
 }
 
-/// A case of `method`, `path` and `body` the reference expects `status` and `answer` for.
-fn case(method: &'static str, path: String, body: &[u8], status: u16, answer: &str) -> Case {
+/// One of `items` by reference, drawn.
+fn choose_ref<'item, T>(rng: &mut Seeded, items: &'item [T]) -> Result<&'item T, Box<dyn Error>> {
+    Ok(items.get(rng.index(items.len())?).ok_or("no items")?)
+}
+
+/// Keys for [`KEYED`] tenants drawn from `rng` in `state`: the first is 1 byte,
+/// the second 64, the rest any valid length.
+fn key_tenants(rng: &mut Seeded, state: &Path) -> Result<Vec<Keyed>, Box<dyn Error>> {
+    let mut keyed: Vec<Keyed> = Vec::with_capacity(KEYED);
+    for index in 0..KEYED {
+        let len = match index {
+            0 => 1,
+            1 => TENANT_MAX,
+            _ => rng.index(TENANT_MAX)?.saturating_add(1),
+        };
+        let name = tenant(rng, len)?;
+        if keyed.iter().any(|seen| seen.name == name) {
+            continue;
+        }
+        let key = issue_key(state, &name)?;
+        keyed.push(Keyed { name, key });
+    }
+    Ok(keyed)
+}
+
+/// A case of `method`, `path`, `body` and `key` the reference expects `status` and `answer` for.
+fn case(
+    method: &'static str,
+    path: String,
+    body: &[u8],
+    key: Option<&str>,
+    status: u16,
+    answer: &str,
+) -> Case {
     Case {
         method,
         path,
         body: body.to_vec(),
+        key: key.map(String::from),
         status,
         answer: String::from(answer),
     }
@@ -127,30 +170,50 @@ fn case(method: &'static str, path: String, body: &[u8], status: u16, answer: &s
 
 /// One request from the seed, with the reference answer: the rule the edge
 /// documents, written out here rather than read from the binary.
-fn draw(rng: &mut Seeded) -> Result<Case, Box<dyn Error>> {
+fn draw(rng: &mut Seeded, keyed: &[Keyed]) -> Result<Case, Box<dyn Error>> {
     let probe = probe_body();
-    let name = {
-        let len = valid_len(rng)?;
-        tenant(rng, len)?
-    };
-    Ok(match rng.index(10)? {
-        0 => case("GET", format!("/t/{name}/healthz"), b"", 200, &probe),
+    let own = choose_ref(rng, keyed)?;
+    let (name, key) = (own.name.as_str(), Some(own.key.as_str()));
+    let any_key = if rng.index(2)? == 0 { None } else { key };
+    Ok(match rng.index(13)? {
+        0 => case("GET", format!("/t/{name}/healthz"), b"", key, 200, &probe),
         1 => {
             let past = TENANT_MAX.saturating_add(1).saturating_add(rng.index(16)?);
             let long = tenant(rng, past)?;
-            case("GET", format!("/t/{long}/healthz"), b"", 400, BAD_TENANT)
+            case(
+                "GET",
+                format!("/t/{long}/healthz"),
+                b"",
+                any_key,
+                400,
+                BAD_TENANT,
+            )
         }
         2 => {
-            let mut bytes = name.into_bytes();
+            let mut bytes = name.as_bytes().to_vec();
             let at = rng.index(bytes.len())?;
             let foreign = pick(rng, FOREIGN_BYTES)?;
             if let Some(byte) = bytes.get_mut(at) {
                 *byte = foreign;
             }
             let bad = String::from_utf8(bytes)?;
-            case("GET", format!("/t/{bad}/healthz"), b"", 400, BAD_TENANT)
+            case(
+                "GET",
+                format!("/t/{bad}/healthz"),
+                b"",
+                any_key,
+                400,
+                BAD_TENANT,
+            )
         }
-        3 => case("GET", String::from("/t//healthz"), b"", 400, BAD_TENANT),
+        3 => case(
+            "GET",
+            String::from("/t//healthz"),
+            b"",
+            any_key,
+            400,
+            BAD_TENANT,
+        ),
         4 => {
             let path = choose(
                 rng,
@@ -162,56 +225,120 @@ fn draw(rng: &mut Seeded) -> Result<Case, Box<dyn Error>> {
                     "/T/acme/healthz",
                 ],
             )?;
-            case("GET", String::from(path), b"", 400, NO_TENANT)
+            case("GET", String::from(path), b"", any_key, 400, NO_TENANT)
         }
-        9 => match choose(rng, &["GET", "HEAD"])? {
-            "HEAD" => case("HEAD", String::from("/healthz"), b"", 200, ""),
-            verb => case(verb, String::from("/healthz"), b"", 200, LIVE),
-        },
         5 => {
             let rest = choose(
                 rng,
-                &["", "health", "healthz/", "HEALTHZ", "readyz", "healthz/x"],
+                &["", "health", "healthz/", "HEALTHZ", "readyz", "whoami/x"],
             )?;
-            case("GET", format!("/t/{name}/{rest}"), b"", 404, NO_ROUTE)
+            case("GET", format!("/t/{name}/{rest}"), b"", key, 404, NO_ROUTE)
         }
-        6 => case("POST", format!("/t/{name}/healthz"), b"", 404, NO_ROUTE),
+        6 => case(
+            "POST",
+            format!("/t/{name}/healthz"),
+            b"",
+            key,
+            404,
+            NO_ROUTE,
+        ),
         7 => {
             let verb = choose(rng, &["PUT", "DELETE", "PATCH", "OPTIONS"])?;
-            case(verb, format!("/t/{name}/healthz"), b"", 405, BAD_VERB)
+            case(verb, format!("/t/{name}/healthz"), b"", key, 405, BAD_VERB)
         }
         8 => {
             let body = choose(rng, &["null", "{}", "0", "[]", "\"\"", "true", "{"])?;
             let path = format!("/t/{name}/healthz");
             match body {
-                "null" => case("GET", path, body.as_bytes(), 200, &probe),
-                _ => case("GET", path, body.as_bytes(), 400, BAD_BODY),
+                "null" => case("GET", path, body.as_bytes(), key, 200, &probe),
+                _ => case("GET", path, body.as_bytes(), key, 400, BAD_BODY),
             }
+        }
+        9 => match choose(rng, &["GET", "HEAD"])? {
+            "HEAD" => case("HEAD", String::from("/healthz"), b"", any_key, 200, ""),
+            verb => case(verb, String::from("/healthz"), b"", any_key, 200, LIVE),
+        },
+        10 => {
+            let other = choose_ref(rng, keyed)?;
+            let tampered = {
+                let mut bytes = own.key.clone().into_bytes();
+                let at = rng.index(bytes.len())?;
+                if let Some(byte) = bytes.get_mut(at) {
+                    *byte = if *byte == b'0' { b'1' } else { b'0' };
+                }
+                String::from_utf8(bytes)?
+            };
+            let sent = match rng.index(3)? {
+                0 => None,
+                1 if other.name != own.name => Some(other.key.clone()),
+                _ => Some(tampered),
+            };
+            let verb = choose(rng, &["GET", "POST", "PUT"])?;
+            case(
+                verb,
+                format!("/t/{name}/healthz"),
+                b"",
+                sent.as_deref(),
+                401,
+                UNKNOWN,
+            )
+        }
+        11 => {
+            let stranger = format!("x{}", tenant(rng, 8)?);
+            case(
+                "GET",
+                format!("/t/{stranger}/healthz"),
+                b"",
+                key,
+                401,
+                UNKNOWN,
+            )
+        }
+        12 => {
+            let answer = format!("{{\"principal\":\"{name}\"}}");
+            case("GET", format!("/t/{name}/whoami"), b"", key, 200, &answer)
         }
         family => return Err(format!("no request family {family}").into()),
     })
 }
 
-/// One pass on a fresh host: every drawn request checked against its
-/// reference answer, and the trace hash of what was sent and answered.
+/// One pass on a fresh host over a fresh store: every drawn request checked
+/// against its reference answer, and the trace hash of what was sent and
+/// answered. Keys are random, so the trace hashes the request with its key
+/// slot named, not the key's bytes.
 fn run_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let mut serving = Serving::start(&[("LARRY_SERVE_ADDR", "127.0.0.1:0")])?;
+    let state = fresh_state_dir();
     let mut rng = Seeded::from_seed(seed);
+    let keyed = key_tenants(&mut rng, &state)?;
+    let dir = state.display().to_string();
+    let mut serving = Serving::start(&[
+        ("LARRY_SERVE_ADDR", "127.0.0.1:0"),
+        ("LARRY_STATE_DIR", dir.as_str()),
+    ])?;
     let mut trace = Hasher::new();
     for index in 0..CASES {
-        let drawn = draw(&mut rng)?;
-        let (status, answer) = exchange(serving.addr(), drawn.method, &drawn.path, &drawn.body)?;
+        let drawn = draw(&mut rng, &keyed)?;
+        let sent = drawn.key.as_deref();
+        let (status, answer) =
+            exchange(serving.addr(), drawn.method, &drawn.path, &drawn.body, sent)?;
         assert_eq!(
             (status, answer.as_str()),
             (drawn.status, drawn.answer.as_str()),
-            "seed {seed:#x} case {index}: {} {} {:?}",
+            "seed {seed:#x} case {index}: {} {} {:?} keyed {}",
             drawn.method,
             drawn.path,
-            String::from_utf8_lossy(&drawn.body)
+            String::from_utf8_lossy(&drawn.body),
+            sent.is_some()
         );
+        let slot = match sent {
+            None => "none",
+            Some(token) if keyed.iter().any(|own| own.key == token) => "issued",
+            Some(_) => "forged",
+        };
         trace.write_framed(drawn.method.as_bytes());
         trace.write_framed(drawn.path.as_bytes());
         trace.write_framed(&drawn.body);
+        trace.write_framed(slot.as_bytes());
         trace.write_framed(&status.to_be_bytes());
         trace.write_framed(answer.as_bytes());
     }
@@ -226,7 +353,7 @@ fn sim_serve_every_request_gets_the_reference_answer_for_every_seed() -> TestRes
     let second = run_pass(SIM_SEED)?;
     assert_eq!(
         first, second,
-        "the same seed on a fresh host gives the same trace"
+        "the same seed on a fresh host and store gives the same trace"
     );
     assert_ne!(
         run_pass(SIM_SEED.wrapping_add(1))?,
@@ -236,15 +363,16 @@ fn sim_serve_every_request_gets_the_reference_answer_for_every_seed() -> TestRes
     Ok(())
 }
 
-/// One sender of the concurrent case: [`PER_THREAD`] probes of tenants drawn
-/// from `seed`, each of which must answer the probe body.
-fn send_probes(addr: std::net::SocketAddr, seed: u64, probe: &str) -> Result<usize, String> {
+/// One sender of the concurrent case: [`PER_THREAD`] probes of keyed tenants
+/// drawn from `seed`, each of which must answer as its own tenant.
+fn send_probes(addr: std::net::SocketAddr, seed: u64, keyed: &[Keyed]) -> Result<usize, String> {
     let mut rng = Seeded::from_seed(seed);
     for _ in 0..PER_THREAD {
-        let tenant = rng.below(TENANTS).map_err(|error| error.to_string())?;
-        let path = format!("/t/tenant-{tenant}/healthz");
-        let answered = get(addr, &path).map_err(|error| error.to_string())?;
-        if answered != (200, String::from(probe)) {
+        let own = choose_ref(&mut rng, keyed).map_err(|error| error.to_string())?;
+        let path = format!("/t/{}/whoami", own.name);
+        let answered = get(addr, &path, Some(&own.key)).map_err(|error| error.to_string())?;
+        let expected = (200, format!("{{\"principal\":\"{}\"}}", own.name));
+        if answered != expected {
             return Err(format!("seed {seed:#x} {path}: {answered:?}"));
         }
     }
@@ -253,15 +381,25 @@ fn send_probes(addr: std::net::SocketAddr, seed: u64, probe: &str) -> Result<usi
 
 #[test]
 fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult {
-    let mut serving = Serving::start(&[("LARRY_SERVE_ADDR", "127.0.0.1:0")])?;
+    let state = fresh_state_dir();
+    let mut keyed = Vec::with_capacity(TENANTS);
+    for index in 0..TENANTS {
+        let name = format!("tenant-{index}");
+        let key = issue_key(&state, &name)?;
+        keyed.push(Keyed { name, key });
+    }
+    let dir = state.display().to_string();
+    let mut serving = Serving::start(&[
+        ("LARRY_SERVE_ADDR", "127.0.0.1:0"),
+        ("LARRY_STATE_DIR", dir.as_str()),
+    ])?;
     let addr = serving.addr();
-    let probe = probe_body();
     for seed in CONCURRENT_SEEDS {
         std::thread::scope(|scope| -> TestResult {
             let mut senders = Vec::with_capacity(THREADS);
             for thread in (0_u64..).take(THREADS) {
-                let probe = probe.as_str();
-                senders.push(scope.spawn(move || send_probes(addr, seed ^ thread, probe)));
+                let keyed = keyed.as_slice();
+                senders.push(scope.spawn(move || send_probes(addr, seed ^ thread, keyed)));
             }
             let mut answered = 0_usize;
             for sender in senders {
@@ -271,7 +409,7 @@ fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult 
             assert_eq!(
                 answered,
                 THREADS.saturating_mul(PER_THREAD),
-                "seed {seed:#x}: every probe answered"
+                "seed {seed:#x}: every probe answered as its own tenant"
             );
             Ok(())
         })?;
@@ -285,30 +423,47 @@ fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult 
 }
 
 #[test]
-fn sim_serve_two_tenants_on_one_path_at_once_are_each_answered() -> TestResult {
-    let mut serving = Serving::start(&[("LARRY_SERVE_ADDR", "127.0.0.1:0")])?;
+fn sim_serve_two_identities_on_one_path_at_once_each_see_only_themselves() -> TestResult {
+    let state = fresh_state_dir();
+    let alpha = issue_key(&state, "alpha")?;
+    let beta = issue_key(&state, "beta")?;
+    let dir = state.display().to_string();
+    let mut serving = Serving::start(&[
+        ("LARRY_SERVE_ADDR", "127.0.0.1:0"),
+        ("LARRY_STATE_DIR", dir.as_str()),
+    ])?;
     let addr = serving.addr();
-    let probe = probe_body();
     let pairs = 32_usize;
-    let gate = Barrier::new(pairs.saturating_mul(2));
+    let gate = Barrier::new(pairs.saturating_mul(4));
     std::thread::scope(|scope| -> TestResult {
-        let mut senders = Vec::with_capacity(pairs.saturating_mul(2));
+        let mut senders = Vec::with_capacity(pairs.saturating_mul(4));
         for _ in 0..pairs {
-            for tenant in ["alpha", "beta"] {
+            for (tenant, key, expected) in [
+                (
+                    "alpha",
+                    alpha.as_str(),
+                    (200, String::from("{\"principal\":\"alpha\"}")),
+                ),
+                (
+                    "beta",
+                    beta.as_str(),
+                    (200, String::from("{\"principal\":\"beta\"}")),
+                ),
+                ("alpha", beta.as_str(), (401, String::from(UNKNOWN))),
+                ("beta", alpha.as_str(), (401, String::from(UNKNOWN))),
+            ] {
                 let gate = &gate;
                 senders.push(scope.spawn(move || {
                     gate.wait();
-                    get(addr, &format!("/t/{tenant}/healthz")).map_err(|error| error.to_string())
+                    get(addr, &format!("/t/{tenant}/whoami"), Some(key))
+                        .map(|answered| (answered, expected))
+                        .map_err(|error| error.to_string())
                 }));
             }
         }
         for sender in senders {
-            let answered = sender.join().map_err(|_panicked| "a sender panicked")??;
-            assert_eq!(
-                answered,
-                (200, probe.clone()),
-                "each tenant gets its own answer"
-            );
+            let (answered, expected) = sender.join().map_err(|_panicked| "a sender panicked")??;
+            assert_eq!(answered, expected, "each identity sees only itself");
         }
         Ok(())
     })?;

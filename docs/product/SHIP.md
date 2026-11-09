@@ -87,7 +87,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
 - [x] #88 `larry serve` on lgwks_bot::app, not Loco (ADR 0021): PR #167, 756 tests; cold 45.97 s, 225 crates; probe p99 0.221 ms.
-- [ ] #89 tenant keys and human sign-in. Proof: two identities on one run id at once.
+- [ ] #89 tenant keys and human sign-in. Proof: two identities on one run id at once. Service keys: #168, PR #169.
 - [ ] #90 runtime API over the durable journal. Proof: two tenants under kill -9 of `larry serve`.
 - [ ] #91 out-of-band approval mail. Proof: an impersonated approval is refused with a typed error.
 - [ ] #115 phone surface over the runtime API (after #90). Proof: a replayed approval is refused.

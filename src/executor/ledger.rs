@@ -22,6 +22,11 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS live_groups(task_id TEXT NOT NU
 const KEY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS receipt_key(id INTEGER PRIMARY KEY CHECK (id = 1), \
     seed BLOB NOT NULL CHECK (length(seed) = 32));";
 
+/// Schema of the tenant key table, version 3 (larry#89): one BLAKE3 digest per tenant,
+/// as 64 hex characters; the key itself is shown once and never stored.
+const TENANT_KEY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS tenant_keys(tenant TEXT PRIMARY KEY, \
+    digest TEXT NOT NULL CHECK (length(digest) = 64));";
+
 /// Owner-only mode for the store and its write-ahead files: the seed is the key.
 const OWNER_ONLY: u32 = 0o600;
 
@@ -69,7 +74,8 @@ impl Ledger {
             .open(&database)
             .map_err(ExecError::KeyStore)?;
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
-        lgwks_deps::sqlite::migrate(&conn, 2, &[SCHEMA, KEY_SCHEMA]).map_err(ExecError::Ledger)?;
+        lgwks_deps::sqlite::migrate(&conn, 3, &[SCHEMA, KEY_SCHEMA, TENANT_KEY_SCHEMA])
+            .map_err(ExecError::Ledger)?;
         for name in STORE_FILES {
             match std::fs::set_permissions(
                 state_dir.join(name),
@@ -117,6 +123,35 @@ impl Ledger {
         };
         let seed = <[u8; 32]>::try_from(stored.as_slice()).map_err(ExecError::KeySeedLength)?;
         Ok(Some(SecretKey::from_seed(seed)))
+    }
+
+    /// Stores `digest` as `tenant`'s one key digest, replacing an earlier one, so
+    /// issuing again rotates the key.
+    pub(crate) fn set_tenant_key(&self, tenant: &str, digest: &str) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO tenant_keys (tenant, digest) VALUES (?1, ?2)",
+                rusqlite::params![tenant, digest],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
+    /// Every (tenant, digest hex) pair, at most `limit` of them.
+    pub(crate) fn tenant_keys(&self, limit: u32) -> Result<Vec<(String, String)>, ExecError> {
+        let bound = i64::from(limit);
+        let mut statement = self
+            .conn
+            .prepare("SELECT tenant, digest FROM tenant_keys ORDER BY tenant LIMIT ?1")
+            .map_err(ExecError::Sql)?;
+        let mapped = statement
+            .query_map([bound], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(ExecError::Sql)?;
+        mapped
+            .collect::<Result<Vec<(String, String)>, rusqlite::Error>>()
+            .map_err(ExecError::Sql)
     }
 
     /// Records a group that a task has started.
