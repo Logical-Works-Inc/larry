@@ -85,8 +85,9 @@ where
     ) -> Result<Option<EffectOutcome>, RuntimeError> {
         Ok(match live.intent.strategy.reconciliation_action() {
             larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
+                let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
                 let authority_live =
-                    self.fence.check(&live.intent).is_ok() && live.proof.check().is_ok();
+                    self.fence.authorize(key, &live.intent).is_ok() && live.proof.check().is_ok();
                 let decision = retry::decide(live, max_attempts, at, authority_live)?;
                 let authority_only = decision.refusals() == [RetryRefusal::AuthorityNotLive];
                 if decision.permits_retry() || authority_only {

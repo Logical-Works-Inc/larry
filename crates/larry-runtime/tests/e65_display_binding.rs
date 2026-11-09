@@ -170,7 +170,7 @@ fn swap_journey(seed: u64, change_on: u64) -> Result<ContentDigest> {
         "refusal cannot publish success"
     );
     assert_eq!(
-        runtime.fence().offline_spent(),
+        runtime.fence().offline_spent()?,
         0,
         "refusal consumes no reach"
     );
@@ -366,7 +366,7 @@ fn e65_queue_saturation_and_recovery() -> Result {
     runtime.submit_displayed(overflow, display)?;
     for _ in 0..4 {
         assert_eq!(
-            runtime.fence_mut().authenticate(SecurityEpoch::INITIAL),
+            runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?,
             SecurityEpoch::INITIAL,
             "fresh host authority"
         );

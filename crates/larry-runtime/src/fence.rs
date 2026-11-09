@@ -13,45 +13,162 @@
 //! decision — and it is consulted at the one point where an effect would
 //! reach its owner to *change* something.
 //!
-//! # The three facts a fence holds
+//! # One owner: `lgwks_bot::broker` (larry#68 row 3, larry#76)
 //!
-//! 1. **A security epoch** ([`SecurityEpoch`]). Revocation's linearization
-//!    point. Moving the epoch forward withdraws every authorization admitted
-//!    below it, at one total-order instant. The epoch only ever moves
-//!    forward: [`RevocationFence::authenticate`] raises it to whatever the
-//!    authority source reports and absorbs a replayed older snapshot instead
-//!    of obeying it (E71).
-//! 2. **A revoked set.** Named operations whose authority has been withdrawn
-//!    individually. Revocation is idempotent and one-way.
-//! 3. **An offline exposure bound.** How many *mutating* reaches may happen
-//!    without the authority source having been re-contacted. Freshness is
-//!    established by [`RevocationFence::authenticate`] and by nothing else.
-//!    A suspended process that wakes up holds a staler fence, not a fresher
-//!    one, and a rolled-back clock cannot recharge the bound, because the
-//!    bound is a count and not a duration.
+//! The fence holds no rule of its own. Its state is one environment of an
+//! `lgwks_bot::broker::Broker`, and every fact below is that broker's:
 //!
-//! The fence reads no clock. That is a property, not an omission: an
-//! authority check that consulted time could be extended by time, and the
-//! three facts above are exactly the ones that must not be.
+//! 1. **A security epoch** ([`SecurityEpoch`]), the environment's generation.
+//!    Moving it forward withdraws every authorization admitted below it, at
+//!    one total-order instant. [`RevocationFence::authenticate`] raises it to
+//!    what the authority source reports and absorbs an older report (E71).
+//! 2. **A revoked set**, at most 65,536 operations withdrawn by name, one way.
+//! 3. **An offline exposure bound**: how many mutating reaches may happen
+//!    without the authority source being re-contacted. It is a count, not a
+//!    duration, so neither sleeping nor a rolled-back clock recharges it.
+//!
+//! A warrant is minted when the reach is checked and presented again at the
+//! handoff, where the broker re-runs the same check, so a withdrawal landing in
+//! between is still honoured; the reach is counted once the owner returns an
+//! outcome, and an owner's typed refusal, which guarantees nothing was
+//! attempted, counts nothing (E65). Larry keeps
+//! only the mapping from its identifiers onto the broker's: epoch `n` is
+//! generation `n + 1`, so `u64::MAX` is past the last generation and an
+//! authority source reporting it closes the fence for good.
 //!
 //! # What the fence deliberately does not gate
 //!
 //! It does not gate *observation*. An effect that had already been dispatched
 //! when revocation landed must still be resolvable, because fencing the
-//! status query would leave an external effect permanently unlabelled — a
-//! worse outcome than the query it prevents. Revocation stops new external
-//! change; it does not stop the runtime from finding out what already
-//! happened. That is the "already-dispatched treatment" D48 asks to be
-//! defined, and it is enforced structurally rather than by convention:
-//! [`RevocationFence::check`] is called from exactly one place in the
-//! runtime, the mutating reach, and never from the observing one.
+//! status query would leave an external effect permanently unlabelled. That
+//! is the "already-dispatched treatment" D48 asks to be defined, enforced by
+//! shape: the warrant is asked for only on the mutating reach.
 
 use core::fmt;
-use std::collections::BTreeSet;
+use core::num::{NonZeroU64, NonZeroU128};
 
 use larry_contracts::authority::SecurityEpoch;
-use larry_contracts::effect::EffectIntent;
+use larry_contracts::effect::{EffectIntent, ReconciliationStrategy};
 use larry_contracts::ids::OperationId;
+use lgwks_bot::broker::{Authority, Broker, BrokerError};
+use lgwks_bot::effect::{
+    ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch, EnvironmentId,
+    FlowRevision, Id128, RunId as BotRunId,
+};
+
+use crate::error::RuntimeError;
+
+/// The one broker environment a runtime's fence is. Each runtime holds its
+/// own broker, so the value only has to be non-zero.
+pub(crate) const ENVIRONMENT: EnvironmentId =
+    EnvironmentId::new(Id128::from_nonzero(NonZeroU128::MIN));
+
+/// The flow revision of a Larry run. Larry admits no flow document, so its
+/// revision is this domain-separated constant, one per binary.
+const FLOW: &[u8] = b"larry.runtime.v1.flow";
+
+/// The domain separator of the action digest.
+const ACTION: &[u8] = b"larry.effect.v1";
+
+/// A Larry identifier as a non-zero lgwks_bot identifier, or a typed refusal
+/// naming the field that was all-zero.
+fn bot_id(
+    bytes: &[u8; 16],
+    operation: OperationId,
+    field: &'static str,
+) -> Result<Id128, RuntimeError> {
+    match NonZeroU128::new(u128::from_be_bytes(*bytes)) {
+        Some(value) => Ok(Id128::from_nonzero(value)),
+        None => Err(RuntimeError::EffectIdentity { operation, field }),
+    }
+}
+
+/// The strategy's tag inside the action digest. The wildcard is a strategy
+/// this build does not know; `reconcile_one` refuses it before any retry is
+/// decided, so its tag only has to differ from the declared ones.
+fn strategy_tag(strategy: ReconciliationStrategy) -> u8 {
+    match strategy {
+        ReconciliationStrategy::Queryable => 0,
+        ReconciliationStrategy::IdempotentRetrySafe => 1,
+        ReconciliationStrategy::RequiresHuman => 2,
+        ReconciliationStrategy::AlwaysCompensate => 3,
+        _ => u8::MAX,
+    }
+}
+
+/// The lgwks_bot key for an attempt at a Larry effect: the one key the fence
+/// warrants and the retry rule reads (larry#76, larry#78).
+///
+/// The run, the operation (as the action) and the attempt map one to one, and
+/// the environment is the fence's. The tenant, run, strategy and binding are
+/// in the action digest, so two tenants never share a key. The epoch is the
+/// admission epoch's generation, checked: an epoch with none is refused rather
+/// than saturated onto its neighbour, which would let a reservation admitted
+/// one epoch below the fence pass it.
+///
+/// # Errors
+///
+/// [`RuntimeError::EffectIdentity`] naming the all-zero `tenant`, `run` or
+/// `operation`, or `admission_epoch` when it is `u64::MAX`.
+pub(crate) fn effect_key(intent: &EffectIntent, attempts: u8) -> Result<EffectKey, RuntimeError> {
+    let operation = intent.operation;
+    // The tenant is not a key field, but an all-zero one is an uninitialised
+    // identity and still names no effect.
+    bot_id(intent.tenant.as_bytes(), operation, "tenant")?;
+    let identity = EffectIdentity::new(
+        BotRunId::new(bot_id(intent.run.as_bytes(), operation, "run")?),
+        ENVIRONMENT,
+        FlowRevision::new(lgwks_std::hash::blake3(FLOW)),
+    );
+    let attempt = match NonZeroU64::new(u64::from(attempts)) {
+        Some(value) => value,
+        None => NonZeroU64::MIN,
+    };
+    let epoch = generation(intent.admission_epoch).ok_or(RuntimeError::EffectIdentity {
+        operation,
+        field: "admission_epoch",
+    })?;
+    let mut hasher = lgwks_std::hash::Hasher::new();
+    hasher.update(ACTION);
+    hasher.update(intent.operation.as_bytes());
+    hasher.update(intent.run.as_bytes());
+    hasher.update(intent.tenant.as_bytes());
+    hasher.update(&[strategy_tag(intent.strategy)]);
+    match intent.binding() {
+        Some(binding) => hasher.update(binding.digest().as_bytes()),
+        None => hasher.update(&[0_u8]),
+    };
+    Ok(identity.key(
+        ActionId::new(bot_id(intent.operation.as_bytes(), operation, "operation")?),
+        AttemptId::new(attempt),
+        ActionDigest::new(hasher.finalize()),
+        epoch,
+    ))
+}
+
+/// The broker generation a security epoch is: one past it, because a
+/// generation is never zero. `None` for `u64::MAX`, which has none.
+pub(crate) const fn generation(epoch: SecurityEpoch) -> Option<EnvironmentEpoch> {
+    match epoch.value().checked_add(1) {
+        Some(next) => match NonZeroU64::new(next) {
+            Some(value) => Some(EnvironmentEpoch::new(value)),
+            None => None,
+        },
+        None => None,
+    }
+}
+
+/// The security epoch a broker generation is.
+const fn security(generation: EnvironmentEpoch) -> SecurityEpoch {
+    SecurityEpoch::new(generation.get().saturating_sub(1))
+}
+
+/// The broker action an operation is, or `None` for the all-zero operation,
+/// which names no action. The same big-endian mapping as the effect key's.
+fn action(operation: OperationId) -> Option<ActionId> {
+    NonZeroU128::new(u128::from_be_bytes(*operation.as_bytes()))
+        .map(|value| ActionId::new(Id128::from_nonzero(value)))
+}
 
 /// Why the fence refused to let an effect reach its owner.
 ///
@@ -76,12 +193,24 @@ pub enum FenceRefusal {
         /// The generation the fence now stands at.
         current: SecurityEpoch,
     },
+    /// The effect names an epoch later than the fence has ever stood at: a
+    /// journal restored under an authority older than the one that admitted
+    /// it. The opposite investigation to [`Self::StaleEpoch`].
+    NeverIssued {
+        /// The generation the reservation claims.
+        admitted: SecurityEpoch,
+        /// The generation the fence stands at.
+        current: SecurityEpoch,
+    },
     /// The authority source has not been reached for `bound` mutating
     /// reaches. Offline authority is spent and the fence fails closed.
     OfflineExposureExhausted {
         /// The configured offline exposure ceiling.
         bound: u32,
     },
+    /// The fence is closed: the authority source reported an epoch past the
+    /// last one it can hold, so no reach is permitted again.
+    Closed,
 }
 
 impl fmt::Display for FenceRefusal {
@@ -94,24 +223,43 @@ impl fmt::Display for FenceRefusal {
                 f,
                 "admitted at {admitted} but the fence stands at {current}: stale authority"
             ),
+            Self::NeverIssued { admitted, current } => write!(
+                f,
+                "admitted at {admitted}, which the fence never reached; it stands at {current}"
+            ),
             Self::OfflineExposureExhausted { bound } => write!(
                 f,
                 "offline authority spent: {bound} reaches without the authority source"
             ),
+            Self::Closed => write!(f, "the fence is closed: its epoch space is spent"),
         }
     }
 }
 
 impl std::error::Error for FenceRefusal {}
 
-/// A refused movement of the security epoch.
+/// A refused change to, or read of, the fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FenceError {
-    /// The epoch is at `u64::MAX` and cannot advance. Refused rather than
+    /// The epoch cannot advance or be represented. Refused rather than
     /// wrapped: a wrapped epoch would alias a withdrawn generation with a
     /// live one, re-authorizing effects that revocation had withdrawn.
     EpochExhausted,
+    /// The fence already holds as many withdrawals by name as it can; the
+    /// operation is not withdrawn, and advancing the epoch still fences it.
+    RevocationsFull {
+        /// How many withdrawals it holds.
+        limit: usize,
+    },
+    /// The all-zero operation names no action and cannot be withdrawn.
+    ZeroOperation,
+    /// The fence was closed by an epoch past its space and takes no change.
+    Closed,
+    /// The broker does not hold the fence's environment, or refused it in a
+    /// way no path here produces (registered twice, or a refusal newer than
+    /// this build).
+    Unowned,
 }
 
 impl fmt::Display for FenceError {
@@ -120,11 +268,49 @@ impl fmt::Display for FenceError {
             Self::EpochExhausted => {
                 write!(f, "security epoch space is exhausted; it never wraps")
             }
+            Self::RevocationsFull { limit } => write!(
+                f,
+                "the fence already holds {limit} withdrawals; advance the epoch to fence the rest"
+            ),
+            Self::ZeroOperation => write!(f, "the all-zero operation cannot be withdrawn"),
+            Self::Closed => write!(f, "the fence is closed and takes no change"),
+            Self::Unowned => write!(f, "the broker does not hold the fence's environment"),
         }
     }
 }
 
 impl std::error::Error for FenceError {}
+
+/// The fence change a broker refusal is.
+fn refused(error: BrokerError) -> FenceError {
+    match error {
+        BrokerError::Exhausted { .. } => FenceError::EpochExhausted,
+        BrokerError::RevocationsFull { limit, .. } => FenceError::RevocationsFull { limit },
+        BrokerError::Closed { .. } => FenceError::Closed,
+        _ => FenceError::Unowned,
+    }
+}
+
+/// The reach refusal a broker refusal is, for `intent`.
+fn fenced(error: BrokerError, intent: &EffectIntent) -> FenceRefusal {
+    match error {
+        BrokerError::Revoked { .. } => FenceRefusal::Revoked {
+            operation: intent.operation,
+        },
+        BrokerError::Superseded { current, .. } => FenceRefusal::StaleEpoch {
+            admitted: intent.admission_epoch,
+            current: security(current),
+        },
+        BrokerError::NeverIssued { current, .. } => FenceRefusal::NeverIssued {
+            admitted: intent.admission_epoch,
+            current: security(current),
+        },
+        BrokerError::OfflineExposureExhausted { bound, .. } => {
+            FenceRefusal::OfflineExposureExhausted { bound }
+        }
+        _ => FenceRefusal::Closed,
+    }
+}
 
 /// The live freshness state consulted at dispatch (R87, D48, E71).
 ///
@@ -133,16 +319,10 @@ impl std::error::Error for FenceError {}
 /// the journal, and nothing here is written to it, because freshness is not
 /// a recorded fact — it is a fact about the present that a record cannot
 /// carry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct RevocationFence {
-    /// Current host-authenticated security generation.
-    epoch: SecurityEpoch,
-    /// Operations whose authority has been withdrawn.
-    revoked: BTreeSet<OperationId>,
-    /// Maximum mutating reaches before reauthentication.
-    offline_bound: u32,
-    /// Mutating reaches since authentication, saturating at the integer bound.
-    offline_spent: u32,
+    /// The broker whose one environment, [`ENVIRONMENT`], is this fence.
+    broker: Broker,
 }
 
 impl RevocationFence {
@@ -152,377 +332,176 @@ impl RevocationFence {
     /// A bound of zero is a kill switch, not a mistake: no mutating reach is
     /// ever permitted, and [`RevocationFence::authenticate`] does not lift
     /// it, because the bound is a ceiling on reaches-between-authentications
-    /// rather than a credit that authentication hands out. An operator who
-    /// needs to stop every outbound effect sets it to zero and can rely on
-    /// the fence refusing even a freshly authenticated dispatch.
-    #[must_use]
-    pub const fn new(epoch: SecurityEpoch, offline_bound: u32) -> Self {
-        Self {
-            epoch,
-            revoked: BTreeSet::new(),
-            offline_bound,
-            offline_spent: 0,
-        }
+    /// rather than a credit that authentication hands out.
+    ///
+    /// # Errors
+    ///
+    /// [`FenceError::EpochExhausted`] for `u64::MAX`, which has no generation.
+    pub fn new(epoch: SecurityEpoch, offline_bound: u32) -> Result<Self, FenceError> {
+        let at = generation(epoch).ok_or(FenceError::EpochExhausted)?;
+        let mut broker = Broker::new();
+        broker.register(ENVIRONMENT).map_err(refused)?;
+        broker.authenticate(ENVIRONMENT, at).map_err(refused)?;
+        broker
+            .set_offline_bound(ENVIRONMENT, offline_bound)
+            .map_err(refused)?;
+        Ok(Self { broker })
     }
 
     /// The generation the fence currently stands at.
-    #[must_use]
-    pub const fn epoch(&self) -> SecurityEpoch {
-        self.epoch
+    ///
+    /// # Errors
+    ///
+    /// [`FenceError::Unowned`] if the broker no longer holds the environment.
+    pub fn epoch(&self) -> Result<SecurityEpoch, FenceError> {
+        let at = self.broker.epoch(ENVIRONMENT).ok_or(FenceError::Unowned)?;
+        Ok(security(at))
     }
 
     /// The configured offline exposure ceiling.
-    #[must_use]
-    pub const fn offline_bound(&self) -> u32 {
-        self.offline_bound
+    ///
+    /// # Errors
+    ///
+    /// [`FenceError::Unowned`] if the broker stopped counting.
+    pub fn offline_bound(&self) -> Result<u32, FenceError> {
+        self.broker
+            .offline_bound(ENVIRONMENT)
+            .ok_or(FenceError::Unowned)
     }
 
     /// How much offline authority has been spent since the last
     /// authentication.
-    #[must_use]
-    pub const fn offline_spent(&self) -> u32 {
-        self.offline_spent
+    ///
+    /// # Errors
+    ///
+    /// [`FenceError::Unowned`] if the broker stopped counting.
+    pub fn offline_spent(&self) -> Result<u32, FenceError> {
+        self.broker
+            .offline_spent(ENVIRONMENT)
+            .ok_or(FenceError::Unowned)
     }
 
     /// Whether `operation` has been withdrawn by name.
     #[must_use]
     pub fn is_revoked(&self, operation: OperationId) -> bool {
-        self.revoked.contains(&operation)
+        action(operation).is_some_and(|action| self.broker.is_revoked(ENVIRONMENT, action))
     }
 
-    /// Withdraws `operation`'s authority by name. Idempotent.
+    /// Withdraws `operation`'s authority by name. Idempotent, and accepted
+    /// even by a closed fence, because a withdrawal must never fail for being
+    /// late.
     ///
-    /// Returns whether this call was the one that revoked it, so a caller
-    /// can distinguish a new withdrawal from a repeated one.
+    /// Returns whether this call was the one that revoked it. There is no
+    /// `unrevoke`: restoring authority is a *new* authorization, not the
+    /// erasure of a withdrawal a replay could then resurrect.
     ///
-    /// The withdrawal is one-way for the life of the fence. There is no
-    /// `unrevoke`, because restoring authority is a *new* authorization with
-    /// its own pinned inputs and its own reservation — not the erasure of a
-    /// withdrawal, which would let a replay of the pre-revocation state
-    /// resurrect the effect.
-    pub fn revoke(&mut self, operation: OperationId) -> bool {
-        self.revoked.insert(operation)
+    /// # Errors
+    ///
+    /// [`FenceError::ZeroOperation`], or [`FenceError::RevocationsFull`] when
+    /// the operation is new and the fence holds all it can.
+    pub fn revoke(&mut self, operation: OperationId) -> Result<bool, FenceError> {
+        let action = action(operation).ok_or(FenceError::ZeroOperation)?;
+        self.broker
+            .revoke_operation(ENVIRONMENT, action)
+            .map_err(refused)
     }
 
     /// Moves the fence to the next epoch: revocation's linearization point.
     ///
     /// Every effect admitted below the new epoch stops being dispatchable at
-    /// that instant, and no other state changes. Offline exposure is *not*
-    /// reset: a local epoch bump is a withdrawal, not evidence that the
-    /// authority source was reached.
+    /// that instant. Offline exposure is *not* reset: a local epoch bump is a
+    /// withdrawal, not evidence that the authority source was reached.
     ///
     /// # Errors
     ///
-    /// Returns [`FenceError::EpochExhausted`] at `u64::MAX`.
+    /// [`FenceError::EpochExhausted`] at `u64::MAX - 1`, the last epoch the
+    /// fence can hold, and [`FenceError::Closed`] once it is closed.
     pub fn advance_epoch(&mut self) -> Result<SecurityEpoch, FenceError> {
-        self.epoch = self.epoch.successor().ok_or(FenceError::EpochExhausted)?;
-        Ok(self.epoch)
+        self.broker
+            .replace(ENVIRONMENT)
+            .map(security)
+            .map_err(refused)
     }
 
     /// Establishes freshness: the authority source was reached and reports
     /// the generation it currently stands at.
     ///
-    /// The fence moves to the later of the two values and never back, so a
-    /// replayed old device, grant or policy snapshot is absorbed rather than
-    /// obeyed, and stale evidence never independently authorizes execution
-    /// (E71). Offline exposure resets, because this call *is* the authority
-    /// source being reached — that is the only thing that resets it.
-    ///
-    /// Returns the generation the fence now stands at.
-    #[must_use = "the returned epoch is the generation the fence now stands at"]
-    pub fn authenticate(&mut self, reported: SecurityEpoch) -> SecurityEpoch {
-        self.epoch = self.epoch.later_of(reported);
-        self.offline_spent = 0;
-        self.epoch
-    }
-
-    /// Whether the fence would let `intent` reach its owner to change
-    /// something.
-    ///
-    /// The checks run in a fixed order — named revocation, then the epoch,
-    /// then the offline bound — so the reported refusal is as deterministic
-    /// as the reducer's denial reason, and the most specific fact about this
-    /// effect is named first.
-    ///
-    /// Crate-internal on purpose. The host withdraws authority and
-    /// re-authenticates; it does not get to pre-clear a reach. The only way
-    /// to learn that a reach was refused is to make it and read
-    /// [`TickReport::fenced`](crate::runtime::TickReport::fenced), which
-    /// keeps the enforcement point single and keeps a would-be caller from
-    /// substituting its own check for the runtime's.
+    /// The fence moves to the later of the two and never back, so a replayed
+    /// old device, grant or policy snapshot is absorbed rather than obeyed
+    /// (E71), and offline exposure resets, because this call *is* the source
+    /// being reached. Returns the generation the fence now stands at.
     ///
     /// # Errors
     ///
-    /// Returns the first-failing [`FenceRefusal`].
-    pub(crate) fn check(&self, intent: &EffectIntent) -> Result<(), FenceRefusal> {
-        if self.revoked.contains(&intent.operation) {
-            return Err(FenceRefusal::Revoked {
-                operation: intent.operation,
-            });
-        }
-        if self.epoch.is_later_than(intent.admission_epoch) {
-            return Err(FenceRefusal::StaleEpoch {
-                admitted: intent.admission_epoch,
-                current: self.epoch,
-            });
-        }
-        if self.offline_spent >= self.offline_bound {
-            return Err(FenceRefusal::OfflineExposureExhausted {
-                bound: self.offline_bound,
-            });
-        }
-        Ok(())
+    /// [`FenceError::EpochExhausted`] for a report of `u64::MAX`, which has no
+    /// generation: the fence closes rather than stand below what the source
+    /// reported, and every later reach and authentication is refused.
+    /// [`FenceError::Closed`] once it is closed.
+    pub fn authenticate(&mut self, reported: SecurityEpoch) -> Result<SecurityEpoch, FenceError> {
+        let Some(at) = generation(reported) else {
+            self.broker.close(ENVIRONMENT).map_err(refused)?;
+            return Err(FenceError::EpochExhausted);
+        };
+        self.broker
+            .authenticate(ENVIRONMENT, at)
+            .map(security)
+            .map_err(refused)
     }
 
-    /// Records that one mutating reach happened without the authority source
-    /// having been re-contacted, consuming one unit of offline authority.
+    /// Mints the warrant for `key`, the mutating reach `intent` would make.
     ///
-    /// Crate-internal: exposure is spent by the runtime actually dispatching,
-    /// never by a caller asserting that a dispatch happened. Saturating
-    /// rather than wrapping, because a wrapped counter would hand back
-    /// exposure that was already spent.
-    pub(crate) fn spend_offline(&mut self) {
-        self.offline_spent = self.offline_spent.saturating_add(1);
+    /// The broker's checks run in a fixed order — closed, named revocation,
+    /// the epoch, then the offline bound — so the reported refusal is as
+    /// deterministic as the reducer's denial reason. Crate-internal: the only
+    /// way to learn that a reach was refused is to make it and read
+    /// [`TickReport::fenced`](crate::runtime::TickReport::fenced).
+    ///
+    /// # Errors
+    ///
+    /// The first-failing [`FenceRefusal`].
+    pub(crate) fn authorize(
+        &self,
+        key: EffectKey,
+        intent: &EffectIntent,
+    ) -> Result<Authority, FenceRefusal> {
+        self.broker
+            .authorize(key)
+            .map_err(|error| fenced(error, intent))
+    }
+
+    /// Presents `warrant` at the handoff, immediately before the owner: the
+    /// same check again, counting nothing, so a withdrawal that landed since
+    /// the mint still refuses the reach.
+    ///
+    /// # Errors
+    ///
+    /// The first-failing [`FenceRefusal`].
+    pub(crate) fn revalidate(
+        &self,
+        warrant: &Authority,
+        intent: &EffectIntent,
+    ) -> Result<(), FenceRefusal> {
+        self.broker
+            .revalidate(warrant)
+            .map_err(|error| fenced(error, intent))
+    }
+
+    /// Counts the reach `warrant` made: the check once more and one unit of
+    /// offline authority, in one broker call. A refusal counts nothing.
+    ///
+    /// # Errors
+    ///
+    /// The first-failing [`FenceRefusal`].
+    pub(crate) fn spend(
+        &mut self,
+        warrant: &Authority,
+        intent: &EffectIntent,
+    ) -> Result<(), FenceRefusal> {
+        self.broker
+            .spend(warrant)
+            .map_err(|error| fenced(error, intent))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use larry_contracts::effect::ReconciliationStrategy;
-    use larry_contracts::ids::{EffectId, RunId, TenantId};
-
-    fn operation(byte: u8) -> OperationId {
-        OperationId::from_bytes([byte; 16])
-    }
-
-    fn admitted_at(operation: OperationId, epoch: SecurityEpoch) -> EffectIntent {
-        EffectIntent::new(
-            EffectId::from_bytes(*operation.as_bytes()),
-            operation,
-            RunId::from_bytes([0x11; 16]),
-            TenantId::from_bytes([0x22; 16]),
-            ReconciliationStrategy::Queryable,
-            epoch,
-        )
-    }
-
-    fn fence(bound: u32) -> RevocationFence {
-        RevocationFence::new(SecurityEpoch::INITIAL, bound)
-    }
-
-    #[test]
-    fn e71_a_fresh_fence_at_the_admission_epoch_admits_the_reach() {
-        let fence = fence(4);
-        assert_eq!(
-            fence.check(&admitted_at(operation(1), SecurityEpoch::INITIAL)),
-            Ok(())
-        );
-        assert_eq!(fence.epoch(), SecurityEpoch::INITIAL);
-        assert_eq!(fence.offline_spent(), 0);
-        assert!(!fence.is_revoked(operation(1)));
-    }
-
-    #[test]
-    fn e71_revocation_by_name_is_one_way_and_idempotent() {
-        let mut fence = fence(4);
-        let intent = admitted_at(operation(7), SecurityEpoch::INITIAL);
-        assert!(fence.revoke(operation(7)), "the first call withdraws");
-        assert!(!fence.revoke(operation(7)), "the second call is a no-op");
-        assert_eq!(
-            fence.check(&intent),
-            Err(FenceRefusal::Revoked {
-                operation: operation(7)
-            })
-        );
-        // A different operation is untouched: revocation is not a blanket.
-        assert_eq!(
-            fence.check(&admitted_at(operation(8), SecurityEpoch::INITIAL)),
-            Ok(())
-        );
-        assert!(fence.is_revoked(operation(7)));
-        assert!(!fence.is_revoked(operation(8)));
-        // There is no unrevoke: the withdrawal survives an advance and an
-        // authentication, so replaying the pre-revocation state cannot
-        // resurrect the effect.
-        assert!(fence.advance_epoch().is_ok());
-        assert_eq!(
-            fence.authenticate(SecurityEpoch::new(0)),
-            SecurityEpoch::new(1),
-            "authentication never lowers the epoch, so the replay is absorbed"
-        );
-        assert!(fence.is_revoked(operation(7)));
-    }
-
-    #[test]
-    fn e71_an_advanced_epoch_fences_everything_admitted_below_it() {
-        let mut fence = fence(4);
-        let stale = admitted_at(operation(1), SecurityEpoch::INITIAL);
-        assert!(fence.advance_epoch().is_ok());
-        assert_eq!(
-            fence.check(&stale),
-            Err(FenceRefusal::StaleEpoch {
-                admitted: SecurityEpoch::INITIAL,
-                current: SecurityEpoch::new(1)
-            })
-        );
-        // An effect admitted at the new generation is unaffected: the
-        // epoch fences what it withdrew, not everything.
-        assert_eq!(
-            fence.check(&admitted_at(operation(2), SecurityEpoch::new(1))),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn e71_authentication_raises_to_the_reported_epoch_and_absorbs_an_older_one() {
-        let mut fence = fence(4);
-        fence.spend_offline();
-        assert_eq!(fence.offline_spent(), 1);
-        // A genuine advance from the authority source revokes by generation.
-        assert_eq!(
-            fence.authenticate(SecurityEpoch::new(9)),
-            SecurityEpoch::new(9)
-        );
-        assert_eq!(fence.offline_spent(), 0, "reaching the source refreshes");
-        assert_eq!(
-            fence.check(&admitted_at(operation(1), SecurityEpoch::new(8))),
-            Err(FenceRefusal::StaleEpoch {
-                admitted: SecurityEpoch::new(8),
-                current: SecurityEpoch::new(9)
-            })
-        );
-        // A replayed older snapshot is absorbed: the fence does not lower.
-        assert_eq!(
-            fence.authenticate(SecurityEpoch::new(2)),
-            SecurityEpoch::new(9)
-        );
-        assert_eq!(fence.epoch(), SecurityEpoch::new(9));
-    }
-
-    #[test]
-    fn e71_time_passing_does_not_authenticate_and_a_rolled_back_clock_is_irrelevant() {
-        // The fence holds no clock and no duration: there is no API on this
-        // type that accepts a time, so no amount of elapsed or reversed time
-        // can restore offline authority. Sleeping until the bound expires
-        // changes nothing, and the bound is reached by counting reaches.
-        assert_one_reach_then_recharge(RevocationFence::new(SecurityEpoch::INITIAL, 1));
-    }
-
-    /// One reach is permitted, the next refused, and only the authority source
-    /// being reached recharges it.
-    fn assert_one_reach_then_recharge(mut fence: RevocationFence) {
-        let intent = admitted_at(operation(1), SecurityEpoch::INITIAL);
-        assert_eq!(fence.check(&intent), Ok(()));
-        fence.spend_offline();
-        assert_eq!(
-            fence.check(&intent),
-            Err(FenceRefusal::OfflineExposureExhausted { bound: 1 })
-        );
-        assert_eq!(
-            fence.authenticate(SecurityEpoch::INITIAL),
-            SecurityEpoch::INITIAL
-        );
-        assert_eq!(fence.check(&intent), Ok(()));
-    }
-
-    #[test]
-    fn e71_a_zero_bound_refuses_every_reach_even_a_freshly_authenticated_one() {
-        // The bound is a ceiling, not a credit. Zero therefore does not mean
-        // "authenticate before each dispatch" — it means "never", and that is
-        // the property an operator reaching for a kill switch depends on. The
-        // check is `spent >= bound`, and authentication clears `spent` to
-        // zero, which is itself still at the ceiling.
-        let mut fence = fence(0);
-        let intent = admitted_at(operation(1), SecurityEpoch::INITIAL);
-        assert_eq!(
-            fence.check(&intent),
-            Err(FenceRefusal::OfflineExposureExhausted { bound: 0 })
-        );
-        assert_eq!(
-            fence.authenticate(SecurityEpoch::INITIAL),
-            SecurityEpoch::INITIAL
-        );
-        assert_eq!(
-            fence.offline_spent(),
-            0,
-            "authentication did clear the count"
-        );
-        assert_eq!(
-            fence.check(&intent),
-            Err(FenceRefusal::OfflineExposureExhausted { bound: 0 }),
-            "and the reach is still refused: zero is a ceiling, not a credit"
-        );
-    }
-
-    #[test]
-    fn e71_a_one_bound_permits_exactly_one_reach_between_authentications() {
-        assert_one_reach_then_recharge(fence(1));
-    }
-
-    #[test]
-    fn e71_epoch_exhaustion_refuses_rather_than_wrapping() {
-        let mut fence = RevocationFence::new(SecurityEpoch::new(u64::MAX), 1);
-        assert_eq!(fence.advance_epoch(), Err(FenceError::EpochExhausted));
-        assert_eq!(fence.epoch(), SecurityEpoch::new(u64::MAX));
-    }
-
-    #[test]
-    fn e71_refusals_are_ordered_revoked_then_stale_then_offline() {
-        // An effect that is revoked *and* stale *and* out of offline
-        // authority reports one deterministic reason, exactly as the reducer
-        // reports the first of its ordered checks.
-        let mut fence = fence(0);
-        let intent = admitted_at(operation(3), SecurityEpoch::INITIAL);
-        assert!(fence.revoke(operation(3)));
-        assert!(fence.advance_epoch().is_ok());
-        assert_eq!(
-            fence.check(&intent),
-            Err(FenceRefusal::Revoked {
-                operation: operation(3)
-            })
-        );
-        // Clear the revocation for a fresh operation: now the epoch is the
-        // first-failing check.
-        assert_eq!(
-            fence.check(&admitted_at(operation(4), SecurityEpoch::INITIAL)),
-            Err(FenceRefusal::StaleEpoch {
-                admitted: SecurityEpoch::INITIAL,
-                current: SecurityEpoch::new(1)
-            })
-        );
-        // Current generation, not revoked: the offline bound is last.
-        assert_eq!(
-            fence.check(&admitted_at(operation(5), SecurityEpoch::new(1))),
-            Err(FenceRefusal::OfflineExposureExhausted { bound: 0 })
-        );
-    }
-
-    #[test]
-    fn offline_exposure_saturates_rather_than_wrapping() {
-        let mut fence = RevocationFence::new(SecurityEpoch::INITIAL, u32::MAX);
-        fence.offline_spent = u32::MAX;
-        fence.spend_offline();
-        assert_eq!(
-            fence.offline_spent(),
-            u32::MAX,
-            "a wrapped counter would hand back exposure already spent"
-        );
-    }
-
-    #[test]
-    fn an_epoch_serializes_as_a_bare_number() {
-        // The wire form matters: this value is persisted inside a recorded
-        // intent, so a nested-object encoding would change the journal's
-        // bytes for a security fact. Asserting the exact string checks the
-        // property rather than trusting a serde default.
-        assert_eq!(
-            lgwks_std::json::to_string(&SecurityEpoch::new(7)).map_err(|error| error.to_string()),
-            Ok("7".to_owned())
-        );
-        assert_eq!(
-            lgwks_std::json::from_str::<SecurityEpoch>("7").map_err(|error| error.to_string()),
-            Ok(SecurityEpoch::new(7))
-        );
-    }
-}
+mod tests;

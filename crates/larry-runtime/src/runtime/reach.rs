@@ -69,10 +69,18 @@ where
     ) -> Result<Option<EffectOutcome>, RuntimeError> {
         Ok(match reach {
             OwnerReach::Mutate => {
-                if let Err(refusal) = self.fence.check(&intent) {
-                    report.fenced.push((intent.operation, refusal));
-                    return Ok(None);
-                }
+                let attempts = match self.live.get(&intent.operation) {
+                    Some(live) => live.dispatches.saturating_add(1),
+                    None => 1,
+                };
+                let key = crate::fence::effect_key(&intent, attempts)?;
+                let warrant = match self.fence.authorize(key, &intent) {
+                    Ok(warrant) => warrant,
+                    Err(refusal) => {
+                        report.fenced.push((intent.operation, refusal));
+                        return Ok(None);
+                    }
+                };
                 // The proof the gate minted at admission must still hold at the
                 // call: a grant that lapsed since is not spent (larry#77).
                 if let Some(live) = self.live.get(&intent.operation)
@@ -86,6 +94,12 @@ where
                 // intent among them, is on disk before the owner can act on
                 // it. A file that refuses means the owner is never called.
                 self.journal.sync()?;
+                // The handoff (larry#76): the broker re-checks the warrant
+                // right before the owner, so a withdrawal since the mint holds.
+                if let Err(refusal) = self.fence.revalidate(&warrant, &intent) {
+                    report.fenced.push((intent.operation, refusal));
+                    return Ok(None);
+                }
                 let previous = self.live.get(&intent.operation).cloned();
                 if let Some(live) = self.live.get_mut(&intent.operation) {
                     live.dispatches = live.dispatches.saturating_add(1);
@@ -97,10 +111,6 @@ where
                     // query about it is therefore evidence.
                     live.sent = true;
                 }
-                // The reach happens without the authority source having been
-                // re-contacted, so it consumes offline authority. Spending it
-                // here — rather than at the call site — is what keeps the
-                // accounting tied to an owner call that actually occurred.
                 let outcome = if intent.binding().is_some() {
                     match self.owner.dispatch_bound(&intent, at) {
                         Ok(outcome) => outcome,
@@ -116,7 +126,16 @@ where
                 } else {
                     self.owner.dispatch(&intent, at)
                 };
-                self.fence.spend_offline();
+                // The reach happened without the authority source, so it
+                // spends one unit of offline authority; a typed owner refusal
+                // returned above and spent none (E65). Nothing can move the
+                // fence between the handoff and here, as this call holds the
+                // runtime exclusively, so a refusal would be a broker defect:
+                // it is reported, and the outcome of the reach that did happen
+                // is still recorded.
+                if let Err(refusal) = self.fence.spend(&warrant, &intent) {
+                    report.fenced.push((intent.operation, refusal));
+                }
                 Some(outcome)
             }
             OwnerReach::Observe => {
