@@ -65,7 +65,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #103 `issue-link` fails a PR closing no issue. Proof (#149): run 42364512157 red without `Closes`, 42364569033 green.
 - [x] #133 dependency register on lgwks-deps schema 3: PR #135, `lgwks-deps check .` prints OK (was REFUSED).
 - [x] #170 hardening: clipboard-win off yanked 5.4.1, 34 locked to newest, appcui_proc_macro held (crates#841): PR #171.
-- [x] #178 every document current: the Rocco rename finished, counts, pins, falsifier state, ruleset re-read.
+- [x] #178 every document current, the Rocco rename finished: PR #179. #180 lgwks_bot 8.2.0, lgwks_deps 6.3.0: PR #185, 800 tests.
 - [ ] #177 gap: pin the ci.yml `rust` job's three actions to commit SHAs (Director 2026-11-09: not yet).
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)

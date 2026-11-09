@@ -19,7 +19,7 @@ sources:
 # Cargo sweep
 
 Read 2026-11-03. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
-`lgwks_ast`, `lgwks_deps`, all at their newest release: 4.1.1, 8.1.1, 6.0.1, 6.2.1); Loco.rs where the estate
+`lgwks_ast`, `lgwks_deps`, all at their newest release: 4.1.1, 8.2.0, 6.0.2, 6.3.0 on 2026-11-09); Loco.rs where the estate
 owns nothing; any other crate only with a `gap` issue on its manifest line. Labels: MEASURED, READ, DOC.
 
 ## Measured with cargo (MEASURED, stable toolchain, load average 4 to 6)
@@ -29,7 +29,7 @@ owns nothing; any other crate only with a `gap` issue on its manifest line. Labe
 | `loco-rs =1.2.0` (`cli`, `with-db`, `db-sqlite`, `auth`) + `lgwks_bot =6.1.0` (`rt`, `net`), deps at `opt-level 0` | 544 | 87.5 s | 393 MB | resolves; over the 60 s budget under this load |
 | `loco-rs` (`db-sqlite`) + `lgwks_deps =5.1.2` (`sqlite`) | none | none | none | refused: `libsqlite3-sys` 0.37 (sqlx) and 0.39 (rusqlite) both link `sqlite3` |
 | `rmcp =3.8.0` (`server`, `transport-io`), deps at `opt-level 3` | 62 | 69.5 s | 545 MB | resolves |
-| Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.1.1 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
+| Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.2.0 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
 | Larry's branch for larry#88 on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | resolves |
 
 Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u | wc -l`,
