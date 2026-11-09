@@ -145,6 +145,8 @@ pub enum RuntimeError {
     Fence(crate::fence::FenceError),
     /// Protocol negotiation or protocol-bound command ingress was refused.
     Protocol(crate::protocol::ProtocolError),
+    /// A question or its answer was refused before anything was written (E30).
+    Question(crate::runtime::QuestionError),
     /// The journal's file refused (larry#75): another writer holds it, its
     /// committed bytes break the chain, a ceiling was reached, the device
     /// refused, or an append's outcome is unknown until a reopen.
@@ -250,6 +252,7 @@ impl fmt::Display for RuntimeError {
             ),
             Self::Fence(ref err) => write!(f, "dispatch fence refused: {err}"),
             Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
+            Self::Question(ref err) => write!(f, "question refused: {err}"),
             Self::Durable(ref err) => write!(f, "journal file refused: {err}"),
             Self::DurableRepeat { index } => write!(
                 f,
@@ -274,6 +277,7 @@ impl std::error::Error for RuntimeError {
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
+            Self::Question(ref err) => Some(err),
             Self::Durable(ref err) => Some(err),
             Self::Fence(ref err) => Some(err),
             Self::DurableRepeat { .. } | Self::DurabilityShort { .. } => None,
@@ -357,5 +361,11 @@ impl From<crate::fence::FenceError> for RuntimeError {
 impl From<crate::protocol::ProtocolError> for RuntimeError {
     fn from(err: crate::protocol::ProtocolError) -> Self {
         Self::Protocol(err)
+    }
+}
+
+impl From<crate::runtime::QuestionError> for RuntimeError {
+    fn from(err: crate::runtime::QuestionError) -> Self {
+        Self::Question(err)
     }
 }

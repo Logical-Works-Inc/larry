@@ -72,6 +72,29 @@ impl ProtocolOffer {
     }
 }
 
+impl ProtocolOffer {
+    /// Whether the offering client can put a question before a human and
+    /// carry the answer back: it offers `HumanQuestion` and is not headless
+    /// (E30, E47).
+    ///
+    /// # Errors
+    ///
+    /// [`ProtocolError::CapabilityMissing`] without `HumanQuestion`, then
+    /// [`ProtocolError::HeadlessQuestion`] for a headless client.
+    pub(crate) fn serves_questions(&self) -> Result<(), ProtocolError> {
+        let &Self(_, _, ref capabilities, headless, _) = self;
+        if !capabilities.contains(&ProtocolCapability::HumanQuestion) {
+            return Err(ProtocolError::CapabilityMissing {
+                capability: ProtocolCapability::HumanQuestion,
+            });
+        }
+        if headless {
+            return Err(ProtocolError::HeadlessQuestion);
+        }
+        Ok(())
+    }
+}
+
 /// Negotiated version and tenant identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NegotiatedProtocol {

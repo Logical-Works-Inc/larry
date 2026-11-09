@@ -19,7 +19,7 @@
 //! in the order they were acknowledged. Other runs pass it. No committed
 //! effect is rewritten.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::SystemTime;
 
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
@@ -51,10 +51,32 @@ pub(super) struct Admitted {
     display: Option<DisplayedEffect>,
 }
 
-/// The run `command`'s proposal names.
+/// The run `command` names: its question's or answer's (E30), or its
+/// proposal's.
 fn target(command: &Command) -> Result<RunId, RuntimeError> {
+    if let Some(run) = super::approval::run_of(command) {
+        return run;
+    }
     let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
     Ok(proposal.run)
+}
+
+/// Why a pending command holds the later commands of its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// A correction its run is not settled for (D25).
+    Correction,
+    /// Work whose question is pending (E30).
+    Answer,
+}
+
+/// Whether a command of `kind` may pass a run held for an answer: the answer
+/// itself, another question, or the stop control, which must stay real.
+const fn passes_answer_hold(kind: CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::Answer | CommandKind::Ask | CommandKind::Cancel
+    )
 }
 
 /// The admitted commands `journal` holds no `CommandAccepted` fact for, in
@@ -136,16 +158,24 @@ where
                     capacity: MAX_READY_WORK,
                 });
             }
-            if command.content().kind() == CommandKind::Submit {
+            let kind = command.content().kind();
+            if kind == CommandKind::Submit {
                 let proposal: WorkProposal =
                     lgwks_std::json::from_slice(command.content().payload())?;
                 let at = sample(&self.clock)?;
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
             }
+            if matches!(kind, CommandKind::Ask | CommandKind::Answer) {
+                // A question or an answer counts as of its durable admission,
+                // so it is judged against this instant before it is written.
+                let at = sample(&self.clock)?;
+                self.check_question(&command, at)?;
+            }
         }
         let held = command.clone();
         let acceptance = self.journal.accept_command(command)?;
         if acceptance == CommandAcceptance::Initial {
+            self.questions.fold(&held);
             self.admitted.push_back(Admitted {
                 run,
                 command: held,
@@ -192,22 +222,39 @@ where
             })
     }
 
-    /// Whether `command` must wait: a correction its run is not settled for.
-    fn unsafe_correction(&self, run: RunId, command: &Command) -> bool {
-        command.content().kind() == CommandKind::Steer && !self.settled(run)
+    /// Why `command` must wait, if it must: a correction its run is not
+    /// settled for, or work whose question is pending.
+    fn hold(&self, run: RunId, command: &Command, at: SystemTime) -> Option<Hold> {
+        match command.content().kind() {
+            CommandKind::Steer if !self.settled(run) => Some(Hold::Correction),
+            CommandKind::Submit if self.awaits_answer(run, command, at) => Some(Hold::Answer),
+            _ => None,
+        }
     }
 
-    /// Holds a just-accepted ready command pending when it is a correction its
-    /// run is not settled for, or when its run already has a command pending.
-    /// Returns the command back when it may be reduced now.
+    /// Whether a cancellation of `run` is admitted and not yet reduced.
+    pub(super) fn cancel_pending(&self, run: RunId) -> bool {
+        self.admitted.iter().any(|admitted| {
+            admitted.run == run && admitted.command.content().kind() == CommandKind::Cancel
+        })
+    }
+
+    /// Holds a just-accepted ready command pending when it must wait, or when
+    /// its run already has a command pending that it may not pass. Returns
+    /// the command back when it may be reduced now.
     pub(super) fn hold_or_pass(
         &mut self,
         run: RunId,
         command: Command,
         display: Option<&DisplayedEffect>,
+        at: SystemTime,
     ) -> Option<Command> {
-        let waiting = self.admitted.iter().any(|admitted| admitted.run == run);
-        if !waiting && !self.unsafe_correction(run, &command) {
+        let passes = passes_answer_hold(command.content().kind());
+        let waiting = self.admitted.iter().any(|admitted| {
+            admitted.run == run
+                && !(passes && self.hold(run, &admitted.command, at) == Some(Hold::Answer))
+        });
+        if !waiting && self.hold(run, &command, at).is_none() {
             return Some(command);
         }
         self.admitted.push_back(Admitted {
@@ -230,15 +277,24 @@ where
         report: &mut TickReport,
     ) -> Result<usize, RuntimeError> {
         let mut left = budget;
-        let mut blocked = BTreeSet::new();
+        let mut blocked: BTreeMap<RunId, Hold> = BTreeMap::new();
         let mut index = 0;
         while left > 0 {
             let Some(next) = self.admitted.get(index) else {
                 break;
             };
             let run = next.run;
-            if blocked.contains(&run) || self.unsafe_correction(run, &next.command) {
-                blocked.insert(run);
+            let behind = match blocked.get(&run) {
+                Some(&Hold::Answer) => !passes_answer_hold(next.command.content().kind()),
+                Some(&Hold::Correction) => true,
+                None => false,
+            };
+            if behind {
+                index = index.saturating_add(1);
+                continue;
+            }
+            if let Some(hold) = self.hold(run, &next.command, at) {
+                blocked.entry(run).or_insert(hold);
                 index = index.saturating_add(1);
                 continue;
             }
@@ -246,32 +302,33 @@ where
                 break;
             };
             left = left.saturating_sub(1);
-            let proposal: WorkProposal =
-                lgwks_std::json::from_slice(next.command.content().payload())?;
             self.ensure_run_tenant(run, next.command.tenant())?;
             report.admitted.push(next.command.id());
-            self.reduce(&next.command, &proposal, next.display.as_ref(), at, report)?;
+            self.reduce(&next.command, next.display.as_ref(), at, report)?;
         }
         Ok(left)
     }
 
     /// Records `command`'s acceptance and folds it: work is gated and
-    /// reserved, a cancellation requested. A correction's acceptance is the
-    /// whole of its promotion: the journal is where its consumer reads it.
+    /// reserved, a cancellation requested, a question's run tracked for its
+    /// tenant. A correction's or an answer's acceptance is the whole of its
+    /// promotion: the journal is where its consumer reads it, and the answer
+    /// was folded into the question book at admission (E30).
     pub(super) fn reduce(
         &mut self,
         command: &Command,
-        proposal: &WorkProposal,
         display: Option<&DisplayedEffect>,
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let (id, tenant, kind) = (command.id(), command.tenant(), command.content().kind());
-        self.record_command_accepted(id, tenant, kind, proposal.run)?;
+        let run = target(command)?;
+        self.record_command_accepted(id, tenant, kind, run)?;
         match kind {
-            CommandKind::Submit => self.admit_work(tenant, proposal, display, at, report),
-            CommandKind::Cancel => self.request_cancellation(tenant, proposal.run),
-            CommandKind::Steer => Ok(()),
+            CommandKind::Submit => self.submit_work(command, display, at, report),
+            CommandKind::Cancel => self.request_cancellation(tenant, run),
+            CommandKind::Ask => self.track_run(run, tenant),
+            CommandKind::Steer | CommandKind::Answer => Ok(()),
             other => Err(RuntimeError::UnsupportedCommand(other)),
         }
     }

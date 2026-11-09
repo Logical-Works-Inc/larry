@@ -26,10 +26,11 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 
 /// What a command asks the reducer to do.
 ///
-/// The three kinds are the command classes the specification's lifecycle
+/// The five kinds are the command classes the specification's lifecycle
 /// names: submit work, steer work in flight (E28 "retry and steer during a
-/// tool"), and cancel. The set is closed; extending it is a specification
-/// change, not a local edit.
+/// tool"), cancel, and the durable scoped question and its answer (Cell 02
+/// "Missing human decision", D25, E30). The set is closed; extending it is a
+/// specification change, not a local edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -42,6 +43,11 @@ pub enum CommandKind {
     Steer,
     /// Request cancellation of a run (requested, not completed).
     Cancel,
+    /// Ask one named respondent to approve one exact effect before it is
+    /// admitted; expiry is never consent (D25, E30).
+    Ask,
+    /// A respondent's answer to one question, bound to its effect and schema.
+    Answer,
 }
 
 impl CommandKind {
@@ -52,6 +58,8 @@ impl CommandKind {
             Self::Submit => 0,
             Self::Steer => 1,
             Self::Cancel => 2,
+            Self::Ask => 3,
+            Self::Answer => 4,
         }
     }
 }

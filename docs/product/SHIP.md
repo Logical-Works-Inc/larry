@@ -83,7 +83,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #101 E47 protocol negotiation before ingress, the executor its caller (ADR 0020): PR #166, 742 tests.
 - [x] #100 E28 durable admission before the acknowledgement, corrections at a safe boundary (ADR 0025): PR #174.
 - [x] #99 E71 a restart recharges no offline authority, old settings revive nothing (ADR 0026): PR #175, 790 tests.
-- [ ] #98 E30 (PR #25): port onto main (recipe on PR #20), merge on green.
+- [x] #98 E30 durable scoped questions, expiry never consent (ADR 0027), PR #25 ported: PR #176.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
