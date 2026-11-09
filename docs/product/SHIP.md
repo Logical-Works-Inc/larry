@@ -77,12 +77,12 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay
   p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
-- [ ] #80 tick and consumer on app scope and tenant_store. Proof: `sim_lifecycle`, `sim_consumer`,
-  `sim_cancel`.
+- [ ] #80 tick and consumer on app scope and tenant_store. Proof: `sim_lifecycle`, `sim_consumer`, `sim_cancel`.
 - [x] #68 step 4 (#164): every executor task passes the runtime gate, `LARRY_POLICY` (ADR 0019): PR #165, 734 tests;
   `larry exec` p50 63.6/62.6 ms, p99 111.7/66.1 ms (64 runs, debug), peak RSS 10.9/11.8 MiB.
 - [x] #101 E47 protocol negotiation before ingress, the executor its caller (ADR 0020): PR #166, 742 tests.
-- [ ] #100 E28 (PR #21), #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe on PR #20), merge on green.
+- [x] #100 E28 durable admission before the acknowledgement, corrections at a safe boundary (ADR 0025): PR #174.
+- [ ] #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe on PR #20), merge on green.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 

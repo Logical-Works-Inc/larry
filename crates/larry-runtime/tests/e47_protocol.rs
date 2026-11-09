@@ -9,10 +9,10 @@ mod atomic;
 use std::time::Duration;
 
 use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope};
-use larry_contracts::command::Command;
+use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::ContentDigest;
-use larry_contracts::ids::{CommandId, RunId, TenantId};
+use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::state::RunState;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
@@ -163,7 +163,9 @@ fn e47_refusals_are_actionable_scoped_and_non_mutating() -> Result<(), Box<dyn s
 
     let negotiated_version = rt.submit_protocol(&valid, command, None)?;
     assert_eq!(negotiated_version, MAX_PROTOCOL_VERSION);
-    assert_eq!(rt.journal().len(), 0, "queueing is not journal acceptance");
+    // The acknowledgement follows the durable write (E28, ADR 0025): the
+    // command is journaled, and accepted only when the tick reduces it.
+    assert_eq!(rt.journal().len(), 1, "admission journals the command");
     assert_eq!(rt.tick_count(), 0);
     let accepted = rt.tick()?;
     assert_eq!(accepted.admitted(), &[command_id(1)]);
@@ -181,7 +183,28 @@ fn e47_overload_backoff_is_bounded_deterministic_and_does_not_append()
     // pins to the drain bound.
     const BACKOFF_TICKS: u32 = 4;
     let tenant_id = tenant(9);
-    let command = command_for(tenant_id, command_id(9), run(9))?;
+    // Distinct corrections on distinct runs: a duplicate takes no capacity
+    // (E28), and a steer reserves no effect, so only the bound is exercised.
+    let filler = |index: usize| -> Result<Command, Box<dyn std::error::Error>> {
+        let mut bytes = [0xE4_u8; 16];
+        bytes[8..].copy_from_slice(&u64::try_from(index)?.to_be_bytes());
+        let body = proposal(
+            RunId::from_bytes(bytes),
+            tenant_id,
+            OperationId::from_bytes(bytes),
+            &[],
+            0,
+            ReconciliationStrategy::Queryable,
+        );
+        let payload = lgwks_std::json::to_vec(&body)?.into_boxed_slice();
+        let content = CommandContent::new(CommandKind::Steer, payload);
+        Ok(Command::new(
+            CommandId::from_bytes(bytes),
+            tenant_id,
+            Vec::new(),
+            content,
+        )?)
+    };
     let mut rt = runtime_with(
         ScriptedOwner::new(),
         &[Scope::FileRead],
@@ -195,12 +218,18 @@ fn e47_overload_backoff_is_bounded_deterministic_and_does_not_append()
         false,
         false,
     );
-    for _ in 0..larry_runtime::MAX_READY_WORK {
-        rt.submit_protocol(&valid, command.clone(), None)?;
+    for index in 0..larry_runtime::MAX_READY_WORK {
+        rt.submit_protocol(&valid, filler(index)?, None)?;
     }
+    let admitted = rt.journal().len();
+    assert_eq!(
+        admitted,
+        larry_runtime::MAX_READY_WORK,
+        "each admission is journaled"
+    );
 
-    let first = rt.submit_protocol(&valid, command.clone(), None);
-    let second = rt.submit_protocol(&valid, command, None);
+    let first = rt.submit_protocol(&valid, filler(larry_runtime::MAX_READY_WORK)?, None);
+    let second = rt.submit_protocol(&valid, filler(larry_runtime::MAX_READY_WORK)?, None);
     let retry_delay = match first {
         Err(RuntimeError::Protocol(ProtocolError::Overloaded {
             capacity,
@@ -220,7 +249,11 @@ fn e47_overload_backoff_is_bounded_deterministic_and_does_not_append()
     ));
     assert!((1..=BACKOFF_TICKS).contains(&retry_delay));
     assert_eq!(retry_delay, BACKOFF_TICKS);
-    assert_eq!(rt.journal().len(), 0);
+    assert_eq!(
+        rt.journal().len(),
+        admitted,
+        "an overload refusal appends nothing"
+    );
     assert_eq!(rt.tick_count(), 0);
 
     for _ in 0..BACKOFF_TICKS {
@@ -264,10 +297,11 @@ fn e47_seeded_negotiation_replays_the_same_trace_for_one_thousand_seeds()
                 false,
                 false,
             );
-            outcomes.push(u8::from(
-                rt.submit_protocol(&candidate, command, None).is_ok(),
-            ));
-            assert_eq!(rt.journal().len(), 0);
+            let acknowledged = rt.submit_protocol(&candidate, command, None).is_ok();
+            outcomes.push(u8::from(acknowledged));
+            // An acknowledgement is one journaled command (E28); a refusal
+            // writes nothing (E47).
+            assert_eq!(rt.journal().len(), usize::from(acknowledged));
         }
         Ok(outcomes)
     }

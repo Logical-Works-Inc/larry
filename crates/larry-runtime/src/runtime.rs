@@ -40,6 +40,7 @@
 //! above true for the effect's whole life rather than only for the tick that
 //! refused it.
 
+mod admission;
 mod display;
 mod ingress;
 mod instant;
@@ -49,6 +50,7 @@ mod reconcile;
 mod retry;
 mod writers;
 
+use admission::Admitted;
 use instant::sample;
 use live::{LiveEffect, OwnerReach, RunLive};
 
@@ -211,7 +213,6 @@ impl TickReport {
     pub fn fenced(&self) -> &[(OperationId, FenceRefusal)] {
         &self.fenced
     }
-
     /// Whether the tick changed nothing.
     ///
     /// A refused reach is a non-event: it wrote no journal entry, dispatched
@@ -244,6 +245,8 @@ pub struct Runtime<P, O> {
     fence: RevocationFence,
     /// Bounded queue of commands awaiting admission.
     ready: VecDeque<ReadyCommand>,
+    /// Durably admitted commands not yet reduced, in journal order (E28).
+    admitted: VecDeque<Admitted>,
     /// Host-supplied snapshots and resource bounds.
     settings: RuntimeSettings,
     /// Budget not yet reserved by recorded intents.
@@ -282,6 +285,7 @@ where
             clock,
             fence,
             ready: VecDeque::new(),
+            admitted: VecDeque::new(),
             settings,
             remaining_budget,
             runs: BTreeMap::new(),
@@ -409,8 +413,11 @@ where
     // ── stage 2: admit, gate, reserve, dispatch, observe ────────────────────
 
     /// Admits queued commands in deterministic order within the tick bound.
+    ///
+    /// Durably admitted commands go first, in journal order, then the ready
+    /// queue, under one budget (E28).
     fn pump_ready(&mut self, at: SystemTime, report: &mut TickReport) -> Result<(), RuntimeError> {
-        let budget = self.settings.max_runs_per_tick;
+        let budget = self.promote_admitted(self.settings.max_runs_per_tick, at, report)?;
         for _ in 0..budget {
             let Some(queued) = self.ready.pop_front() else {
                 return Ok(());
@@ -426,25 +433,23 @@ where
             if kind == CommandKind::Submit && self.journal.command(id).is_none() {
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
             }
+            if self.journal.command(id).is_none() && self.admitted.len() >= MAX_READY_WORK {
+                // A command that may have to wait has no room to: it stays
+                // queued for the next tick rather than being dropped.
+                self.ready.push_front(ReadyCommand { command, display });
+                return Ok(());
+            }
+            let kept = command.clone();
             let acceptance = self.journal.accept_command(command)?;
             if acceptance == CommandAcceptance::DuplicateReplay {
                 report.duplicates.push(id);
                 continue;
             }
+            let Some(command) = self.hold_or_pass(proposal.run, kept, display.as_ref()) else {
+                continue;
+            };
             report.admitted.push(id);
-            self.record_command_accepted(id, tenant, kind, proposal.run)?;
-
-            match kind {
-                CommandKind::Submit => {
-                    self.admit_work(tenant, &proposal, display.as_ref(), at, report)?
-                }
-                CommandKind::Cancel => self.request_cancellation(tenant, proposal.run)?,
-                CommandKind::Steer => {
-                    // Steering is recorded at a safe boundary; the command's
-                    // acceptance is the durable fact this slice owns.
-                }
-                other => return Err(RuntimeError::UnsupportedCommand(other)),
-            }
+            self.reduce(&command, &proposal, display.as_ref(), at, report)?;
         }
         Ok(())
     }
@@ -655,6 +660,9 @@ where
 
     let mut projection = P::default();
     projection.rebuild(&journal)?;
+    // Admitted commands the journal holds no acceptance for are pending again,
+    // in journal order (E28): the record says so, never the dead process.
+    let pending = admission::recover(&journal)?;
 
     let mut runs: BTreeMap<RunId, RunLive> = BTreeMap::new();
     let mut live: BTreeMap<OperationId, LiveEffect> = BTreeMap::new();
@@ -736,6 +744,7 @@ where
         clock,
         fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound)?,
         ready: VecDeque::new(),
+        admitted: pending,
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
         settings,
         runs,

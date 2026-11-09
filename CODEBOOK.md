@@ -46,6 +46,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `error` | Every refused runtime operation |
 | `runtime` | Settings, `TickReport`, stage 2 (admit, reserve, dispatch), `restore` |
 | `runtime::instant` | The tick's one pinned instant: `lgwks_bot::clock` read as time since the Unix epoch (larry#74) |
+| `runtime::admission` | E28 durable admission before the acknowledgement, the pending set, safe-boundary promotion (ADR 0025) |
 | `runtime::display` | E65 display and admission on the real command path |
 | `runtime::ingress` | `submit_protocol`: negotiate, tenant check and bounded backoff before the queue (E47) |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
@@ -109,12 +110,11 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 ## Invariants the module map carries
 
 - Only `runtime::reconcile` completes a cancellation, and only with no owned effect open (ADR 0001).
-- Only `runtime::writers` appends to the journal; every append folds the projection after it; `tick` and `runtime::reach` are the only syncs.
+- Only `runtime::writers` appends events, and every event folds the projection after it; commands enter by `Journal::accept_command`; `tick`, `runtime::reach` and `Runtime::admit` are the only syncs.
 - `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
-- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test
-  that exercises every helper: `support/origin.rs` the origin repository the executor and MCP journeys
-  share, `support/mcp_task.rs` the operator session and receipt check behind `larry_submit_task`,
-  `support/larry_cli.rs` the `larry` child and its report readers, `support/serve_cli.rs` `larry serve`.
+- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that
+  exercises every helper: `support/origin.rs` the journeys' origin repository, `support/mcp_task.rs` the
+  operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/serve_cli.rs` `larry serve`.
