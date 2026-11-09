@@ -335,20 +335,36 @@ fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
 }
 
 /// `larry serve`: bind `LARRY_SERVE_ADDR` (loopback by default), print one JSON line naming
-/// the bound address, the edge's liveness path and the tenant probe, then serve until SIGTERM
-/// or SIGINT and exit 0.
+/// the bound address, the edge's liveness path, the tenant probe and how many tenants hold a
+/// key in `LARRY_STATE_DIR`, then serve until SIGTERM or SIGINT and exit 0.
 fn serve_once() -> Result<(), larry_demo::serve::ServeError> {
     let settings = larry_demo::serve::Settings::from_env(|name| std::env::var(name).ok())?;
-    larry_demo::serve::run(&settings, |addr| {
+    larry_demo::serve::run(settings, |addr, keyed| {
         let path = larry_demo::serve::HEALTH_PATH;
         let line = lgwks_std::json::json!({
             "serving": format!("http://{addr}"),
             "health": format!("http://{addr}{path}"),
             "probe": format!("http://{addr}/t/{{tenant}}{path}"),
+            "keyed_tenants": keyed,
         });
         let mut out = io::stdout().lock();
         writeln!(out, "{line}").and_then(|()| out.flush())
     })
+}
+
+/// `larry serve key <tenant>`: issue (or rotate) the tenant's bearer key and print it once,
+/// as JSON; only its digest is kept in `LARRY_STATE_DIR`.
+fn serve_key_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> {
+    let key = larry_demo::serve::issue_key(|name| std::env::var(name).ok(), tenant)?;
+    let line = lgwks_std::json::json!({
+        "tenant": tenant,
+        "key": key,
+        "shown": "once: only its digest is stored; issuing again rotates it",
+    });
+    let mut out = io::stdout().lock();
+    writeln!(out, "{line}")
+        .and_then(|()| out.flush())
+        .map_err(larry_demo::serve::ServeError::Announce)
 }
 
 /// The exit status of a sealed verdict.
@@ -400,6 +416,11 @@ fn main() -> ExitCode {
         [ref command] if command == "serve" => serve_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
+        [ref command, ref sub, ref tenant] if command == "serve" && sub == "key" => {
+            serve_key_once(&tenant.to_string_lossy())
+                .map(|()| ExitCode::SUCCESS)
+                .map_err(|error| error.to_string())
+        }
         _ => Err(String::from(
             "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
         )),

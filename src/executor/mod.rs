@@ -18,7 +18,7 @@ use std::time::Duration;
 pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 use larry_runtime::error::RuntimeError;
-use ledger::Ledger;
+pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 use run::run_command;
 use workspace::{Workspace, sweep};
@@ -224,6 +224,12 @@ fn state_dir(read: &impl Fn(&str) -> Option<String>) -> Result<PathBuf, ExecErro
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or(ExecError::StateDirUnset)
+}
+
+/// The state directory's store, opened (and created or migrated) under its lock: the
+/// one home of the receipt key and the tenant key digests (larry#89).
+pub(crate) fn state_ledger(read: &impl Fn(&str) -> Option<String>) -> Result<Ledger, ExecError> {
+    Ledger::open(&state_dir(read)?)
 }
 
 /// The public half of the state directory's receipt key, created on first use.

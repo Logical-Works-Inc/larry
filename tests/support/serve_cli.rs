@@ -1,11 +1,14 @@
-//! The shipped `larry serve` as a child process, and one HTTP/1.1 exchange
-//! against it. Shared by `tests/serve_journey.rs` and `tests/sim_serve.rs`
-//! (larry#88), so the host is started, read and stopped one way.
+//! The shipped `larry serve` as a child process, its `serve key` issuer, and one
+//! HTTP/1.1 exchange against it. Shared by `tests/serve_journey.rs` and
+//! `tests/sim_serve.rs` (larry#88, larry#89), so the host is started, keyed,
+//! read and stopped one way.
 
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lgwks_std::json::{self, Value};
@@ -13,6 +16,41 @@ use lgwks_std::json::{self, Value};
 /// How long one exchange may take before the host is called broken: a bound on
 /// a hung host, never the pace of a working one.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Per-process counter that gives each host its own state directory.
+static STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh, empty state directory under the system temp dir.
+pub fn fresh_state_dir() -> PathBuf {
+    let index = STATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("larry-serve-{}-{index}", std::process::id()))
+}
+
+/// `larry serve key <tenant>` against `state`: the key it printed once.
+pub fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_larry"))
+        .args(["serve", "key", tenant])
+        .env_clear()
+        .env("LARRY_STATE_DIR", state)
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "serve key {tenant:?}: {}, {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let printed: Value = json::from_slice(&output.stdout)?;
+    Ok(String::from(
+        printed
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or("serve key prints its key")?,
+    ))
+}
 
 /// A running `larry serve` and the address it printed. Dropping it kills the
 /// child, so a failed test leaves no host behind.
@@ -106,16 +144,22 @@ impl Drop for Serving {
     }
 }
 
-/// One request on a fresh connection: its status and body. The connection
-/// closes after the answer, so the read ends with it.
+/// One request on a fresh connection, with `key` as its bearer token when
+/// given: its status and body. The connection closes after the answer, so the
+/// read ends with it.
 pub fn exchange(
     addr: SocketAddr,
     method: &str,
     path: &str,
     body: &[u8],
+    key: Option<&str>,
 ) -> Result<(u16, String), Box<dyn Error>> {
+    let auth = match key {
+        Some(token) => format!("authorization: Bearer {token}\r\n"),
+        None => String::new(),
+    };
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nhost: {addr}\r\n{auth}content-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     );
     let mut stream = TcpStream::connect(addr)?;
@@ -137,9 +181,13 @@ pub fn exchange(
     Ok((status, String::from(answered)))
 }
 
-/// `GET path` with no body.
-pub fn get(addr: SocketAddr, path: &str) -> Result<(u16, String), Box<dyn Error>> {
-    exchange(addr, "GET", path, b"")
+/// `GET path` with no body, as `key` when given.
+pub fn get(
+    addr: SocketAddr,
+    path: &str,
+    key: Option<&str>,
+) -> Result<(u16, String), Box<dyn Error>> {
+    exchange(addr, "GET", path, b"", key)
 }
 
 /// The probe body the shipped binary answers, built independently of it.
