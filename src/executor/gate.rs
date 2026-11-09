@@ -218,6 +218,7 @@ fn denial_line(reason: &DenialReason) -> String {
         DenialReason::AuthorityExpired => String::from("gate: authority_expired"),
         DenialReason::BudgetExhausted { .. } => String::from("gate: budget_exhausted"),
         DenialReason::UnitMismatch { .. } => String::from("gate: unit_mismatch"),
+        DenialReason::NotApproved => String::from("gate: not_approved"),
         _ => String::from("gate: denied"),
     }
 }

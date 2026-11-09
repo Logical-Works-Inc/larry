@@ -41,6 +41,7 @@
 //! refused it.
 
 mod admission;
+mod approval;
 mod display;
 mod ingress;
 mod instant;
@@ -54,6 +55,7 @@ use admission::Admitted;
 use instant::sample;
 use live::{LiveEffect, OwnerReach, RunLive};
 
+pub use approval::{Answer, Decision, Question, QuestionError, Subject};
 pub use display::DisplayedEffect;
 use display::ReadyCommand;
 
@@ -247,6 +249,8 @@ pub struct Runtime<P, O> {
     ready: VecDeque<ReadyCommand>,
     /// Durably admitted commands not yet reduced, in journal order (E28).
     admitted: VecDeque<Admitted>,
+    /// The journal's questions and their answers (E30).
+    questions: approval::Book,
     /// Host-supplied snapshots and resource bounds.
     settings: RuntimeSettings,
     /// Budget not yet reserved by recorded intents.
@@ -286,6 +290,7 @@ where
             fence,
             ready: VecDeque::new(),
             admitted: VecDeque::new(),
+            questions: approval::Book::default(),
             settings,
             remaining_budget,
             runs: BTreeMap::new(),
@@ -301,8 +306,14 @@ where
     ///
     /// Returns [`RuntimeError::ReadyWorkFull`] when the ready queue is at its
     /// bound. The caller must drain a tick; the runtime never silently drops
-    /// a submission (Cell 05).
+    /// a submission (Cell 05). A question or an answer is refused
+    /// [`RuntimeError::UnsupportedCommand`]: it enters only through
+    /// [`Self::submit_protocol`], from a client that can serve a human (E30).
     pub fn submit(&mut self, command: Command) -> Result<(), RuntimeError> {
+        let kind = command.content().kind();
+        if matches!(kind, CommandKind::Ask | CommandKind::Answer) {
+            return Err(RuntimeError::UnsupportedCommand(kind));
+        }
         self.enqueue(ReadyCommand {
             command,
             display: None,
@@ -445,11 +456,11 @@ where
                 report.duplicates.push(id);
                 continue;
             }
-            let Some(command) = self.hold_or_pass(proposal.run, kept, display.as_ref()) else {
+            let Some(command) = self.hold_or_pass(proposal.run, kept, display.as_ref(), at) else {
                 continue;
             };
             report.admitted.push(id);
-            self.reduce(&command, &proposal, display.as_ref(), at, report)?;
+            self.reduce(&command, display.as_ref(), at, report)?;
         }
         Ok(())
     }
@@ -459,16 +470,20 @@ where
         &mut self,
         tenant: TenantId,
         proposal: &WorkProposal,
+        content: larry_contracts::ids::ContentDigest,
         display: Option<&DisplayedEffect>,
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let run = proposal.run;
         // Admissibility is decided from the runtime's own run table, never
-        // inferred from the projection: recording the command already created
-        // a run view, so a projection-based check would read `Draft` and skip
-        // the admission step.
-        let is_new = !self.runs.contains_key(&run);
+        // inferred from the projection alone: recording the command already
+        // created a run view, so a projection-based check would read `Draft`
+        // and skip the admission step. A tracked run still in `Draft` was
+        // tracked by a question asked before its work (E30) and was never
+        // admitted.
+        let is_new = !self.runs.contains_key(&run)
+            || matches!(self.projection.run_state(run), None | Some(RunState::Draft));
         self.track_run(run, tenant)?;
 
         if is_new {
@@ -487,6 +502,14 @@ where
             return Err(RuntimeError::DuplicateOperation {
                 operation: proposal.operation,
             });
+        }
+        // A question bound to this effect is the only way past it: an
+        // approval covering its exact content and scopes, never a timeout
+        // (D25, E30).
+        if let Err(reason) = self.approved(tenant, proposal, content, at) {
+            report.denied.push((proposal.operation, reason));
+            self.advance(run, TransitionEvent::Fail)?;
+            return Ok(());
         }
 
         let mut pinned = self.pinned_inputs(proposal, at);
@@ -663,6 +686,9 @@ where
     // Admitted commands the journal holds no acceptance for are pending again,
     // in journal order (E28): the record says so, never the dead process.
     let pending = admission::recover(&journal)?;
+    // Questions and answers are commands, so the book is a fold over the
+    // journal in order, never the dead process's memory (E30).
+    let questions = approval::Book::rebuild(&journal);
     // The fence is live state the journal does not hold, so a runtime resuming
     // recorded history counts its whole offline allowance spent until the host
     // reaches the authority source (E71): neither a restart nor settings older
@@ -756,6 +782,7 @@ where
         fence,
         ready: VecDeque::new(),
         admitted: pending,
+        questions,
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
         settings,
         runs,

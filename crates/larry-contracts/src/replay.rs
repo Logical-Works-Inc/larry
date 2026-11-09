@@ -208,6 +208,10 @@ pub enum DenialReason {
         /// The unit the budget is denominated in.
         budget: BudgetUnit,
     },
+    /// A question bound to this effect was rejected, timed out or cancelled,
+    /// or its approval does not cover the effect's content and scopes; a
+    /// timeout is never consent (D25, E30).
+    NotApproved,
 }
 
 /// The authorization decision (D36 output).

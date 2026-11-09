@@ -2,7 +2,7 @@
 //! after its client's offer negotiates a version and the capabilities the
 //! command needs, so a refusal mutates neither the queue nor the journal.
 
-use larry_contracts::command::Command;
+use larry_contracts::command::{Command, CommandKind};
 
 use super::DisplayedEffect;
 use super::Runtime;
@@ -41,6 +41,14 @@ where
         display: Option<DisplayedEffect>,
     ) -> Result<u16, RuntimeError> {
         let negotiated = negotiate(offer)?;
+        if matches!(
+            command.content().kind(),
+            CommandKind::Ask | CommandKind::Answer
+        ) {
+            // A question or an answer needs a human at the other end; a
+            // headless client is refused, never a silent wait (E30).
+            offer.serves_questions()?;
+        }
         if negotiated.tenant != command.tenant() {
             return Err(ProtocolError::TenantMismatch {
                 negotiated: negotiated.tenant,
