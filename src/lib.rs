@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod model;
 pub mod native;
 pub mod rerank;
+pub mod serve;
 pub mod theme;
 
 /// Distinguishes the temporary files of concurrent replacements inside one process.

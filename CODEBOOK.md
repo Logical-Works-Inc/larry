@@ -82,6 +82,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008) |
+| `serve` | `larry serve`: the address, the routes on `lgwks_bot::app`, the stop signals (ADR 0021) |
 | `governance` | `larry governance`: the structural checker over the governed documents and its report (ADR 0010) |
 | `governance::documents` | The bounded load of the top-level documents and the `docs/` tree; split documents read whole (ADR 0015) |
 | `governance::markdown` | Frontmatter, fences, local links and GitHub heading ids |
@@ -100,7 +101,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::pystr` | CPython `str` semantics the messages need: `splitlines`, `split`, `repr`, decode errors |
 | `governance::sim_*` | Seeded ports of the Python controls, parser references, bounds and two-root checks |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
@@ -113,8 +114,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
-- Test fixtures shared by several runtime test binaries live in `tests/support`, `tests/sim_kit` and
-  `tests/fence_kit`, each with a test that exercises every helper; `tests/support/origin.rs` holds the
-  origin repository the executor and MCP journeys share, `tests/support/mcp_task.rs` the operator
-  session and offline receipt check behind `larry_submit_task`, `tests/support/larry_cli.rs` the
-  `larry` child and its sealed-report readers.
+- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test
+  that exercises every helper: `support/origin.rs` the origin repository the executor and MCP journeys
+  share, `support/mcp_task.rs` the operator session and receipt check behind `larry_submit_task`,
+  `support/larry_cli.rs` the `larry` child and its report readers, `support/serve_cli.rs` `larry serve`.

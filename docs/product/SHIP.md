@@ -71,8 +71,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 - [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds).
 - [ ] #75 journal on FileJournal, durable across kill -9. Proof: `sim_crash_restore`, `sim_replay` and a
-  kill -9 that re-executes the binary mid-append. Waits: lgwks_bot 7.1.1 journals only its own effects.
-- [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs`. Waits: broker gaps.
+  kill -9 that re-executes the binary mid-append. Unblocked: lgwks_bot 8.0.x RecordJournal (crates#875).
+- [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs` (crates#876, 8.0.x).
 - [x] #77 gate on GrantSet and cap::Auth: PR #163, 729 tests; replay p50 49.9/49.7 us, p99 94.5/86.8 us (ADR 0018).
 - [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay
   p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
@@ -86,7 +86,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
-- [ ] #88 Loco host behind a `serve` feature. Proof: `/healthz` on production config; cold build under 60 s.
+- [x] #88 `larry serve` on lgwks_bot::app, not Loco (ADR 0021): PR #167, 756 tests; cold 45.97 s, 225 crates; probe p99 0.221 ms.
 - [ ] #89 tenant keys and human sign-in. Proof: two identities on one run id at once.
 - [ ] #90 runtime API over the durable journal. Proof: two tenants under kill -9 of `larry serve`.
 - [ ] #91 out-of-band approval mail. Proof: an impersonated approval is refused with a typed error.

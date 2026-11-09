@@ -315,10 +315,11 @@ fn kill_dash_nine_then_restart_serves_a_fresh_session() -> TestResult<()> {
     Ok(())
 }
 
-/// Anything but `mcp` or nothing is refused without touching stdout.
+/// An argument a command does not take is refused without touching stdout;
+/// `serve` is a command since larry#88, so a trailing argument to it is refused too.
 #[test]
 fn unknown_arguments_exit_nonzero_with_empty_stdout() -> TestResult<()> {
-    for args in [vec!["mcp", "extra"], vec!["serve"]] {
+    for args in [vec!["mcp", "extra"], vec!["serve", "extra"], vec!["nope"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_larry"))
             .args(&args)
             .stdin(Stdio::null())

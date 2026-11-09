@@ -37,6 +37,8 @@ until they are renamed.
   - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
   - `larry model`: sends one completion through the configured gateway.
   - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
+  - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`); `GET /healthz` is
+    liveness, `GET /t/{tenant}/healthz` the tenant probe, and SIGTERM drains it (ADR 0021).
 
 ## Install
 
