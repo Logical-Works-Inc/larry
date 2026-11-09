@@ -19,7 +19,7 @@ sources:
 # Cargo sweep
 
 Read 2026-11-03. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
-`lgwks_ast`, `lgwks_deps`, all at their newest release: 4.0.2, 7.1.1, 4.1.0, 6.1.0); Loco.rs where the estate
+`lgwks_ast`, `lgwks_deps`, all at their newest release: 4.1.0, 8.0.1, 6.0.0, 6.2.0); Loco.rs where the estate
 owns nothing; any other crate only with a `gap` issue on its manifest line. Labels: MEASURED, READ, DOC.
 
 ## Measured with cargo (MEASURED, stable toolchain, load average 4 to 6)
@@ -29,6 +29,8 @@ owns nothing; any other crate only with a `gap` issue on its manifest line. Labe
 | `loco-rs =1.2.0` (`cli`, `with-db`, `db-sqlite`, `auth`) + `lgwks_bot =6.1.0` (`rt`, `net`), deps at `opt-level 0` | 544 | 87.5 s | 393 MB | resolves; over the 60 s budget under this load |
 | `loco-rs` (`db-sqlite`) + `lgwks_deps =5.1.2` (`sqlite`) | none | none | none | refused: `libsqlite3-sys` 0.37 (sqlx) and 0.39 (rusqlite) both link `sqlite3` |
 | `rmcp =3.8.0` (`server`, `transport-io`), deps at `opt-level 3` | 62 | 69.5 s | 545 MB | resolves |
+| Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.0.1 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
+| Larry's branch for larry#88 on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | resolves |
 
 Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u | wc -l`,
 `/usr/bin/time -l cargo build --locked` into a fresh target directory after one warm-up fetch, sccache on
@@ -38,7 +40,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 
 | Larry needs | Owner | Rejected alternative, and why |
 |---|---|---|
-| Async runtime, net, supervision | `lgwks_bot::rt` | `tokio::main`: Loco boots on `Runtime::block_on` |
+| Async runtime, net, supervision | `lgwks_bot::rt` | `tokio::main`: one process driver, `lgwks_bot::block_on` |
 | Tick clock, authority expiry (larry#74) | `lgwks_bot::clock`, `skew`, defaults off: 22 to 27 crates, cold 4.2 s to 6.4 s | the deleted `larry-runtime` clock |
 | Journal, crash recovery, replay | `lgwks_bot::journal` (`FileJournal`), larry#68 | Loco jobs or SeaORM rows: a second journal |
 | Tick, projection | `lgwks_bot` ECS world | Loco scheduler: not deterministic, not replayable |
@@ -51,7 +53,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Prompt-injection screen (larry#37) | `lgwks_deps` `llm-guard` | a classifier of our own first |
 | Rerank port (larry#53) | `lgwks_deps` `ml-candle`, `ml-tokenizers` | Python reranker: banned |
 | Terminal UI | `lgwks_deps` `appcui` (already) | none |
-| HTTP routes and middleware | **Loco** (axum) + `lgwks_deps` `tower-http` | estate has TCP only |
+| HTTP routes, body and tenant bounds (larry#88) | `lgwks_bot::app` (axum through `lgwks_deps`), ADR 0021 | Loco: 544 crates, a second edge |
 | Human sign-in, password hashing, magic links | **Loco** `auth` | estate owns none |
 | Approval mail, out-of-band checks (larry#41) | **Loco** mailers (lettre) | estate owns none |
 | Side jobs (mail fan-out, digests) | **Loco** workers | effects: never, they stay on the journal |
@@ -72,12 +74,13 @@ edges. Each new manifest line cites its issue.
 
 ## Where Loco is used, and where it is refused
 
-- Loco serves and authenticates. It never dispatches an effect, never authorizes and never holds authority.
+- `lgwks_bot::app` serves (ADR 0021). Loco, where it lands, mails and keeps operational tables; it never
+  serves routes, dispatches an effect, authorizes or holds authority.
 - Every Loco table is a projection the journal rebuilds; dropping the database loses nothing but caches.
 - One SQLite engine per binary: the executor ledger (larry#85, ADR 0004) takes `lgwks_deps/sqlite`, so Loco
   takes Postgres through sqlx, or `db-sqlite` once #849 closes.
-- Loco sits behind a `serve` feature with the `opt-level 0` dependency override, so `cargo build --bins` on
-  the default features does not pay its 544 crates; the cost is measured in the PR that adds it.
+- `larry serve` is in the default build: the edge takes Larry's tree from 118 to 225 crates and the cold build
+  is 45.97 s, under 60 s (ADR 0021). Loco, if #91 adds it, sits behind a feature with the `opt-level 0` override.
 - The production config boots in the live test (empty templated YAML becomes null and 500s a route).
 
 ## Forge: code once
@@ -90,7 +93,7 @@ approvals and an audit chain. They move onto the estate (larry#71) rather than b
 
 1. larry#68 rows 1 and 2: the journal on `FileJournal`, so kill -9 loses nothing.
 2. Track 3 executor (larry#71): Director's own code daily, no customer data, no web layer, so no Loco cost.
-3. Track 2 gateway (larry#70): Loco host over the same runtime, two tenants, receipts for every write.
+3. Track 2 gateway (larry#70): `larry serve` on the app edge over the same runtime, two tenants, receipts.
 4. Benchmarks (larry#72, larry#65) run on what shipped.
 
 ## Benchmarks against other harnesses (DOC until run)

@@ -4,7 +4,8 @@
 //! `larry key`, the receipt check and the key it trusts (larry#86), and
 //! `larry eval`, one priced arm over the matched task set (larry#87), and
 //! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010), and
-//! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014).
+//! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014), and
+//! `larry serve`, the HTTP host on lgwks_bot's app edge (larry#88, ADR 0021).
 //! The launcher paints the fixture surface and exits when the operator
 //! quits; it performs no backend or workspace effect.
 use std::ffi::OsString;
@@ -333,6 +334,23 @@ fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
     }
 }
 
+/// `larry serve`: bind `LARRY_SERVE_ADDR` (loopback by default), print one JSON line naming
+/// the bound address, the edge's liveness path and the tenant probe, then serve until SIGTERM
+/// or SIGINT and exit 0.
+fn serve_once() -> Result<(), larry_demo::serve::ServeError> {
+    let settings = larry_demo::serve::Settings::from_env(|name| std::env::var(name).ok())?;
+    larry_demo::serve::run(&settings, |addr| {
+        let path = larry_demo::serve::HEALTH_PATH;
+        let line = lgwks_std::json::json!({
+            "serving": format!("http://{addr}"),
+            "health": format!("http://{addr}{path}"),
+            "probe": format!("http://{addr}/t/{{tenant}}{path}"),
+        });
+        let mut out = io::stdout().lock();
+        writeln!(out, "{line}").and_then(|()| out.flush())
+    })
+}
+
 /// The exit status of a sealed verdict.
 fn verdict_status(accepted: bool) -> ExitCode {
     if accepted {
@@ -379,8 +397,11 @@ fn main() -> ExitCode {
                 .map(|()| ExitCode::SUCCESS)
                 .map_err(|error: larry_demo::mascot::MascotError| error.to_string())
         }
+        [ref command] if command == "serve" => serve_once()
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(|error| error.to_string()),
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker` and `mascot`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
         )),
     };
     match outcome {

@@ -47,14 +47,14 @@ rust-version = "1.98"
 # `default-features` when the workspace declaration omits it, so leaving it
 # out would silently keep defaults on. Select only the capabilities used by
 # each member; 0.6.6 defaults also include structured tracing.
-lgwks_std = { version = "=4.0.2", default-features = false }
+lgwks_std = { version = "=4.1.0", default-features = false }
 # The runtime's owner (larry#68). Defaults off: the clock and skew rows (larry#74) are
 # std-only modules, so no member compiles the driver, the ECS world or `script!` until a
 # row that needs one turns its feature on.
-lgwks_bot = { version = "=7.1.1", default-features = false }
+lgwks_bot = { version = "=8.0.1", default-features = false }
 # The dependency-admission storefront. The larry package opts into `appcui`; the
 # published storefront owns that dependency and its transitive admission.
-lgwks_deps = { version = "=6.1.0", default-features = false }
+lgwks_deps = { version = "=6.2.0", default-features = false }
 thiserror = "=2.0.20"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # The runtime gate (larry#164): the executor submits every task through it, so
 # a task body runs only inside the runtime's authorized owner call.
@@ -66,9 +66,11 @@ larry-runtime = { path = "crates/larry-runtime" }
 larry-contracts = { path = "crates/larry-contracts" }
 larry-runtime = { workspace = true }
 lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign", "pattern"] }
-# The runtime gate's clock (larry#164): the estate's declared clock, which
-# larry-runtime already declares; no feature is needed beyond its default.
-lgwks_bot = { workspace = true }
+# The runtime gate's clock (larry#164), and `larry serve` (larry#88, ADR 0021):
+# the app edge (`edge`) serves the routes, and `signal` stops it on SIGTERM.
+# The estate owns HTTP serving, so no Loco here; the crate count and cold build
+# are measured in docs/dependencies/cargo-sweep.md.
+lgwks_bot = { workspace = true, features = ["edge", "signal"] }
 lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
 
 [features]
