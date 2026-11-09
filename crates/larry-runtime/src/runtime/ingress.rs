@@ -21,20 +21,19 @@ where
     ///
     /// This is the external protocol ingress. Local in-process callers may
     /// continue using [`Self::submit`]; protocol callers must present an offer
-    /// for every command so a refusal cannot mutate the queue or journal. A
-    /// displayed effect, when present, rides the same command through
-    /// [`Self::submit_displayed`], which retains its identity check at the
-    /// queue; without one the command enqueues display-less exactly as
-    /// [`Self::submit`] does.
+    /// for every command so a refusal cannot mutate the pending set or journal.
+    /// The command, with its displayed effect when present, is durably
+    /// admitted before this returns (E28, ADR 0025).
     ///
-    /// Returns the negotiated protocol version.
+    /// Returns the negotiated protocol version: the acknowledgement.
     ///
     /// # Errors
     ///
     /// Returns [`RuntimeError::Protocol`] for unsupported versions, absent
-    /// capabilities, headless questions, tenant mismatch or queue overload,
-    /// and the shared enqueue refusals ([`RuntimeError::ReadyWorkFull`],
-    /// [`RuntimeError::Binding`]) from the queueing step itself.
+    /// capabilities, headless questions, tenant mismatch or overload, and the
+    /// admission refusals ([`RuntimeError::Command`],
+    /// [`RuntimeError::RunTenantMismatch`], [`RuntimeError::Binding`], the
+    /// journal's) from the durable write itself.
     pub fn submit_protocol(
         &mut self,
         offer: &ProtocolOffer,
@@ -49,8 +48,8 @@ where
             }
             .into());
         }
-        if self.ready.len() >= MAX_READY_WORK {
-            // A full queue needs at least MAX_PROTOCOL_BACKOFF_TICKS ticks to
+        if self.admitted.len() >= MAX_READY_WORK {
+            // A full set needs at least MAX_PROTOCOL_BACKOFF_TICKS ticks to
             // drain (asserted in `protocol`), so the capped delay is exact.
             return Err(ProtocolError::Overloaded {
                 capacity: MAX_READY_WORK,
@@ -58,10 +57,8 @@ where
             }
             .into());
         }
-        let queued = match display {
-            Some(shown) => self.submit_displayed(command, shown),
-            None => self.submit(command),
-        };
-        queued.map(|()| negotiated.version)
+        // The command is acknowledged only once it is durable (E28): the
+        // version returned is the acknowledgement.
+        self.admit(command, display).map(|_| negotiated.version)
     }
 }
