@@ -143,6 +143,10 @@ fn sim_crash_new_run_after_restore_completes() -> Outcome {
             clock()?,
             runtime.into_journal(),
         )?;
+        // The host reaches its authority source before any mutating reach
+        // (E71, ADR 0026); the source still stands at the restored epoch.
+        let epoch = restored.fence().epoch()?;
+        restored.fence_mut().authenticate(epoch)?;
         let tick = dispatch(&mut restored, 5, 5, &[Scope::FileRead], 20, strat)?;
         assert_eq!(tick.receipts().len(), 1, "post-restore run receipts");
         assert_state(restored.projection(), run(5), RunState::Completed)?;

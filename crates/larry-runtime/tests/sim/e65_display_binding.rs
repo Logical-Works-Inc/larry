@@ -88,6 +88,10 @@ fn sim_e65_retry_after_restore_keeps_binding() -> Result {
             clock_at(seed)?,
             runtime.into_journal(),
         )?;
+        // The source is reached first (E71, ADR 0026), so the refusal below is
+        // the binding's, not the restored fence's.
+        let epoch = restored.fence().epoch()?;
+        restored.fence_mut().authenticate(epoch)?;
         let before = trace(restored.journal());
         assert_swap(restored.tick(), swapped_field(seed));
         assert_eq!(

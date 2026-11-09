@@ -323,6 +323,10 @@ fn fenced(error: BrokerError, intent: &EffectIntent) -> FenceRefusal {
 pub struct RevocationFence {
     /// The broker whose one environment, [`ENVIRONMENT`], is this fence.
     broker: Broker,
+    /// The offline ceiling a restored fence takes up at its first contact with
+    /// the authority source; until then its whole allowance counts as spent
+    /// (E71, larry#99). `None` once the source has been reached.
+    unconfirmed: Option<u32>,
 }
 
 impl RevocationFence {
@@ -345,7 +349,32 @@ impl RevocationFence {
         broker
             .set_offline_bound(ENVIRONMENT, offline_bound)
             .map_err(refused)?;
-        Ok(Self { broker })
+        Ok(Self {
+            broker,
+            unconfirmed: None,
+        })
+    }
+
+    /// A fence for a runtime rebuilt from its journal, standing at `epoch`,
+    /// with its whole offline allowance spent until the authority source is
+    /// reached (E71, larry#99).
+    ///
+    /// The broker is live and unjournaled, so one built after a restart would
+    /// otherwise have spent nothing: a host partitioned from its source could
+    /// restart to recharge offline authority, and could restore from settings
+    /// older than the source's epoch to revive what was withdrawn. The journal
+    /// cannot say how much was spent, so the restored fence counts all of it,
+    /// and the first [`RevocationFence::authenticate`] takes up `offline_bound`
+    /// at whatever epoch the source then reports. Withdrawals by name are
+    /// re-delivered at that contact; until it, no mutating reach is made.
+    ///
+    /// # Errors
+    ///
+    /// [`FenceError::EpochExhausted`] for `u64::MAX`, which has no generation.
+    pub(crate) fn restored(epoch: SecurityEpoch, offline_bound: u32) -> Result<Self, FenceError> {
+        let mut fence = Self::new(epoch, 0)?;
+        fence.unconfirmed = Some(offline_bound);
+        Ok(fence)
     }
 
     /// The generation the fence currently stands at.
@@ -364,21 +393,30 @@ impl RevocationFence {
     ///
     /// [`FenceError::Unowned`] if the broker stopped counting.
     pub fn offline_bound(&self) -> Result<u32, FenceError> {
-        self.broker
-            .offline_bound(ENVIRONMENT)
-            .ok_or(FenceError::Unowned)
+        match self.unconfirmed {
+            Some(bound) => Ok(bound),
+            None => self
+                .broker
+                .offline_bound(ENVIRONMENT)
+                .ok_or(FenceError::Unowned),
+        }
     }
 
     /// How much offline authority has been spent since the last
-    /// authentication.
+    /// authentication: all of it on a restored fence the source has not yet
+    /// reached.
     ///
     /// # Errors
     ///
     /// [`FenceError::Unowned`] if the broker stopped counting.
     pub fn offline_spent(&self) -> Result<u32, FenceError> {
-        self.broker
-            .offline_spent(ENVIRONMENT)
-            .ok_or(FenceError::Unowned)
+        match self.unconfirmed {
+            Some(bound) => Ok(bound),
+            None => self
+                .broker
+                .offline_spent(ENVIRONMENT)
+                .ok_or(FenceError::Unowned),
+        }
     }
 
     /// Whether `operation` has been withdrawn by name.
@@ -442,10 +480,20 @@ impl RevocationFence {
             self.broker.close(ENVIRONMENT).map_err(refused)?;
             return Err(FenceError::EpochExhausted);
         };
-        self.broker
+        let now = self
+            .broker
             .authenticate(ENVIRONMENT, at)
             .map(security)
-            .map_err(refused)
+            .map_err(refused)?;
+        // The first contact after a restore takes up the configured ceiling;
+        // the broker's own count starts from this contact.
+        if let Some(bound) = self.unconfirmed {
+            self.broker
+                .set_offline_bound(ENVIRONMENT, bound)
+                .map_err(refused)?;
+            self.unconfirmed = None;
+        }
+        Ok(now)
     }
 
     /// Mints the warrant for `key`, the mutating reach `intent` would make.
@@ -466,7 +514,18 @@ impl RevocationFence {
     ) -> Result<Authority, FenceRefusal> {
         self.broker
             .authorize(key)
-            .map_err(|error| fenced(error, intent))
+            .map_err(|error| self.refusal(error, intent))
+    }
+
+    /// The broker's refusal as Larry's, naming the configured ceiling rather
+    /// than the zero a restored fence holds until its first contact.
+    fn refusal(&self, error: BrokerError, intent: &EffectIntent) -> FenceRefusal {
+        match (fenced(error, intent), self.unconfirmed) {
+            (FenceRefusal::OfflineExposureExhausted { .. }, Some(bound)) => {
+                FenceRefusal::OfflineExposureExhausted { bound }
+            }
+            (refusal, _) => refusal,
+        }
     }
 
     /// Presents `warrant` at the handoff, immediately before the owner: the
@@ -483,7 +542,7 @@ impl RevocationFence {
     ) -> Result<(), FenceRefusal> {
         self.broker
             .revalidate(warrant)
-            .map_err(|error| fenced(error, intent))
+            .map_err(|error| self.refusal(error, intent))
     }
 
     /// Counts the reach `warrant` made: the check once more and one unit of
@@ -499,7 +558,7 @@ impl RevocationFence {
     ) -> Result<(), FenceRefusal> {
         self.broker
             .spend(warrant)
-            .map_err(|error| fenced(error, intent))
+            .map_err(|error| self.refusal(error, intent))
     }
 }
 

@@ -59,6 +59,76 @@ fn e71_a_fresh_fence_at_the_admission_epoch_admits_the_reach() -> Outcome {
     Ok(())
 }
 
+/// E71 (larry#99): a restored fence has spent its whole allowance until the
+/// authority source is reached, so a restart recharges nothing; the first
+/// contact takes up the ceiling at the source's epoch, which fences what was
+/// admitted below it, and a later contact behaves as on a fresh fence.
+#[test]
+fn e71_a_restored_fence_reaches_nothing_until_the_source_is_contacted() -> Outcome {
+    let mut fence = RevocationFence::restored(SecurityEpoch::INITIAL, 3)?;
+    let older = admitted_at(operation(1), SecurityEpoch::INITIAL);
+    assert_eq!(
+        fence.offline_spent()?,
+        3,
+        "the journal cannot say what was spent"
+    );
+    assert_eq!(fence.offline_bound()?, 3);
+    assert_eq!(
+        check(&fence, &older),
+        Err(FenceRefusal::OfflineExposureExhausted { bound: 3 })
+    );
+    // A withdrawal is still checked first, and is accepted before contact.
+    assert!(fence.revoke(operation(2))?);
+    assert_eq!(
+        check(&fence, &admitted_at(operation(2), SecurityEpoch::INITIAL)),
+        Err(FenceRefusal::Revoked {
+            operation: operation(2)
+        })
+    );
+
+    assert_eq!(
+        fence.authenticate(SecurityEpoch::new(1))?,
+        SecurityEpoch::new(1)
+    );
+    assert_eq!(fence.offline_spent()?, 0, "the contact starts the count");
+    assert_eq!(fence.offline_bound()?, 3, "the ceiling is taken up");
+    assert_eq!(
+        check(&fence, &older),
+        Err(FenceRefusal::StaleEpoch {
+            admitted: SecurityEpoch::INITIAL,
+            current: SecurityEpoch::new(1)
+        }),
+        "settings older than the source revive nothing"
+    );
+    let current = admitted_at(operation(3), SecurityEpoch::new(1));
+    for _ in 0..3 {
+        reach(&mut fence, &current)?;
+    }
+    assert_eq!(
+        reach(&mut fence, &current),
+        Err(FenceRefusal::OfflineExposureExhausted { bound: 3 })
+    );
+    fence.authenticate(SecurityEpoch::new(1))?;
+    assert_eq!(
+        reach(&mut fence, &current),
+        Ok(()),
+        "a later contact recharges"
+    );
+    Ok(())
+}
+
+/// E71: a restored kill switch stays a kill switch after contact.
+#[test]
+fn e71_a_restored_zero_bound_stays_shut_after_contact() -> Outcome {
+    let mut fence = RevocationFence::restored(SecurityEpoch::INITIAL, 0)?;
+    fence.authenticate(SecurityEpoch::INITIAL)?;
+    assert_eq!(
+        check(&fence, &admitted_at(operation(1), SecurityEpoch::INITIAL)),
+        Err(FenceRefusal::OfflineExposureExhausted { bound: 0 })
+    );
+    Ok(())
+}
+
 #[test]
 fn e71_revocation_by_name_is_one_way_and_idempotent() -> Outcome {
     let mut fence = fence(4)?;

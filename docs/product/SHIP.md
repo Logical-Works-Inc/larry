@@ -29,8 +29,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #112 newest estate pins, #116 runner by visibility: PR #113, ea3645d
 - [x] #117 public-alpha warning, SECURITY.md, CONTRIBUTING.md, licence clause: PR #118, 4ff17c5
 - [x] #119 cancellation waits for reconciliation, runtime split: PR #120, 1f46189, 544 tests in 2.03 s
-- [x] #121 `target/` ignored at any depth: PR #122, a65507a
-- [x] Repository public 2026-11-06: runner deleted, interaction limits, fork-PR approval, private reporting
+- [x] #121 `target/` ignored at any depth: PR #122, a65507a. Repository public 2026-11-06: runner deleted,
+  interaction limits, fork-PR approval, private reporting
 
 ## 1. Weekend ship: Larry v0.1, the executor (#114, umbrella #71)
 
@@ -82,7 +82,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
   `larry exec` p50 63.6/62.6 ms, p99 111.7/66.1 ms (64 runs, debug), peak RSS 10.9/11.8 MiB.
 - [x] #101 E47 protocol negotiation before ingress, the executor its caller (ADR 0020): PR #166, 742 tests.
 - [x] #100 E28 durable admission before the acknowledgement, corrections at a safe boundary (ADR 0025): PR #174.
-- [ ] #99 E71 (PR #22), #98 E30 (PR #25): port each onto main (recipe on PR #20), merge on green.
+- [x] #99 E71 a restart recharges no offline authority, old settings revive nothing (ADR 0026): PR #175, 790 tests.
+- [ ] #98 E30 (PR #25): port onto main (recipe on PR #20), merge on green.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
@@ -116,5 +117,4 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 - Memory (cell C03) waits for Logical-DB; no substitute store. Real owners (Nova, Moo, Secure-Authority)
   arrive through #85 and Track 2; until then every owner is a test double.
-- #4 shared-context routing and local ML: design only, no PR yet.
-- #56 and #57, the logical-cloud strand, are held here until that repository exists.
+- #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.

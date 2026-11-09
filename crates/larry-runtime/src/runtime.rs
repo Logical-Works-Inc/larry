@@ -663,6 +663,17 @@ where
     // Admitted commands the journal holds no acceptance for are pending again,
     // in journal order (E28): the record says so, never the dead process.
     let pending = admission::recover(&journal)?;
+    // The fence is live state the journal does not hold, so a runtime resuming
+    // recorded history counts its whole offline allowance spent until the host
+    // reaches the authority source (E71): neither a restart nor settings older
+    // than the source can recharge or revive authority. An empty journal is
+    // a first start, with nothing to resume and nothing spent.
+    let (epoch, bound) = (settings.security_epoch, settings.offline_dispatch_bound);
+    let fence = if journal.is_empty() {
+        RevocationFence::new(epoch, bound)?
+    } else {
+        RevocationFence::restored(epoch, bound)?
+    };
 
     let mut runs: BTreeMap<RunId, RunLive> = BTreeMap::new();
     let mut live: BTreeMap<OperationId, LiveEffect> = BTreeMap::new();
@@ -742,7 +753,7 @@ where
         projection,
         owner,
         clock,
-        fence: RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound)?,
+        fence,
         ready: VecDeque::new(),
         admitted: pending,
         remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),

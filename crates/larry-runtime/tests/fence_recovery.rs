@@ -138,6 +138,20 @@ fn e71_restore_fences_only_the_effects_the_new_generation_left_behind()
     assert_eq!(advanced.owner().dispatched(), &[]);
 
     let mut same = reopened(SecurityEpoch::INITIAL)?;
+    // A restart recharges nothing (E71, larry#99): until the host reaches the
+    // authority source the restored fence counts its whole allowance spent.
+    assert_eq!(same.fence().offline_spent()?, 64);
+    let before_contact = same.tick()?;
+    assert_eq!(
+        before_contact.fenced(),
+        &[(
+            operation(1),
+            FenceRefusal::OfflineExposureExhausted { bound: 64 }
+        )],
+        "no mutating reach before the source is contacted"
+    );
+    assert_eq!(same.owner().dispatched(), &[]);
+    same.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
     let unrestored_tick = same.tick()?;
     assert!(
         unrestored_tick.fenced().is_empty(),
@@ -146,8 +160,76 @@ fn e71_restore_fences_only_the_effects_the_new_generation_left_behind()
     assert_eq!(
         same.owner().dispatched(),
         &[operation(1)],
-        "the retry proceeds, because nothing withdrew its authority"
+        "the retry proceeds once the source is reached, because nothing withdrew its authority"
     );
+    Ok(())
+}
+
+/// E71 (larry#99): a host partitioned from its authority source cannot buy
+/// offline authority by restarting, and settings older than the source revive
+/// nothing: the first contact reports the source's epoch, which fences what
+/// was admitted below it, and an operation withdrawn at that contact stays
+/// withdrawn.
+#[test]
+fn e71_a_restart_recharges_no_offline_authority_and_old_settings_revive_nothing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (original, op) = open_retry_safe_effect(2)?;
+    assert_eq!(
+        original.fence().offline_spent()?,
+        1,
+        "the first dispatch spent one"
+    );
+    let journal = original.into_journal();
+    let mut restarted: TestRuntime = restore(
+        settings_at(SecurityEpoch::INITIAL, 2)?,
+        ScriptedOwner::new(),
+        crate::support::clock()?,
+        journal.clone(),
+    )?;
+    for _ in 0..3 {
+        let tick = restarted.tick()?;
+        assert_eq!(
+            tick.fenced(),
+            &[(op, FenceRefusal::OfflineExposureExhausted { bound: 2 })],
+            "every tick before contact is fenced, however many pass"
+        );
+    }
+    assert_eq!(restarted.owner().dispatched(), &[], "nothing was reached");
+
+    // The source moved on while the host was down; the host restores from
+    // the settings it had, and the contact is what tells it.
+    let mut stale: TestRuntime = restore(
+        settings_at(SecurityEpoch::INITIAL, 2)?,
+        ScriptedOwner::new(),
+        crate::support::clock()?,
+        journal.clone(),
+    )?;
+    stale.fence_mut().authenticate(SecurityEpoch::new(1))?;
+    assert_eq!(
+        stale.tick()?.fenced(),
+        &[(
+            op,
+            FenceRefusal::StaleEpoch {
+                admitted: SecurityEpoch::INITIAL,
+                current: SecurityEpoch::new(1)
+            }
+        )]
+    );
+    assert_eq!(stale.owner().dispatched(), &[]);
+
+    let mut withdrawn: TestRuntime = restore(
+        settings_at(SecurityEpoch::INITIAL, 2)?,
+        ScriptedOwner::new(),
+        crate::support::clock()?,
+        journal,
+    )?;
+    withdrawn.fence_mut().revoke(op)?;
+    withdrawn.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
+    assert_eq!(
+        withdrawn.tick()?.fenced(),
+        &[(op, FenceRefusal::Revoked { operation: op })]
+    );
+    assert_eq!(withdrawn.owner().dispatched(), &[]);
     Ok(())
 }
 
