@@ -11,9 +11,19 @@
 //! work before the body is dispatched exactly once inside the bound owner
 //! reach. A denial runs nothing — no clone, no command, no model call — and
 //! the sealed report says so.
+//!
+//! Each task's runtime journal is durable (larry#75, ADR 0023): the file
+//! `journals/<task>.journal` under the state directory takes every entry
+//! before the runtime does, and goes once the task returns. A file a killed
+//! executor left is recovered by the next start: replayed (a torn tail taken
+//! back), restored, ticked once so the reservation it proves settles as
+//! unknown under `RequiresHuman`, and kept as `<task>.recovered`. Recovery's
+//! owner reaches nothing, so a recovered task's body never runs again.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
@@ -24,6 +34,7 @@ use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrateg
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
+use larry_runtime::journal::Journal;
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::FoldProjection;
@@ -31,8 +42,9 @@ use larry_runtime::protocol::{
     MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, ProtocolCapability, ProtocolOffer,
     ProtocolVersionRange,
 };
-use larry_runtime::runtime::{Runtime, RuntimeSettings};
+use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 use lgwks_bot::clock::Clock;
+use lgwks_bot::journal::JournalError;
 
 use super::{ExecError, Report, Settings, Task};
 
@@ -76,6 +88,37 @@ const WORKER_TAG: &[u8] = b"larry/executor/worker/v1\0";
 
 /// The prefix the estate capability names carry and a policy name omits.
 const CAPABILITY_PREFIX: &str = "larry.";
+
+/// The directory under the state directory that holds the task journals.
+const JOURNALS_DIR: &str = "journals";
+/// The extension of a running task's journal.
+const JOURNAL_EXT: &str = "journal";
+/// The extension a recovered journal is kept under.
+const RECOVERED_EXT: &str = "recovered";
+/// The extension a journal whose bytes the store refused is kept under.
+const REFUSED_EXT: &str = "refused";
+/// The most journals one start recovers, in name order; the rest wait for the
+/// next start, so a backlog never stalls a task without bound.
+const MAX_RECOVERED: usize = 1024;
+
+/// The journal file of `task_id` under `state`.
+fn journal_path(state: &Path, task_id: &str) -> PathBuf {
+    state
+        .join(JOURNALS_DIR)
+        .join(format!("{task_id}.{JOURNAL_EXT}"))
+}
+
+/// The runtime settings one task runs under: this build's policy revision,
+/// the executor's capabilities, the lease ending at `expiry`, one request.
+fn task_settings(policy: &BTreeSet<Scope>, expiry: SystemTime) -> RuntimeSettings {
+    RuntimeSettings::with_defaults(
+        PolicySnapshot::new(POLICY_REVISION, policy.clone()),
+        CapabilitySnapshot::new(EXECUTOR_CAPABILITIES.iter().copied().collect()),
+        ValiditySnapshot::new(expiry),
+        BudgetUnit::Requests,
+        TASK_COST,
+    )
+}
 
 /// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
 /// estate capability name `replay::capability` gives it (larry#77), without
@@ -367,19 +410,96 @@ pub(super) fn admit_and_run(
         run: Some(run),
         slot: Rc::clone(&slot),
     };
-    let mut runtime = Runtime::<FoldProjection, _>::new(
-        RuntimeSettings::with_defaults(
-            PolicySnapshot::new(POLICY_REVISION, policy.clone()),
-            CapabilitySnapshot::new(capabilities),
-            ValiditySnapshot::new(expiry),
-            BudgetUnit::Requests,
-            TASK_COST,
-        ),
-        owner,
-        Clock::wall(),
-    )
-    .map_err(ExecError::Gate)?;
+    std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
+    let path = journal_path(&settings.state_dir, task_id);
+    let run_settings = task_settings(policy, expiry);
+    let opened = Journal::open(&path, run_settings.journal_capacity).and_then(|journal| {
+        restore::<FoldProjection, _>(run_settings, owner, Clock::wall(), journal)
+    });
+    let outcome = match opened {
+        Ok(mut runtime) => {
+            let admission = Admission {
+                command,
+                holder,
+                grant,
+                tenant,
+                required: &required,
+                task_id,
+                task_digest,
+                key,
+            };
+            drive(&mut runtime, admission, policy, &slot)
+        }
+        Err(error) => Err(ExecError::Gate(error)),
+    };
+    finish(&path, outcome)
+}
 
+/// What one task presents to its runtime once the journal is open.
+struct Admission<'a> {
+    /// The task's `Submit` command.
+    command: Command,
+    /// The worker the grant is held by.
+    holder: WorkerId,
+    /// The one grant the policy and capabilities allow.
+    grant: Grant,
+    /// The state directory's tenant.
+    tenant: TenantId,
+    /// The scopes the task needs.
+    required: &'a BTreeSet<Scope>,
+    /// The run's identity.
+    task_id: &'a str,
+    /// The task document's digest.
+    task_digest: &'a str,
+    /// The receipt key a denial is sealed under.
+    key: &'a lgwks_std::sign::SecretKey,
+}
+
+/// Removes a returned task's journal: its record is now the sealed report the
+/// caller holds. A journal the store itself refused is kept, because what it
+/// holds is the only evidence of how far the task got, and the next start
+/// recovers it. A removal fault never hides the task's own failure.
+fn finish(path: &Path, outcome: Result<Report, ExecError>) -> Result<Report, ExecError> {
+    let kept = matches!(
+        outcome,
+        Err(ExecError::Gate(
+            RuntimeError::Durable(_)
+                | RuntimeError::DurableRepeat { .. }
+                | RuntimeError::DurabilityShort { .. }
+                | RuntimeError::Codec(_)
+        ))
+    );
+    if kept {
+        return outcome;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => outcome,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => outcome,
+        Err(error) => match outcome {
+            Ok(_) => Err(ExecError::Journals(error)),
+            Err(failure) => Err(failure),
+        },
+    }
+}
+
+/// Displays, negotiates and ticks one admitted task on its runtime, and
+/// returns the body's outcome or the sealed refusal.
+fn drive<O: EffectOwner>(
+    runtime: &mut Runtime<FoldProjection, O>,
+    admission: Admission<'_>,
+    policy: &BTreeSet<Scope>,
+    slot: &RefCell<Option<Result<Report, ExecError>>>,
+) -> Result<Report, ExecError> {
+    let Admission {
+        command,
+        holder,
+        grant,
+        tenant,
+        required,
+        task_id,
+        task_digest,
+        key,
+    } = admission;
     let shown = match runtime.display(&command, holder, &[grant]) {
         Ok(shown) => shown,
         Err(RuntimeError::Binding(BindingError::NoCoveringGrant)) => {
@@ -387,7 +507,7 @@ pub(super) fn admit_and_run(
             // capable of every required scope, so the refusal is the policy's).
             // Nothing is cloned, written, spawned or invoked: the refusal comes
             // before any tick, and the owner is never reached.
-            let line = match first_missing(&required, policy) {
+            let line = match first_missing(required, policy) {
                 Some(scope) => format!("gate: policy_refuses: {}", scope_name(scope)),
                 None => String::from("gate: no covering grant"),
             };
@@ -432,4 +552,94 @@ pub(super) fn admit_and_run(
         None => String::from("gate: denied"),
     };
     Ok(denied_report(task_id, task_digest, &line, key))
+}
+
+/// The owner a recovered run is restored with. The task body died with the
+/// executor that held it, so nothing here can reach the world: binding
+/// resolves nothing and every reach is `Unknown`. A `RequiresHuman` effect
+/// never asks it anything; it settles as unknown on the first tick.
+struct Recovered;
+
+impl EffectOwner for Recovered {
+    fn resolve(&mut self, _intent: &EffectIntent) -> Result<Option<ResolvedEffect>, BindingError> {
+        Ok(None)
+    }
+
+    fn dispatch_bound(
+        &mut self,
+        intent: &EffectIntent,
+        _at: SystemTime,
+    ) -> Result<EffectOutcome, BindingError> {
+        Ok(unknown(intent))
+    }
+
+    fn dispatch(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome {
+        self.reconcile(intent, at)
+    }
+
+    fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
+        unknown(intent)
+    }
+}
+
+/// The only truthful answer about an effect nobody here can observe.
+const fn unknown(intent: &EffectIntent) -> EffectOutcome {
+    EffectOutcome::Unknown {
+        operation: intent.operation,
+    }
+}
+
+/// Replays, restores and ticks one journal a dead executor left, so the
+/// reservation it proves is recorded as settled before the file is set aside.
+fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError> {
+    let run_settings = task_settings(policy, lease_end(SystemTime::now())?);
+    let journal = Journal::open(path, run_settings.journal_capacity)?;
+    let mut runtime =
+        restore::<FoldProjection, _>(run_settings, Recovered, Clock::wall(), journal)?;
+    runtime.tick()?;
+    Ok(())
+}
+
+/// Recovers every task journal a killed executor left under `state`, at most
+/// [`MAX_RECOVERED`] in name order, and returns how many were set aside.
+///
+/// A journal another executor still holds is skipped: its lock is the proof
+/// it is live. A recovered journal is kept as `<task>.recovered`; one whose
+/// bytes the store or the replay refuses is kept as `<task>.refused`, so a
+/// damaged file is evidence, never a reason every later task fails.
+pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<usize, ExecError> {
+    let listing = match std::fs::read_dir(state.join(JOURNALS_DIR)) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(ExecError::Journals(error)),
+    };
+    let mut paths = Vec::new();
+    for entry in listing {
+        let path = entry.map_err(ExecError::Journals)?.path();
+        if path.extension() != Some(OsStr::new(JOURNAL_EXT)) {
+            continue;
+        }
+        // A task whose executor still runs is that executor's, even in the
+        // instant between creating its file and taking the file's lock.
+        let task = path.file_stem().and_then(OsStr::to_str);
+        if let Some(task) = task
+            && super::workspace::owner_alive(task)?
+        {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.sort();
+    paths.truncate(MAX_RECOVERED);
+    let mut set_aside: usize = 0;
+    for path in paths {
+        let kept_as = match recover_one(&path, policy) {
+            Ok(()) => RECOVERED_EXT,
+            Err(RuntimeError::Durable(JournalError::Locked { .. })) => continue,
+            Err(_) => REFUSED_EXT,
+        };
+        std::fs::rename(&path, path.with_extension(kept_as)).map_err(ExecError::Journals)?;
+        set_aside = set_aside.saturating_add(1);
+    }
+    Ok(set_aside)
 }

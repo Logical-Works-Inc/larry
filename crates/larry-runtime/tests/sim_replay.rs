@@ -471,3 +471,75 @@ fn sim_replay_seeded_shapes_match_live() -> Outcome {
         Ok(trace(runtime.journal()))
     })
 }
+
+/// larry#75, D04: the same seeded workload driven over a memory journal and
+/// over a file journal traces alike, and the file reopened folds the same run
+/// states: the file is the history, not a second account of it.
+#[test]
+fn sim_replay_from_the_file_matches_the_memory_trace_for_every_seed() -> Outcome {
+    use larry_contracts::authority::Scope;
+    use larry_runtime::journal::Journal;
+    use larry_runtime::runtime::restore;
+    use support::{clock, settings};
+    replay(500_u64..532, |seed| -> Sim<ContentDigest> {
+        let mut random = seed;
+        let count = u8::try_from(advance(&mut random) % 6)?.saturating_add(1);
+        let outcomes = || {
+            (0..count).map(|index| {
+                let number = index.saturating_add(40);
+                match index % 2 {
+                    0 => succeeded(operation(number)),
+                    _ => unknown(operation(number)),
+                }
+            })
+        };
+        let runs: Vec<(u8, u8)> = (0..count)
+            .map(|index| (index.saturating_add(40), index.saturating_add(40)))
+            .collect();
+        let strategy = ReconciliationStrategy::Queryable;
+        let mut memory: TestRuntime = reader(ScriptedOwner::scripted(outcomes()), 100)?;
+        offer_runs(&mut memory, &runs, 1, strategy)?;
+        memory.tick()?;
+
+        let path = std::env::temp_dir().join(format!(
+            "larry-sim-{}-replay-{seed}.journal",
+            std::process::id()
+        ));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let open = |owner| -> Sim<TestRuntime> {
+            let settings = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
+            let journal = Journal::open(&path, settings.journal_capacity)?;
+            Ok(restore(settings, owner, clock()?, journal)?)
+        };
+        let mut durable = open(ScriptedOwner::scripted(outcomes()))?;
+        offer_runs(&mut durable, &runs, 1, strategy)?;
+        durable.tick()?;
+        let live = trace(memory.journal());
+        assert_eq!(
+            trace(durable.journal()),
+            live,
+            "seed {seed}: the file journal records what memory does"
+        );
+        drop(durable);
+        let reopened = open(ScriptedOwner::new())?;
+        assert_eq!(
+            trace(reopened.journal()),
+            live,
+            "seed {seed}: the file replays to the live trace"
+        );
+        for &(number, _) in &runs {
+            assert_eq!(
+                reopened.projection().run_state(run(number)),
+                memory.projection().run_state(run(number)),
+                "seed {seed}: run {number} folds alike from the file"
+            );
+        }
+        drop(reopened);
+        std::fs::remove_file(&path)?;
+        Ok(live)
+    })
+}

@@ -35,7 +35,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 
 | Module | Owns |
 |---|---|
-| `journal` | The bounded append-only authoritative record |
+| `journal` | The bounded append-only authoritative record; `journal::durable` its `RecordJournal` file, group-committed (larry#75, ADR 0023) |
 | `payload` | Typed bodies of the closed event vocabulary |
 | `projection` | The fold, effect phases and the replay report |
 | `protocol` | E47 version and capability negotiation: the offer, its typed refusals |
@@ -60,7 +60,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 |---|---|
 | `lib` | The effect-free DEMO session state, `replace_file` (the whole-or-nothing write) and `diagnose` (one stderr line) |
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
-| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal (ADR 0019) |
+| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; each task's journal file and the recovery of a dead task's (ADR 0019, 0023) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill |
@@ -109,7 +109,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 ## Invariants the module map carries
 
 - Only `runtime::reconcile` completes a cancellation, and only with no owned effect open (ADR 0001).
-- Only `runtime::writers` appends to the journal; every append folds the projection after it.
+- Only `runtime::writers` appends to the journal; every append folds the projection after it; `tick` and `runtime::reach` are the only syncs.
 - `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.

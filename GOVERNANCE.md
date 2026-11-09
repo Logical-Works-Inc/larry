@@ -93,10 +93,9 @@ never claim enforcement GitHub does not apply.
 ## Open governance debt
 
 - larry#53 closed 2026-11-07: no Python is tracked or run in CI or `cargo local-ci` (ADR 0010 to 0015).
-- larry#68 Track 1: row 1 (clock, ADR 0016), row 4 (gate, ADR 0018) and row 5 (effect retry, ADR 0017) run
-  on lgwks_bot. Rows 2
-  (#75, the journal on `RecordJournal`, crates#875) and 3 (#76, the fence, crates#876) are unblocked by
-  lgwks_bot 8.x; until each lands, its INVARIANTS line stays review-only.
+- larry#68 Track 1: row 1 (clock, ADR 0016), row 2 (the journal file on `RecordJournal`, ADR 0023), row 4
+  (gate, ADR 0018) and row 5 (effect retry, ADR 0017) run on lgwks_bot. Row 3 (#76, the fence, crates#876)
+  is unblocked by lgwks_bot 8.x; until it lands, its INVARIANTS line stays review-only.
 - Step 4 wired the runtime into the run path (#164) and E47 landed as #101 (PR #166). Falsifier PRs #21
   (E28), #22 (E71) and #25 (E30) port onto main with the recipe on PR #20. PR #50 merged 2026-11-03.
 - Supply chain (larry#170, 2026-11-09): `cargo audit` reads RustSec locally; Dependabot shows no alert and no

@@ -64,14 +64,14 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
   no tracked `.py`, no Python step in CI or `cargo local-ci`, every `.md` at most 120 lines (`larry governance`).
 - [x] #103 `issue-link` fails a PR closing no issue. Proof (#149): run 42364512157 red without `Closes`, 42364569033 green.
 - [x] #133 dependency register on lgwks-deps schema 3: PR #135, `lgwks-deps check .` prints OK (was REFUSED).
-- [x] #170 hardening: clipboard-win off yanked 5.4.1, 34 more locked to newest, appcui_proc_macro held (crates#841).
+- [x] #170 hardening: clipboard-win off yanked 5.4.1, 34 locked to newest, appcui_proc_macro held (crates#841): PR #171.
 - Moved to section 3 (2026-11-07): the falsifier PRs land after #68 step 4; see the last line there.
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
 
 - [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds).
-- [ ] #75 journal on RecordJournal (lgwks_bot 8.x), durable across kill -9. Proof: `sim_crash_restore`, `sim_replay` and a
-  kill -9 that re-executes the binary mid-append. Unblocked: lgwks_bot 8.0.x RecordJournal (crates#875).
+- [x] #75 journal on RecordJournal, group-committed, a dead task recovered unrerun (ADR 0023): PR #172, 775 tests;
+  `larry exec` p50 70.0/78.1 ms, p99 96.3/98.3 ms (32 runs, debug), peak RSS 12.5/13.2 MiB.
 - [ ] #76 fence on broker and dist_lease. Proof: `tests/fence.rs`, `sim_fence`, `sim_epochs` (crates#876, 8.0.x).
 - [x] #77 gate on GrantSet and cap::Auth: PR #163, 729 tests; replay p50 49.9/49.7 us, p99 94.5/86.8 us (ADR 0018).
 - [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay

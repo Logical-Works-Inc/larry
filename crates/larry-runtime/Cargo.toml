@@ -21,7 +21,8 @@ description = "The Larry runtime: bounded journal, deterministic tick, admission
 [dependencies]
 larry-contracts = { path = "../larry-contracts" }
 # The tick's clock is lgwks_bot's declared clock (larry#74); Larry keeps no clock of its own.
-lgwks_bot = { workspace = true }
+# `wire` carries `journal::RecordJournal`, the journal's file (larry#75, ADR 0023).
+lgwks_bot = { workspace = true, features = ["wire"] }
 lgwks_std = { workspace = true, features = ["json"] }
 
 [features]

@@ -142,6 +142,22 @@ pub enum RuntimeError {
     },
     /// Protocol negotiation or protocol-bound command ingress was refused.
     Protocol(crate::protocol::ProtocolError),
+    /// The journal's file refused (larry#75): another writer holds it, its
+    /// committed bytes break the chain, a ceiling was reached, the device
+    /// refused, or an append's outcome is unknown until a reopen.
+    Durable(lgwks_bot::journal::JournalError),
+    /// The journal's file holds a command identity twice, which no append
+    /// this runtime made can produce (larry#75).
+    DurableRepeat {
+        /// The zero-based record that repeats an earlier one.
+        index: usize,
+    },
+    /// The journal's file acknowledged an append under a promise weaker than
+    /// surviving a process crash (larry#75).
+    DurabilityShort {
+        /// What the acknowledgment promised.
+        promised: lgwks_bot::journal::DurabilityPromise,
+    },
 }
 
 impl fmt::Display for RuntimeError {
@@ -230,6 +246,15 @@ impl fmt::Display for RuntimeError {
                 "operation {operation} has an all-zero {field}; no effect key can be formed"
             ),
             Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
+            Self::Durable(ref err) => write!(f, "journal file refused: {err}"),
+            Self::DurableRepeat { index } => write!(
+                f,
+                "journal file record {index} repeats an accepted command; the file is not this runtime's"
+            ),
+            Self::DurabilityShort { promised } => write!(
+                f,
+                "journal file promised {promised}, short of surviving a process crash"
+            ),
         }
     }
 }
@@ -245,6 +270,8 @@ impl std::error::Error for RuntimeError {
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
+            Self::Durable(ref err) => Some(err),
+            Self::DurableRepeat { .. } | Self::DurabilityShort { .. } => None,
             Self::UnsupportedDecision(_)
             | Self::UnsupportedCommand(_)
             | Self::UnsupportedEvent(_)
@@ -307,6 +334,12 @@ impl From<lgwks_std::json::Error> for RuntimeError {
 impl From<larry_contracts::binding::BindingError> for RuntimeError {
     fn from(error: larry_contracts::binding::BindingError) -> Self {
         Self::Binding(error)
+    }
+}
+
+impl From<lgwks_bot::journal::JournalError> for RuntimeError {
+    fn from(err: lgwks_bot::journal::JournalError) -> Self {
+        Self::Durable(err)
     }
 }
 
