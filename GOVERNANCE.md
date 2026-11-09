@@ -68,7 +68,7 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - design-gate at commit: a recorded plan covers every staged file.
 - rust-surface at commit: a new `pub` item needs a caller outside its crate (tests never count), so new
   `larry-runtime` API lands only once a package depends on the runtime (larry#68 step 4).
-- `lgwks-deps check .` (lgwks_deps 6.1.0) locally: every direct dependency has a schema-3 row in
+- `lgwks-deps check .` (lgwks_deps 6.2.1) locally: every direct dependency has a schema-3 row in
   `contract/APPROVED.toml` with its license, retirement plan and measured cost. CI does not run it.
 - `larry governance` in CI and locally (ADR 0010): frontmatter, local links, unique contiguous R, D, E, C and axis
   inventories that cannot shrink, requirement-to-decision-and-falsifier mapping, execution-cell allocation,
@@ -95,10 +95,13 @@ never claim enforcement GitHub does not apply.
 - larry#53 closed 2026-11-07: no Python is tracked or run in CI or `cargo local-ci` (ADR 0010 to 0015).
 - larry#68 Track 1: row 1 (clock, ADR 0016), row 4 (gate, ADR 0018) and row 5 (effect retry, ADR 0017) run
   on lgwks_bot. Rows 2
-  (#75, the journal) and 3 (#76, the fence) wait on lgwks_bot gaps written on those issues and on
-  logicalworks-crates#845; until then their INVARIANTS lines stay review-only.
-- Falsifier PRs #20 (E47), #21 (E28), #22 (E71) and #25 (E30) land at larry#68 step 5, after step 4 wires
-  the runtime into the run path; the E47 port and its recipe are on PR #20. PR #50 merged 2026-11-03.
+  (#75, the journal on `RecordJournal`, crates#875) and 3 (#76, the fence, crates#876) are unblocked by
+  lgwks_bot 8.x; until each lands, its INVARIANTS line stays review-only.
+- Step 4 wired the runtime into the run path (#164) and E47 landed as #101 (PR #166). Falsifier PRs #21
+  (E28), #22 (E71) and #25 (E30) port onto main with the recipe on PR #20. PR #50 merged 2026-11-03.
+- Supply chain (larry#170, 2026-11-09): `cargo audit` reads RustSec locally; Dependabot shows no alert and no
+  code scanning analysis exists. The `rust` job in ci.yml still uses mutable action tags; pinning it needs
+  the Director to name ci.yml.
 
 Every runtime acceptance claim still needs full behaviour and failure coverage, declared resource limits,
 retained failures, physical baselines, cross-tenant tests and the real delivery endpoint. Until then those
