@@ -69,6 +69,8 @@ use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use larry_contracts::harness::TenantHarness;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
+use larry_contracts::learning::Charge;
+use larry_contracts::learning::{LearningBudget, LearningSpent};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::{RunState, TransitionEvent};
 
@@ -113,6 +115,8 @@ pub struct RuntimeSettings {
     pub run_capacity: usize,
     /// How many ready commands one tick may admit.
     pub max_runs_per_tick: usize,
+    /// What each tenant's learning may spend, inside standing authority (larry#66).
+    pub learning: LearningBudget,
 }
 
 impl RuntimeSettings {
@@ -136,6 +140,7 @@ impl RuntimeSettings {
             journal_capacity: crate::MAX_JOURNAL_ENTRIES,
             run_capacity: MAX_TRACKED_RUNS,
             max_runs_per_tick: MAX_RUNS_PER_TICK,
+            learning: LearningBudget::new(256, 192, 10_000_000),
         }
     }
 }
@@ -361,6 +366,15 @@ where
         self.projection.recursion(tenant, plan)
     }
 
+    /// What `tenant`'s learning may spend and has spent, counted across all its plans (larry#66).
+    #[must_use]
+    pub fn learning_budget(&self, tenant: TenantId) -> (LearningBudget, LearningSpent) {
+        (
+            self.settings.learning,
+            self.projection.learning_spent(tenant),
+        )
+    }
+
     /// The one blind selection `tenant` recorded for `plan`, once its selector run succeeded
     /// (larry#64).
     #[must_use]
@@ -557,6 +571,39 @@ where
             report.denied.push((proposal.operation, reason));
             self.advance(run, TransitionEvent::Fail)?;
             return Ok(());
+        }
+
+        // Learning spends only its own budget: past a ceiling the effect is denied and the run fails,
+        // both journalled, and nothing is reserved (larry#66).
+        let learning = proposal
+            .recursion()
+            .map(|step| {
+                Charge::of_step(
+                    step.label.stage(),
+                    step.attempt,
+                    proposal.cost,
+                    proposal.unit,
+                )
+            })
+            .or_else(|| {
+                proposal
+                    .selection()
+                    .map(|_| Charge::of_selection(proposal.cost, proposal.unit))
+            });
+        if let Some(charge) = learning {
+            let spent = self.projection.learning_spent(tenant);
+            if let Err(refused) = self.settings.learning.admit(&spent, &charge) {
+                let (required, remaining) = refused.required_and_remaining(&charge);
+                report.denied.push((
+                    proposal.operation,
+                    DenialReason::BudgetExhausted {
+                        required,
+                        remaining,
+                    },
+                ));
+                self.advance(run, TransitionEvent::Fail)?;
+                return Ok(());
+            }
         }
 
         let mut pinned = self.pinned_inputs(proposal, at);

@@ -56,6 +56,7 @@ pub mod evidence;
 mod fixture;
 pub mod harness;
 pub mod ids;
+pub mod learning;
 pub mod lesson;
 pub mod recursion;
 pub mod replay;

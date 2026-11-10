@@ -27,6 +27,7 @@ use larry_contracts::event::{Event, EventKind};
 use larry_contracts::evidence::ImproverContext;
 use larry_contracts::harness::{HarnessAdoption, HarnessError, TenantHarness, Vetted};
 use larry_contracts::ids::{ContentDigest, OperationId, RunId, TenantId};
+use larry_contracts::learning::{Charge, LearningSpent};
 use larry_contracts::recursion::{
     Label, Produced, RecursionError, RecursionLedger, RecursionPlan, RecursionStep, Stage,
     StepOutcome,
@@ -167,6 +168,9 @@ pub trait ProjectionBackend {
     /// The one selection `tenant` recorded for `plan`, once its selector run succeeded.
     fn selection(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&Selection>;
 
+    /// What `tenant`'s learning has reserved so far, across all its plans (larry#66).
+    fn learning_spent(&self, tenant: TenantId) -> LearningSpent;
+
     /// The ledger `tenant` keeps for `plan`, if any step of it was recorded.
     fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger>;
 
@@ -264,6 +268,21 @@ struct OpenStep {
     label: Label,
 }
 
+/// What an intent charges to learning: a recursion step or a selector run, by its authorized cost.
+pub(crate) fn learning_charge(payload: &IntentPayload) -> Option<Charge> {
+    let request = &payload.authorization.pinned.request;
+    payload
+        .recursion
+        .as_ref()
+        .map(|step| Charge::of_step(step.label.stage(), step.attempt, request.cost, request.unit))
+        .or_else(|| {
+            payload
+                .selection
+                .as_ref()
+                .map(|_| Charge::of_selection(request.cost, request.unit))
+        })
+}
+
 /// A plan's selection: in flight until its selector run succeeds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pick {
@@ -292,6 +311,8 @@ pub(crate) struct RunFold {
     recursion: BTreeMap<(TenantId, ContentDigest), RecursionLedger>,
     /// Recursion steps with an intent and no receipt, by operation.
     open_steps: BTreeMap<OperationId, OpenStep>,
+    /// What each tenant's learning has reserved (larry#66).
+    learning: BTreeMap<TenantId, LearningSpent>,
     /// Each plan's one selection, in flight or recorded (larry#64).
     picks: BTreeMap<(TenantId, ContentDigest), Pick>,
     /// Selector runs with an intent and no receipt, by operation.
@@ -589,6 +610,10 @@ impl RecordFold<Event> for RunFold {
                 }
             }
             Checked::Intent(payload, vetted, picked) => {
+                if let Some(charge) = learning_charge(&payload) {
+                    let spent = self.learning.entry(tenant).or_default();
+                    *spent = spent.plus(&charge);
+                }
                 if let (Some(pick), Some(chosen)) = (payload.selection.as_ref(), picked) {
                     let key = (tenant, pick.plan.identity());
                     self.picks.insert(key, Pick::Pending(chosen));
@@ -799,6 +824,14 @@ impl ProjectionBackend for FoldProjection {
 
     fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger> {
         self.view.fold().recursion.get(&(tenant, plan.identity()))
+    }
+
+    fn learning_spent(&self, tenant: TenantId) -> LearningSpent {
+        self.view
+            .fold()
+            .learning
+            .get(&tenant)
+            .map_or_else(LearningSpent::default, |held| *held)
     }
 
     fn vet_pick(&self, tenant: TenantId, step: &SelectionStep) -> Result<(), RuntimeError> {
