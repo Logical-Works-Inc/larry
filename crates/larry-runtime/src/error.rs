@@ -14,8 +14,10 @@ use larry_contracts::error::{
 };
 use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
+use larry_contracts::lesson::LessonError;
 use larry_contracts::recursion::{PlanError, RecursionError};
 use larry_contracts::replay::DenialReason;
+use larry_contracts::selection::SelectionError;
 use larry_contracts::state::RunState;
 
 /// Every way the runtime refuses an operation.
@@ -81,6 +83,10 @@ pub enum RuntimeError {
     Harness(HarnessError),
     /// The recursion ledger refused a step (larry#62).
     Recursion(RecursionError),
+    /// A selection was refused (larry#64).
+    Selection(SelectionError),
+    /// A lesson was refused (larry#64).
+    Lesson(LessonError),
     /// The recursion plan is outside its bounds or the tenant holds as many plans as it may.
     RecursionPlan(PlanError),
     /// The tenant already holds as many recursion plans as it may.
@@ -238,6 +244,8 @@ impl fmt::Display for RuntimeError {
             Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
             Self::Harness(ref err) => write!(f, "harness refused: {err}"),
             Self::Recursion(ref err) => write!(f, "recursion step refused: {err}"),
+            Self::Selection(ref err) => write!(f, "selection refused: {err}"),
+            Self::Lesson(ref err) => write!(f, "lesson refused: {err}"),
             Self::RecursionPlan(ref err) => write!(f, "recursion plan refused: {err}"),
             Self::RecursionPlanLimit { capacity } => {
                 write!(f, "tenant already holds {capacity} recursion plans")
@@ -323,6 +331,8 @@ impl std::error::Error for RuntimeError {
             Self::Codec(ref err) => Some(err),
             Self::Harness(ref err) => Some(err),
             Self::Recursion(ref err) => Some(err),
+            Self::Selection(ref err) => Some(err),
+            Self::Lesson(ref err) => Some(err),
             Self::RecursionPlan(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
             Self::Question(ref err) => Some(err),
@@ -383,6 +393,18 @@ impl From<TransitionError> for RuntimeError {
 impl From<AuthorityError> for RuntimeError {
     fn from(err: AuthorityError) -> Self {
         Self::Authority(err)
+    }
+}
+
+impl From<SelectionError> for RuntimeError {
+    fn from(err: SelectionError) -> Self {
+        Self::Selection(err)
+    }
+}
+
+impl From<LessonError> for RuntimeError {
+    fn from(err: LessonError) -> Self {
+        Self::Lesson(err)
     }
 }
 

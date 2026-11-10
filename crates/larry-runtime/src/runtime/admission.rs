@@ -199,6 +199,9 @@ where
         if let Some(step) = proposal.recursion() {
             self.projection.vet_step(tenant, step)?;
         }
+        if let Some(pick) = proposal.selection() {
+            self.projection.vet_pick(tenant, pick)?;
+        }
         let Some(adoption) = proposal.harness() else {
             return Ok(());
         };

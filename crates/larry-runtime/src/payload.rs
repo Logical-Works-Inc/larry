@@ -24,6 +24,7 @@ use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId};
 use larry_contracts::recursion::{Produced, RecursionStep};
 use larry_contracts::replay::ReplayRecord;
+use larry_contracts::selection::SelectionStep;
 use larry_contracts::state::{RunState, TransitionEvent};
 use lgwks_std::json::serde::{Deserialize, Serialize};
 
@@ -69,6 +70,10 @@ pub struct WorkProposal {
     /// The recursion step this work is, if it is one (larry#62). Absent from the encoding when empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recursion: Option<RecursionStep>,
+    /// The blind selection this work records, if it is a selector session (larry#64). Absent from
+    /// the encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<SelectionStep>,
 }
 
 impl WorkProposal {
@@ -93,7 +98,22 @@ impl WorkProposal {
             strategy,
             harness: None,
             recursion: None,
+            selection: None,
         }
+    }
+
+    /// Makes this work the selector session of a settled plan. It is not a step of the plan, so it
+    /// counts toward neither R = 4k nor P = 3k.
+    #[must_use]
+    pub fn selecting(mut self, step: SelectionStep) -> Self {
+        self.selection = Some(step);
+        self
+    }
+
+    /// The selection this work records, if any.
+    #[must_use]
+    pub const fn selection(&self) -> Option<&SelectionStep> {
+        self.selection.as_ref()
     }
 
     /// Makes this work a step of a recursion plan. The ledger decides it before anything is written.
@@ -208,6 +228,9 @@ pub struct IntentPayload {
     /// The recursion step the reserved effect is (larry#62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recursion: Option<RecursionStep>,
+    /// The selection the reserved effect records (larry#64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionStep>,
 }
 
 /// The body of an [`EventKind::EffectOutcomeRecorded`](larry_contracts::event::EventKind::EffectOutcomeRecorded)
@@ -262,6 +285,7 @@ impl IntentPayload {
             authorization,
             harness: None,
             recursion: None,
+            selection: None,
         }
     }
 }

@@ -22,6 +22,11 @@ pub const MAX_CANDIDATES: usize = 9;
 pub const MAX_SELECTION_REASON_BYTES: usize = 512;
 
 /// An anonymous candidate, numbered by the seeded shuffle; it says nothing of its origin.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CandidateId(u8);
 
@@ -46,9 +51,17 @@ pub enum SelectionError {
     /// The recursion has not settled every round, so there is nothing delivered to choose from.
     #[error("the recursion has not settled")]
     NotSettled,
+    /// This plan already has its one selection (recorded or in flight).
+    #[error("the plan already has a selection")]
+    AlreadySelected,
 }
 
 /// What the selector said.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SelectorAnswer {
@@ -66,6 +79,11 @@ pub enum SelectorAnswer {
 }
 
 /// Why an answer was not used.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NonAnswer {
@@ -82,6 +100,11 @@ pub enum NonAnswer {
 }
 
 /// Why the winner won.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SelectionReason {
@@ -126,6 +149,11 @@ pub struct Prepared {
 }
 
 /// The recorded outcome of a selection; replaying the same inputs yields the same value.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     /// The seed.
@@ -308,5 +336,30 @@ impl Selection {
     #[must_use]
     pub const fn is_fallback(&self) -> bool {
         matches!(self.reason, SelectionReason::Fallback(_))
+    }
+}
+
+/// What a selector session carries into the runtime: the plan it selects for and the selector's
+/// answer. The selector's evidence context shapes the answer but is not part of the result, so it is
+/// not carried; the tenant is the run table's, never the proposal's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
+pub struct SelectionStep {
+    /// The settled plan.
+    pub plan: crate::recursion::RecursionPlan,
+    /// What the selector said.
+    pub answer: SelectorAnswer,
+}
+
+impl SelectionStep {
+    /// A selection of `plan` by `answer`.
+    #[must_use]
+    pub const fn new(plan: crate::recursion::RecursionPlan, answer: SelectorAnswer) -> Self {
+        Self { plan, answer }
     }
 }

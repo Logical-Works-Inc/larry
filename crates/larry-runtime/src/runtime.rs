@@ -361,6 +361,32 @@ where
         self.projection.recursion(tenant, plan)
     }
 
+    /// The one blind selection `tenant` recorded for `plan`, once its selector run succeeded
+    /// (larry#64).
+    #[must_use]
+    pub fn selection(
+        &self,
+        tenant: TenantId,
+        plan: &larry_contracts::recursion::RecursionPlan,
+    ) -> Option<&larry_contracts::selection::Selection> {
+        self.projection.selection(tenant, plan)
+    }
+
+    /// Vets a lesson against the journal: every run it cites must be one this journal holds for the
+    /// lesson's own tenant, so another tenant's run is as unknown as a run that never existed. No
+    /// lesson is stored (the store waits on Logical-DB).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Lesson`] with [`larry_contracts::lesson::LessonError::UnknownRun`].
+    pub fn vet_lesson(&self, lesson: &larry_contracts::lesson::Lesson) -> Result<(), RuntimeError> {
+        lesson.vet(&TenantRuns {
+            projection: &self.projection,
+            tenant: lesson.tenant(),
+        })?;
+        Ok(())
+    }
+
     /// The owner boundary, for assertions in tests.
     #[must_use]
     pub const fn owner(&self) -> &O {
@@ -572,6 +598,7 @@ where
             authorization,
             proposal.harness().cloned(),
             proposal.recursion().cloned(),
+            proposal.selection().cloned(),
         )?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
@@ -816,4 +843,18 @@ where
         live,
         tick_count: 0,
     })
+}
+
+/// The runs the journal holds for one tenant: a lesson's evidence index.
+struct TenantRuns<'a, P> {
+    /// The fold view.
+    projection: &'a P,
+    /// The only tenant whose runs are known.
+    tenant: TenantId,
+}
+
+impl<P: ProjectionBackend> larry_contracts::lesson::RunIndex for TenantRuns<'_, P> {
+    fn knows(&self, run: RunId) -> bool {
+        self.projection.run_tenant(run) == Some(self.tenant)
+    }
 }

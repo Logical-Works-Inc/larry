@@ -24,6 +24,7 @@ use larry_contracts::effect::{
     EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt, terminal_disposition,
 };
 use larry_contracts::event::{Event, EventKind};
+use larry_contracts::evidence::ImproverContext;
 use larry_contracts::harness::{HarnessAdoption, HarnessError, TenantHarness, Vetted};
 use larry_contracts::ids::{ContentDigest, OperationId, RunId, TenantId};
 use larry_contracts::recursion::{
@@ -31,6 +32,7 @@ use larry_contracts::recursion::{
     StepOutcome,
 };
 use larry_contracts::replay::ReplayRecord;
+use larry_contracts::selection::{Selection, SelectionError, SelectionStep, prepare};
 use larry_contracts::state::{RunState, TransitionEvent, transition};
 
 use crate::error::RuntimeError;
@@ -154,6 +156,17 @@ pub trait ProjectionBackend {
     /// [`RuntimeError::RecursionPlanLimit`].
     fn vet_step(&self, tenant: TenantId, step: &RecursionStep) -> Result<(), RuntimeError>;
 
+    /// Refuses, without changing the view, a selection the fold would refuse: a plan that has not
+    /// settled, or one that already has its one selection (recorded or in flight) (larry#64).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Selection`] or [`RuntimeError::RecursionPlan`].
+    fn vet_pick(&self, tenant: TenantId, step: &SelectionStep) -> Result<(), RuntimeError>;
+
+    /// The one selection `tenant` recorded for `plan`, once its selector run succeeded.
+    fn selection(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&Selection>;
+
     /// The ledger `tenant` keeps for `plan`, if any step of it was recorded.
     fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger>;
 
@@ -231,7 +244,7 @@ enum Checked {
         to: RunState,
     },
     /// A reservation, with the decision that admitted it.
-    Intent(Box<IntentPayload>, Option<Vetted>),
+    Intent(Box<IntentPayload>, Option<Vetted>, Option<Selection>),
     /// An observed outcome.
     Outcome(Box<OutcomePayload>),
     /// A published terminal receipt.
@@ -249,6 +262,15 @@ struct OpenStep {
     plan: ContentDigest,
     /// Which step.
     label: Label,
+}
+
+/// A plan's selection: in flight until its selector run succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pick {
+    /// Reserved by an intent; not yet a fact.
+    Pending(Selection),
+    /// The selector run succeeded.
+    Recorded(Selection),
 }
 
 /// The most recursion plans one tenant's view keeps.
@@ -270,6 +292,10 @@ pub(crate) struct RunFold {
     recursion: BTreeMap<(TenantId, ContentDigest), RecursionLedger>,
     /// Recursion steps with an intent and no receipt, by operation.
     open_steps: BTreeMap<OperationId, OpenStep>,
+    /// Each plan's one selection, in flight or recorded (larry#64).
+    picks: BTreeMap<(TenantId, ContentDigest), Pick>,
+    /// Selector runs with an intent and no receipt, by operation.
+    open_picks: BTreeMap<OperationId, ((TenantId, ContentDigest), RunId)>,
 }
 
 impl RunFold {
@@ -308,11 +334,18 @@ impl RunFold {
                 if let Some(ref step) = payload.recursion {
                     self.vet_recursion(tenant, step)?;
                 }
+                let picked = match payload.selection {
+                    Some(ref pick) => Some(self.vet_selection(tenant, pick)?),
+                    None => None,
+                };
                 let vetted = match payload.harness {
                     Some(ref adoption) => Some(self.vet(tenant, adoption)?),
                     None => None,
                 };
-                (Checked::Intent(Box::new(payload), vetted), event.run())
+                (
+                    Checked::Intent(Box::new(payload), vetted, picked),
+                    event.run(),
+                )
             }
             EventKind::EffectOutcomeRecorded => {
                 let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
@@ -359,6 +392,25 @@ impl RunFold {
         Ok(())
     }
 
+    /// The one rule set for a selection: the plan's ledger must have settled and have no selection.
+    /// The seed uses the run table's tenant. The result does not depend on the selector's context,
+    /// so the fold prepares with an empty one.
+    fn vet_selection(
+        &self,
+        tenant: TenantId,
+        step: &SelectionStep,
+    ) -> Result<Selection, RuntimeError> {
+        let plan = step.plan.validated()?;
+        let key = (tenant, plan.identity());
+        if self.picks.contains_key(&key) {
+            return Err(SelectionError::AlreadySelected.into());
+        }
+        let ledger = self.recursion.get(&key).ok_or(SelectionError::NotSettled)?;
+        let context =
+            ImproverContext::assemble(Vec::new()).map_err(|_| SelectionError::NotSettled)?;
+        Ok(prepare(ledger, tenant, context)?.decide(&step.answer))
+    }
+
     /// The one rule set for an adoption: the tenant's record vets it.
     fn vet(&self, tenant: TenantId, adoption: &HarnessAdoption) -> Result<Vetted, HarnessError> {
         match self.harness.get(&tenant) {
@@ -378,6 +430,41 @@ impl RunFold {
 }
 
 impl RunFold {
+    /// A succeeded selector run (not cancelling) makes its selection a fact; any other end frees the
+    /// plan for another selection.
+    fn settle_pick(&mut self, receipt: &TerminalReceipt, live: bool) {
+        let Some((key, _)) = self.open_picks.remove(&receipt.operation()) else {
+            return;
+        };
+        let won = live && receipt.disposition() == TerminalDisposition::Succeeded;
+        match self.picks.remove(&key) {
+            Some(Pick::Pending(chosen)) if won => {
+                self.picks.insert(key, Pick::Recorded(chosen));
+            }
+            Some(other @ Pick::Recorded(_)) => {
+                self.picks.insert(key, other);
+            }
+            Some(Pick::Pending(_)) | None => {}
+        }
+    }
+
+    /// A run that ended without a receipt frees its plan's pending selection.
+    fn abandon_picks(&mut self, run: RunId) {
+        let held: Vec<OperationId> = self
+            .open_picks
+            .iter()
+            .filter(|entry| entry.1.1 == run)
+            .map(|entry| *entry.0)
+            .collect();
+        for operation in held {
+            if let Some((key, _)) = self.open_picks.remove(&operation)
+                && matches!(self.picks.get(&key), Some(Pick::Pending(_)))
+            {
+                self.picks.remove(&key);
+            }
+        }
+    }
+
     /// Maps a terminal receipt to the recursion step's outcome.
     fn settle_step(&mut self, payload: &ReceiptPayload) -> Result<(), RuntimeError> {
         let receipt = &payload.receipt;
@@ -494,11 +581,20 @@ impl RecordFold<Event> for RunFold {
                     // A run that ends without a succeeded receipt adopts nothing.
                     record.abandon(event.run());
                 }
+                if to.is_terminal() {
+                    self.abandon_picks(event.run());
+                }
                 if to == RunState::Cancelling || to == RunState::Cancelled {
                     self.release_cancelled(event.run(), to == RunState::Cancelled)?;
                 }
             }
-            Checked::Intent(payload, vetted) => {
+            Checked::Intent(payload, vetted, picked) => {
+                if let (Some(pick), Some(chosen)) = (payload.selection.as_ref(), picked) {
+                    let key = (tenant, pick.plan.identity());
+                    self.picks.insert(key, Pick::Pending(chosen));
+                    self.open_picks
+                        .insert(payload.intent.operation, (key, event.run()));
+                }
                 if let Some(ref step) = payload.recursion {
                     let plan = step.plan;
                     self.recursion
@@ -550,6 +646,7 @@ impl RecordFold<Event> for RunFold {
                     },
                 );
                 self.settle_step(&payload)?;
+                self.settle_pick(&payload.receipt, previous != RunState::Cancelling);
                 self.receipts.push(payload.receipt);
             }
         }
@@ -702,6 +799,18 @@ impl ProjectionBackend for FoldProjection {
 
     fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger> {
         self.view.fold().recursion.get(&(tenant, plan.identity()))
+    }
+
+    fn vet_pick(&self, tenant: TenantId, step: &SelectionStep) -> Result<(), RuntimeError> {
+        self.view.fold().vet_selection(tenant, step).map(drop)
+    }
+
+    fn selection(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&Selection> {
+        let pick = self.view.fold().picks.get(&(tenant, plan.identity()))?;
+        match *pick {
+            Pick::Recorded(ref chosen) => Some(chosen),
+            Pick::Pending(_) => None,
+        }
     }
 }
 

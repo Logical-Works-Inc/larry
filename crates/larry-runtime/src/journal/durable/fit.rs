@@ -163,7 +163,7 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
         BudgetUnit::Requests,
         20,
     );
-    let outcomes: Vec<EffectOutcome> = (1..=7_u8)
+    let outcomes: Vec<EffectOutcome> = (1..=8_u8)
         .map(|number| EffectOutcome::Succeeded {
             operation: OperationId::from_bytes([number; 16]),
         })
@@ -190,7 +190,7 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
     let plan = RecursionPlan::new(
         ContentDigest::over(&[b"task"]),
         RecursionMode::Sequential,
-        8,
+        1,
         base,
         16,
     )?;
@@ -245,6 +245,38 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
             .and_then(|held| held.state(Label::new(0, Stage::Compose, 0)))
             .is_some_and(larry_contracts::recursion::StepState::is_settled),
         "round 0 completed"
+    );
+    // The blind selector session, with the longest reason that escapes widest in JSON.
+    let reason = "\u{1}".repeat(512);
+    let pick = WorkProposal::new(
+        RunId::from_bytes([8; 16]),
+        tenant,
+        OperationId::from_bytes([8; 16]),
+        scopes,
+        1,
+        BudgetUnit::Requests,
+        ReconciliationStrategy::Queryable,
+    )
+    .selecting(larry_contracts::selection::SelectionStep::new(
+        plan,
+        larry_contracts::selection::SelectorAnswer::Chose {
+            id: larry_contracts::selection::CandidateId::new(0),
+            reason,
+        },
+    ));
+    runtime.submit(Command::new(
+        CommandId::from_bytes([8; 16]),
+        tenant,
+        Vec::new(),
+        CommandContent::new(
+            CommandKind::Submit,
+            lgwks_std::json::to_vec(&pick)?.into_boxed_slice(),
+        ),
+    )?)?;
+    runtime.tick()?;
+    assert!(
+        runtime.selection(tenant, &plan).is_some(),
+        "the selector run recorded the plan's selection"
     );
     let widest = runtime
         .journal()

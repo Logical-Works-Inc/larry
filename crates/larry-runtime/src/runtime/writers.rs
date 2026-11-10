@@ -10,6 +10,7 @@ use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, RunId, TenantId};
 use larry_contracts::recursion::RecursionStep;
 use larry_contracts::replay::{BudgetSnapshot, EffectRequest, PinnedInputs};
+use larry_contracts::selection::SelectionStep;
 use larry_contracts::state::{RunState, TransitionEvent};
 
 use super::{RunLive, Runtime, TickReport};
@@ -109,6 +110,7 @@ where
         authorization: larry_contracts::replay::ReplayRecord,
         harness: Option<HarnessAdoption>,
         recursion: Option<RecursionStep>,
+        selection: Option<SelectionStep>,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
         let payload = IntentPayload {
@@ -116,6 +118,7 @@ where
             authorization,
             harness,
             recursion,
+            selection,
         };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::EffectIntentRecorded, bytes)
