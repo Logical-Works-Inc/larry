@@ -30,6 +30,7 @@
 //!   pinned inputs replay bit-identically; mutated inputs diverge only as
 //!   explicit findings (R71, D36, E55; P5 remains a proof obligation).
 //! - [`evidence`] — evidence provenance as a type, so no grader output reaches an improver (larry#63).
+//! - [`recursion`] — the recursion budget identity (R = 4k rollouts, P = 3k sessions) as a pure ledger (larry#62).
 //! - [`harness`] — the harness as a typed, content-hashed, validated value (larry#61).
 //! - [`error`] — every typed failure variant the contract surface returns.
 //! - [`workspace`] — bounded workspace projections and the shared Continue
@@ -54,6 +55,7 @@ pub mod evidence;
 mod fixture;
 pub mod harness;
 pub mod ids;
+pub mod recursion;
 pub mod replay;
 pub mod state;
 pub mod workspace;
