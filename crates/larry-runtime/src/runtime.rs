@@ -366,6 +366,61 @@ where
         self.projection.recursion(tenant, plan)
     }
 
+    /// One action that stops `tenant`'s recursion plans, one or all: no new step is offered or
+    /// admitted, and steps in flight settle and free their slots (larry#66). It rides an ordinary
+    /// `Cancel` command whose body names the plans and whose run is a control run of its own, so no
+    /// new command or event kind exists. A stop that would change nothing is refused before the write.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Stop`] for an unknown or already stopped plan, or when nothing is running;
+    /// otherwise the tick's own refusals.
+    pub fn stop_learning(
+        &mut self,
+        tenant: TenantId,
+        scope: larry_contracts::recursion::PlanScope,
+    ) -> Result<(), RuntimeError> {
+        self.projection.vet_stop(tenant, scope)?;
+        // The control run and command are derived from the journal, so a stop is deterministic.
+        let seed = larry_contracts::ids::ContentDigest::over(&[
+            b"larry.learning.stop.v1\0",
+            tenant.as_bytes(),
+            &self.journal.len().to_be_bytes(),
+            format!("{scope:?}").as_bytes(),
+        ]);
+        let (first, second) = seed.as_bytes().split_at(16);
+        let identity = |bytes: &[u8]| -> [u8; 16] {
+            let mut raw = [0_u8; 16];
+            raw.iter_mut()
+                .zip(bytes)
+                .for_each(|(slot, byte)| *slot = *byte);
+            raw
+        };
+        let control = RunId::from_bytes(identity(first));
+        let body = WorkProposal::new(
+            control,
+            tenant,
+            OperationId::from_bytes(identity(first)),
+            std::collections::BTreeSet::new(),
+            0,
+            self.settings.unit,
+            larry_contracts::effect::ReconciliationStrategy::Queryable,
+        )
+        .stopping(scope);
+        let command = Command::new(
+            CommandId::from_bytes(identity(second)),
+            tenant,
+            Vec::new(),
+            larry_contracts::command::CommandContent::new(
+                CommandKind::Cancel,
+                lgwks_std::json::to_vec(&body)?.into_boxed_slice(),
+            ),
+        )?;
+        self.submit(command)?;
+        self.tick()?;
+        Ok(())
+    }
+
     /// What `tenant`'s learning may spend and has spent, counted across all its plans (larry#66).
     #[must_use]
     pub fn learning_budget(&self, tenant: TenantId) -> (LearningBudget, LearningSpent) {
@@ -499,6 +554,9 @@ where
             let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
             self.ensure_run_tenant(proposal.run, tenant)?;
 
+            if kind == CommandKind::Cancel && self.journal.command(id).is_none() {
+                self.check_stop(tenant, &command)?;
+            }
             if kind == CommandKind::Submit && self.journal.command(id).is_none() {
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
                 self.check_adoption(tenant, &proposal)?;

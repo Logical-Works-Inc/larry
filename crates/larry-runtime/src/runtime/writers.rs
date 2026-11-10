@@ -8,7 +8,7 @@ use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, 
 use larry_contracts::event::{Event, EventKind};
 use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, RunId, TenantId};
-use larry_contracts::recursion::RecursionStep;
+use larry_contracts::recursion::{PlanScope, RecursionStep};
 use larry_contracts::replay::{BudgetSnapshot, EffectRequest, PinnedInputs};
 use larry_contracts::selection::SelectionStep;
 use larry_contracts::state::{RunState, TransitionEvent};
@@ -82,8 +82,14 @@ where
         tenant: TenantId,
         kind: CommandKind,
         run: RunId,
+        stop: Option<PlanScope>,
     ) -> Result<(), RuntimeError> {
-        let payload = CommandAcceptedPayload { command, run, kind };
+        let payload = CommandAcceptedPayload {
+            command,
+            run,
+            kind,
+            stop,
+        };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
     }

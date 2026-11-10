@@ -48,6 +48,21 @@ Rejected:
 - A side config for the learning budget: it would not be standing authority.
 - Counting at the receipt: a loop would spend before any receipt arrived.
 
+## Part 2: one stop (larry#66)
+
+- `Runtime::stop_learning(tenant, PlanScope::One(identity) | PlanScope::All)` is the one action to stop.
+  It rides an existing `Cancel`: the body is a `WorkProposal` with an optional `stop` (omitted when
+  empty, like `recursion` and `selection`) and a control run of its own, derived from the journal. No
+  new `CommandKind` or `EventKind`. `CommandAcceptedPayload` records the scope, so the fold and replay
+  rebuild it, including from a reopened journal file.
+- The fold stops the plans in scope by the run table's tenant, never the payload's, using the ledger's
+  cancel: `next_steps` offers nothing and a new intent is refused `Cancelled` before the write. Steps in
+  flight still settle, and their width slots free as they settle. `All` covers the tenant's plans at
+  that moment, and no other tenant's.
+- A stop that would change nothing is refused before the write (`UnknownPlan`, `AlreadyStopped`,
+  `NothingToStop`), so a second stop has no effect. A stop admitted behind an earlier one is recorded
+  as a no-op, so the fold never refuses what the journal holds.
+
 ## Consequences
 
 - Open for #66: the ten-task journey through the public interface, TUI visibility of the budget, the

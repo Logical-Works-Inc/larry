@@ -29,8 +29,8 @@ use larry_contracts::harness::{HarnessAdoption, HarnessError, TenantHarness, Vet
 use larry_contracts::ids::{ContentDigest, OperationId, RunId, TenantId};
 use larry_contracts::learning::{Charge, LearningSpent};
 use larry_contracts::recursion::{
-    Label, Produced, RecursionError, RecursionLedger, RecursionPlan, RecursionStep, Stage,
-    StepOutcome,
+    Label, PlanScope, Produced, RecursionError, RecursionLedger, RecursionPlan, RecursionStep,
+    Stage, StepOutcome, StopError,
 };
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::selection::{Selection, SelectionError, SelectionStep, prepare};
@@ -168,6 +168,14 @@ pub trait ProjectionBackend {
     /// The one selection `tenant` recorded for `plan`, once its selector run succeeded.
     fn selection(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&Selection>;
 
+    /// Refuses, without changing the view, a stop that would change nothing: an unknown plan, an
+    /// already stopped plan, or no running plan to stop (larry#66).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Stop`].
+    fn vet_stop(&self, tenant: TenantId, scope: PlanScope) -> Result<(), RuntimeError>;
+
     /// What `tenant`'s learning has reserved so far, across all its plans (larry#66).
     fn learning_spent(&self, tenant: TenantId) -> LearningSpent;
 
@@ -241,7 +249,7 @@ impl RunView {
 /// A record every refusal rule has passed, with what the fold then writes.
 enum Checked {
     /// A command was accepted onto the run.
-    Command,
+    Command(Option<PlanScope>),
     /// The run moves to `to`, re-derived from the pure algebra.
     Transition {
         /// The state the algebra produced.
@@ -333,7 +341,7 @@ impl RunFold {
         let (checked, run) = match event.kind() {
             EventKind::CommandAccepted => {
                 let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
-                (Checked::Command, payload.run)
+                (Checked::Command(payload.stop), payload.run)
             }
             EventKind::StateTransition => {
                 // Re-derived from the pure algebra, never trusting the recorded target.
@@ -521,6 +529,45 @@ impl RunFold {
         Ok(())
     }
 
+    /// The one rule set for a stop: it must change something.
+    fn vet_stop(&self, tenant: TenantId, scope: PlanScope) -> Result<(), StopError> {
+        match scope {
+            PlanScope::One(identity) => match self.recursion.get(&(tenant, identity)) {
+                None => Err(StopError::UnknownPlan),
+                Some(ledger) if ledger.is_cancelled() => Err(StopError::AlreadyStopped),
+                Some(_) => Ok(()),
+            },
+            PlanScope::All => {
+                let running = self
+                    .recursion
+                    .iter()
+                    .any(|entry| entry.0.0 == tenant && !entry.1.is_cancelled());
+                if running {
+                    Ok(())
+                } else {
+                    Err(StopError::NothingToStop)
+                }
+            }
+            // The scope is non-exhaustive across crates: a scope this build does not know stops nothing.
+            _ => Err(StopError::UnknownPlan),
+        }
+    }
+
+    /// Stops the plans in scope for `tenant`, the run table's tenant. Steps in flight still settle.
+    fn apply_stop(&mut self, tenant: TenantId, scope: PlanScope) {
+        for entry in self.recursion.iter_mut() {
+            let covered = entry.0.0 == tenant
+                && match scope {
+                    PlanScope::One(identity) => entry.0.1 == identity,
+                    PlanScope::All => true,
+                    _ => false,
+                };
+            if covered && !entry.1.is_cancelled() {
+                entry.1.cancel();
+            }
+        }
+    }
+
     /// A cancelling run stops its plan; a cancelled run, whose effects all settled, also releases the
     /// slots its steps held.
     fn release_cancelled(&mut self, run: RunId, cancelled: bool) -> Result<(), RuntimeError> {
@@ -593,7 +640,12 @@ impl RecordFold<Event> for RunFold {
         Self::touch(view, event);
         let tenant = view.tenant.unwrap_or_else(|| event.tenant());
         match checked {
-            Checked::Command => view.commands = view.commands.saturating_add(1),
+            Checked::Command(stop) => {
+                view.commands = view.commands.saturating_add(1);
+                if let Some(scope) = stop {
+                    self.apply_stop(tenant, scope);
+                }
+            }
             Checked::Transition { to } => {
                 view.state = to;
                 if to.is_terminal()
@@ -824,6 +876,10 @@ impl ProjectionBackend for FoldProjection {
 
     fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger> {
         self.view.fold().recursion.get(&(tenant, plan.identity()))
+    }
+
+    fn vet_stop(&self, tenant: TenantId, scope: PlanScope) -> Result<(), RuntimeError> {
+        Ok(self.view.fold().vet_stop(tenant, scope)?)
     }
 
     fn learning_spent(&self, tenant: TenantId) -> LearningSpent {

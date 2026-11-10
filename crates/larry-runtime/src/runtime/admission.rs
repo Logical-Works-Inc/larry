@@ -28,6 +28,7 @@ use larry_contracts::effect::TerminalDisposition;
 use larry_contracts::event::EventKind;
 use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{RunId, TenantId};
+use larry_contracts::recursion::PlanScope;
 
 use super::instant::sample;
 use super::{DisplayedEffect, Runtime, TickReport};
@@ -168,6 +169,9 @@ where
                 let at = sample(&self.clock)?;
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
             }
+            if kind == CommandKind::Cancel {
+                self.check_stop(command.tenant(), &command)?;
+            }
             if matches!(kind, CommandKind::Ask | CommandKind::Answer) {
                 // A question or an answer counts as of its durable admission,
                 // so it is judged against this instant before it is written.
@@ -209,6 +213,28 @@ where
             return Err(HarnessError::ScopeNotDeclared.into());
         }
         self.projection.vet_adoption(tenant, adoption)
+    }
+
+    /// The plans a cancellation names, if it names plans.
+    fn stop_of(&self, command: &Command) -> Option<PlanScope> {
+        if command.content().kind() != CommandKind::Cancel {
+            return None;
+        }
+        let proposal: WorkProposal =
+            lgwks_std::json::from_slice(command.content().payload()).ok()?;
+        proposal.stop()
+    }
+
+    /// Refuses, before anything is written, a stop the tenant's plans cannot take.
+    pub(super) fn check_stop(
+        &self,
+        tenant: TenantId,
+        command: &Command,
+    ) -> Result<(), RuntimeError> {
+        match self.stop_of(command) {
+            Some(scope) => self.projection.vet_stop(tenant, scope),
+            None => Ok(()),
+        }
     }
 
     /// Refuses a run another tenant owns, by the run table or by a command
@@ -348,7 +374,12 @@ where
     ) -> Result<(), RuntimeError> {
         let (id, tenant, kind) = (command.id(), command.tenant(), command.content().kind());
         let run = target(command)?;
-        self.record_command_accepted(id, tenant, kind, run)?;
+        // A stop that the fold would not apply (already stopped by an earlier command) is accepted
+        // as a no-op, so the fold never refuses what the journal holds.
+        let stop = self
+            .stop_of(command)
+            .filter(|scope| self.projection.vet_stop(tenant, *scope).is_ok());
+        self.record_command_accepted(id, tenant, kind, run, stop)?;
         match kind {
             CommandKind::Submit => self.submit_work(command, display, at, report),
             CommandKind::Cancel => self.request_cancellation(tenant, run),

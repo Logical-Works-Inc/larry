@@ -22,7 +22,7 @@ use larry_contracts::effect::{
 };
 use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId};
-use larry_contracts::recursion::{Produced, RecursionStep};
+use larry_contracts::recursion::{PlanScope, Produced, RecursionStep};
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::selection::SelectionStep;
 use larry_contracts::state::{RunState, TransitionEvent};
@@ -74,6 +74,10 @@ pub struct WorkProposal {
     /// the encoding when empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selection: Option<SelectionStep>,
+    /// For a cancellation, the recursion plans it stops instead of a run (larry#66). Absent from the
+    /// encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop: Option<PlanScope>,
 }
 
 impl WorkProposal {
@@ -99,7 +103,22 @@ impl WorkProposal {
             harness: None,
             recursion: None,
             selection: None,
+            stop: None,
         }
+    }
+
+    /// Makes this a cancellation of recursion plans: one plan or all of the tenant's. Carried by an
+    /// ordinary `Cancel`, whose run is a control run of its own.
+    #[must_use]
+    pub fn stopping(mut self, scope: PlanScope) -> Self {
+        self.stop = Some(scope);
+        self
+    }
+
+    /// The plans this cancellation stops, if it stops plans.
+    #[must_use]
+    pub const fn stop(&self) -> Option<PlanScope> {
+        self.stop
     }
 
     /// Makes this work the selector session of a settled plan. It is not a step of the plan, so it
@@ -190,6 +209,9 @@ pub struct CommandAcceptedPayload {
     pub run: RunId,
     /// The command class.
     pub kind: CommandKind,
+    /// The plans a cancellation stopped, when it stopped plans (larry#66). Absent when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<PlanScope>,
 }
 
 /// The body of an [`EventKind::StateTransition`](larry_contracts::event::EventKind::StateTransition)
@@ -264,7 +286,12 @@ impl CommandAcceptedPayload {
     /// Records a command's accepted target and kind.
     #[must_use]
     pub const fn new(command: CommandId, run: RunId, kind: CommandKind) -> Self {
-        Self { command, run, kind }
+        Self {
+            command,
+            run,
+            kind,
+            stop: None,
+        }
     }
 }
 

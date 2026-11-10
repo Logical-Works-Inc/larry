@@ -274,3 +274,33 @@ pub enum Produced {
     /// The proposal failed the harness reducer.
     Refused(crate::harness::HarnessError),
 }
+
+/// Which of a tenant's recursion plans a stop covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
+pub enum PlanScope {
+    /// The plan with this identity ([`RecursionPlan::identity`]).
+    One(ContentDigest),
+    /// Every plan the tenant has now.
+    All,
+}
+
+/// Why a stop was refused before it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum StopError {
+    /// The tenant has no such plan.
+    #[error("the tenant has no such plan")]
+    UnknownPlan,
+    /// The plan is already stopped; a second stop does nothing.
+    #[error("the plan is already stopped")]
+    AlreadyStopped,
+    /// Every plan the tenant has is already stopped, or it has none.
+    #[error("the tenant has no running plan to stop")]
+    NothingToStop,
+}

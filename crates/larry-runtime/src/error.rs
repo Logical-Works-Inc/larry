@@ -15,7 +15,7 @@ use larry_contracts::error::{
 use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
 use larry_contracts::lesson::LessonError;
-use larry_contracts::recursion::{PlanError, RecursionError};
+use larry_contracts::recursion::{PlanError, RecursionError, StopError};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::selection::SelectionError;
 use larry_contracts::state::RunState;
@@ -83,6 +83,8 @@ pub enum RuntimeError {
     Harness(HarnessError),
     /// The recursion ledger refused a step (larry#62).
     Recursion(RecursionError),
+    /// A stop was refused before it was written (larry#66).
+    Stop(StopError),
     /// A selection was refused (larry#64).
     Selection(SelectionError),
     /// A lesson was refused (larry#64).
@@ -244,6 +246,7 @@ impl fmt::Display for RuntimeError {
             Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
             Self::Harness(ref err) => write!(f, "harness refused: {err}"),
             Self::Recursion(ref err) => write!(f, "recursion step refused: {err}"),
+            Self::Stop(ref err) => write!(f, "stop refused: {err}"),
             Self::Selection(ref err) => write!(f, "selection refused: {err}"),
             Self::Lesson(ref err) => write!(f, "lesson refused: {err}"),
             Self::RecursionPlan(ref err) => write!(f, "recursion plan refused: {err}"),
@@ -331,6 +334,7 @@ impl std::error::Error for RuntimeError {
             Self::Codec(ref err) => Some(err),
             Self::Harness(ref err) => Some(err),
             Self::Recursion(ref err) => Some(err),
+            Self::Stop(ref err) => Some(err),
             Self::Selection(ref err) => Some(err),
             Self::Lesson(ref err) => Some(err),
             Self::RecursionPlan(ref err) => Some(err),
@@ -393,6 +397,12 @@ impl From<TransitionError> for RuntimeError {
 impl From<AuthorityError> for RuntimeError {
     fn from(err: AuthorityError) -> Self {
         Self::Authority(err)
+    }
+}
+
+impl From<StopError> for RuntimeError {
+    fn from(err: StopError) -> Self {
+        Self::Stop(err)
     }
 }
 
