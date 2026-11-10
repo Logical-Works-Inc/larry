@@ -30,7 +30,7 @@ validated by the same structural gate as the root documents.
 | [/docs/evaluation/README.md](/docs/evaluation/README.md) | Evaluation portfolio, lanes and falsifier organization | D15/D34/D41, Cell 09/10 |
 | [/docs/product/README.md](/docs/product/README.md) | Product plan v2: tracks against Copilot, Muse, Duet, Dots and Harness², reconciled with the estate 2026-11-03 | None; order of work only |
 | [/docs/product/SHIP.md](/docs/product/SHIP.md) | Ship checklist: every remaining PR in order with its proof, ticked by the PR that ships it | None; state of work only |
-| `/docs/adr/` | Architecture decision records 0001 to 0031, one decision each (Status, Context, Decision, Consequences) | The IDs each record names |
+| `/docs/adr/` | Architecture decision records 0001 to 0032, one decision each (Status, Context, Decision, Consequences) | The IDs each record names |
 | `/docs/specification/`, `/docs/log/`, `/docs/research-ledger/` | The parts of /specification.md, /log.md and /research-ledger.md, read as one document each (ADR 0015) | The index document |
 
 ## Structure rules
