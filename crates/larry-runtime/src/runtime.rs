@@ -67,6 +67,7 @@ use lgwks_bot::clock::Clock;
 use larry_contracts::authority::{BudgetUnit, SecurityEpoch};
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
+use larry_contracts::harness::TenantHarness;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::{RunState, TransitionEvent};
@@ -343,6 +344,13 @@ where
         &self.projection
     }
 
+    /// The harness record `tenant` holds: its active version and tree, its adoptions in order. The
+    /// tenant is the run table's, so one tenant never reads another's record (larry#61).
+    #[must_use]
+    pub fn harness(&self, tenant: TenantId) -> Option<&TenantHarness> {
+        self.projection.harness(tenant)
+    }
+
     /// The owner boundary, for assertions in tests.
     #[must_use]
     pub const fn owner(&self) -> &O {
@@ -443,6 +451,7 @@ where
 
             if kind == CommandKind::Submit && self.journal.command(id).is_none() {
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
+                self.check_adoption(tenant, &proposal)?;
             }
             if self.journal.command(id).is_none() && self.admitted.len() >= MAX_READY_WORK {
                 // A command that may have to wait has no room to: it stays
@@ -476,6 +485,8 @@ where
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let run = proposal.run;
+        // An adoption the tenant's record refuses is refused before this run records anything.
+        self.check_adoption(tenant, proposal)?;
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection alone: recording the command already
         // created a run view, so a projection-based check would read `Draft`
@@ -545,7 +556,7 @@ where
             None => intent,
         };
         let proof = crate::gate::Proof::issue(&pinned, &self.clock);
-        self.record_intent(run, intent, authorization)?;
+        self.record_intent(run, intent, authorization, proposal.harness().cloned())?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
         self.live.insert(

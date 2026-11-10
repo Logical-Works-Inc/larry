@@ -61,6 +61,21 @@ impl HarnessVersion {
         author: HarnessAuthor,
         reason: &str,
     ) -> Result<Self, HarnessError> {
+        Self::naming(tree.hash(), parent, author, reason)
+    }
+
+    /// Records a version by hash alone, for a rollback to a tree the tenant already adopted. Nothing
+    /// here proves the hash names a tree; the tenant's record refuses one it never adopted.
+    ///
+    /// # Errors
+    ///
+    /// [`HarnessError::ReasonEmpty`] or [`HarnessError::ReasonTooLong`].
+    pub fn naming(
+        hash: HarnessHash,
+        parent: Option<HarnessHash>,
+        author: HarnessAuthor,
+        reason: &str,
+    ) -> Result<Self, HarnessError> {
         if reason.is_empty() {
             return Err(HarnessError::ReasonEmpty);
         }
@@ -71,7 +86,7 @@ impl HarnessVersion {
             });
         }
         Ok(Self {
-            hash: tree.hash(),
+            hash,
             parent,
             author,
             reason: reason.to_owned(),

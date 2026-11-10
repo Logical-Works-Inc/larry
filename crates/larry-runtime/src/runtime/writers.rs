@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use larry_contracts::command::CommandKind;
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use larry_contracts::event::{Event, EventKind};
+use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, RunId, TenantId};
 use larry_contracts::replay::{BudgetSnapshot, EffectRequest, PinnedInputs};
 use larry_contracts::state::{RunState, TransitionEvent};
@@ -105,11 +106,13 @@ where
         run: RunId,
         intent: EffectIntent,
         authorization: larry_contracts::replay::ReplayRecord,
+        harness: Option<HarnessAdoption>,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
         let payload = IntentPayload {
             intent,
             authorization,
+            harness,
         };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::EffectIntentRecorded, bytes)

@@ -20,6 +20,7 @@ use larry_contracts::command::CommandKind;
 use larry_contracts::effect::{
     EffectIntent, EffectOutcome, ReconciliationStrategy, TerminalReceipt,
 };
+use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId};
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent};
@@ -60,6 +61,10 @@ pub struct WorkProposal {
     pub unit: BudgetUnit,
     /// The declared reconciliation strategy (R72).
     pub strategy: ReconciliationStrategy,
+    /// A harness adoption this work carries, if it is one (larry#61). Absent from the encoding when
+    /// `None`, so every proposal written before this field existed encodes and decodes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    harness: Option<HarnessAdoption>,
 }
 
 impl WorkProposal {
@@ -82,7 +87,22 @@ impl WorkProposal {
             cost,
             unit,
             strategy,
+            harness: None,
         }
+    }
+
+    /// Makes this work an adoption of a harness version. The gate still decides it: the proposal must
+    /// declare the write scope, and the version becomes active only if the effect succeeds.
+    #[must_use]
+    pub fn adopting(mut self, adoption: HarnessAdoption) -> Self {
+        self.harness = Some(adoption);
+        self
+    }
+
+    /// The adoption this work carries, if any.
+    #[must_use]
+    pub const fn harness(&self) -> Option<&HarnessAdoption> {
+        self.harness.as_ref()
     }
 
     /// Returns the declared scope requirements without allowing mutation.
@@ -163,6 +183,10 @@ pub struct IntentPayload {
     /// The pinned authorization inputs and the decision they produced. This
     /// is what makes the journal replayable (E55).
     pub authorization: ReplayRecord,
+    /// The harness adoption the reserved effect carries. It is recorded here, after the gate
+    /// authorized the work, so a denied adoption leaves no trace (larry#61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessAdoption>,
 }
 
 /// The body of an [`EventKind::EffectOutcomeRecorded`](larry_contracts::event::EventKind::EffectOutcomeRecorded)
@@ -211,6 +235,7 @@ impl IntentPayload {
         Self {
             intent,
             authorization,
+            harness: None,
         }
     }
 }

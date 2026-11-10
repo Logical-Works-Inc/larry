@@ -52,6 +52,7 @@ Rejected:
   by tenant, with the previous harness kept adopted on any refusal. Rollback adopts an earlier hash.
 - Changing a bound or the encoding changes hashes. The pinned hash in `sim_harness.rs` makes that loud,
   and a new format takes a new version byte.
+- Adoption through the fence is ADR 0029.
 - Covered by `tests/sim_harness.rs` (`sim_harness_roundtrip_is_identity_over_seeded_trees`,
   `harness_path_rules_separate_off_surface_from_invalid_names`, `harness_non_canonical_bytes_are_refused`,
   `harness_hash_is_pinned_to_a_known_answer`). The hash known answer is MEASURED on this build only;

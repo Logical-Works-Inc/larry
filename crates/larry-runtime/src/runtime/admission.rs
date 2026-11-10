@@ -22,9 +22,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::SystemTime;
 
+use larry_contracts::authority::Scope;
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::TerminalDisposition;
 use larry_contracts::event::EventKind;
+use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{RunId, TenantId};
 
 use super::instant::sample;
@@ -162,6 +164,7 @@ where
             if kind == CommandKind::Submit {
                 let proposal: WorkProposal =
                     lgwks_std::json::from_slice(command.content().payload())?;
+                self.check_adoption(command.tenant(), &proposal)?;
                 let at = sample(&self.clock)?;
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
             }
@@ -184,6 +187,22 @@ where
         }
         self.journal.sync()?;
         Ok(acceptance)
+    }
+
+    /// Refuses, before anything is written, an adoption `tenant`'s harness record would refuse, or
+    /// one that does not declare the write scope the gate decides it by.
+    pub(super) fn check_adoption(
+        &self,
+        tenant: TenantId,
+        proposal: &WorkProposal,
+    ) -> Result<(), RuntimeError> {
+        let Some(adoption) = proposal.harness() else {
+            return Ok(());
+        };
+        if !proposal.required_scopes().contains(&Scope::FileWrite) {
+            return Err(HarnessError::ScopeNotDeclared.into());
+        }
+        self.projection.vet_adoption(tenant, adoption)
     }
 
     /// Refuses a run another tenant owns, by the run table or by a command

@@ -91,6 +91,43 @@ pub enum HarnessError {
     /// Two entries share one component and name.
     #[error("harness entries repeat a component and name")]
     Duplicate,
+    /// The adoption's tree is longer than a journal record can carry.
+    #[error("adoption tree of {actual} bytes exceeds the record limit of {limit}")]
+    AdoptedTreeTooLarge {
+        /// The byte limit.
+        limit: usize,
+        /// The bytes offered.
+        actual: usize,
+    },
+    /// The tree the adoption carries does not hash to the version it names.
+    #[error("adoption tree does not match the version hash")]
+    HashMismatch,
+    /// This tenant already has an adoption in flight; one settles before the next is recorded.
+    #[error("an adoption is already in flight for this tenant")]
+    AdoptionInFlight,
+    /// The version's parent is not the hash this tenant has active.
+    #[error("adoption parent is not the active harness")]
+    StaleParent,
+    /// A rollback names a hash this tenant never adopted.
+    #[error("rollback names a harness this tenant never adopted")]
+    UnknownVersion,
+    /// The tenant already holds as many distinct adopted trees as it may.
+    #[error("tenant already holds its limit of {limit} adopted harnesses")]
+    TooManyVersions {
+        /// The per-tenant limit.
+        limit: usize,
+    },
+    /// An adoption must declare the write scope so the gate decides it.
+    #[error("adoption does not declare the write scope")]
+    ScopeNotDeclared,
+    /// The encoding is longer than any tree can encode to.
+    #[error("harness encoding of {actual} bytes exceeds the limit of {limit}")]
+    EncodingTooLarge {
+        /// The byte limit.
+        limit: usize,
+        /// The bytes offered.
+        actual: usize,
+    },
     /// The declared entry count exceeds what any tree may hold.
     #[error("harness declares {actual} entries; no tree holds more than {limit}")]
     TreeTooLarge {

@@ -24,6 +24,7 @@ use larry_contracts::effect::{
     EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt, terminal_disposition,
 };
 use larry_contracts::event::{Event, EventKind};
+use larry_contracts::harness::{HarnessAdoption, HarnessError, TenantHarness, Vetted};
 use larry_contracts::ids::{OperationId, RunId, TenantId};
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent, transition};
@@ -126,6 +127,22 @@ pub trait ProjectionBackend {
     /// Every tracked run. This allocates and is called on the recovery path,
     /// not per tick.
     fn run_ids(&self) -> Vec<RunId>;
+
+    /// Refuses, without changing the view, an adoption the tenant's record would refuse. The runtime
+    /// asks before it writes the command that carries it (larry#61).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Harness`] naming the first refusing rule.
+    fn vet_adoption(
+        &self,
+        tenant: TenantId,
+        adoption: &HarnessAdoption,
+    ) -> Result<(), RuntimeError>;
+
+    /// The harness record `tenant` holds, if it has any. The tenant is the run table's, never a
+    /// proposal's declaration.
+    fn harness(&self, tenant: TenantId) -> Option<&TenantHarness>;
 }
 
 /// The per-run view.
@@ -197,7 +214,7 @@ enum Checked {
         to: RunState,
     },
     /// A reservation, with the decision that admitted it.
-    Intent(Box<IntentPayload>),
+    Intent(Box<IntentPayload>, Option<Vetted>),
     /// An observed outcome.
     Outcome(Box<OutcomePayload>),
     /// A published terminal receipt.
@@ -214,6 +231,8 @@ pub(crate) struct RunFold {
     authorizations: Vec<ReplayRecord>,
     /// Reservations in recorded order.
     intents: Vec<EffectIntent>,
+    /// Each tenant's harness record, folded from intents and receipts (larry#61).
+    harness: BTreeMap<TenantId, TenantHarness>,
 }
 
 impl RunFold {
@@ -221,7 +240,12 @@ impl RunFold {
     /// the payload decodes, a transition agrees with the pure algebra, the
     /// kind is one the view folds, and the record names a row. `apply` takes
     /// its decoded record from here, so the check and the fold cannot drift.
-    fn check(event: &Event, has_row: bool) -> Result<Checked, RuntimeError> {
+    fn check(
+        &self,
+        event: &Event,
+        has_row: bool,
+        run_tenant: Option<TenantId>,
+    ) -> Result<Checked, RuntimeError> {
         let (checked, run) = match event.kind() {
             EventKind::CommandAccepted => {
                 let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
@@ -242,7 +266,13 @@ impl RunFold {
             }
             EventKind::EffectIntentRecorded => {
                 let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
-                (Checked::Intent(Box::new(payload)), event.run())
+                // The run's tenant, never the proposal's declaration (D42, E63).
+                let tenant = run_tenant.unwrap_or_else(|| event.tenant());
+                let vetted = match payload.harness {
+                    Some(ref adoption) => Some(self.vet(tenant, adoption)?),
+                    None => None,
+                };
+                (Checked::Intent(Box::new(payload), vetted), event.run())
             }
             EventKind::EffectOutcomeRecorded => {
                 let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
@@ -259,6 +289,14 @@ impl RunFold {
             Ok(checked)
         } else {
             Err(RuntimeError::RunNotTracked { run })
+        }
+    }
+
+    /// The one rule set for an adoption: the tenant's record vets it.
+    fn vet(&self, tenant: TenantId, adoption: &HarnessAdoption) -> Result<Vetted, HarnessError> {
+        match self.harness.get(&tenant) {
+            Some(record) => record.vet(adoption),
+            None => TenantHarness::default().vet(adoption),
         }
     }
 
@@ -303,15 +341,36 @@ impl RecordFold<Event> for RunFold {
         row: Option<&mut RunView>,
     ) -> Result<(), RuntimeError> {
         let event = entry.record();
-        let checked = Self::check(event, row.is_some())?;
+        let checked = self.check(
+            event,
+            row.is_some(),
+            row.as_deref().and_then(RunView::tenant),
+        )?;
         let Some(view) = row else {
             return Err(RuntimeError::RunNotTracked { run: event.run() });
         };
+        let previous = view.state;
         Self::touch(view, event);
+        let tenant = view.tenant.unwrap_or_else(|| event.tenant());
         match checked {
             Checked::Command => view.commands = view.commands.saturating_add(1),
-            Checked::Transition { to } => view.state = to,
-            Checked::Intent(payload) => {
+            Checked::Transition { to } => {
+                view.state = to;
+                if to.is_terminal()
+                    && let Some(record) = self.harness.get_mut(&tenant)
+                {
+                    // A run that ends without a succeeded receipt adopts nothing.
+                    record.abandon(event.run());
+                }
+            }
+            Checked::Intent(payload, vetted) => {
+                if let Some(adopt) = vetted {
+                    self.harness.entry(tenant).or_default().reserve(
+                        payload.intent.operation,
+                        event.run(),
+                        adopt,
+                    );
+                }
                 view.effects
                     .insert(payload.intent.operation, EffectPhase::Reserved);
                 self.authorizations.push(payload.authorization);
@@ -326,6 +385,13 @@ impl RecordFold<Event> for RunFold {
                 );
             }
             Checked::Receipt(payload) => {
+                // Adoption is the effect's success and nothing earlier: a succeeded receipt on a
+                // run that is not being cancelled. Every other ending settles it unadopted.
+                if let Some(record) = self.harness.get_mut(&tenant) {
+                    let adopted = payload.receipt.disposition() == TerminalDisposition::Succeeded
+                        && previous != RunState::Cancelling;
+                    record.settle(payload.receipt.operation(), adopted);
+                }
                 view.effects.insert(
                     payload.receipt.operation(),
                     EffectPhase::Reconciled {
@@ -399,7 +465,13 @@ impl ProjectionBackend for FoldProjection {
             });
         }
         // A routed record always has a row once folded, so the check sees one.
-        RunFold::check(event, key.is_some()).map(drop)
+        let tenant = key
+            .and_then(|run| self.view.row(&run))
+            .and_then(RunView::tenant);
+        self.view
+            .fold()
+            .check(event, key.is_some(), tenant)
+            .map(drop)
     }
 
     fn apply(&mut self, event: &Event) -> Result<(), RuntimeError> {
@@ -457,6 +529,19 @@ impl ProjectionBackend for FoldProjection {
 
     fn run_ids(&self) -> Vec<RunId> {
         self.view.rows().map(|(run, _)| *run).collect()
+    }
+
+    fn vet_adoption(
+        &self,
+        tenant: TenantId,
+        adoption: &HarnessAdoption,
+    ) -> Result<(), RuntimeError> {
+        self.view.fold().vet(tenant, adoption)?;
+        Ok(())
+    }
+
+    fn harness(&self, tenant: TenantId) -> Option<&TenantHarness> {
+        self.view.fold().harness.get(&tenant)
     }
 }
 

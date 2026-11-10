@@ -26,14 +26,23 @@
 //! The tree holds at most 289 entries and about 5.8 MB of content. An edit holds at most 128
 //! operations and a version reason at most 512 bytes. The encoding is a version byte, a big-endian
 //! `u32` entry count, then entries sorted by (tag, name): tag, name length byte, name, `u32` data
-//! length, data. Decoding refuses anything `encode` could not produce.
+//! length, data. Decoding refuses anything `encode` could not produce, and any input longer than
+//! the longest tree encodes to.
+//!
+//! Adoption (larry#61 part 2, ADR 0029): [`HarnessAdoption`] is what a run proposes and
+//! [`TenantHarness`] is one tenant's record. Nothing is active until the run's effect succeeds.
 
+mod adoption;
 mod component;
 mod edit;
 mod error;
 mod tree;
 mod version;
 
+pub use adoption::{
+    HarnessAdoption, MAX_ADOPTED_TREE_BYTES, MAX_ADOPTED_VERSIONS, MAX_ADOPTION_HISTORY,
+    TenantHarness, Vetted,
+};
 pub use component::HarnessComponent;
 pub use edit::{HarnessEdit, HarnessOp, HarnessPolicy, validate_edit};
 pub use error::HarnessError;
@@ -48,6 +57,8 @@ const HASH_DOMAIN: &[u8] = b"larry.harness.tree.v1\0";
 const MAX_NAME_BYTES: usize = 64;
 /// The most entries any tree may hold (the sum of the per-component limits).
 const MAX_TOTAL_ENTRIES: usize = 289;
+/// The longest canonical encoding any tree has: the header plus every entry at its bounds.
+const MAX_ENCODED_BYTES: usize = 5 + MAX_TOTAL_ENTRIES * (1 + 1 + MAX_NAME_BYTES + 4) + 5_799_936;
 /// The most operations in one edit.
 const MAX_EDIT_OPS: usize = 128;
 /// The longest version reason in bytes.
@@ -64,6 +75,15 @@ mod tests {
             .map(|kind| kind.max_entries())
             .sum();
         assert_eq!(sum, MAX_TOTAL_ENTRIES, "module doc and bound must agree");
+        let content: usize = HarnessComponent::ALL
+            .iter()
+            .map(|kind| kind.max_entries().saturating_mul(kind.max_entry_bytes()))
+            .sum();
+        assert_eq!(
+            MAX_ENCODED_BYTES,
+            5 + MAX_TOTAL_ENTRIES * (1 + 1 + MAX_NAME_BYTES + 4) + content,
+            "the encoding bound is the header plus every entry at its bounds"
+        );
         let tags: Vec<u8> = HarnessComponent::ALL
             .iter()
             .map(|kind| kind.tag())

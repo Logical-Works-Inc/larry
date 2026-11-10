@@ -6,7 +6,7 @@ use crate::ids::ContentDigest;
 
 use super::component::HarnessComponent;
 use super::error::HarnessError;
-use super::{FORMAT_VERSION, HASH_DOMAIN, MAX_NAME_BYTES, MAX_TOTAL_ENTRIES};
+use super::{FORMAT_VERSION, HASH_DOMAIN, MAX_ENCODED_BYTES, MAX_NAME_BYTES, MAX_TOTAL_ENTRIES};
 
 /// The BLAKE3 identity of a harness tree: a hash over the domain tag and the canonical bytes.
 ///
@@ -195,6 +195,12 @@ impl HarnessTree {
     /// A [`HarnessError`] naming the first fault: version, count, tag, name, size, order, truncation
     /// or trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, HarnessError> {
+        if bytes.len() > MAX_ENCODED_BYTES {
+            return Err(HarnessError::EncodingTooLarge {
+                limit: MAX_ENCODED_BYTES,
+                actual: bytes.len(),
+            });
+        }
         let mut reader = Reader { rest: bytes };
         let version = reader.byte()?;
         if version != FORMAT_VERSION {

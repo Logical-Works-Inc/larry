@@ -12,6 +12,7 @@ use core::fmt;
 use larry_contracts::error::{
     AuthorityError, CommandError, OrderingError, SequenceError, TransitionError,
 };
+use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::state::RunState;
@@ -66,8 +67,17 @@ pub enum RuntimeError {
     Transition(TransitionError),
     /// The effect-boundary authority re-validation failed.
     Authority(AuthorityError),
+    /// An encoded journal entry is longer than one record of the durable file can hold.
+    RecordTooLarge {
+        /// The most bytes one record may hold.
+        limit: usize,
+        /// The bytes the entry encoded to.
+        actual: usize,
+    },
     /// A journal payload could not be encoded or decoded.
     Codec(lgwks_std::json::Error),
+    /// The harness value or an adoption of it was refused (larry#61).
+    Harness(HarnessError),
     /// The pure authorization reducer denied the effect (D36).
     Denied {
         /// The stable operation ID that was refused.
@@ -216,6 +226,11 @@ impl fmt::Display for RuntimeError {
             Self::Transition(ref err) => write!(f, "run-state transition refused: {err}"),
             Self::Authority(ref err) => write!(f, "effect-boundary authority refused: {err}"),
             Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
+            Self::Harness(ref err) => write!(f, "harness refused: {err}"),
+            Self::RecordTooLarge { limit, actual } => write!(
+                f,
+                "journal entry of {actual} bytes exceeds the record limit of {limit}"
+            ),
             Self::Denied { operation, reason } => {
                 write!(f, "effect {operation} denied: {reason:?}")
             }
@@ -291,6 +306,7 @@ impl std::error::Error for RuntimeError {
             Self::Transition(ref err) => Some(err),
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
+            Self::Harness(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
             Self::Question(ref err) => Some(err),
             Self::Durable(ref err) => Some(err),
@@ -316,6 +332,7 @@ impl std::error::Error for RuntimeError {
             | Self::ProjectionRefused { .. }
             | Self::ProjectionPoisoned
             | Self::ClockOutOfRange { .. }
+            | Self::RecordTooLarge { .. }
             | Self::EffectIdentity { .. } => None,
         }
     }
@@ -348,6 +365,12 @@ impl From<TransitionError> for RuntimeError {
 impl From<AuthorityError> for RuntimeError {
     fn from(err: AuthorityError) -> Self {
         Self::Authority(err)
+    }
+}
+
+impl From<HarnessError> for RuntimeError {
+    fn from(err: HarnessError) -> Self {
+        Self::Harness(err)
     }
 }
 
