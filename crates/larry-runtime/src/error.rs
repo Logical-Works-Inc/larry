@@ -127,6 +127,17 @@ pub enum RuntimeError {
         /// The state the pure algebra re-derived.
         rederived: RunState,
     },
+    /// The projection was fed a record out of order. The runtime numbers the
+    /// records it folds itself, so this is a defect, never a caller error.
+    ProjectionOutOfOrder {
+        /// The sequence the view expected.
+        expected: u64,
+        /// The sequence it was given.
+        found: u64,
+    },
+    /// An earlier fold failure left the projection half applied; it refuses
+    /// every later fold until it is rebuilt from the journal.
+    ProjectionPoisoned,
     /// The clock's reading, placed after the Unix epoch, is past what the platform's
     /// `SystemTime` represents, so the tick has no instant to pin and runs no stage (E30).
     ClockOutOfRange {
@@ -242,6 +253,13 @@ impl fmt::Display for RuntimeError {
                 f,
                 "run {run} fold diverged: journal recorded {recorded}, algebra re-derived {rederived}"
             ),
+            Self::ProjectionOutOfOrder { expected, found } => write!(
+                f,
+                "projection expected record {expected} and was given {found}"
+            ),
+            Self::ProjectionPoisoned => {
+                f.write_str("projection is half applied after a failed fold; rebuild it")
+            }
             Self::ClockOutOfRange { elapsed } => write!(
                 f,
                 "clock reading {elapsed:?} after the Unix epoch is outside the platform's time range"
@@ -298,6 +316,8 @@ impl std::error::Error for RuntimeError {
             | Self::UnresolvableOutcome { .. }
             | Self::ReceiptAlreadyPublished { .. }
             | Self::FoldDivergence { .. }
+            | Self::ProjectionOutOfOrder { .. }
+            | Self::ProjectionPoisoned
             | Self::ClockOutOfRange { .. }
             | Self::EffectIdentity { .. } => None,
         }

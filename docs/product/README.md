@@ -66,8 +66,8 @@ existing falsifier green before and after. Authority checks consume secure-autho
 logicalworks-crates and ported there with its tests, never kept as a second copy here. The crate's
 2026-10-26 deprecation is lifted (Director 2026-11-03: "Larry-runtime can be edited and it should be
 decoupled"); larry#68 is the port map, one row per PR, and its first row keeps the test doubles out of
-every shipped build. Clock, journal file, fence, gate and retry run on lgwks_bot (#74 to #78); the
-projection (#79) and the tick and consumer (#80) are the rows left.
+every shipped build. Clock, journal file, fence, gate, retry and the
+projection run on lgwks_bot (#74 to #79); the tick and consumer (#80) are the row left.
 
 **Track 2, Face 2: the operator agent (the Copilot answer).** The revenue slice's agent gateway (moo#184).
 A model limited to each app's manifest of typed actions with a risk class. Reads run in the client;

@@ -2,19 +2,21 @@
 //!
 //! This module is the seam the Director asked for. The runtime never reads
 //! state directly; it reads through [`ProjectionBackend`], and the only
-//! implementation today is [`FoldProjection`], a deterministic fold over the
-//! journal using `BTreeMap` throughout so no operation depends on hash
+//! implementation is [`FoldProjection`]: `lgwks_bot`'s `RecordProjection`, one
+//! ECS world entity per run, folded by [`RunFold`] (larry#79). Rows are read in
+//! `RunId` order, never entity order, so no operation depends on hash or entity
 //! iteration order.
 //!
-//! **This is not a claim that a `bevy_ecs::World` may hold authority.** The
-//! question "may the ECS world ever be authoritative, or is it always a
-//! view?" is deliberately left open by the Director and is recorded as an
-//! open decision in `docs/architecture/runtime.md`. What this seam buys is
-//! that the answer stays cheap: a `bevy_ecs` backend can be admitted and
-//! swapped in behind this trait without the reducer, the journal or the
-//! effect lifecycle noticing, because none of them reference the world.
+//! **The world is a view and holds no authority.** The journal is the truth.
+//! Whether the world may ever be authoritative is the open decision recorded in
+//! `docs/architecture/runtime.md`. Each event is folded as the runtime stages
+//! it, before the group-commit sync, as an entry numbered by the view itself.
+//! A fold that fails poisons the view until a rebuild.
 
 use std::collections::BTreeMap;
+
+use lgwks_bot::journal::RecordEntry;
+use lgwks_bot::{ProjectionError, RecordFold, RecordProjection};
 
 use larry_contracts::effect::{
     EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt, terminal_disposition,
@@ -173,17 +175,132 @@ impl RunView {
     }
 }
 
-/// The deterministic fold implementation of [`ProjectionBackend`].
-#[derive(Debug, Clone)]
-pub struct FoldProjection {
-    /// Run views keyed in deterministic identity order.
-    runs: BTreeMap<RunId, RunView>,
+/// What the view keeps beside its rows: the three ordered lists no single run
+/// owns, and the fold rules that fill them and the rows.
+#[derive(Debug, Default)]
+pub struct RunFold {
     /// Terminal receipts in recorded order.
     receipts: Vec<TerminalReceipt>,
     /// Pinned decisions in recorded order.
     authorizations: Vec<ReplayRecord>,
     /// Reservations in recorded order.
     intents: Vec<EffectIntent>,
+}
+
+impl RunFold {
+    /// Records the event on the run's row. The tenant is first-wins: the one
+    /// the run's earliest event carried. A later event cannot re-attribute a
+    /// run that is already known, so a journal that names two tenants for one
+    /// run keeps the one the run was created under.
+    fn touch<'a>(
+        row: Option<&'a mut RunView>,
+        run: RunId,
+        event: &Event,
+    ) -> Result<&'a mut RunView, RuntimeError> {
+        let view = row.ok_or(RuntimeError::RunNotTracked { run })?;
+        view.tenant.get_or_insert(event.tenant());
+        view.last_sequence = Some(event.sequence());
+        Ok(view)
+    }
+}
+
+impl RecordFold<Event> for RunFold {
+    type Key = RunId;
+    type Row = RunView;
+    type Error = RuntimeError;
+
+    fn route(&self, record: &Event) -> Option<RunId> {
+        // Two payloads name their own run. One that does not decode routes
+        // nowhere, and `apply` then reports the decode failure.
+        match record.kind() {
+            EventKind::CommandAccepted => {
+                let payload: CommandAcceptedPayload =
+                    lgwks_std::json::from_slice(record.payload()).ok()?;
+                Some(payload.run)
+            }
+            EventKind::TerminalReceiptPublished => {
+                let payload: ReceiptPayload = lgwks_std::json::from_slice(record.payload()).ok()?;
+                Some(payload.receipt.run())
+            }
+            EventKind::StateTransition
+            | EventKind::EffectIntentRecorded
+            | EventKind::EffectOutcomeRecorded => Some(record.run()),
+            _ => None,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        entry: &RecordEntry<Event>,
+        row: Option<&mut RunView>,
+    ) -> Result<(), RuntimeError> {
+        let event = entry.record();
+        match event.kind() {
+            EventKind::CommandAccepted => {
+                let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
+                let view = Self::touch(row, payload.run, event)?;
+                view.commands = view.commands.saturating_add(1);
+                Ok(())
+            }
+            EventKind::StateTransition => {
+                // Re-derived from the pure algebra, never trusting the recorded target.
+                let payload: TransitionPayload = lgwks_std::json::from_slice(event.payload())?;
+                let rederived = transition(payload.from, payload.event)?;
+                if rederived != payload.to {
+                    return Err(RuntimeError::FoldDivergence {
+                        run: event.run(),
+                        recorded: payload.to,
+                        rederived,
+                    });
+                }
+                Self::touch(row, event.run(), event)?.state = rederived;
+                Ok(())
+            }
+            EventKind::EffectIntentRecorded => {
+                let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
+                let view = Self::touch(row, event.run(), event)?;
+                view.effects
+                    .insert(payload.intent.operation, EffectPhase::Reserved);
+                self.authorizations.push(payload.authorization);
+                self.intents.push(payload.intent);
+                Ok(())
+            }
+            EventKind::EffectOutcomeRecorded => {
+                let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
+                let view = Self::touch(row, event.run(), event)?;
+                view.effects.insert(
+                    payload.outcome.operation(),
+                    EffectPhase::Observed {
+                        outcome: payload.outcome,
+                    },
+                );
+                Ok(())
+            }
+            EventKind::TerminalReceiptPublished => {
+                let payload: ReceiptPayload = lgwks_std::json::from_slice(event.payload())?;
+                let view = Self::touch(row, payload.receipt.run(), event)?;
+                view.effects.insert(
+                    payload.receipt.operation(),
+                    EffectPhase::Reconciled {
+                        disposition: payload.receipt.disposition(),
+                    },
+                );
+                self.receipts.push(payload.receipt);
+                Ok(())
+            }
+            other => Err(RuntimeError::UnsupportedEvent(other)),
+        }
+    }
+}
+
+/// The [`ProjectionBackend`] on `lgwks_bot`'s ECS world: one world entity per
+/// run, folded by [`RunFold`]. It is a view of the journal and holds no
+/// authority; [`rebuild`](ProjectionBackend::rebuild) discards it and folds the
+/// journal again.
+#[derive(Debug)]
+pub struct FoldProjection {
+    /// The world, with one row per run in `RunId` order.
+    view: RecordProjection<Event, RunFold>,
     /// Maximum number of tracked run views.
     capacity: usize,
 }
@@ -199,10 +316,7 @@ impl FoldProjection {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
-            runs: BTreeMap::new(),
-            receipts: Vec::new(),
-            authorizations: Vec::new(),
-            intents: Vec::new(),
+            view: RecordProjection::empty(RunFold::default(), capacity),
             capacity,
         }
     }
@@ -210,104 +324,18 @@ impl FoldProjection {
     /// The per-run view, if the run is tracked.
     #[must_use]
     pub fn run(&self, run: RunId) -> Option<&RunView> {
-        self.runs.get(&run)
+        self.view.row(&run)
     }
 
     /// Every tracked run, in `RunId` order.
-    #[must_use]
-    pub fn runs(&self) -> &BTreeMap<RunId, RunView> {
-        &self.runs
-    }
-
-    /// Folds one command-accepted record.
-    fn fold_command_accepted(&mut self, event: &Event) -> Result<(), RuntimeError> {
-        let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
-        let view = self.entry(payload.run, event)?;
-        view.commands = view.commands.saturating_add(1);
-        Ok(())
-    }
-
-    /// Folds one state-transition record, re-deriving the transition from the
-    /// pure algebra rather than trusting the recorded target.
-    fn fold_state_transition(&mut self, event: &Event) -> Result<(), RuntimeError> {
-        let payload: TransitionPayload = lgwks_std::json::from_slice(event.payload())?;
-        let rederived = transition(payload.from, payload.event)?;
-        if rederived != payload.to {
-            return Err(RuntimeError::FoldDivergence {
-                run: event.run(),
-                recorded: payload.to,
-                rederived,
-            });
-        }
-        let view = self.entry(event.run(), event)?;
-        view.state = rederived;
-        Ok(())
-    }
-
-    /// Folds one effect-reservation record.
-    fn fold_intent(&mut self, event: &Event) -> Result<(), RuntimeError> {
-        let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
-        let operation = payload.intent.operation;
-        let view = self.entry(event.run(), event)?;
-        view.effects.insert(operation, EffectPhase::Reserved);
-        self.authorizations.push(payload.authorization);
-        self.intents.push(payload.intent);
-        Ok(())
-    }
-
-    /// Folds one observed-outcome record.
-    fn fold_outcome(&mut self, event: &Event) -> Result<(), RuntimeError> {
-        let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
-        let operation = payload.outcome.operation();
-        let view = self.entry(event.run(), event)?;
-        view.effects.insert(
-            operation,
-            EffectPhase::Observed {
-                outcome: payload.outcome,
-            },
-        );
-        Ok(())
-    }
-
-    /// Folds one receipt record.
-    fn fold_receipt(&mut self, event: &Event) -> Result<(), RuntimeError> {
-        let payload: ReceiptPayload = lgwks_std::json::from_slice(event.payload())?;
-        let operation = payload.receipt.operation();
-        let view = self.entry(payload.receipt.run(), event)?;
-        view.effects.insert(
-            operation,
-            EffectPhase::Reconciled {
-                disposition: payload.receipt.disposition(),
-            },
-        );
-        self.receipts.push(payload.receipt);
-        Ok(())
-    }
-
-    /// Finds or admits a bounded run view and validates event sequencing.
-    fn entry(&mut self, run: RunId, event: &Event) -> Result<&mut RunView, RuntimeError> {
-        if !self.runs.contains_key(&run) && self.runs.len() >= self.capacity {
-            return Err(RuntimeError::RunLimitReached {
-                capacity: self.capacity,
-            });
-        }
-        let view = self.runs.entry(run).or_default();
-        // First-wins: the run's tenant is the one its earliest recorded event
-        // carried. A later event cannot re-attribute a run that is already
-        // known, so a journal that names two tenants for one run keeps the one
-        // the run was created under rather than flipping to the newest claim.
-        view.tenant.get_or_insert(event.tenant());
-        view.last_sequence = Some(event.sequence());
-        Ok(view)
+    pub fn runs(&self) -> impl Iterator<Item = (&RunId, &RunView)> {
+        self.view.rows()
     }
 }
 
 impl ProjectionBackend for FoldProjection {
     fn rebuild(&mut self, journal: &Journal) -> Result<(), RuntimeError> {
-        self.runs.clear();
-        self.receipts.clear();
-        self.authorizations.clear();
-        self.intents.clear();
+        *self = Self::new(self.capacity);
         for entry in journal.entries() {
             if let JournalEntry::Event(ref event) = *entry {
                 self.apply(event)?;
@@ -317,56 +345,60 @@ impl ProjectionBackend for FoldProjection {
     }
 
     fn apply(&mut self, event: &Event) -> Result<(), RuntimeError> {
-        match event.kind() {
-            EventKind::CommandAccepted => self.fold_command_accepted(event),
-            EventKind::StateTransition => self.fold_state_transition(event),
-            EventKind::EffectIntentRecorded => self.fold_intent(event),
-            EventKind::EffectOutcomeRecorded => self.fold_outcome(event),
-            EventKind::TerminalReceiptPublished => self.fold_receipt(event),
-            other => Err(RuntimeError::UnsupportedEvent(other)),
-        }
+        // The view counts events only (commands have no row), contiguously
+        // from one, so the sequence is the view's own and never the file's.
+        let sequence = self.view.applied().map_or(1, |last| last.saturating_add(1));
+        let entry = RecordEntry::staged(sequence, event.clone());
+        self.view.fold_one(&entry).map_err(|refused| match refused {
+            ProjectionError::Fold(cause) => cause,
+            ProjectionError::RowLimit { limit } => {
+                RuntimeError::RunLimitReached { capacity: limit }
+            }
+            ProjectionError::Diverged { expected, found } => {
+                RuntimeError::ProjectionOutOfOrder { expected, found }
+            }
+            ProjectionError::Journal(cause) => RuntimeError::Durable(cause),
+            ProjectionError::Poisoned | _ => RuntimeError::ProjectionPoisoned,
+        })
     }
 
     fn run_state(&self, run: RunId) -> Option<RunState> {
-        self.runs.get(&run).map(|view| view.state)
+        self.run(run).map(RunView::state)
     }
 
     fn run_tenant(&self, run: RunId) -> Option<TenantId> {
-        self.runs.get(&run).and_then(RunView::tenant)
+        self.run(run).and_then(RunView::tenant)
     }
 
     fn run_count(&self) -> usize {
-        self.runs.len()
+        self.view.rows().count()
     }
 
     fn effect_phase(&self, operation: OperationId) -> Option<EffectPhase> {
-        self.runs
-            .values()
-            .find_map(|view| view.effects.get(&operation).copied())
+        self.view
+            .rows()
+            .find_map(|(_, view)| view.effects.get(&operation).copied())
     }
 
     fn effect_count(&self, run: RunId) -> usize {
         // A run the projection never saw has opened no effects.
-        match self.runs.get(&run) {
-            Some(view) => view.effects.len(),
-            None => 0,
-        }
+        self.run(run).map_or(0, |view| view.effects.len())
     }
 
     fn receipts(&self) -> &[TerminalReceipt] {
-        &self.receipts
+        &self.view.fold().receipts
     }
 
     fn authorizations(&self) -> &[ReplayRecord] {
-        &self.authorizations
+        &self.view.fold().authorizations
     }
 
     fn intents(&self) -> &[EffectIntent] {
-        &self.intents
+        &self.view.fold().intents
     }
 
     fn run_ids(&self) -> Vec<RunId> {
-        self.runs.keys().copied().collect()
+        self.view.rows().map(|(run, _)| *run).collect()
     }
 }
 
