@@ -109,9 +109,9 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #61 harness as a versioned, content-hashed journal value (ADR 0028, 0029): PR pending, 21 tests; 38217 of 65524 record bytes.
 - [x] #62 recursion as journalled steps (production executor owner and RSS wait on part 3): PR pending, 11 tests; 4445 of 65524 record bytes.
 - [x] #63 grader-blind learning (type boundary and scan; egress waits on Nova): PR pending, 10 tests.
-- [ ] #64 blind seeded selection and a lesson library per tenant.
+- [ ] #64 blind seeded selection and a lesson library per tenant (selection and lesson vet: PR pending, 13 tests; the store waits on Logical-DB).
 - [ ] #65 matched benchmark against Harness² on JobBench and LAB.
-- [ ] #66 learning the person can see, budget, undo and stop.
+- [ ] #66 learning the person can see, budget, undo and stop (budget, poisoning and plan stop: PR pending, 8 tests; surfaces and journey remain).
 - Each issue's Acceptance section is its proof.
 
 ## Holds and open design

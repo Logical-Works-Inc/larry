@@ -5,7 +5,7 @@ description: Module map, owners and invariants for the Larry workspace.
 resource: /CODEBOOK.md
 tags: [larry, codebook, modules]
 generated: {by: claude-code, at: 2026-11-07}
-verified: {by: claude-code, method: read of each crate root and module declaration, 2026-11-07}
+verified: {by: claude-code, method: read of each crate root and module declaration, 2026-11-10}
 status: public-alpha
 stale_after: 2026-12-06
 sources: [crates/larry-contracts/src/lib.rs, crates/larry-runtime/src/lib.rs, src/lib.rs, INVARIANTS.md]
@@ -29,6 +29,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `replay` | The pure authorization reducer and pinned replay; expiry on `lgwks_bot::skew::lease_holds`, coverage on `lgwks_bot::gate::GrantSet` (larry#77) |
 | `error` | Every typed contract failure |
 | `workspace` | Bounded workspace projections and the Continue boundary |
+| `harness`, `evidence`, `recursion`, `selection`, `lesson`, `learning` | Track 4 learning (#60): the hashed harness, grader-blind evidence, the R = 4k / P = 3k ledger, blind selection, evidence-backed lessons, the learning budget (ADR 0028 to 0033) |
 | `fixture` (test only) | Pinned instants shared by the unit tests |
 
 ## crates/larry-runtime (the deterministic tick)
@@ -116,5 +117,4 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
-- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that exercises every helper: `support/origin.rs` the journeys' origin repository,
-  `support/mcp_task.rs` the operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/serve_cli.rs` `larry serve`.
+- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that exercises every helper: `support/origin.rs` the journeys' origin repository, `support/mcp_task.rs` the operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/serve_cli.rs` `larry serve`.
