@@ -28,8 +28,10 @@ and probes without end is denial of wallet, and a poisoned deliverable (#38) mus
   milli-cents; a host narrows it.
 - The fold counts what each tenant's learning reserved (`LearningSpent`) across all its plans: a probe
   is a rollout; a first-attempt proposer, composer or selector run is a session; a retry adds no session;
-  every learning step adds its declared cost as money when that cost is in milli-cents. Counting is by
-  the run table's tenant and rebuilds identically on replay.
+  every learning step adds its declared cost as money. The cost must be in milli-cents: a step priced
+  in tokens or requests is refused (`LearningError::Unit`, denied `UnitMismatch`), never counted as
+  free, so pricing a loop in another unit cannot slip past the money ceiling. Counting is by the run
+  table's tenant and rebuilds identically on replay.
 - `LearningBudget::admit` is the one pure rule. The runtime asks it in `admit_work`, before the effect
   is reserved. A step past a ceiling is denied `DenialReason::BudgetExhausted` and its run fails. Both
   are journalled: the command and the failed run's transitions. Nothing is reserved, so nothing is

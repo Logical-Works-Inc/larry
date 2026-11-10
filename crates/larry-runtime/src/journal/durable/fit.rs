@@ -160,7 +160,7 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
         PolicySnapshot::new(1, scopes.clone()),
         CapabilitySnapshot::new(scopes.clone()),
         ValiditySnapshot::new(valid_until),
-        BudgetUnit::Requests,
+        BudgetUnit::MilliCents,
         20,
     );
     let outcomes: Vec<EffectOutcome> = (1..=8_u8)
@@ -224,7 +224,7 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
             OperationId::from_bytes([number; 16]),
             scopes.clone(),
             1,
-            BudgetUnit::Requests,
+            BudgetUnit::MilliCents,
             ReconciliationStrategy::Queryable,
         )
         .stepping(step);
@@ -254,7 +254,7 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
         OperationId::from_bytes([8; 16]),
         scopes,
         1,
-        BudgetUnit::Requests,
+        BudgetUnit::MilliCents,
         ReconciliationStrategy::Queryable,
     )
     .selecting(larry_contracts::selection::SelectionStep::new(

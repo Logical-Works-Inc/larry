@@ -404,3 +404,77 @@ fn sim_learning_poisoning_an_injected_instruction_cannot_plant_a_lesson() -> Sim
     }
     Ok(())
 }
+
+/// As `step`, priced in `unit`.
+fn step_priced(
+    runtime: &mut TestRuntime,
+    number: u8,
+    plan: RecursionPlan,
+    unit: BudgetUnit,
+) -> Sim<larry_runtime::runtime::TickReport> {
+    let body = WorkProposal::new(
+        run(number),
+        tenant(1),
+        operation(number),
+        [Scope::FileRead].into_iter().collect(),
+        1,
+        unit,
+        ReconciliationStrategy::Queryable,
+    )
+    .stepping(RecursionStep::new(
+        plan,
+        Label::new(0, Stage::Propose, 0),
+        0,
+    ));
+    runtime.submit(submit(command_id(number), &body)?)?;
+    Ok(runtime.tick()?)
+}
+
+#[test]
+fn sim_learning_budget_a_step_priced_outside_milli_cents_is_refused_and_spends_nothing() -> Sim<()>
+{
+    for seed in 0..24_u64 {
+        support::seeded(seed, || -> Sim<()> {
+            let mut runtime = runtime(LearningBudget::new(100, 100, 1_000_000), 12)?;
+            for unit in [BudgetUnit::Tokens, BudgetUnit::Requests] {
+                // A loop that prices every step in another unit, hoping to be counted as free.
+                for round in 0..6_u8 {
+                    let number = round
+                        .saturating_add(1)
+                        .saturating_add(if unit == BudgetUnit::Tokens { 0 } else { 6 });
+                    let report =
+                        step_priced(&mut runtime, number, plan(u64::from(number), 1)?, unit)?;
+                    assert_eq!(
+                        report.denied(),
+                        &[(
+                            operation(number),
+                            DenialReason::UnitMismatch {
+                                requested: unit,
+                                budget: BudgetUnit::MilliCents
+                            }
+                        )],
+                        "seed {seed}: {unit:?} is refused, not free"
+                    );
+                }
+            }
+            assert_eq!(
+                spent(&runtime, 1),
+                (0, 0, 0),
+                "seed {seed}: nothing was spent"
+            );
+            assert!(
+                runtime.projection().intents().is_empty(),
+                "seed {seed}: and nothing was reserved"
+            );
+            // Control: the same step priced in milli-cents is admitted and counted.
+            let report = step_priced(&mut runtime, 20, plan(20, 1)?, BudgetUnit::MilliCents)?;
+            assert!(
+                report.denied().is_empty(),
+                "seed {seed}: the milli-cent path still works"
+            );
+            assert_eq!(spent(&runtime, 1), (0, 1, 1), "seed {seed}: and is counted");
+            Ok(())
+        })?;
+    }
+    Ok(())
+}

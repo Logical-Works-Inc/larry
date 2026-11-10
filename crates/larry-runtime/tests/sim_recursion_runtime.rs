@@ -3,6 +3,8 @@
 //! same rules before the journal write, and a receipt settles the step. Each step here runs on a
 //! runtime restored from the previous journal, so every position between steps is a restart.
 
+#[path = "support/milli.rs"]
+mod milli;
 mod sim_kit;
 mod support;
 
@@ -23,10 +25,9 @@ use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::runtime::{replay as replay_journal, restore};
 
+use milli::{proposal_milli, settings_milli};
 use sim_kit::Sim;
-use support::{
-    TestRuntime, cancel, clock, command_id, operation, proposal, run, settings, submit, tenant,
-};
+use support::{TestRuntime, cancel, clock, command_id, operation, run, submit, tenant};
 
 const MODES: [RecursionMode; 2] = [RecursionMode::Parallel, RecursionMode::Sequential];
 
@@ -79,7 +80,7 @@ fn reference(
 }
 
 fn body(number: u8, step: RecursionStep) -> WorkProposal {
-    proposal(
+    proposal_milli(
         run(number),
         tenant(1),
         operation(number),
@@ -119,7 +120,7 @@ fn execute_with(
         owner = owner.producing(operation(number), made);
     }
     let mut runtime: TestRuntime = restore(
-        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+        settings_milli(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         owner,
         clock()?,
         journal,
@@ -444,7 +445,7 @@ fn sim_recursion_runtime_an_unknown_step_stays_open_across_a_restart_for_every_s
                         "seed {seed} {stage:?}: not issued again"
                     );
                     let mut runtime: TestRuntime = restore(
-                        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+                        settings_milli(&[Scope::FileRead], &[Scope::FileRead], 100)?,
                         ScriptedOwner::new(),
                         clock()?,
                         journal.clone(),
@@ -548,7 +549,7 @@ fn sim_recursion_runtime_a_tenant_holds_a_bounded_number_of_plans() -> Sim<()> {
             )?;
             let step = reference(None, extra, Label::new(0, Stage::Propose, 0), 0)?;
             let mut runtime: TestRuntime = restore(
-                settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+                settings_milli(&[Scope::FileRead], &[Scope::FileRead], 100)?,
                 ScriptedOwner::new(),
                 clock()?,
                 journal,
@@ -641,7 +642,7 @@ fn sim_recursion_runtime_the_durable_file_restarts_between_intent_and_receipt_fo
                     );
                     let before = Journal::open(&path, 4096)?.len();
                     let mut runtime: TestRuntime = restore(
-                        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+                        settings_milli(&[Scope::FileRead], &[Scope::FileRead], 100)?,
                         ScriptedOwner::new(),
                         clock()?,
                         Journal::open(&path, 4096)?,
@@ -798,7 +799,7 @@ fn sim_recursion_runtime_cancel_with_an_unknown_effect_releases_the_slot_when_re
                 },
             ]);
             let mut runtime: TestRuntime = restore(
-                settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+                settings_milli(&[Scope::FileRead], &[Scope::FileRead], 100)?,
                 owner,
                 clock()?,
                 journal,

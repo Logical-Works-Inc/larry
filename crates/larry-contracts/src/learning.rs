@@ -10,7 +10,9 @@
 //!
 //! What is charged. A recursion probe is one rollout. A first-attempt proposer or composer step and a
 //! selector run are one session. A retry is the same session, so it adds no session. Every learning
-//! step also charges its declared cost as money when that cost is denominated in milli-cents.
+//! step also charges its declared cost as money, and the cost must be in milli-cents: a learning step
+//! priced in any other unit is refused ([`LearningError::Unit`]), never counted as free, so pricing a
+//! loop in tokens cannot slip past the money ceiling.
 
 use crate::authority::{Budget, BudgetUnit};
 use crate::recursion::Stage;
@@ -61,6 +63,9 @@ impl LearningBudget {
     ///
     /// [`LearningError`] naming the first ceiling it would pass: rollouts, then sessions, then money.
     pub fn admit(&self, spent: &LearningSpent, charge: &Charge) -> Result<(), LearningError> {
+        if !matches!(charge.unit, BudgetUnit::MilliCents) {
+            return Err(LearningError::Unit { unit: charge.unit });
+        }
         if spent.rollouts.saturating_add(charge.rollouts) > self.rollouts {
             return Err(LearningError::Rollouts {
                 limit: self.rollouts,
@@ -91,8 +96,10 @@ pub struct Charge {
     rollouts: u64,
     /// Sessions, 0 or 1.
     sessions: u64,
-    /// Milli-cents.
+    /// Milli-cents when the unit is milli-cents.
     money: u64,
+    /// The unit the cost was declared in.
+    unit: BudgetUnit,
 }
 
 impl Charge {
@@ -104,7 +111,8 @@ impl Charge {
         Self {
             rollouts: one_if(probe),
             sessions: one_if(!probe && attempt == 0),
-            money: money_of(cost, unit),
+            money: cost,
+            unit,
         }
     }
 
@@ -114,17 +122,9 @@ impl Charge {
         Self {
             rollouts: 0,
             sessions: 1,
-            money: money_of(cost, unit),
+            money: cost,
+            unit,
         }
-    }
-}
-
-/// A declared cost counts as money only in milli-cents; other units are not coerced.
-const fn money_of(cost: u64, unit: BudgetUnit) -> u64 {
-    if matches!(unit, BudgetUnit::MilliCents) {
-        cost
-    } else {
-        0
     }
 }
 
@@ -186,6 +186,7 @@ impl LearningError {
                 spent,
                 requested,
             } => (requested, limit.saturating_sub(spent)),
+            Self::Unit { .. } => (charge.money, 0),
         }
     }
 }
@@ -209,6 +210,12 @@ pub enum LearningError {
         limit: u64,
         /// Spent.
         spent: u64,
+    },
+    /// The step is priced outside milli-cents; learning money is milli-cents only, so it is refused.
+    #[error("learning step priced in {unit:?}; learning money is milli-cents only")]
+    Unit {
+        /// The unit it was priced in.
+        unit: BudgetUnit,
     },
     /// The money ceiling.
     #[error("learning has spent {spent} of {limit} milli-cents and asks {requested} more")]

@@ -1,6 +1,8 @@
 //! larry#64 part 2: one blind selection per plan rides the journal as an ordinary selector run, and
 //! the runtime vets a lesson against the journal. There is no lesson store: it waits on Logical-DB.
 
+#[path = "support/milli.rs"]
+mod milli;
 mod sim_kit;
 mod support;
 
@@ -23,8 +25,9 @@ use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::runtime::{replay as replay_journal, restore};
 
+use milli::{proposal_milli, settings_milli};
 use sim_kit::Sim;
-use support::{TestRuntime, clock, command_id, operation, proposal, run, settings, submit, tenant};
+use support::{TestRuntime, clock, command_id, operation, run, submit, tenant};
 
 fn base() -> HarnessHash {
     HarnessTree::empty().hash()
@@ -73,7 +76,7 @@ fn runtime_over(journal: Journal, after: Vec<EffectOutcome>) -> Sim<TestRuntime>
         owner = owner.producing(operation(number), Produced::Harness(made_by(label)?));
     }
     let mut runtime: TestRuntime = restore(
-        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+        settings_milli(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         owner,
         clock()?,
         journal,
@@ -113,7 +116,7 @@ fn settle(runtime: &mut TestRuntime, plan: RecursionPlan) -> Sim<()> {
         } else {
             step
         };
-        let body = proposal(
+        let body = proposal_milli(
             run(number),
             tenant(1),
             operation(number),
@@ -134,7 +137,7 @@ fn select(
     plan: RecursionPlan,
     answer: SelectorAnswer,
 ) -> Sim<()> {
-    let body = proposal(
+    let body = proposal_milli(
         run(number),
         tenant(1),
         operation(number),
@@ -186,7 +189,7 @@ fn sim_selection_runtime_a_settled_plan_selects_once_and_replays() -> Sim<()> {
             );
             // A second selection is refused before the write.
             let before = runtime.journal().len();
-            let body = proposal(
+            let body = proposal_milli(
                 run(9),
                 tenant(1),
                 operation(9),
@@ -277,7 +280,7 @@ fn sim_selection_runtime_an_unsettled_plan_is_refused_before_the_write() -> Sim<
             let plan = plan(RecursionMode::Parallel, seed)?;
             let mut runtime = runtime_over(Journal::new(4096)?, vec![succeed(8)])?;
             let before = runtime.journal().len();
-            let body = proposal(
+            let body = proposal_milli(
                 run(8),
                 tenant(1),
                 operation(8),
@@ -369,7 +372,7 @@ fn runtime_vets_a_lesson_against_the_journal_and_the_tenant() -> Sim<()> {
     let mut runtime = runtime_over(Journal::new(4096)?, vec![succeed(8)])?;
     settle(&mut runtime, plan)?;
     // Another tenant's run, journalled.
-    let other = proposal(
+    let other = proposal_milli(
         run(80),
         tenant(2),
         operation(80),

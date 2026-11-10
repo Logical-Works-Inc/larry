@@ -69,7 +69,7 @@ use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use larry_contracts::harness::TenantHarness;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
-use larry_contracts::learning::Charge;
+use larry_contracts::learning::{Charge, LearningError};
 use larry_contracts::learning::{LearningBudget, LearningSpent};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::{RunState, TransitionEvent};
@@ -593,14 +593,20 @@ where
         if let Some(charge) = learning {
             let spent = self.projection.learning_spent(tenant);
             if let Err(refused) = self.settings.learning.admit(&spent, &charge) {
-                let (required, remaining) = refused.required_and_remaining(&charge);
-                report.denied.push((
-                    proposal.operation,
-                    DenialReason::BudgetExhausted {
-                        required,
-                        remaining,
+                let reason = match refused {
+                    LearningError::Unit { unit } => DenialReason::UnitMismatch {
+                        requested: unit,
+                        budget: BudgetUnit::MilliCents,
                     },
-                ));
+                    other => {
+                        let (required, remaining) = other.required_and_remaining(&charge);
+                        DenialReason::BudgetExhausted {
+                            required,
+                            remaining,
+                        }
+                    }
+                };
+                report.denied.push((proposal.operation, reason));
                 self.advance(run, TransitionEvent::Fail)?;
                 return Ok(());
             }
