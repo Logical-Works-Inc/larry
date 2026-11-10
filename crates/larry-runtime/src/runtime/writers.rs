@@ -160,7 +160,7 @@ where
         Ok(())
     }
 
-    /// Appends a sequenced event before applying it to the projection.
+    /// Appends a sequenced event the projection admits, then applies it.
     fn record_event(
         &mut self,
         tenant: TenantId,
@@ -177,6 +177,9 @@ where
             kind,
             payload.into_boxed_slice(),
         )?;
+        // A refused fold poisons the view and a journaled fact is replayed on
+        // restart, so a fact the view would refuse is never written.
+        self.projection.admit(&event)?;
         self.journal.record(event)?;
         let Some(last) = self.journal.last() else {
             return Ok(());
@@ -213,3 +216,6 @@ where
             .ok_or(RuntimeError::RunNotTracked { run })
     }
 }
+
+#[cfg(test)]
+mod tests;

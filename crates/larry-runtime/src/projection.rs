@@ -11,7 +11,9 @@
 //! Whether the world may ever be authoritative is the open decision recorded in
 //! `docs/architecture/runtime.md`. Each event is folded as the runtime stages
 //! it, before the group-commit sync, as an entry numbered by the view itself.
-//! A fold that fails poisons the view until a rebuild.
+//! A fold that fails poisons the view until a rebuild, so the runtime asks
+//! [`ProjectionBackend::admit`] before it journals a fact: a refused fact is
+//! never written and never folded.
 
 use std::collections::BTreeMap;
 
@@ -68,6 +70,16 @@ pub trait ProjectionBackend {
     /// [`RuntimeError::FoldDivergence`] when a recorded transition disagrees
     /// with the pure algebra.
     fn rebuild(&mut self, journal: &Journal) -> Result<(), RuntimeError>;
+
+    /// Refuses, without changing the view, a fact that [`ProjectionBackend::apply`]
+    /// would refuse. A refused fold poisons the view, so the runtime asks here
+    /// before it writes the fact to the journal.
+    ///
+    /// # Errors
+    ///
+    /// The conditions of [`ProjectionBackend::apply`], and
+    /// [`RuntimeError::RunLimitReached`] for a new run past the view's capacity.
+    fn admit(&self, event: &Event) -> Result<(), RuntimeError>;
 
     /// Folds one recorded fact into the view.
     ///
@@ -175,10 +187,27 @@ impl RunView {
     }
 }
 
+/// A record every refusal rule has passed, with what the fold then writes.
+enum Checked {
+    /// A command was accepted onto the run.
+    Command,
+    /// The run moves to `to`, re-derived from the pure algebra.
+    Transition {
+        /// The state the algebra produced.
+        to: RunState,
+    },
+    /// A reservation, with the decision that admitted it.
+    Intent(Box<IntentPayload>),
+    /// An observed outcome.
+    Outcome(Box<OutcomePayload>),
+    /// A published terminal receipt.
+    Receipt(ReceiptPayload),
+}
+
 /// What the view keeps beside its rows: the three ordered lists no single run
 /// owns, and the fold rules that fill them and the rows.
 #[derive(Debug, Default)]
-pub struct RunFold {
+pub(crate) struct RunFold {
     /// Terminal receipts in recorded order.
     receipts: Vec<TerminalReceipt>,
     /// Pinned decisions in recorded order.
@@ -188,19 +217,58 @@ pub struct RunFold {
 }
 
 impl RunFold {
+    /// Every rule that can refuse a record, once, without touching the view:
+    /// the payload decodes, a transition agrees with the pure algebra, the
+    /// kind is one the view folds, and the record names a row. `apply` takes
+    /// its decoded record from here, so the check and the fold cannot drift.
+    fn check(event: &Event, has_row: bool) -> Result<Checked, RuntimeError> {
+        let (checked, run) = match event.kind() {
+            EventKind::CommandAccepted => {
+                let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
+                (Checked::Command, payload.run)
+            }
+            EventKind::StateTransition => {
+                // Re-derived from the pure algebra, never trusting the recorded target.
+                let payload: TransitionPayload = lgwks_std::json::from_slice(event.payload())?;
+                let rederived = transition(payload.from, payload.event)?;
+                if rederived != payload.to {
+                    return Err(RuntimeError::FoldDivergence {
+                        run: event.run(),
+                        recorded: payload.to,
+                        rederived,
+                    });
+                }
+                (Checked::Transition { to: rederived }, event.run())
+            }
+            EventKind::EffectIntentRecorded => {
+                let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
+                (Checked::Intent(Box::new(payload)), event.run())
+            }
+            EventKind::EffectOutcomeRecorded => {
+                let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
+                (Checked::Outcome(Box::new(payload)), event.run())
+            }
+            EventKind::TerminalReceiptPublished => {
+                let payload: ReceiptPayload = lgwks_std::json::from_slice(event.payload())?;
+                let run = payload.receipt.run();
+                (Checked::Receipt(payload), run)
+            }
+            other => return Err(RuntimeError::UnsupportedEvent(other)),
+        };
+        if has_row {
+            Ok(checked)
+        } else {
+            Err(RuntimeError::RunNotTracked { run })
+        }
+    }
+
     /// Records the event on the run's row. The tenant is first-wins: the one
     /// the run's earliest event carried. A later event cannot re-attribute a
     /// run that is already known, so a journal that names two tenants for one
     /// run keeps the one the run was created under.
-    fn touch<'a>(
-        row: Option<&'a mut RunView>,
-        run: RunId,
-        event: &Event,
-    ) -> Result<&'a mut RunView, RuntimeError> {
-        let view = row.ok_or(RuntimeError::RunNotTracked { run })?;
+    fn touch(view: &mut RunView, event: &Event) {
         view.tenant.get_or_insert(event.tenant());
         view.last_sequence = Some(event.sequence());
-        Ok(view)
     }
 }
 
@@ -235,50 +303,29 @@ impl RecordFold<Event> for RunFold {
         row: Option<&mut RunView>,
     ) -> Result<(), RuntimeError> {
         let event = entry.record();
-        match event.kind() {
-            EventKind::CommandAccepted => {
-                let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
-                let view = Self::touch(row, payload.run, event)?;
-                view.commands = view.commands.saturating_add(1);
-                Ok(())
-            }
-            EventKind::StateTransition => {
-                // Re-derived from the pure algebra, never trusting the recorded target.
-                let payload: TransitionPayload = lgwks_std::json::from_slice(event.payload())?;
-                let rederived = transition(payload.from, payload.event)?;
-                if rederived != payload.to {
-                    return Err(RuntimeError::FoldDivergence {
-                        run: event.run(),
-                        recorded: payload.to,
-                        rederived,
-                    });
-                }
-                Self::touch(row, event.run(), event)?.state = rederived;
-                Ok(())
-            }
-            EventKind::EffectIntentRecorded => {
-                let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
-                let view = Self::touch(row, event.run(), event)?;
+        let checked = Self::check(event, row.is_some())?;
+        let Some(view) = row else {
+            return Err(RuntimeError::RunNotTracked { run: event.run() });
+        };
+        Self::touch(view, event);
+        match checked {
+            Checked::Command => view.commands = view.commands.saturating_add(1),
+            Checked::Transition { to } => view.state = to,
+            Checked::Intent(payload) => {
                 view.effects
                     .insert(payload.intent.operation, EffectPhase::Reserved);
                 self.authorizations.push(payload.authorization);
                 self.intents.push(payload.intent);
-                Ok(())
             }
-            EventKind::EffectOutcomeRecorded => {
-                let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
-                let view = Self::touch(row, event.run(), event)?;
+            Checked::Outcome(payload) => {
                 view.effects.insert(
                     payload.outcome.operation(),
                     EffectPhase::Observed {
                         outcome: payload.outcome,
                     },
                 );
-                Ok(())
             }
-            EventKind::TerminalReceiptPublished => {
-                let payload: ReceiptPayload = lgwks_std::json::from_slice(event.payload())?;
-                let view = Self::touch(row, payload.receipt.run(), event)?;
+            Checked::Receipt(payload) => {
                 view.effects.insert(
                     payload.receipt.operation(),
                     EffectPhase::Reconciled {
@@ -286,10 +333,9 @@ impl RecordFold<Event> for RunFold {
                     },
                 );
                 self.receipts.push(payload.receipt);
-                Ok(())
             }
-            other => Err(RuntimeError::UnsupportedEvent(other)),
         }
+        Ok(())
     }
 }
 
@@ -344,6 +390,18 @@ impl ProjectionBackend for FoldProjection {
         Ok(())
     }
 
+    fn admit(&self, event: &Event) -> Result<(), RuntimeError> {
+        let key = self.view.fold().route(event);
+        let known = key.is_some_and(|run| self.view.row(&run).is_some());
+        if key.is_some() && !known && self.view.rows().count() >= self.capacity {
+            return Err(RuntimeError::RunLimitReached {
+                capacity: self.capacity,
+            });
+        }
+        // A routed record always has a row once folded, so the check sees one.
+        RunFold::check(event, key.is_some()).map(drop)
+    }
+
     fn apply(&mut self, event: &Event) -> Result<(), RuntimeError> {
         // The view counts events only (commands have no row), contiguously
         // from one, so the sequence is the view's own and never the file's.
@@ -354,11 +412,11 @@ impl ProjectionBackend for FoldProjection {
             ProjectionError::RowLimit { limit } => {
                 RuntimeError::RunLimitReached { capacity: limit }
             }
-            ProjectionError::Diverged { expected, found } => {
-                RuntimeError::ProjectionOutOfOrder { expected, found }
-            }
             ProjectionError::Journal(cause) => RuntimeError::Durable(cause),
-            ProjectionError::Poisoned | _ => RuntimeError::ProjectionPoisoned,
+            ProjectionError::Poisoned => RuntimeError::ProjectionPoisoned,
+            other => RuntimeError::ProjectionRefused {
+                reason: other.to_string(),
+            },
         })
     }
 
@@ -438,3 +496,6 @@ pub fn replay_authorizations(
 pub const fn unknown_outcome_event() -> TransitionEvent {
     TransitionEvent::ObserveUnknownOutcome
 }
+
+#[cfg(test)]
+mod tests;
