@@ -29,6 +29,7 @@
 //! - [`replay`] — the pure authorization reducer and recorded-log replay:
 //!   pinned inputs replay bit-identically; mutated inputs diverge only as
 //!   explicit findings (R71, D36, E55; P5 remains a proof obligation).
+//! - [`harness`] — the harness as a typed, content-hashed, validated value (larry#61).
 //! - [`error`] — every typed failure variant the contract surface returns.
 //! - [`workspace`] — bounded workspace projections and the shared Continue
 //!   dispatch boundary, with an explicit unavailable Moo owner disposition.
@@ -49,6 +50,7 @@ pub mod error;
 pub mod event;
 #[cfg(test)]
 mod fixture;
+pub mod harness;
 pub mod ids;
 pub mod replay;
 pub mod state;
