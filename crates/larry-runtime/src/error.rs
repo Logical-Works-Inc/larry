@@ -14,6 +14,7 @@ use larry_contracts::error::{
 };
 use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
+use larry_contracts::recursion::{PlanError, RecursionError};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::state::RunState;
 
@@ -78,6 +79,15 @@ pub enum RuntimeError {
     Codec(lgwks_std::json::Error),
     /// The harness value or an adoption of it was refused (larry#61).
     Harness(HarnessError),
+    /// The recursion ledger refused a step (larry#62).
+    Recursion(RecursionError),
+    /// The recursion plan is outside its bounds or the tenant holds as many plans as it may.
+    RecursionPlan(PlanError),
+    /// The tenant already holds as many recursion plans as it may.
+    RecursionPlanLimit {
+        /// The per-tenant limit.
+        capacity: usize,
+    },
     /// The pure authorization reducer denied the effect (D36).
     Denied {
         /// The stable operation ID that was refused.
@@ -227,6 +237,11 @@ impl fmt::Display for RuntimeError {
             Self::Authority(ref err) => write!(f, "effect-boundary authority refused: {err}"),
             Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
             Self::Harness(ref err) => write!(f, "harness refused: {err}"),
+            Self::Recursion(ref err) => write!(f, "recursion step refused: {err}"),
+            Self::RecursionPlan(ref err) => write!(f, "recursion plan refused: {err}"),
+            Self::RecursionPlanLimit { capacity } => {
+                write!(f, "tenant already holds {capacity} recursion plans")
+            }
             Self::RecordTooLarge { limit, actual } => write!(
                 f,
                 "journal entry of {actual} bytes exceeds the record limit of {limit}"
@@ -307,6 +322,8 @@ impl std::error::Error for RuntimeError {
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
             Self::Harness(ref err) => Some(err),
+            Self::Recursion(ref err) => Some(err),
+            Self::RecursionPlan(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
             Self::Question(ref err) => Some(err),
             Self::Durable(ref err) => Some(err),
@@ -332,6 +349,7 @@ impl std::error::Error for RuntimeError {
             | Self::ProjectionRefused { .. }
             | Self::ProjectionPoisoned
             | Self::ClockOutOfRange { .. }
+            | Self::RecursionPlanLimit { .. }
             | Self::RecordTooLarge { .. }
             | Self::EffectIdentity { .. } => None,
         }
@@ -365,6 +383,18 @@ impl From<TransitionError> for RuntimeError {
 impl From<AuthorityError> for RuntimeError {
     fn from(err: AuthorityError) -> Self {
         Self::Authority(err)
+    }
+}
+
+impl From<RecursionError> for RuntimeError {
+    fn from(err: RecursionError) -> Self {
+        Self::Recursion(err)
+    }
+}
+
+impl From<PlanError> for RuntimeError {
+    fn from(err: PlanError) -> Self {
+        Self::RecursionPlan(err)
     }
 }
 

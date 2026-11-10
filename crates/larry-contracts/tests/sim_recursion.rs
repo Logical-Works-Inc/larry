@@ -13,7 +13,7 @@ use larry_contracts::harness::{
 use larry_contracts::ids::ContentDigest;
 use larry_contracts::recursion::{
     Label, MAX_K, PlanError, RecursionError, RecursionFact, RecursionLedger, RecursionMode,
-    RecursionPlan, Refusal, Stage, Step, StepOutcome, StepState,
+    RecursionPlan, RecursionStep, Refusal, Stage, Step, StepOutcome, StepState,
 };
 
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -659,5 +659,77 @@ fn sim_recursion_a_crash_at_every_position_leaves_the_step_open_and_unrepeated()
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn recursion_facts_and_steps_roundtrip_through_their_encoding_and_stay_small() -> Outcome {
+    let label = Label::new(7, Stage::Compose, 0);
+    let hash = made_by(label)?;
+    let facts = [
+        RecursionFact::IntentRecorded { label, attempt: 1 },
+        RecursionFact::OutcomeRecorded {
+            label,
+            outcome: StepOutcome::Succeeded {
+                produced: Some(hash),
+            },
+        },
+        RecursionFact::OutcomeRecorded {
+            label,
+            outcome: StepOutcome::Succeeded { produced: None },
+        },
+        RecursionFact::OutcomeRecorded {
+            label,
+            outcome: StepOutcome::Failed,
+        },
+        RecursionFact::OutcomeRecorded {
+            label,
+            outcome: StepOutcome::Unknown,
+        },
+        RecursionFact::ProposalRefused {
+            label,
+            error: HarnessError::OffSurface,
+        },
+        RecursionFact::ProposalRefused {
+            label,
+            error: HarnessError::Reserved {
+                component: HarnessComponent::Scripts,
+                name: "x".repeat(64),
+            },
+        },
+        RecursionFact::ProposalRefused {
+            label,
+            error: HarnessError::Oversize {
+                component: HarnessComponent::Plugins,
+                limit: 65_536,
+                actual: usize::MAX,
+            },
+        },
+        RecursionFact::FellBack { label },
+        RecursionFact::Cancelled,
+    ];
+    let mut widest = 0_usize;
+    for fact in facts {
+        let bytes = lgwks_std::json::to_vec(&fact)?;
+        widest = widest.max(bytes.len());
+        let back: RecursionFact = lgwks_std::json::from_slice(&bytes)?;
+        assert_eq!(back, fact, "{fact:?} roundtrips");
+    }
+    assert!(widest < 512, "a fact encodes small: {widest}");
+    let step = RecursionStep::new(plan(RecursionMode::Sequential, 8, 16)?, label, 1)
+        .with_candidate(hash)
+        .producing(hash);
+    let bytes = lgwks_std::json::to_vec(&step)?;
+    assert_eq!(
+        lgwks_std::json::from_slice::<RecursionStep>(&bytes)?,
+        step,
+        "a step reference roundtrips"
+    );
+    assert!(bytes.len() < 1024, "and encodes small: {}", bytes.len());
+    assert_eq!(
+        step.plan.validated(),
+        Ok(step.plan),
+        "a decoded plan is re-checked"
+    );
     Ok(())
 }

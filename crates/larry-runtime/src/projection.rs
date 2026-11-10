@@ -25,7 +25,10 @@ use larry_contracts::effect::{
 };
 use larry_contracts::event::{Event, EventKind};
 use larry_contracts::harness::{HarnessAdoption, HarnessError, TenantHarness, Vetted};
-use larry_contracts::ids::{OperationId, RunId, TenantId};
+use larry_contracts::ids::{ContentDigest, OperationId, RunId, TenantId};
+use larry_contracts::recursion::{
+    Label, RecursionError, RecursionLedger, RecursionPlan, RecursionStep, Stage, StepOutcome,
+};
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent, transition};
 
@@ -140,6 +143,19 @@ pub trait ProjectionBackend {
         adoption: &HarnessAdoption,
     ) -> Result<(), RuntimeError>;
 
+    /// Refuses, without changing the view, a recursion step the tenant's ledger would refuse: a
+    /// duplicate label, rollout 4k + 1, session 3k + 1, an unsettled dependency, a full probe width, a
+    /// probe naming the wrong candidate, or a plan past the tenant's bound (larry#62).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Recursion`], [`RuntimeError::RecursionPlan`] or
+    /// [`RuntimeError::RecursionPlanLimit`].
+    fn vet_step(&self, tenant: TenantId, step: &RecursionStep) -> Result<(), RuntimeError>;
+
+    /// The ledger `tenant` keeps for `plan`, if any step of it was recorded.
+    fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger>;
+
     /// The harness record `tenant` holds, if it has any. The tenant is the run table's, never a
     /// proposal's declaration.
     fn harness(&self, tenant: TenantId) -> Option<&TenantHarness>;
@@ -221,6 +237,24 @@ enum Checked {
     Receipt(ReceiptPayload),
 }
 
+/// A recursion step whose effect has no receipt yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenStep {
+    /// The run that carries it.
+    run: RunId,
+    /// The run's tenant.
+    tenant: TenantId,
+    /// The plan's identity.
+    plan: ContentDigest,
+    /// Which step.
+    label: Label,
+    /// The harness a proposer or composer declared it produces.
+    produces: Option<larry_contracts::harness::HarnessHash>,
+}
+
+/// The most recursion plans one tenant's view keeps.
+pub(crate) const MAX_PLANS_PER_TENANT: usize = 16;
+
 /// What the view keeps beside its rows: the three ordered lists no single run
 /// owns, and the fold rules that fill them and the rows.
 #[derive(Debug, Default)]
@@ -233,6 +267,10 @@ pub(crate) struct RunFold {
     intents: Vec<EffectIntent>,
     /// Each tenant's harness record, folded from intents and receipts (larry#61).
     harness: BTreeMap<TenantId, TenantHarness>,
+    /// Each tenant's recursion ledgers by plan identity (larry#62).
+    recursion: BTreeMap<(TenantId, ContentDigest), RecursionLedger>,
+    /// Recursion steps with an intent and no receipt, by operation.
+    open_steps: BTreeMap<OperationId, OpenStep>,
 }
 
 impl RunFold {
@@ -268,6 +306,9 @@ impl RunFold {
                 let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
                 // The run's tenant, never the proposal's declaration (D42, E63).
                 let tenant = run_tenant.unwrap_or_else(|| event.tenant());
+                if let Some(ref step) = payload.recursion {
+                    self.vet_recursion(tenant, step)?;
+                }
                 let vetted = match payload.harness {
                     Some(ref adoption) => Some(self.vet(tenant, adoption)?),
                     None => None,
@@ -292,6 +333,33 @@ impl RunFold {
         }
     }
 
+    /// The one rule set for a recursion step: the tenant's ledger vets it on a copy.
+    fn vet_recursion(&self, tenant: TenantId, step: &RecursionStep) -> Result<(), RuntimeError> {
+        let plan = step.plan.validated()?;
+        let mut ledger = match self.recursion.get(&(tenant, plan.identity())) {
+            Some(held) => held.clone(),
+            None => {
+                let held = self.recursion.keys().filter(|key| key.0 == tenant).count();
+                if held >= MAX_PLANS_PER_TENANT {
+                    return Err(RuntimeError::RecursionPlanLimit {
+                        capacity: MAX_PLANS_PER_TENANT,
+                    });
+                }
+                RecursionLedger::new(plan)
+            }
+        };
+        let label = step.label;
+        let probe = label.stage() == Stage::Probe;
+        if step.produces.is_some() == probe || step.candidate.is_some() != probe {
+            return Err(RecursionError::ProducedMismatch { label }.into());
+        }
+        ledger.record_intent(label, step.attempt)?;
+        if probe && ledger.candidate(label.round(), label.slot() >> 1) != step.candidate {
+            return Err(RecursionError::CandidateMismatch { label }.into());
+        }
+        Ok(())
+    }
+
     /// The one rule set for an adoption: the tenant's record vets it.
     fn vet(&self, tenant: TenantId, adoption: &HarnessAdoption) -> Result<Vetted, HarnessError> {
         match self.harness.get(&tenant) {
@@ -307,6 +375,55 @@ impl RunFold {
     fn touch(view: &mut RunView, event: &Event) {
         view.tenant.get_or_insert(event.tenant());
         view.last_sequence = Some(event.sequence());
+    }
+}
+
+impl RunFold {
+    /// Maps a terminal receipt to the recursion step's outcome.
+    fn settle_step(&mut self, receipt: &TerminalReceipt) -> Result<(), RuntimeError> {
+        let Some(open) = self.open_steps.remove(&receipt.operation()) else {
+            return Ok(());
+        };
+        let outcome = match receipt.disposition() {
+            TerminalDisposition::Succeeded => StepOutcome::Succeeded {
+                produced: open.produces,
+            },
+            TerminalDisposition::Failed | TerminalDisposition::Compensated => StepOutcome::Failed,
+            TerminalDisposition::UnknownPermanent => StepOutcome::Unknown,
+            other => return Err(RuntimeError::UnsupportedDisposition(other)),
+        };
+        if let Some(ledger) = self.recursion.get_mut(&(open.tenant, open.plan)) {
+            ledger.record_outcome(open.label, outcome)?;
+        }
+        Ok(())
+    }
+
+    /// A cancelling run stops its plan; a cancelled run, whose effects all settled, also releases the
+    /// slots its steps held.
+    fn release_cancelled(&mut self, run: RunId, cancelled: bool) -> Result<(), RuntimeError> {
+        let held: Vec<OperationId> = self
+            .open_steps
+            .iter()
+            .filter(|entry| entry.1.run == run)
+            .map(|entry| *entry.0)
+            .collect();
+        for operation in held {
+            let Some(open) = self.open_steps.get(&operation).cloned() else {
+                continue;
+            };
+            if let Some(ledger) = self.recursion.get_mut(&(open.tenant, open.plan)) {
+                if !ledger.is_cancelled() {
+                    ledger.cancel();
+                }
+                if cancelled {
+                    ledger.record_outcome(open.label, StepOutcome::Failed)?;
+                }
+            }
+            if cancelled {
+                self.open_steps.remove(&operation);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -362,8 +479,28 @@ impl RecordFold<Event> for RunFold {
                     // A run that ends without a succeeded receipt adopts nothing.
                     record.abandon(event.run());
                 }
+                if to == RunState::Cancelling || to == RunState::Cancelled {
+                    self.release_cancelled(event.run(), to == RunState::Cancelled)?;
+                }
             }
             Checked::Intent(payload, vetted) => {
+                if let Some(ref step) = payload.recursion {
+                    let plan = step.plan;
+                    self.recursion
+                        .entry((tenant, plan.identity()))
+                        .or_insert_with(|| RecursionLedger::new(plan))
+                        .record_intent(step.label, step.attempt)?;
+                    self.open_steps.insert(
+                        payload.intent.operation,
+                        OpenStep {
+                            run: event.run(),
+                            tenant,
+                            plan: plan.identity(),
+                            label: step.label,
+                            produces: step.produces,
+                        },
+                    );
+                }
                 if let Some(adopt) = vetted {
                     self.harness.entry(tenant).or_default().reserve(
                         payload.intent.operation,
@@ -398,6 +535,7 @@ impl RecordFold<Event> for RunFold {
                         disposition: payload.receipt.disposition(),
                     },
                 );
+                self.settle_step(&payload.receipt)?;
                 self.receipts.push(payload.receipt);
             }
         }
@@ -542,6 +680,14 @@ impl ProjectionBackend for FoldProjection {
 
     fn harness(&self, tenant: TenantId) -> Option<&TenantHarness> {
         self.view.fold().harness.get(&tenant)
+    }
+
+    fn vet_step(&self, tenant: TenantId, step: &RecursionStep) -> Result<(), RuntimeError> {
+        self.view.fold().vet_recursion(tenant, step)
+    }
+
+    fn recursion(&self, tenant: TenantId, plan: &RecursionPlan) -> Option<&RecursionLedger> {
+        self.view.fold().recursion.get(&(tenant, plan.identity()))
     }
 }
 

@@ -3,6 +3,11 @@
 use super::component::HarnessComponent;
 
 /// Why a harness edit, tree or encoding was refused. Every refusal leaves the current tree as it was.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HarnessError {

@@ -351,6 +351,16 @@ where
         self.projection.harness(tenant)
     }
 
+    /// The recursion ledger `tenant` keeps for `plan`, folded from the journal (larry#62).
+    #[must_use]
+    pub fn recursion(
+        &self,
+        tenant: TenantId,
+        plan: &larry_contracts::recursion::RecursionPlan,
+    ) -> Option<&larry_contracts::recursion::RecursionLedger> {
+        self.projection.recursion(tenant, plan)
+    }
+
     /// The owner boundary, for assertions in tests.
     #[must_use]
     pub const fn owner(&self) -> &O {
@@ -556,7 +566,13 @@ where
             None => intent,
         };
         let proof = crate::gate::Proof::issue(&pinned, &self.clock);
-        self.record_intent(run, intent, authorization, proposal.harness().cloned())?;
+        self.record_intent(
+            run,
+            intent,
+            authorization,
+            proposal.harness().cloned(),
+            proposal.recursion().cloned(),
+        )?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
         self.live.insert(

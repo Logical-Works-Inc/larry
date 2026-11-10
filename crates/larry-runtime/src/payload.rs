@@ -22,6 +22,7 @@ use larry_contracts::effect::{
 };
 use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId};
+use larry_contracts::recursion::RecursionStep;
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent};
 use lgwks_std::json::serde::{Deserialize, Serialize};
@@ -65,6 +66,9 @@ pub struct WorkProposal {
     /// `None`, so every proposal written before this field existed encodes and decodes as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     harness: Option<HarnessAdoption>,
+    /// The recursion step this work is, if it is one (larry#62). Absent from the encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recursion: Option<RecursionStep>,
 }
 
 impl WorkProposal {
@@ -88,7 +92,21 @@ impl WorkProposal {
             unit,
             strategy,
             harness: None,
+            recursion: None,
         }
+    }
+
+    /// Makes this work a step of a recursion plan. The ledger decides it before anything is written.
+    #[must_use]
+    pub fn stepping(mut self, step: RecursionStep) -> Self {
+        self.recursion = Some(step);
+        self
+    }
+
+    /// The recursion step this work is, if any.
+    #[must_use]
+    pub const fn recursion(&self) -> Option<&RecursionStep> {
+        self.recursion.as_ref()
     }
 
     /// Makes this work an adoption of a harness version. The gate still decides it: the proposal must
@@ -187,6 +205,9 @@ pub struct IntentPayload {
     /// authorized the work, so a denied adoption leaves no trace (larry#61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<HarnessAdoption>,
+    /// The recursion step the reserved effect is (larry#62).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursion: Option<RecursionStep>,
 }
 
 /// The body of an [`EventKind::EffectOutcomeRecorded`](larry_contracts::event::EventKind::EffectOutcomeRecorded)
@@ -236,6 +257,7 @@ impl IntentPayload {
             intent,
             authorization,
             harness: None,
+            recursion: None,
         }
     }
 }

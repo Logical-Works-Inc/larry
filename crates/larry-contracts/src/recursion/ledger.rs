@@ -8,6 +8,11 @@ use crate::harness::{HarnessError, HarnessHash};
 use super::{RecursionMode, RecursionPlan};
 
 /// What kind of step.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Stage {
@@ -34,6 +39,11 @@ impl Stage {
 /// A step's identity inside a plan: round, stage and slot. Propose slots are 0 and 1 (the
 /// candidate), probe slots are 0 to 3 (candidate `slot >> 1`, repeat `slot & 1`), the compose slot is
 /// 0. Ordered by round, then stage, then slot.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Label {
     /// The round, from 0.
@@ -71,6 +81,11 @@ impl Label {
 }
 
 /// What an executor or session reported.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StepOutcome {
@@ -138,6 +153,11 @@ pub struct Step {
 }
 
 /// One recorded fact; the ledger is their fold.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecursionFact {
@@ -251,6 +271,12 @@ pub enum RecursionError {
     /// A proposer or composer must report a hash and a probe must not.
     #[error("the produced hash does not fit the stage")]
     ProducedMismatch {
+        /// The label.
+        label: Label,
+    },
+    /// A probe names a candidate other than the one its proposer settled on.
+    #[error("probe candidate does not match its proposer")]
+    CandidateMismatch {
         /// The label.
         label: Label,
     },

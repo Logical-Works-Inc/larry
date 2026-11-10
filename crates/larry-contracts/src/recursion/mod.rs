@@ -44,6 +44,11 @@ pub const ROLLOUTS_PER_ROUND: usize = 4;
 pub const SESSIONS_PER_ROUND: usize = 3;
 
 /// How the rounds relate.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum RecursionMode {
@@ -83,6 +88,11 @@ pub enum PlanError {
 }
 
 /// The declared shape of one recursion over one pinned task.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecursionPlan {
     /// Digest of the pinned task input.
@@ -175,5 +185,85 @@ impl RecursionPlan {
             &[self.mode.tag(), self.rounds],
             &[label.stage().tag(), label.round(), label.slot()],
         ])
+    }
+}
+
+impl RecursionPlan {
+    /// The plan again, through the constructor's bounds. A plan decoded from a journal is checked
+    /// with this before it is trusted.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError`] for `k` or the probe width out of bounds.
+    pub const fn validated(self) -> Result<Self, PlanError> {
+        Self::new(
+            self.task,
+            self.mode,
+            self.rounds,
+            self.base,
+            self.probe_width,
+        )
+    }
+
+    /// The plan's identity: what a tenant's ledger is keyed by.
+    #[must_use]
+    pub fn identity(&self) -> ContentDigest {
+        ContentDigest::over(&[
+            b"larry.recursion.plan.v1\0",
+            self.task.as_bytes(),
+            &[self.mode.tag(), self.rounds],
+            self.base.as_bytes(),
+            &self.probe_width.to_be_bytes(),
+        ])
+    }
+}
+
+/// A runtime step's reference into its plan: which step, which attempt, and the harness hashes it
+/// reads or declares. Carried by a work proposal and recorded with its intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
+pub struct RecursionStep {
+    /// The plan.
+    pub plan: RecursionPlan,
+    /// Which step.
+    pub label: Label,
+    /// 0, or 1 for the retry of an invalid proposal.
+    pub attempt: u8,
+    /// For a probe, the candidate harness it runs; it must be the one its proposer settled on.
+    pub candidate: Option<HarnessHash>,
+    /// For a proposer or composer, the harness the step declares it produces.
+    pub produces: Option<HarnessHash>,
+}
+
+impl RecursionStep {
+    /// A reference to `label` of `plan`.
+    #[must_use]
+    pub const fn new(plan: RecursionPlan, label: Label, attempt: u8) -> Self {
+        Self {
+            plan,
+            label,
+            attempt,
+            candidate: None,
+            produces: None,
+        }
+    }
+
+    /// Names the candidate a probe runs.
+    #[must_use]
+    pub const fn with_candidate(mut self, candidate: HarnessHash) -> Self {
+        self.candidate = Some(candidate);
+        self
+    }
+
+    /// Names the harness a proposer or composer produces.
+    #[must_use]
+    pub const fn producing(mut self, produced: HarnessHash) -> Self {
+        self.produces = Some(produced);
+        self
     }
 }

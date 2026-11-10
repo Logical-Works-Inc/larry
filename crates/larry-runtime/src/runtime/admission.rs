@@ -196,6 +196,9 @@ where
         tenant: TenantId,
         proposal: &WorkProposal,
     ) -> Result<(), RuntimeError> {
+        if let Some(step) = proposal.recursion() {
+            self.projection.vet_step(tenant, step)?;
+        }
         let Some(adoption) = proposal.harness() else {
             return Ok(());
         };

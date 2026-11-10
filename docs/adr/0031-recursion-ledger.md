@@ -48,12 +48,34 @@ Rejected:
 - Counting a retry as a session: it would break P = 3k for the cases the identity must cover.
 - Treating `Unknown` as failure and rescheduling: it could run a probe twice.
 
+## Part 2: the runtime fold (larry#62)
+
+- A step is an ordinary `Submit` run: `WorkProposal` and `IntentPayload` gain an optional
+  `RecursionStep` (plan, label, attempt, the probe's candidate hash, the declared produced hash). No
+  new `CommandKind` or `EventKind`; the field is absent from the encoding when empty.
+- `RunFold` keeps a `RecursionLedger` per tenant and plan identity (`RecursionPlan::identity`), at
+  most 16 plans per tenant. The intent folds to `record_intent`; a terminal receipt folds to
+  `record_outcome` (succeeded, failed or compensated, or unknown-permanent, which stays ambiguous).
+- Admission asks the same rule set (`vet_recursion` on a copy) before the command is written, and
+  again when the intent folds, so duplicate StepKey, rollout 4k + 1, session 3k + 1, an unsettled
+  dependency, a full probe width, a probe naming the wrong candidate and a plan past the bound are
+  refused and never journalled. The tenant is the run table's, never the proposal's.
+- Cancel: a run entering `Cancelling` stops its plan; when it reaches `Cancelled` its held slot frees.
+  An unknown effect keeps the run cancelling and the slot held until it settles.
+- The facts use the journal's existing JSON payload encoding (serde on the pure types), not a
+  hand-written binary form; variant names are the stable tags. A decoded plan is re-checked by
+  `RecursionPlan::validated`. The widest record of a full step is 4518 of 65524 bytes (MEASURED).
+- A proposer or composer declares the hash it produces at its intent; the ledger adopts it on success.
+  Refusal and fallback facts are not journalled by the runtime yet.
+
 ## Consequences
 
-- Part 2 wires it: the facts journalled through the runtime fold, each probe an effect through the
-  fence to the executor owner with a durable intent, the kill -9 test, and p50, p95, p99 and peak RSS.
-  The facts need a canonical encoding there (`HarnessError` has no serde yet).
-- Part 1 touches no runtime and dispatches nothing. #62 stays unticked until part 2.
+- Not done: no production executor owner is wired, so probes run on the scripted owner double only;
+  proposal-refusal and fallback facts are not yet raised by a runtime proposer; peak RSS is not
+  measured. The executor reading the active harness is #62's remaining run-path work.
 - Covered by `tests/sim_recursion.rs`: the identity for every k and both modes, a 1,200-seed driver
   (same seed, same trace hash; replay equals live), width, duplicate, retry, ambiguity and a crash cut
   at every fact position. Measured: about 1,150 seed runs a second in a debug build.
+  Part 2: `tests/sim_recursion_runtime.rs` (restart at every step, refusals before the write, width,
+  cancel, plan bound). One step with restore, admission and fold took p50 2.0 to 3.1 ms and p99 5.7 to
+  6.9 ms across the three stages in a debug build (MEASURED).

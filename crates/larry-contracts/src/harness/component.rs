@@ -4,6 +4,11 @@
 ///
 /// The set is closed: a ninth kind is a specification change. Declaration order equals tag order,
 /// so the derived `Ord` is the canonical sort order of the encoding.
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum HarnessComponent {
