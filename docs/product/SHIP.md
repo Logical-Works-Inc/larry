@@ -108,7 +108,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 - [x] #61 harness as a versioned, content-hashed journal value (ADR 0028, 0029): PR pending, 21 tests; 38217 of 65524 record bytes.
 - [ ] #62 propose, probe and compose as journalled steps.
-- [ ] #63 grader-blind learning.
+- [x] #63 grader-blind learning (type boundary and scan; egress waits on Nova): PR pending, 10 tests.
 - [ ] #64 blind seeded selection and a lesson library per tenant.
 - [ ] #65 matched benchmark against Harness² on JobBench and LAB.
 - [ ] #66 learning the person can see, budget, undo and stop.
