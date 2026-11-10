@@ -12,8 +12,8 @@ use larry_contracts::harness::{
 };
 use larry_contracts::ids::ContentDigest;
 use larry_contracts::recursion::{
-    Label, MAX_K, PlanError, RecursionError, RecursionFact, RecursionLedger, RecursionMode,
-    RecursionPlan, RecursionStep, Refusal, Stage, Step, StepOutcome, StepState,
+    Label, MAX_K, PlanError, Produced, RecursionError, RecursionFact, RecursionLedger,
+    RecursionMode, RecursionPlan, RecursionStep, Refusal, Stage, Step, StepOutcome, StepState,
 };
 
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -716,9 +716,19 @@ fn recursion_facts_and_steps_roundtrip_through_their_encoding_and_stay_small() -
         assert_eq!(back, fact, "{fact:?} roundtrips");
     }
     assert!(widest < 512, "a fact encodes small: {widest}");
-    let step = RecursionStep::new(plan(RecursionMode::Sequential, 8, 16)?, label, 1)
-        .with_candidate(hash)
-        .producing(hash);
+    for produced in [
+        Produced::Harness(hash),
+        Produced::Refused(HarnessError::OffSurface),
+    ] {
+        let bytes = lgwks_std::json::to_vec(&produced)?;
+        assert_eq!(
+            lgwks_std::json::from_slice::<Produced>(&bytes)?,
+            produced,
+            "a produced report roundtrips"
+        );
+    }
+    let step =
+        RecursionStep::new(plan(RecursionMode::Sequential, 8, 16)?, label, 1).with_candidate(hash);
     let bytes = lgwks_std::json::to_vec(&step)?;
     assert_eq!(
         lgwks_std::json::from_slice::<RecursionStep>(&bytes)?,

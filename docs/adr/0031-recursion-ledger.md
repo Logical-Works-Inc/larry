@@ -51,7 +51,7 @@ Rejected:
 ## Part 2: the runtime fold (larry#62)
 
 - A step is an ordinary `Submit` run: `WorkProposal` and `IntentPayload` gain an optional
-  `RecursionStep` (plan, label, attempt, the probe's candidate hash, the declared produced hash). No
+  `RecursionStep` (plan, label, attempt, and for a probe the candidate hash its proposer settled on). No
   new `CommandKind` or `EventKind`; the field is absent from the encoding when empty.
 - `RunFold` keeps a `RecursionLedger` per tenant and plan identity (`RecursionPlan::identity`), at
   most 16 plans per tenant. The intent folds to `record_intent`; a terminal receipt folds to
@@ -64,18 +64,24 @@ Rejected:
   An unknown effect keeps the run cancelling and the slot held until it settles.
 - The facts use the journal's existing JSON payload encoding (serde on the pure types), not a
   hand-written binary form; variant names are the stable tags. A decoded plan is re-checked by
-  `RecursionPlan::validated`. The widest record of a full step is 4518 of 65524 bytes (MEASURED).
-- A proposer or composer declares the hash it produces at its intent; the ledger adopts it on success.
-  Refusal and fallback facts are not journalled by the runtime yet.
+  `RecursionPlan::validated`. The widest record of a full step is 4445 of 65524 bytes (MEASURED).
+- The produced harness comes from the outcome, never the intent. `EffectOwner::produced` is asked once
+  when a succeeded receipt is published, and the answer rides `ReceiptPayload.produced` (omitted when
+  empty): `Produced::Harness(hash)`, or `Produced::Refused(HarnessError)` when the proposer's owner ran
+  the #61 reducer on its edit, the only place that sees the edit. A refused proposal folds to
+  `ProposalRefused`: one retry (attempt 1, a new run) carrying the error, then `FellBack` to the
+  round base. A succeeded proposer or composer that reports no harness is recorded as a failed step
+  and falls back; the fold cannot refuse a receipt, so Failed is the choice.
+- Cancel with an unknown effect: the runtime already reconciles unknown effects, so the owner's status
+  answer publishes the receipt, the run reaches Cancelled and the held slot frees (tested).
 
 ## Consequences
 
-- Not done: no production executor owner is wired, so probes run on the scripted owner double only;
-  proposal-refusal and fallback facts are not yet raised by a runtime proposer; peak RSS is not
-  measured. The executor reading the active harness is #62's remaining run-path work.
+- Open (part 3): no production executor owner is wired, so steps run on the scripted owner double;
+  peak RSS is not measured; the executor reading the active harness is #62's run-path work.
 - Covered by `tests/sim_recursion.rs`: the identity for every k and both modes, a 1,200-seed driver
   (same seed, same trace hash; replay equals live), width, duplicate, retry, ambiguity and a crash cut
   at every fact position. Measured: about 1,150 seed runs a second in a debug build.
-  Part 2: `tests/sim_recursion_runtime.rs` (restart at every step, refusals before the write, width,
-  cancel, plan bound). One step with restore, admission and fold took p50 2.0 to 3.1 ms and p99 5.7 to
+  Part 2: `tests/sim_recursion_runtime.rs` (restart at every step and from the real journal file at
+  every stage, refusals before the write, width, cancel, plan bound, retry and fallback). One step with restore, admission and fold took p50 2.0 to 3.1 ms and p99 5.7 to
   6.9 ms across the three stages in a debug build (MEASURED).

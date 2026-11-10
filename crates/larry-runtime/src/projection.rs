@@ -27,7 +27,8 @@ use larry_contracts::event::{Event, EventKind};
 use larry_contracts::harness::{HarnessAdoption, HarnessError, TenantHarness, Vetted};
 use larry_contracts::ids::{ContentDigest, OperationId, RunId, TenantId};
 use larry_contracts::recursion::{
-    Label, RecursionError, RecursionLedger, RecursionPlan, RecursionStep, Stage, StepOutcome,
+    Label, Produced, RecursionError, RecursionLedger, RecursionPlan, RecursionStep, Stage,
+    StepOutcome,
 };
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent, transition};
@@ -248,8 +249,6 @@ struct OpenStep {
     plan: ContentDigest,
     /// Which step.
     label: Label,
-    /// The harness a proposer or composer declared it produces.
-    produces: Option<larry_contracts::harness::HarnessHash>,
 }
 
 /// The most recursion plans one tenant's view keeps.
@@ -350,7 +349,7 @@ impl RunFold {
         };
         let label = step.label;
         let probe = label.stage() == Stage::Probe;
-        if step.produces.is_some() == probe || step.candidate.is_some() != probe {
+        if step.candidate.is_some() != probe {
             return Err(RecursionError::ProducedMismatch { label }.into());
         }
         ledger.record_intent(label, step.attempt)?;
@@ -380,14 +379,30 @@ impl RunFold {
 
 impl RunFold {
     /// Maps a terminal receipt to the recursion step's outcome.
-    fn settle_step(&mut self, receipt: &TerminalReceipt) -> Result<(), RuntimeError> {
+    fn settle_step(&mut self, payload: &ReceiptPayload) -> Result<(), RuntimeError> {
+        let receipt = &payload.receipt;
         let Some(open) = self.open_steps.remove(&receipt.operation()) else {
             return Ok(());
         };
         let outcome = match receipt.disposition() {
-            TerminalDisposition::Succeeded => StepOutcome::Succeeded {
-                produced: open.produces,
-            },
+            TerminalDisposition::Succeeded => {
+                match (open.label.stage(), payload.produced.clone()) {
+                    (Stage::Probe, _) => StepOutcome::Succeeded { produced: None },
+                    (_, Some(Produced::Harness(hash))) => StepOutcome::Succeeded {
+                        produced: Some(hash),
+                    },
+                    (Stage::Propose, Some(Produced::Refused(error))) => {
+                        // The proposal failed the harness reducer: one retry carrying the error, then a
+                        // fallback to the round base.
+                        if let Some(ledger) = self.recursion.get_mut(&(open.tenant, open.plan)) {
+                            ledger.record_refusal(open.label, error)?;
+                        }
+                        return Ok(());
+                    }
+                    // A session that reports no harness, or a refused composition, produced nothing.
+                    _ => StepOutcome::Failed,
+                }
+            }
             TerminalDisposition::Failed | TerminalDisposition::Compensated => StepOutcome::Failed,
             TerminalDisposition::UnknownPermanent => StepOutcome::Unknown,
             other => return Err(RuntimeError::UnsupportedDisposition(other)),
@@ -497,7 +512,6 @@ impl RecordFold<Event> for RunFold {
                             tenant,
                             plan: plan.identity(),
                             label: step.label,
-                            produces: step.produces,
                         },
                     );
                 }
@@ -535,7 +549,7 @@ impl RecordFold<Event> for RunFold {
                         disposition: payload.receipt.disposition(),
                     },
                 );
-                self.settle_step(&payload.receipt)?;
+                self.settle_step(&payload)?;
                 self.receipts.push(payload.receipt);
             }
         }

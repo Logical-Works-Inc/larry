@@ -236,8 +236,6 @@ pub struct RecursionStep {
     pub attempt: u8,
     /// For a probe, the candidate harness it runs; it must be the one its proposer settled on.
     pub candidate: Option<HarnessHash>,
-    /// For a proposer or composer, the harness the step declares it produces.
-    pub produces: Option<HarnessHash>,
 }
 
 impl RecursionStep {
@@ -249,7 +247,6 @@ impl RecursionStep {
             label,
             attempt,
             candidate: None,
-            produces: None,
         }
     }
 
@@ -259,11 +256,21 @@ impl RecursionStep {
         self.candidate = Some(candidate);
         self
     }
+}
 
-    /// Names the harness a proposer or composer produces.
-    #[must_use]
-    pub const fn producing(mut self, produced: HarnessHash) -> Self {
-        self.produces = Some(produced);
-        self
-    }
+/// What a proposer or composer session produced, as its owner reports it with the settled outcome.
+/// The proposer's owner runs the harness reducer on the edit it made, because only it sees the edit:
+/// a refusal arrives as the typed [`HarnessError`](crate::harness::HarnessError).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(lgwks_std::json::serde::Serialize, lgwks_std::json::serde::Deserialize)
+)]
+#[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
+#[non_exhaustive]
+pub enum Produced {
+    /// A valid harness with this hash.
+    Harness(HarnessHash),
+    /// The proposal failed the harness reducer.
+    Refused(crate::harness::HarnessError),
 }

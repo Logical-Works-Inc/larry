@@ -53,6 +53,13 @@ pub trait EffectOwner {
     /// Performs the effect for the first time.
     fn dispatch(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome;
 
+    /// What the effect produced, asked once its outcome succeeded: a recursion proposer or composer
+    /// reports the harness it made, or the typed refusal its edit earned from the harness reducer
+    /// (larry#62). The default produces nothing.
+    fn produced(&mut self, _intent: &EffectIntent) -> Option<larry_contracts::recursion::Produced> {
+        None
+    }
+
     /// Asks the endpoint what happened to an effect whose outcome is still
     /// unknown. Implementations must reuse `intent.operation` verbatim so a
     /// supporting endpoint can deduplicate.
@@ -90,6 +97,8 @@ pub mod fixture {
         dispatched: Vec<OperationId>,
         /// Status queries observed by this fixture.
         reconciled: Vec<OperationId>,
+        /// What each operation produced, for the recursion steps that make a harness.
+        produced: std::collections::BTreeMap<OperationId, larry_contracts::recursion::Produced>,
     }
 
     impl ScriptedOwner {
@@ -112,7 +121,19 @@ pub mod fixture {
                 scripted: outcomes.into_iter().collect(),
                 dispatched: Vec::new(),
                 reconciled: Vec::new(),
+                produced: std::collections::BTreeMap::new(),
             }
+        }
+
+        /// Declares what `operation` produces once it succeeds.
+        #[must_use]
+        pub fn producing(
+            mut self,
+            operation: OperationId,
+            produced: larry_contracts::recursion::Produced,
+        ) -> Self {
+            self.produced.insert(operation, produced);
+            self
         }
 
         /// The operations this owner was asked to dispatch, in order.
@@ -158,6 +179,13 @@ pub mod fixture {
         fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
             self.reconciled.push(intent.operation);
             self.next(intent.operation)
+        }
+
+        fn produced(
+            &mut self,
+            intent: &EffectIntent,
+        ) -> Option<larry_contracts::recursion::Produced> {
+            self.produced.get(&intent.operation).cloned()
         }
     }
 

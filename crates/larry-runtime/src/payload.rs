@@ -22,7 +22,7 @@ use larry_contracts::effect::{
 };
 use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId};
-use larry_contracts::recursion::RecursionStep;
+use larry_contracts::recursion::{Produced, RecursionStep};
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent};
 use lgwks_std::json::serde::{Deserialize, Serialize};
@@ -225,12 +225,16 @@ pub struct OutcomePayload {
 
 /// The body of an [`EventKind::TerminalReceiptPublished`](larry_contracts::event::EventKind::TerminalReceiptPublished)
 /// record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 #[non_exhaustive]
 pub struct ReceiptPayload {
     /// The immutable terminal receipt.
     pub receipt: TerminalReceipt,
+    /// What a recursion proposer or composer produced, as its owner reported it with the settled
+    /// outcome (larry#62). Absent from the encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced: Option<Produced>,
 }
 
 impl CommandAcceptedPayload {
@@ -274,6 +278,9 @@ impl ReceiptPayload {
     /// Wraps an immutable terminal receipt for journal encoding.
     #[must_use]
     pub const fn new(receipt: TerminalReceipt) -> Self {
-        Self { receipt }
+        Self {
+            receipt,
+            produced: None,
+        }
     }
 }

@@ -138,7 +138,9 @@ fn the_largest_adoption_fits_every_record_it_writes_with_a_quarter_to_spare() ->
 fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare() -> Outcome {
     use larry_contracts::harness::HarnessHash;
     use larry_contracts::ids::ContentDigest;
-    use larry_contracts::recursion::{Label, RecursionMode, RecursionPlan, RecursionStep, Stage};
+    use larry_contracts::recursion::{
+        Label, Produced, RecursionMode, RecursionPlan, RecursionStep, Stage,
+    };
 
     let scopes: BTreeSet<Scope> = [
         Scope::FileRead,
@@ -168,7 +170,19 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
         .collect();
     let mut runtime: Runtime<FoldProjection, ScriptedOwner> = Runtime::new(
         settings,
-        ScriptedOwner::scripted(outcomes),
+        ScriptedOwner::scripted(outcomes)
+            .producing(
+                OperationId::from_bytes([1; 16]),
+                Produced::Harness(HarnessTree::empty().hash()),
+            )
+            .producing(
+                OperationId::from_bytes([2; 16]),
+                Produced::Harness(HarnessTree::empty().hash()),
+            )
+            .producing(
+                OperationId::from_bytes([7; 16]),
+                Produced::Harness(HarnessTree::empty().hash()),
+            ),
         Clock::virtual_at(start),
     )?;
     let tenant = TenantId::from_bytes([3; 16]);
@@ -202,7 +216,7 @@ fn the_widest_recursion_step_fits_every_record_it_writes_with_a_quarter_to_spare
                     .ok_or("candidate")?,
             )
         } else {
-            step.producing(tree.hash())
+            step
         };
         let work = WorkProposal::new(
             RunId::from_bytes([number; 16]),

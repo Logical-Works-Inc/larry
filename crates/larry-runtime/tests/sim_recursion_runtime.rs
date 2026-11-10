@@ -13,8 +13,8 @@ use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy};
 use larry_contracts::harness::{HarnessComponent, HarnessHash, HarnessTree};
 use larry_contracts::ids::ContentDigest;
 use larry_contracts::recursion::{
-    Label, RecursionError, RecursionLedger, RecursionMode, RecursionPlan, RecursionStep, Stage,
-    StepState,
+    Label, Produced, RecursionError, RecursionLedger, RecursionMode, RecursionPlan, RecursionStep,
+    Stage, StepState,
 };
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
@@ -74,7 +74,7 @@ fn reference(
                 .unwrap_or_else(base);
             step.with_candidate(candidate)
         }
-        _ => step.producing(made_by(label)?),
+        _ => step,
     })
 }
 
@@ -98,7 +98,26 @@ fn execute(
     step: RecursionStep,
     outcome: Option<EffectOutcome>,
 ) -> Sim<TestRuntime> {
-    let owner = ScriptedOwner::scripted(outcome);
+    let produced = if step.label.stage() == Stage::Probe {
+        None
+    } else {
+        Some(Produced::Harness(made_by(step.label)?))
+    };
+    execute_with(journal, number, step, outcome, produced)
+}
+
+/// As [`execute`], with the owner reporting `produced` for the step.
+fn execute_with(
+    journal: Journal,
+    number: u8,
+    step: RecursionStep,
+    outcome: Option<EffectOutcome>,
+    produced: Option<Produced>,
+) -> Sim<TestRuntime> {
+    let mut owner = ScriptedOwner::scripted(outcome);
+    if let Some(made) = produced {
+        owner = owner.producing(operation(number), made);
+    }
     let mut runtime: TestRuntime = restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         owner,
@@ -199,16 +218,13 @@ fn sim_recursion_runtime_a_plan_completes_through_restarts_at_every_step() -> Si
     for (stage, mut samples) in timings.into_iter().enumerate() {
         samples.sort_unstable();
         let at = |part: usize| {
-            samples
-                .get(
-                    samples
-                        .len()
-                        .saturating_mul(part)
-                        .checked_div(100)
-                        .unwrap_or(0)
-                        .min(samples.len().saturating_sub(1)),
-                )
-                .copied()
+            let last = samples.len().saturating_sub(1);
+            let rank = samples
+                .len()
+                .saturating_mul(part)
+                .checked_div(100)
+                .map_or(last, |wanted| wanted.min(last));
+            samples.get(rank).copied()
         };
         let (p50, p99) = (at(50), at(99));
         assert!(
@@ -541,6 +557,277 @@ fn sim_recursion_runtime_a_tenant_holds_a_bounded_number_of_plans() -> Sim<()> {
             assert!(
                 matches!(error, RuntimeError::RecursionPlanLimit { capacity: 16 }),
                 "seed {seed}: {error}"
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn durable_path(name: &str, seed: u64) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "larry-recursion-{}-{name}-{seed}.journal",
+        std::process::id()
+    ));
+    std::fs::remove_file(&path).ok();
+    path
+}
+
+/// One step on a runtime restored from the journal file at `path`: opened from disk, run, dropped.
+fn execute_on_disk(
+    path: &std::path::Path,
+    number: u8,
+    step: RecursionStep,
+    outcome: Option<EffectOutcome>,
+    produced: Option<Produced>,
+) -> Sim<()> {
+    let journal = Journal::open(path, 4096)?;
+    let after = execute_with(journal, number, step, outcome, produced)?;
+    drop(after);
+    Ok(())
+}
+
+fn on_disk_ledger(path: &std::path::Path, plan: &RecursionPlan) -> Sim<Option<RecursionLedger>> {
+    let journal = Journal::open(path, 4096)?;
+    let mut folded = FoldProjection::default();
+    replay_journal(&mut folded, &journal)?;
+    Ok(folded.recursion(tenant(1), plan).cloned())
+}
+
+#[test]
+fn sim_recursion_runtime_the_durable_file_restarts_between_intent_and_receipt_for_every_stage()
+-> Sim<()> {
+    for stage in [Stage::Propose, Stage::Probe, Stage::Compose] {
+        for seed in 0..6_u64 {
+            support::seeded(seed, || -> Sim<()> {
+                let plan = plan(RecursionMode::Sequential, 1, 4)?;
+                let path = durable_path("restart", seed.wrapping_add(u64::from(stage.tag()) << 8));
+                let mut number = 0_u8;
+                loop {
+                    let held = on_disk_ledger(&path, &plan).ok().flatten();
+                    let ready = held
+                        .clone()
+                        .unwrap_or_else(|| RecursionLedger::new(plan))
+                        .next_steps();
+                    let next = ready.first().ok_or("a step")?.clone();
+                    number = number.saturating_add(1);
+                    let step = reference(held.as_ref(), plan, next.label, 0)?;
+                    let hit = next.label.stage() == stage;
+                    let outcome = if hit {
+                        Some(EffectOutcome::Unknown {
+                            operation: operation(number),
+                        })
+                    } else {
+                        succeeded(number)
+                    };
+                    let produced =
+                        (next.label.stage() != Stage::Probe).then(|| Produced::Harness(base()));
+                    execute_on_disk(&path, number, step.clone(), outcome, produced)?;
+                    if !hit {
+                        continue;
+                    }
+                    // The process died here. Everything below is read back from the file.
+                    let restored = on_disk_ledger(&path, &plan)?.ok_or("a ledger on disk")?;
+                    assert!(
+                        matches!(restored.state(next.label), Some(StepState::InFlight { .. })),
+                        "seed {seed} {stage:?}: open, never succeeded"
+                    );
+                    assert!(
+                        restored
+                            .next_steps()
+                            .iter()
+                            .all(|again| again.label != next.label),
+                        "seed {seed} {stage:?}: not issued again"
+                    );
+                    let before = Journal::open(&path, 4096)?.len();
+                    let mut runtime: TestRuntime = restore(
+                        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+                        ScriptedOwner::new(),
+                        clock()?,
+                        Journal::open(&path, 4096)?,
+                    )?;
+                    let again = refused(&mut runtime, 200, step)?;
+                    assert!(
+                        matches!(
+                            again,
+                            RuntimeError::Recursion(RecursionError::DuplicateLabel { .. })
+                        ),
+                        "seed {seed} {stage:?}: no StepKey staged twice: {again}"
+                    );
+                    drop(runtime);
+                    assert_eq!(
+                        Journal::open(&path, 4096)?.len(),
+                        before,
+                        "seed {seed} {stage:?}: the file did not grow"
+                    );
+                    std::fs::remove_file(&path).ok();
+                    return Ok(());
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn sim_recursion_runtime_an_invalid_proposal_retries_once_then_falls_back() -> Sim<()> {
+    use larry_contracts::harness::HarnessError;
+    for seed in 0..8_u64 {
+        support::seeded(seed, || -> Sim<()> {
+            let plan = plan(RecursionMode::Parallel, 1, 2)?;
+            let label = Label::new(0, Stage::Propose, 0);
+            let refusal = Produced::Refused(HarnessError::OffSurface);
+            // First attempt: the proposer's edit fails the harness reducer.
+            let first = execute_with(
+                empty_journal()?,
+                1,
+                RecursionStep::new(plan, label, 0),
+                succeeded(1),
+                Some(refusal.clone()),
+            )?;
+            let ledger = ledger_of(&first, &plan).ok_or("ledger")?;
+            assert!(
+                matches!(ledger.state(label), Some(StepState::RetryPending { .. })),
+                "seed {seed}: one retry is pending"
+            );
+            let retry = ledger
+                .next_steps()
+                .into_iter()
+                .find(|step| step.label == label)
+                .ok_or("retry offered")?;
+            assert_eq!(
+                (retry.attempt, retry.carried),
+                (1, Some(HarnessError::OffSurface)),
+                "seed {seed}: it carries the typed error"
+            );
+            // The retry is refused too: fall back to the round's base.
+            let second = execute_with(
+                first.journal().clone(),
+                2,
+                RecursionStep::new(plan, label, 1),
+                succeeded(2),
+                Some(refusal),
+            )?;
+            let ledger = ledger_of(&second, &plan).ok_or("ledger")?;
+            assert_eq!(
+                ledger.state(label),
+                Some(&StepState::FellBack),
+                "seed {seed}: fallback is a recorded fact"
+            );
+            assert_eq!(
+                ledger.candidate(0, 0),
+                Some(base()),
+                "seed {seed}: the round's base harness"
+            );
+            assert_eq!(
+                ledger.sessions(),
+                1,
+                "seed {seed}: the retry is the same session"
+            );
+            let mut folded = FoldProjection::default();
+            replay_journal(&mut folded, second.journal())?;
+            assert_eq!(
+                folded.recursion(tenant(1), &plan),
+                Some(&ledger),
+                "seed {seed}: the rebuilt fold agrees"
+            );
+            // A third attempt is not allowed.
+            let mut runtime = second;
+            let error = refused(&mut runtime, 3, RecursionStep::new(plan, label, 1))?;
+            assert!(
+                matches!(error, RuntimeError::Recursion(_)),
+                "seed {seed}: {error}"
+            );
+            // A succeeded proposer that reports no harness produced nothing: it falls back too.
+            let other = Label::new(0, Stage::Propose, 1);
+            let none = execute_with(
+                runtime.journal().clone(),
+                4,
+                RecursionStep::new(plan, other, 0),
+                succeeded(4),
+                None,
+            )?;
+            let ledger = ledger_of(&none, &plan).ok_or("ledger")?;
+            assert_eq!(
+                ledger.state(other),
+                Some(&StepState::Failed),
+                "seed {seed}: no produced hash is a failed session"
+            );
+            assert_eq!(
+                ledger.candidate(0, 1),
+                Some(base()),
+                "seed {seed}: and the candidate is the base"
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn sim_recursion_runtime_cancel_with_an_unknown_effect_releases_the_slot_when_reconciliation_settles_it()
+-> Sim<()> {
+    for seed in 0..8_u64 {
+        support::seeded(seed, || -> Sim<()> {
+            let plan = plan(RecursionMode::Parallel, 1, 2)?;
+            let mut journal = empty_journal()?;
+            let mut ledger: Option<RecursionLedger> = None;
+            let mut number = 0_u8;
+            for label in [
+                Label::new(0, Stage::Propose, 0),
+                Label::new(0, Stage::Propose, 1),
+            ] {
+                number = number.saturating_add(1);
+                let step = reference(ledger.as_ref(), plan, label, 0)?;
+                let after = execute(journal, number, step, succeeded(number))?;
+                ledger = ledger_of(&after, &plan);
+                journal = after.journal().clone();
+            }
+            number = number.saturating_add(1);
+            let probe = body(
+                number,
+                reference(ledger.as_ref(), plan, Label::new(0, Stage::Probe, 0), 0)?,
+            );
+            // The owner first says unknown, and answers the status query with success.
+            let owner = ScriptedOwner::scripted([
+                EffectOutcome::Unknown {
+                    operation: operation(number),
+                },
+                EffectOutcome::Succeeded {
+                    operation: operation(number),
+                },
+            ]);
+            let mut runtime: TestRuntime = restore(
+                settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+                owner,
+                clock()?,
+                journal,
+            )?;
+            let epoch = runtime.fence().epoch()?;
+            runtime.fence_mut().authenticate(epoch)?;
+            runtime.submit(submit(command_id(number), &probe)?)?;
+            runtime.tick()?;
+            assert_eq!(
+                ledger_of(&runtime, &plan).ok_or("ledger")?.open_probes(),
+                1,
+                "seed {seed}: unknown holds the slot"
+            );
+            runtime.submit(cancel(command_id(90), &probe)?)?;
+            let mut ticks = 0_u8;
+            while ledger_of(&runtime, &plan).ok_or("ledger")?.open_probes() > 0 && ticks < 6 {
+                runtime.tick()?;
+                ticks = ticks.saturating_add(1);
+            }
+            let after = ledger_of(&runtime, &plan).ok_or("ledger")?;
+            assert!(after.is_cancelled(), "seed {seed}: the plan stopped");
+            assert_eq!(
+                after.open_probes(),
+                0,
+                "seed {seed}: reconciliation settled it and the slot is free"
+            );
+            assert!(
+                after.next_steps().is_empty(),
+                "seed {seed}: and no new probe is offered"
             );
             Ok(())
         })?;

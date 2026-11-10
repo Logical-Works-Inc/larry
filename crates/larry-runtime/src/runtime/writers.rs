@@ -154,7 +154,13 @@ where
         }
         let receipt =
             TerminalReceipt::publish(intent.operation, run, self.tenant_of(run)?, disposition);
-        let payload = ReceiptPayload { receipt };
+        // Only a succeeded effect produced anything; the owner reports it here, once.
+        let produced = if disposition == TerminalDisposition::Succeeded {
+            self.owner.produced(&intent)
+        } else {
+            None
+        };
+        let payload = ReceiptPayload { receipt, produced };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(
             self.tenant_of(run)?,
