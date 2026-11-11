@@ -32,7 +32,7 @@ Changing a runtime rule is a specification change, never a refactor.
 ## Workspace and dependencies
 
 - One workspace, one lockfile, one lint set; no second repository. Why: the split runtime repo drifted and was deleted (2026-10-26). Test: `cargo metadata --locked`.
-- Every lgwks_* pin is the newest release. Why: estate rule ESTATE-LATEST (2026-11-03). Test: rust-guard ESTATE-LATEST at Edit and pre-commit.
+- Every lgwks_* pin is the newest release, and the documents name the locked ones. Why: estate rule ESTATE-LATEST (2026-11-03), and a doc naming an old pin is drift (larry#178, #180). Test: rust-guard ESTATE-LATEST at Edit and pre-commit, `governance::tests::governance_names_the_locked_lgwks_deps`, `governance::tests::the_cargo_sweep_names_every_locked_estate_release`.
 - A third-party crate cites an open `gap` issue on Logical-Works-Inc/logicalworks-crates on its manifest line. Why: every dependency is later replaced by the estate. Test: rust-guard GAP.
 - One SQLite engine per binary: `lgwks_deps/sqlite` (the executor ledger, ADR 0004), so Loco's `db-sqlite` stays off until logicalworks-crates#849 closes. Why: both link `sqlite3` at different `libsqlite3-sys` majors (docs/dependencies/cargo-sweep.md). Test: `cargo tree --locked -i libsqlite3-sys` names one version, and `cargo metadata --locked` refuses to resolve both.
 - The executor records a command's group leader before waiting on it and removes the row only once the group is gone; every start reaps the rows left behind. Why: a kill -9 of the executor runs no destructor, so its groups outlive it (larry#85). Test: `tests/executor_journey.rs` (`a_kill_9_of_the_executor_is_reaped_by_the_next_start`).
