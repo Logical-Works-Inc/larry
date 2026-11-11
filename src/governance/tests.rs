@@ -200,3 +200,59 @@ fn governance_names_the_locked_lgwks_deps() -> Result<(), Box<dyn std::error::Er
     }
     Ok(())
 }
+
+#[test]
+fn the_docs_tree_names_every_documents_directory() -> Result<(), Box<dyn std::error::Error>> {
+    // larry#178: docs/README.md's layout listed neither the ADRs nor the split parts, and named
+    // a fixed ADR range that went stale with the next record. Each directory holding a governed
+    // document is named in the layout as `/docs/<directory>/`.
+    let documents = super::documents::load(root())?;
+    let tree = std::fs::read_to_string(root().join("docs").join("README.md"))?;
+    let mut missing: Vec<String> = documents
+        .iter()
+        .filter_map(|(name, _)| name.strip_prefix("docs/"))
+        .filter_map(|rest| rest.split_once('/'))
+        .map(|(directory, _)| format!("/docs/{directory}/"))
+        .filter(|named| !tree.contains(named.as_str()))
+        .collect();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "docs/README.md must name every documents directory: {missing:?}"
+    );
+    Ok(())
+}
+
+/// The estate crates the cargo sweep names "at their newest release", in its order.
+const SWEEP_ESTATE: [&str; 4] = ["lgwks_std", "lgwks_bot", "lgwks_ast", "lgwks_deps"];
+
+#[test]
+fn the_cargo_sweep_names_every_locked_estate_release() -> Result<(), Box<dyn std::error::Error>> {
+    // larry#178 found the sweep saying "Larry ships on 8.0.1" while 8.1.1 was locked, and
+    // larry#180 moved the pins again the same day: the sweep's newest-release line follows the lock.
+    let lock = std::fs::read_to_string(root().join("Cargo.lock"))?;
+    let sweep = std::fs::read_to_string(
+        root()
+            .join("docs")
+            .join("dependencies")
+            .join("cargo-sweep.md"),
+    )?;
+    let Some(line) = sweep.lines().find(|line| line.contains("newest release:")) else {
+        return Err("docs/dependencies/cargo-sweep.md has no `newest release:` line".into());
+    };
+    let named: Vec<&str> = line
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .filter(|word| word.matches('.').count() == 2)
+        .collect();
+    let mut wanted = Vec::new();
+    for name in SWEEP_ESTATE {
+        let locked = locked_versions(&lock, name);
+        assert_eq!(locked.len(), 1, "one {name} release is locked: {locked:?}");
+        wanted.extend(locked);
+    }
+    assert_eq!(
+        named, wanted,
+        "the sweep's newest-release line must list the locked {SWEEP_ESTATE:?} in order"
+    );
+    Ok(())
+}
