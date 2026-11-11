@@ -12,8 +12,12 @@ use core::fmt;
 use larry_contracts::error::{
     AuthorityError, CommandError, OrderingError, SequenceError, TransitionError,
 };
+use larry_contracts::harness::HarnessError;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
+use larry_contracts::lesson::LessonError;
+use larry_contracts::recursion::{PlanError, RecursionError, StopError};
 use larry_contracts::replay::DenialReason;
+use larry_contracts::selection::SelectionError;
 use larry_contracts::state::RunState;
 
 /// Every way the runtime refuses an operation.
@@ -66,8 +70,32 @@ pub enum RuntimeError {
     Transition(TransitionError),
     /// The effect-boundary authority re-validation failed.
     Authority(AuthorityError),
+    /// An encoded journal entry is longer than one record of the durable file can hold.
+    RecordTooLarge {
+        /// The most bytes one record may hold.
+        limit: usize,
+        /// The bytes the entry encoded to.
+        actual: usize,
+    },
     /// A journal payload could not be encoded or decoded.
     Codec(lgwks_std::json::Error),
+    /// The harness value or an adoption of it was refused (larry#61).
+    Harness(HarnessError),
+    /// The recursion ledger refused a step (larry#62).
+    Recursion(RecursionError),
+    /// A stop was refused before it was written (larry#66).
+    Stop(StopError),
+    /// A selection was refused (larry#64).
+    Selection(SelectionError),
+    /// A lesson was refused (larry#64).
+    Lesson(LessonError),
+    /// The recursion plan is outside its bounds or the tenant holds as many plans as it may.
+    RecursionPlan(PlanError),
+    /// The tenant already holds as many recursion plans as it may.
+    RecursionPlanLimit {
+        /// The per-tenant limit.
+        capacity: usize,
+    },
     /// The pure authorization reducer denied the effect (D36).
     Denied {
         /// The stable operation ID that was refused.
@@ -127,6 +155,15 @@ pub enum RuntimeError {
         /// The state the pure algebra re-derived.
         rederived: RunState,
     },
+    /// The projection refused a record for a reason it names; `reason` is its
+    /// own wording.
+    ProjectionRefused {
+        /// Why the view refused.
+        reason: String,
+    },
+    /// An earlier fold failure left the projection half applied; it refuses
+    /// every later fold until it is rebuilt from the journal.
+    ProjectionPoisoned,
     /// The clock's reading, placed after the Unix epoch, is past what the platform's
     /// `SystemTime` represents, so the tick has no instant to pin and runs no stage (E30).
     ClockOutOfRange {
@@ -207,6 +244,19 @@ impl fmt::Display for RuntimeError {
             Self::Transition(ref err) => write!(f, "run-state transition refused: {err}"),
             Self::Authority(ref err) => write!(f, "effect-boundary authority refused: {err}"),
             Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
+            Self::Harness(ref err) => write!(f, "harness refused: {err}"),
+            Self::Recursion(ref err) => write!(f, "recursion step refused: {err}"),
+            Self::Stop(ref err) => write!(f, "stop refused: {err}"),
+            Self::Selection(ref err) => write!(f, "selection refused: {err}"),
+            Self::Lesson(ref err) => write!(f, "lesson refused: {err}"),
+            Self::RecursionPlan(ref err) => write!(f, "recursion plan refused: {err}"),
+            Self::RecursionPlanLimit { capacity } => {
+                write!(f, "tenant already holds {capacity} recursion plans")
+            }
+            Self::RecordTooLarge { limit, actual } => write!(
+                f,
+                "journal entry of {actual} bytes exceeds the record limit of {limit}"
+            ),
             Self::Denied { operation, reason } => {
                 write!(f, "effect {operation} denied: {reason:?}")
             }
@@ -242,6 +292,12 @@ impl fmt::Display for RuntimeError {
                 f,
                 "run {run} fold diverged: journal recorded {recorded}, algebra re-derived {rederived}"
             ),
+            Self::ProjectionRefused { ref reason } => {
+                write!(f, "projection refused a record: {reason}")
+            }
+            Self::ProjectionPoisoned => {
+                f.write_str("projection is half applied after a failed fold; rebuild it")
+            }
             Self::ClockOutOfRange { elapsed } => write!(
                 f,
                 "clock reading {elapsed:?} after the Unix epoch is outside the platform's time range"
@@ -276,6 +332,12 @@ impl std::error::Error for RuntimeError {
             Self::Transition(ref err) => Some(err),
             Self::Authority(ref err) => Some(err),
             Self::Codec(ref err) => Some(err),
+            Self::Harness(ref err) => Some(err),
+            Self::Recursion(ref err) => Some(err),
+            Self::Stop(ref err) => Some(err),
+            Self::Selection(ref err) => Some(err),
+            Self::Lesson(ref err) => Some(err),
+            Self::RecursionPlan(ref err) => Some(err),
             Self::Protocol(ref err) => Some(err),
             Self::Question(ref err) => Some(err),
             Self::Durable(ref err) => Some(err),
@@ -298,7 +360,11 @@ impl std::error::Error for RuntimeError {
             | Self::UnresolvableOutcome { .. }
             | Self::ReceiptAlreadyPublished { .. }
             | Self::FoldDivergence { .. }
+            | Self::ProjectionRefused { .. }
+            | Self::ProjectionPoisoned
             | Self::ClockOutOfRange { .. }
+            | Self::RecursionPlanLimit { .. }
+            | Self::RecordTooLarge { .. }
             | Self::EffectIdentity { .. } => None,
         }
     }
@@ -331,6 +397,42 @@ impl From<TransitionError> for RuntimeError {
 impl From<AuthorityError> for RuntimeError {
     fn from(err: AuthorityError) -> Self {
         Self::Authority(err)
+    }
+}
+
+impl From<StopError> for RuntimeError {
+    fn from(err: StopError) -> Self {
+        Self::Stop(err)
+    }
+}
+
+impl From<SelectionError> for RuntimeError {
+    fn from(err: SelectionError) -> Self {
+        Self::Selection(err)
+    }
+}
+
+impl From<LessonError> for RuntimeError {
+    fn from(err: LessonError) -> Self {
+        Self::Lesson(err)
+    }
+}
+
+impl From<RecursionError> for RuntimeError {
+    fn from(err: RecursionError) -> Self {
+        Self::Recursion(err)
+    }
+}
+
+impl From<PlanError> for RuntimeError {
+    fn from(err: PlanError) -> Self {
+        Self::RecursionPlan(err)
+    }
+}
+
+impl From<HarnessError> for RuntimeError {
+    fn from(err: HarnessError) -> Self {
+        Self::Harness(err)
     }
 }
 

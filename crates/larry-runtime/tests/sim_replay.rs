@@ -81,20 +81,23 @@ fn sim_replay_reproduces_run_states() -> Outcome {
     })
 }
 
-/// FoldProjection must be clonable for the rebuilt-state assertion above.
+/// The world holds no copy of itself (it is a view, not a value), so "folds
+/// alike" is a second fold of the same journal, not a clone of the first.
 #[test]
-fn sim_replay_projection_clone_folds_alike() -> Outcome {
+fn sim_replay_second_fold_of_the_journal_folds_alike() -> Outcome {
+    use larry_runtime::runtime::replay as refold;
     replay(12_u64..14, |_| -> Sim<usize> {
         let mut runtime: TestRuntime =
             reader(ScriptedOwner::scripted([succeeded(operation(3))]), 100)?;
         let body = read_work(3, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(3, &body)?;
         runtime.tick()?;
-        let again = runtime.projection().clone();
+        let mut again = FoldProjection::default();
+        refold(&mut again, runtime.journal())?;
         assert_eq!(
             again.receipts(),
             runtime.projection().receipts(),
-            "clones fold alike"
+            "a second fold folds alike"
         );
         Ok(again.receipts().len())
     })

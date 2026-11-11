@@ -67,7 +67,10 @@ use lgwks_bot::clock::Clock;
 use larry_contracts::authority::{BudgetUnit, SecurityEpoch};
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
+use larry_contracts::harness::TenantHarness;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
+use larry_contracts::learning::{Charge, LearningError};
+use larry_contracts::learning::{LearningBudget, LearningSpent};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::{RunState, TransitionEvent};
 
@@ -112,6 +115,8 @@ pub struct RuntimeSettings {
     pub run_capacity: usize,
     /// How many ready commands one tick may admit.
     pub max_runs_per_tick: usize,
+    /// What each tenant's learning may spend, inside standing authority (larry#66).
+    pub learning: LearningBudget,
 }
 
 impl RuntimeSettings {
@@ -135,6 +140,7 @@ impl RuntimeSettings {
             journal_capacity: crate::MAX_JOURNAL_ENTRIES,
             run_capacity: MAX_TRACKED_RUNS,
             max_runs_per_tick: MAX_RUNS_PER_TICK,
+            learning: LearningBudget::new(256, 192, 10_000_000),
         }
     }
 }
@@ -343,6 +349,113 @@ where
         &self.projection
     }
 
+    /// The harness record `tenant` holds: its active version and tree, its adoptions in order. The
+    /// tenant is the run table's, so one tenant never reads another's record (larry#61).
+    #[must_use]
+    pub fn harness(&self, tenant: TenantId) -> Option<&TenantHarness> {
+        self.projection.harness(tenant)
+    }
+
+    /// The recursion ledger `tenant` keeps for `plan`, folded from the journal (larry#62).
+    #[must_use]
+    pub fn recursion(
+        &self,
+        tenant: TenantId,
+        plan: &larry_contracts::recursion::RecursionPlan,
+    ) -> Option<&larry_contracts::recursion::RecursionLedger> {
+        self.projection.recursion(tenant, plan)
+    }
+
+    /// One action that stops `tenant`'s recursion plans, one or all: no new step is offered or
+    /// admitted, and steps in flight settle and free their slots (larry#66). It rides an ordinary
+    /// `Cancel` command whose body names the plans and whose run is a control run of its own, so no
+    /// new command or event kind exists. A stop that would change nothing is refused before the write.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Stop`] for an unknown or already stopped plan, or when nothing is running;
+    /// otherwise the tick's own refusals.
+    pub fn stop_learning(
+        &mut self,
+        tenant: TenantId,
+        scope: larry_contracts::recursion::PlanScope,
+    ) -> Result<(), RuntimeError> {
+        self.projection.vet_stop(tenant, scope)?;
+        // The control run and command are derived from the journal, so a stop is deterministic.
+        let seed = larry_contracts::ids::ContentDigest::over(&[
+            b"larry.learning.stop.v1\0",
+            tenant.as_bytes(),
+            &self.journal.len().to_be_bytes(),
+            format!("{scope:?}").as_bytes(),
+        ]);
+        let (first, second) = seed.as_bytes().split_at(16);
+        let identity = |bytes: &[u8]| -> [u8; 16] {
+            let mut raw = [0_u8; 16];
+            raw.iter_mut()
+                .zip(bytes)
+                .for_each(|(slot, byte)| *slot = *byte);
+            raw
+        };
+        let control = RunId::from_bytes(identity(first));
+        let body = WorkProposal::new(
+            control,
+            tenant,
+            OperationId::from_bytes(identity(first)),
+            std::collections::BTreeSet::new(),
+            0,
+            self.settings.unit,
+            larry_contracts::effect::ReconciliationStrategy::Queryable,
+        )
+        .stopping(scope);
+        let command = Command::new(
+            CommandId::from_bytes(identity(second)),
+            tenant,
+            Vec::new(),
+            larry_contracts::command::CommandContent::new(
+                CommandKind::Cancel,
+                lgwks_std::json::to_vec(&body)?.into_boxed_slice(),
+            ),
+        )?;
+        self.submit(command)?;
+        self.tick()?;
+        Ok(())
+    }
+
+    /// What `tenant`'s learning may spend and has spent, counted across all its plans (larry#66).
+    #[must_use]
+    pub fn learning_budget(&self, tenant: TenantId) -> (LearningBudget, LearningSpent) {
+        (
+            self.settings.learning,
+            self.projection.learning_spent(tenant),
+        )
+    }
+
+    /// The one blind selection `tenant` recorded for `plan`, once its selector run succeeded
+    /// (larry#64).
+    #[must_use]
+    pub fn selection(
+        &self,
+        tenant: TenantId,
+        plan: &larry_contracts::recursion::RecursionPlan,
+    ) -> Option<&larry_contracts::selection::Selection> {
+        self.projection.selection(tenant, plan)
+    }
+
+    /// Vets a lesson against the journal: every run it cites must be one this journal holds for the
+    /// lesson's own tenant, so another tenant's run is as unknown as a run that never existed. No
+    /// lesson is stored (the store waits on Logical-DB).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Lesson`] with [`larry_contracts::lesson::LessonError::UnknownRun`].
+    pub fn vet_lesson(&self, lesson: &larry_contracts::lesson::Lesson) -> Result<(), RuntimeError> {
+        lesson.vet(&TenantRuns {
+            projection: &self.projection,
+            tenant: lesson.tenant(),
+        })?;
+        Ok(())
+    }
+
     /// The owner boundary, for assertions in tests.
     #[must_use]
     pub const fn owner(&self) -> &O {
@@ -441,8 +554,12 @@ where
             let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
             self.ensure_run_tenant(proposal.run, tenant)?;
 
+            if kind == CommandKind::Cancel && self.journal.command(id).is_none() {
+                self.check_stop(tenant, &command)?;
+            }
             if kind == CommandKind::Submit && self.journal.command(id).is_none() {
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
+                self.check_adoption(tenant, &proposal)?;
             }
             if self.journal.command(id).is_none() && self.admitted.len() >= MAX_READY_WORK {
                 // A command that may have to wait has no room to: it stays
@@ -476,6 +593,8 @@ where
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let run = proposal.run;
+        // An adoption the tenant's record refuses is refused before this run records anything.
+        self.check_adoption(tenant, proposal)?;
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection alone: recording the command already
         // created a run view, so a projection-based check would read `Draft`
@@ -512,6 +631,45 @@ where
             return Ok(());
         }
 
+        // Learning spends only its own budget: past a ceiling the effect is denied and the run fails,
+        // both journalled, and nothing is reserved (larry#66).
+        let learning = proposal
+            .recursion()
+            .map(|step| {
+                Charge::of_step(
+                    step.label.stage(),
+                    step.attempt,
+                    proposal.cost,
+                    proposal.unit,
+                )
+            })
+            .or_else(|| {
+                proposal
+                    .selection()
+                    .map(|_| Charge::of_selection(proposal.cost, proposal.unit))
+            });
+        if let Some(charge) = learning {
+            let spent = self.projection.learning_spent(tenant);
+            if let Err(refused) = self.settings.learning.admit(&spent, &charge) {
+                let reason = match refused {
+                    LearningError::Unit { unit } => DenialReason::UnitMismatch {
+                        requested: unit,
+                        budget: BudgetUnit::MilliCents,
+                    },
+                    other => {
+                        let (required, remaining) = other.required_and_remaining(&charge);
+                        DenialReason::BudgetExhausted {
+                            required,
+                            remaining,
+                        }
+                    }
+                };
+                report.denied.push((proposal.operation, reason));
+                self.advance(run, TransitionEvent::Fail)?;
+                return Ok(());
+            }
+        }
+
         let mut pinned = self.pinned_inputs(proposal, at);
         if let Some(shown) = display {
             shown.constrain(&mut pinned);
@@ -545,7 +703,14 @@ where
             None => intent,
         };
         let proof = crate::gate::Proof::issue(&pinned, &self.clock);
-        self.record_intent(run, intent, authorization)?;
+        self.record_intent(
+            run,
+            intent,
+            authorization,
+            proposal.harness().cloned(),
+            proposal.recursion().cloned(),
+            proposal.selection().cloned(),
+        )?;
         self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
         self.live.insert(
@@ -789,4 +954,18 @@ where
         live,
         tick_count: 0,
     })
+}
+
+/// The runs the journal holds for one tenant: a lesson's evidence index.
+struct TenantRuns<'a, P> {
+    /// The fold view.
+    projection: &'a P,
+    /// The only tenant whose runs are known.
+    tenant: TenantId,
+}
+
+impl<P: ProjectionBackend> larry_contracts::lesson::RunIndex for TenantRuns<'_, P> {
+    fn knows(&self, run: RunId) -> bool {
+        self.projection.run_tenant(run) == Some(self.tenant)
+    }
 }

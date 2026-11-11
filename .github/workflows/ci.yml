@@ -49,6 +49,9 @@ jobs:
         run: cargo nextest run --workspace --locked
       - if: ${{ github.event.repository.private || steps.nextest.outcome != 'success' }}
         run: cargo test --workspace --all-targets --locked
+      # Neither runner above runs doctests, so the compile_fail falsifiers
+      # (larry#63) run here.
+      - run: cargo test --doc --workspace --locked
 
   # The specification and governance lanes, carried over from Larry's
   # workflow. Action SHAs are pinned here because this job ran that way

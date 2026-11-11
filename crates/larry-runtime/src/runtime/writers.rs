@@ -6,8 +6,11 @@ use std::time::SystemTime;
 use larry_contracts::command::CommandKind;
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use larry_contracts::event::{Event, EventKind};
+use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, RunId, TenantId};
+use larry_contracts::recursion::{PlanScope, RecursionStep};
 use larry_contracts::replay::{BudgetSnapshot, EffectRequest, PinnedInputs};
+use larry_contracts::selection::SelectionStep;
 use larry_contracts::state::{RunState, TransitionEvent};
 
 use super::{RunLive, Runtime, TickReport};
@@ -79,8 +82,14 @@ where
         tenant: TenantId,
         kind: CommandKind,
         run: RunId,
+        stop: Option<PlanScope>,
     ) -> Result<(), RuntimeError> {
-        let payload = CommandAcceptedPayload { command, run, kind };
+        let payload = CommandAcceptedPayload {
+            command,
+            run,
+            kind,
+            stop,
+        };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
     }
@@ -105,11 +114,17 @@ where
         run: RunId,
         intent: EffectIntent,
         authorization: larry_contracts::replay::ReplayRecord,
+        harness: Option<HarnessAdoption>,
+        recursion: Option<RecursionStep>,
+        selection: Option<SelectionStep>,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
         let payload = IntentPayload {
             intent,
             authorization,
+            harness,
+            recursion,
+            selection,
         };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::EffectIntentRecorded, bytes)
@@ -148,7 +163,13 @@ where
         }
         let receipt =
             TerminalReceipt::publish(intent.operation, run, self.tenant_of(run)?, disposition);
-        let payload = ReceiptPayload { receipt };
+        // Only a succeeded effect produced anything; the owner reports it here, once.
+        let produced = if disposition == TerminalDisposition::Succeeded {
+            self.owner.produced(&intent)
+        } else {
+            None
+        };
+        let payload = ReceiptPayload { receipt, produced };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(
             self.tenant_of(run)?,
@@ -160,7 +181,7 @@ where
         Ok(())
     }
 
-    /// Appends a sequenced event before applying it to the projection.
+    /// Appends a sequenced event the projection admits, then applies it.
     fn record_event(
         &mut self,
         tenant: TenantId,
@@ -177,6 +198,9 @@ where
             kind,
             payload.into_boxed_slice(),
         )?;
+        // A refused fold poisons the view and a journaled fact is replayed on
+        // restart, so a fact the view would refuse is never written.
+        self.projection.admit(&event)?;
         self.journal.record(event)?;
         let Some(last) = self.journal.last() else {
             return Ok(());
@@ -213,3 +237,6 @@ where
             .ok_or(RuntimeError::RunNotTracked { run })
     }
 }
+
+#[cfg(test)]
+mod tests;

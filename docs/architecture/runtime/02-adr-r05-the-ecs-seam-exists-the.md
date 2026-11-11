@@ -13,7 +13,13 @@ sources: [/specification.md, /AGENTS.md, /contract/APPROVED.toml, /log.md, Direc
 # ADR-R05 — The ECS seam exists; the authority question is deliberately open
 
 Decision: the runtime reads state only through `ProjectionBackend`. The sole
-implementation today is `FoldProjection`. **This is not a decision that an ECS
+implementation is `FoldProjection`, which since larry#79 is `lgwks_bot`'s
+`RecordProjection`: one world entity per run, folded by Larry's `RunFold`, with
+the receipt, authorization and intent lists held in the fold. Larry owns no
+second copy of the view and no `bevy_ecs` edge of its own. The world is still a
+view of the journal and the journal is still the truth; a restart rebuilds it by
+folding the journal again, in key order and never in entity order. A fold that
+fails poisons the view until it is rebuilt. **This is not a decision that an ECS
 world may ever hold authority**, and it is not a decision that it may not. The
 Director deferred that call on 2026-09-20, and this ADR records it as open
 rather than settling it by implementation accident.

@@ -79,7 +79,8 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
   Its negative controls run in the workspace tests. It checks structure, never runtime behaviour, Mermaid
   rendering or prose truth.
 - Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests on
-  `cargo nextest run --workspace --locked`, the `cargo local-ci` tests lane (larry#154).
+  `cargo nextest run --workspace --locked`, the `cargo local-ci` tests lane (larry#154), and the doctests
+  on `cargo test --doc --workspace --locked`, which hold the `compile_fail` falsifiers (larry#63).
 - `issue-link` in CI: a PR whose `closingIssuesReferences` is empty fails (larry#103, ADR 0012).
 - `larry mascot --check` in CI and locally: `docs/larry-mascot.svg` equals the render of the one grid (ADR 0014).
 

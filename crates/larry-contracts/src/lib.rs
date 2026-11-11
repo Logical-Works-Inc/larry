@@ -29,6 +29,10 @@
 //! - [`replay`] — the pure authorization reducer and recorded-log replay:
 //!   pinned inputs replay bit-identically; mutated inputs diverge only as
 //!   explicit findings (R71, D36, E55; P5 remains a proof obligation).
+//! - [`evidence`] — evidence provenance as a type, so no grader output reaches an improver (larry#63).
+//! - [`recursion`] — the recursion budget identity (R = 4k rollouts, P = 3k sessions) as a pure ledger (larry#62).
+//! - [`selection`] and [`lesson`] — blind seeded selection of the final harness and the evidence-backed lesson record (larry#64).
+//! - [`harness`] — the harness as a typed, content-hashed, validated value (larry#61).
 //! - [`error`] — every typed failure variant the contract surface returns.
 //! - [`workspace`] — bounded workspace projections and the shared Continue
 //!   dispatch boundary, with an explicit unavailable Moo owner disposition.
@@ -47,9 +51,15 @@ pub mod command;
 pub mod effect;
 pub mod error;
 pub mod event;
+pub mod evidence;
 #[cfg(test)]
 mod fixture;
+pub mod harness;
 pub mod ids;
+pub mod learning;
+pub mod lesson;
+pub mod recursion;
 pub mod replay;
+pub mod selection;
 pub mod state;
 pub mod workspace;

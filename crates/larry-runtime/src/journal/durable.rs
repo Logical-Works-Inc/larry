@@ -23,6 +23,16 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 use super::JournalEntry;
 use crate::error::RuntimeError;
 
+/// The largest frame lgwks_bot 8.2.0 writes (`journal/file.rs` `MAX_FRAME_BYTES`, private upstream).
+/// A test against a real `RecordJournal` file fails if the upstream value moves.
+pub(super) const LGWKS_BOT_MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// The most bytes one encoded entry may take. The frame holds a one-byte record tag first
+/// (`records/write.rs` `frame_tagged`), then the rkyv archive of the byte vector: the data rounded up
+/// to a multiple of four and an 8-byte tail. Measured against lgwks_bot 8.2.0: 65524 bytes fit and
+/// 65525 do not, which is the frame limit less 1 (tag), 8 (tail) and 3 (alignment).
+pub(super) const MAX_RECORD_BYTES: usize = LGWKS_BOT_MAX_FRAME_BYTES.saturating_sub(1 + 8 + 3);
+
 /// An entry's parts as the file holds them, borrowed from the entry so an
 /// append copies nothing it does not encode.
 #[derive(Serialize)]
@@ -183,9 +193,17 @@ impl Backing {
     /// # Errors
     ///
     /// [`RuntimeError::Codec`] when the entry does not encode; nothing is
-    /// staged and the index has not taken the entry.
+    /// staged and the index has not taken the entry. [`RuntimeError::RecordTooLarge`]
+    /// when the file could never hold the record, so the fold is never reached.
     pub(super) fn stage(&mut self, entry: &JournalEntry) -> Result<(), RuntimeError> {
-        self.staged.push(encode(entry)?);
+        let bytes = encode(entry)?;
+        if bytes.len() > MAX_RECORD_BYTES {
+            return Err(RuntimeError::RecordTooLarge {
+                limit: MAX_RECORD_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        self.staged.push(bytes);
         Ok(())
     }
 
@@ -233,6 +251,9 @@ impl Backing {
 }
 
 #[cfg(test)]
+mod fit;
+
+#[cfg(test)]
 mod tests {
     use larry_contracts::command::{Command, CommandContent, CommandKind};
     use larry_contracts::event::{Event, EventKind, EventSequence};
@@ -241,7 +262,7 @@ mod tests {
     use lgwks_bot::journal::{JournalError, RecordJournal};
 
     use super::super::Journal;
-    use super::{JournalEntry, decode, encode};
+    use super::{JournalEntry, MAX_RECORD_BYTES, decode, encode};
     use crate::error::RuntimeError;
 
     /// Fallible test outcome.
@@ -456,5 +477,78 @@ mod tests {
                 "{bytes:?} is a codec refusal"
             );
         }
+    }
+
+    /// A submit command whose record encodes to exactly `target` bytes: zero bytes cost two
+    /// characters each in the JSON number array, and a ten costs three, so bumping bytes tunes it.
+    fn command_encoding_to(target: usize) -> Result<Command, Box<dyn std::error::Error>> {
+        let id = CommandId::from_bytes([7; 16]);
+        let tenant = TenantId::from_bytes([8; 16]);
+        let build = |payload: Vec<u8>| {
+            Command::new(
+                id,
+                tenant,
+                Vec::new(),
+                CommandContent::new(CommandKind::Submit, payload.into_boxed_slice()),
+            )
+        };
+        let base = encode(&JournalEntry::Command(build(Vec::new())?))?.len();
+        // An empty array is two characters; each further zero adds two (a byte and a comma).
+        let count = target.saturating_sub(base).checked_div(2).ok_or("count")?;
+        let mut payload = vec![0_u8; count];
+        let mut length = encode(&JournalEntry::Command(build(payload.clone())?))?.len();
+        for slot in payload.iter_mut() {
+            if length >= target {
+                break;
+            }
+            *slot = 10;
+            length = length.saturating_add(1);
+        }
+        let command = build(payload)?;
+        assert_eq!(
+            encode(&JournalEntry::Command(command.clone()))?.len(),
+            target,
+            "the fixture hits its target length"
+        );
+        Ok(command)
+    }
+
+    /// Larry's record limit is lgwks_bot's frame limit less its tag and archive framing: a record of exactly
+    /// the limit reaches a real file, one byte more is refused by the file itself and, before the
+    /// fold, by Larry. If lgwks_bot moves its limit, this fails here.
+    #[test]
+    fn the_record_limit_is_the_upstream_frame_limit_less_its_framing() -> Outcome {
+        let path = fresh("limit", 0)?;
+        let mut store = RecordJournal::<Vec<u8>>::open(&path)?;
+        let tail = store.tail();
+        store.compare_and_append(tail, &vec![1_u8; MAX_RECORD_BYTES])?;
+        let tail = store.tail();
+        let over = store.compare_and_append(tail, &vec![1_u8; MAX_RECORD_BYTES.saturating_add(1)]);
+        assert!(
+            matches!(over, Err(JournalError::CapacityExceeded { .. })),
+            "upstream refuses one byte over: {over:?}"
+        );
+        drop(store);
+
+        let mut journal = Journal::open(&fresh("limit-journal", 0)?, 8)?;
+        let before = journal.len();
+        let over = command_encoding_to(MAX_RECORD_BYTES.saturating_add(1))?;
+        assert!(
+            matches!(
+                journal.accept_command(over),
+                Err(RuntimeError::RecordTooLarge { actual, .. }) if actual == MAX_RECORD_BYTES.saturating_add(1)
+            ),
+            "an entry one byte over is refused at stage time"
+        );
+        assert_eq!(journal.len(), before, "the index never took it");
+        assert_eq!(journal.unsynced(), 0, "nothing was staged");
+        journal.accept_command(command_encoding_to(MAX_RECORD_BYTES)?)?;
+        journal.sync()?;
+        assert_eq!(
+            journal.unsynced(),
+            0,
+            "an entry of exactly the limit is synced"
+        );
+        Ok(())
     }
 }

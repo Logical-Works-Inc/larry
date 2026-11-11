@@ -20,8 +20,11 @@ use larry_contracts::command::CommandKind;
 use larry_contracts::effect::{
     EffectIntent, EffectOutcome, ReconciliationStrategy, TerminalReceipt,
 };
+use larry_contracts::harness::HarnessAdoption;
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId};
+use larry_contracts::recursion::{PlanScope, Produced, RecursionStep};
 use larry_contracts::replay::ReplayRecord;
+use larry_contracts::selection::SelectionStep;
 use larry_contracts::state::{RunState, TransitionEvent};
 use lgwks_std::json::serde::{Deserialize, Serialize};
 
@@ -60,6 +63,21 @@ pub struct WorkProposal {
     pub unit: BudgetUnit,
     /// The declared reconciliation strategy (R72).
     pub strategy: ReconciliationStrategy,
+    /// A harness adoption this work carries, if it is one (larry#61). Absent from the encoding when
+    /// `None`, so every proposal written before this field existed encodes and decodes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    harness: Option<HarnessAdoption>,
+    /// The recursion step this work is, if it is one (larry#62). Absent from the encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recursion: Option<RecursionStep>,
+    /// The blind selection this work records, if it is a selector session (larry#64). Absent from
+    /// the encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<SelectionStep>,
+    /// For a cancellation, the recursion plans it stops instead of a run (larry#66). Absent from the
+    /// encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop: Option<PlanScope>,
 }
 
 impl WorkProposal {
@@ -82,7 +100,66 @@ impl WorkProposal {
             cost,
             unit,
             strategy,
+            harness: None,
+            recursion: None,
+            selection: None,
+            stop: None,
         }
+    }
+
+    /// Makes this a cancellation of recursion plans: one plan or all of the tenant's. Carried by an
+    /// ordinary `Cancel`, whose run is a control run of its own.
+    #[must_use]
+    pub fn stopping(mut self, scope: PlanScope) -> Self {
+        self.stop = Some(scope);
+        self
+    }
+
+    /// The plans this cancellation stops, if it stops plans.
+    #[must_use]
+    pub const fn stop(&self) -> Option<PlanScope> {
+        self.stop
+    }
+
+    /// Makes this work the selector session of a settled plan. It is not a step of the plan, so it
+    /// counts toward neither R = 4k nor P = 3k.
+    #[must_use]
+    pub fn selecting(mut self, step: SelectionStep) -> Self {
+        self.selection = Some(step);
+        self
+    }
+
+    /// The selection this work records, if any.
+    #[must_use]
+    pub const fn selection(&self) -> Option<&SelectionStep> {
+        self.selection.as_ref()
+    }
+
+    /// Makes this work a step of a recursion plan. The ledger decides it before anything is written.
+    #[must_use]
+    pub fn stepping(mut self, step: RecursionStep) -> Self {
+        self.recursion = Some(step);
+        self
+    }
+
+    /// The recursion step this work is, if any.
+    #[must_use]
+    pub const fn recursion(&self) -> Option<&RecursionStep> {
+        self.recursion.as_ref()
+    }
+
+    /// Makes this work an adoption of a harness version. The gate still decides it: the proposal must
+    /// declare the write scope, and the version becomes active only if the effect succeeds.
+    #[must_use]
+    pub fn adopting(mut self, adoption: HarnessAdoption) -> Self {
+        self.harness = Some(adoption);
+        self
+    }
+
+    /// The adoption this work carries, if any.
+    #[must_use]
+    pub const fn harness(&self) -> Option<&HarnessAdoption> {
+        self.harness.as_ref()
     }
 
     /// Returns the declared scope requirements without allowing mutation.
@@ -132,6 +209,9 @@ pub struct CommandAcceptedPayload {
     pub run: RunId,
     /// The command class.
     pub kind: CommandKind,
+    /// The plans a cancellation stopped, when it stopped plans (larry#66). Absent when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<PlanScope>,
 }
 
 /// The body of an [`EventKind::StateTransition`](larry_contracts::event::EventKind::StateTransition)
@@ -163,6 +243,16 @@ pub struct IntentPayload {
     /// The pinned authorization inputs and the decision they produced. This
     /// is what makes the journal replayable (E55).
     pub authorization: ReplayRecord,
+    /// The harness adoption the reserved effect carries. It is recorded here, after the gate
+    /// authorized the work, so a denied adoption leaves no trace (larry#61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessAdoption>,
+    /// The recursion step the reserved effect is (larry#62).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursion: Option<RecursionStep>,
+    /// The selection the reserved effect records (larry#64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionStep>,
 }
 
 /// The body of an [`EventKind::EffectOutcomeRecorded`](larry_contracts::event::EventKind::EffectOutcomeRecorded)
@@ -180,19 +270,28 @@ pub struct OutcomePayload {
 
 /// The body of an [`EventKind::TerminalReceiptPublished`](larry_contracts::event::EventKind::TerminalReceiptPublished)
 /// record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 #[non_exhaustive]
 pub struct ReceiptPayload {
     /// The immutable terminal receipt.
     pub receipt: TerminalReceipt,
+    /// What a recursion proposer or composer produced, as its owner reported it with the settled
+    /// outcome (larry#62). Absent from the encoding when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced: Option<Produced>,
 }
 
 impl CommandAcceptedPayload {
     /// Records a command's accepted target and kind.
     #[must_use]
     pub const fn new(command: CommandId, run: RunId, kind: CommandKind) -> Self {
-        Self { command, run, kind }
+        Self {
+            command,
+            run,
+            kind,
+            stop: None,
+        }
     }
 }
 
@@ -211,6 +310,9 @@ impl IntentPayload {
         Self {
             intent,
             authorization,
+            harness: None,
+            recursion: None,
+            selection: None,
         }
     }
 }
@@ -227,6 +329,9 @@ impl ReceiptPayload {
     /// Wraps an immutable terminal receipt for journal encoding.
     #[must_use]
     pub const fn new(receipt: TerminalReceipt) -> Self {
-        Self { receipt }
+        Self {
+            receipt,
+            produced: None,
+        }
     }
 }

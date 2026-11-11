@@ -52,13 +52,12 @@
 //!
 //! ## The ECS seam
 //!
-//! [`projection::ProjectionBackend`] is the seam for an ECS view. ECS driving
-//! the runtime is the Director's intent (2026-10-26), not an open question:
-//! the fold drifted to a `BTreeMap` and the ECS world became an optional seam.
-//! The way back is the lgwks_bot ECS world, row by row in larry#68, with every
-//! rule in `INVARIANTS.md` green before and after. Until then the only
-//! implementation is [`projection::FoldProjection`], which uses `BTreeMap`
-//! throughout so no operation depends on hash iteration order.
+//! [`projection::ProjectionBackend`] is the seam the runtime reads through. ECS driving
+//! the runtime is the Director's intent (2026-10-26), not an open question, and since
+//! larry#79 the one implementation, [`projection::FoldProjection`], is the lgwks_bot ECS
+//! world (`RecordProjection`) folded by Larry's own rules. Rows are read in `RunId` order,
+//! so no operation depends on entity or hash order. The world is a view: the journal stays
+//! the truth, and a rebuild folds it again.
 //!
 //! ## Module map
 //!
