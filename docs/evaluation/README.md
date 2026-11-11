@@ -8,7 +8,7 @@ generated: {by: opencode, at: 2026-09-16}
 verified: {by: opencode, method: structural gate and source review of /specification.md Cell 09/10 and /research-ledger.md; nothing executed}
 status: final-structure-v1.2
 stale_after: 2026-12-09
-updated: {by: claude-code, at: 2026-11-09, note: larry eval, the benchmark issues and E63–E80 added}
+updated: {by: claude-code, at: 2026-11-11, note: larry acp, the Terminal-Bench 2.0 Harbor adapter (larry#93)}
 sources: [Director conversation 2026-09-16, /specification.md, /research-ledger.md]
 ---
 
@@ -17,9 +17,23 @@ sources: [Director conversation 2026-09-16, /specification.md, /research-ledger.
 Canonical targets: /specification.md Cells 05–10; canonical source claims:
 /research-ledger.md. This file organizes how the inventory is navigated.
 `larry eval` scores one arm over the matched set `eval/matched-v1.json`, run
-so far only on the mock endpoint (larry#87, ADR 0009); the Terminal-Bench and
-Harness-Bench runners (#93, #94) and the scored runs (#95) follow. Every scored
-benchmark, persona run and human study is NOT RUN; nothing here is a score.
+so far only on the mock endpoint (larry#87, ADR 0009). The Harness-Bench runner
+(#94) and the scored runs (#95) follow. Every scored benchmark, persona run and
+human study is NOT RUN; nothing here is a score.
+
+## Terminal-Bench 2.0 through Harbor (larry#93, ADR 0035)
+
+`larry acp` is an Agent Client Protocol agent, the kind Harbor's generic `acp`
+agent drives. Each `session/prompt` runs the task instruction as a terminal
+session in the task's working directory. Harbor's agent installs agents from the
+ACP Registry and passes settings with `--agent-env`, so a run sets
+`LARRY_POLICY=file.read,file.write,process.spawn,model.invoke,model.command`,
+`LARRY_STATE_DIR`, `LARRY_MODEL_URL` and `LARRY_MODEL_KEY`. `model.command` is
+named only because Harbor's task container isolates the commands. Each prompt
+result carries the sealed report under `_meta.larry.report`, and the task's
+`tests/test.sh` decides the reward. The registry listing is a publication the
+Director names (ADR 0035), so `tests/acp_harbor_journey.rs` proves the adapter
+today: a Harbor-shaped task on the mock endpoint, MEASURED there, not scored.
 
 ## Lanes
 

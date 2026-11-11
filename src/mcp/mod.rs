@@ -19,9 +19,9 @@
 mod legacy;
 mod modern;
 mod tools;
-mod wire;
+pub(crate) mod wire;
 
-use lgwks_std::json::{self, Map, Value, json};
+use lgwks_std::json::{Map, Value, json};
 use std::io::{self, BufRead, Write};
 
 /// The stateless revision: newest, served per request.
@@ -102,75 +102,17 @@ struct Session<'run> {
 impl Session<'_> {
     /// Maps one frame to its reply; `None` when JSON-RPC calls for silence.
     fn handle(&mut self, bytes: &[u8]) -> Option<Value> {
-        match json::from_slice::<Value>(bytes) {
-            Err(error) => Some(wire::error(
-                &Value::Null,
-                wire::PARSE_ERROR,
-                &format!("parse error: {error}"),
-            )),
-            Ok(Value::Object(frame)) => self.handle_object(&frame),
-            Ok(_) => Some(wire::error(
-                &Value::Null,
-                wire::INVALID_REQUEST,
-                "a frame must be one JSON object; batches are not supported",
-            )),
-        }
-    }
-
-    /// Validates one JSON-RPC object and routes it.
-    fn handle_object(&mut self, frame: &Map) -> Option<Value> {
-        let id = match frame.get("id") {
-            None => None,
-            Some(value) if is_valid_id(value) => Some(value),
-            Some(_) => {
-                return Some(wire::error(
-                    &Value::Null,
-                    wire::INVALID_REQUEST,
-                    "id must be a string or an integer",
-                ));
+        let frame = match wire::object(bytes) {
+            Ok(frame) => frame,
+            Err(reply) => return Some(reply),
+        };
+        match wire::envelope(&frame) {
+            Err(reply) => reply,
+            Ok(wire::Envelope::Request { id, method, params }) => {
+                Some(self.request(id, method, params))
             }
-        };
-        let reply_id = match id {
-            Some(value) => value,
-            None => &Value::Null,
-        };
-        if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-            return Some(wire::error(
-                reply_id,
-                wire::INVALID_REQUEST,
-                "jsonrpc must be \"2.0\"",
-            ));
+            Ok(wire::Envelope::Notification { .. } | wire::Envelope::Response) => None,
         }
-        let Some(method_value) = frame.get("method") else {
-            if frame.contains_key("result") || frame.contains_key("error") {
-                return None;
-            }
-            return Some(wire::error(
-                reply_id,
-                wire::INVALID_REQUEST,
-                "method is required",
-            ));
-        };
-        let Some(method) = method_value.as_str() else {
-            return Some(wire::error(
-                reply_id,
-                wire::INVALID_REQUEST,
-                "method must be a string",
-            ));
-        };
-        let params = match frame.get("params") {
-            None => None,
-            Some(value) => match value.as_object() {
-                Some(map) => Some(map),
-                None => {
-                    return id.map(|request_id| {
-                        wire::error(request_id, wire::INVALID_PARAMS, "params must be an object")
-                    });
-                }
-            },
-        };
-        let request_id = id?;
-        Some(self.request(request_id, method, params))
     }
 
     /// Answers one request, choosing the era from how the request opens.
@@ -195,11 +137,6 @@ impl Session<'_> {
         }
         wire::error(id, wire::METHOD_NOT_FOUND, "method not found")
     }
-}
-
-/// Whether `value` is a legal request id: a string or an integer, never null.
-fn is_valid_id(value: &Value) -> bool {
-    value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
 /// `tools/list`: the declared tools, shaped for the era by `finish`; no cursor

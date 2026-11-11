@@ -239,6 +239,7 @@ pub fn capability(scope: Scope) -> Cap {
         Scope::NetworkEgress => "larry.net.egress",
         Scope::ProcessSpawn => "larry.process.spawn",
         Scope::ModelInvoke => "larry.model.invoke",
+        Scope::ModelCommand => "larry.model.command",
     };
     Cap::new(name)
 }

@@ -65,7 +65,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; each task's journal file and the recovery of a dead task's (ADR 0019, 0023) |
 | `executor::task` | The bounded task document and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
-| `executor::run` | One command in its own process group: capture, timeout, group kill |
+| `executor::run` | One command in its own process group: capture, timeout, group kill, the observed clip |
+| `executor::session` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035) |
 | `executor::ledger` | The SQLite record of live groups, the reap after a kill -9, the receipt key |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
 | `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
@@ -83,7 +84,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `native::workspace::views` | The board, truth and work scenes |
 | `native::workspace::input` | Workspace keys, mouse and paint |
 | `theme` | View colours |
-| `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008) |
+| `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008); `mcp::wire` the stdio framing and envelope |
+| `acp` | `larry acp`: the Agent Client Protocol agent Harbor drives; each prompt a terminal session (ADR 0035) |
 | `serve` | `larry serve`: the address, tenant keys, the routes on `lgwks_bot::app`, the stop signals (ADR 0021, 0022) |
 | `governance` | `larry governance`: the structural checker over the governed documents and its report (ADR 0010) |
 | `governance::documents` | The bounded load of the top-level documents and the `docs/` tree; split documents read whole (ADR 0015) |
@@ -92,8 +94,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |
 | `governance::receipts` | The reranker receipts' shape, SHA-256 (retained) or BLAKE3 (ADR 0013) |
 | `mascot` | `larry mascot`: the one pixel grid, its SVG, preview and pet package (ADR 0014) |
-| `mascot::webp` | The lossless VP8L encoder of the pet spritesheet (RFC 9649) |
-| `mascot::sim` | Seeded encoder round trips through an RFC reader, the SVG check, the command line |
+| `mascot::webp`, `mascot::sim` | The lossless VP8L encoder of the pet spritesheet (RFC 9649); its seeded round trips, the SVG check |
 | `rerank` | `larry-rerank`: the request, its bounds, the ranking and the create-exclusive receipt (ADR 0013) |
 | `rerank::qwen` | The pinned Qwen3 reranker on Candle and its tokenizer, feature `rerank` only |
 | `rerank::sim` | Seeded ports of the Python reranker controls, bounds, ranking and receipts |
@@ -103,7 +104,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::pystr` | CPython `str` semantics the messages need: `splitlines`, `split`, `repr`, decode errors |
 | `governance::sim_*` | Seeded ports of the Python controls, parser references, bounds and two-root checks |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
@@ -116,5 +117,4 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
-- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that exercises every helper: `support/origin.rs` the journeys' origin repository,
-  `support/mcp_task.rs` the operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/serve_cli.rs` `larry serve`.
+- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that exercises every helper: `support/origin.rs` the journeys' origin repository, `support/mcp_task.rs` the operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/larry_child.rs` the long-running stdio child (`larry mcp`, `larry acp`), `support/serve_cli.rs` `larry serve`; the in-crate `sim_*` modules share the test-only `sim_error::SimError`.

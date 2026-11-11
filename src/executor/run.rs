@@ -52,6 +52,41 @@ pub(crate) struct CommandResult {
 }
 
 impl CommandResult {
+    /// The exit code, or `None` when a signal ended the command.
+    pub(crate) const fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    /// Whether the timeout fired and the group was killed.
+    pub(crate) const fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+
+    /// The kept standard output.
+    pub(crate) fn stdout(&self) -> &str {
+        self.stdout.as_str()
+    }
+
+    /// The kept standard error.
+    pub(crate) fn stderr(&self) -> &str {
+        self.stderr.as_str()
+    }
+
+    /// Whether any output was not kept.
+    pub(crate) const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// This result with each stream cut to its first `bytes` on a character boundary,
+    /// `truncated` set when anything was cut: what a terminal session shows its model
+    /// and keeps in its report (larry#93).
+    pub(crate) fn clipped(mut self, bytes: usize) -> CommandResult {
+        let out_cut = clip(&mut self.stdout, bytes);
+        let err_cut = clip(&mut self.stderr, bytes);
+        self.truncated = self.truncated || out_cut || err_cut;
+        self
+    }
+
     /// The report object for this command.
     #[must_use]
     pub(crate) fn into_json(self) -> lgwks_std::json::Value {
@@ -178,6 +213,19 @@ pub(crate) fn run_command(
         truncated: stdout_spilled || stderr_spilled,
         duration_ms,
     })
+}
+
+/// Cuts `text` to at most `bytes` on a character boundary and reports whether it cut.
+pub(crate) fn clip(text: &mut String, bytes: usize) -> bool {
+    if text.len() <= bytes {
+        return false;
+    }
+    let mut end = bytes;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    text.truncate(end);
+    true
 }
 
 /// Keeps the first `CAPTURE_LIMIT` bytes of a pipe and reports whether more followed.

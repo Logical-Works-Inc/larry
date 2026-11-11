@@ -231,7 +231,8 @@ fn file_text(reply: &str) -> String {
 }
 
 /// The reply without one surrounding ```` ``` ```` fence; the reply itself when it has none.
-fn unfenced(reply: &str) -> &str {
+/// A terminal session reads its replies through it too (larry#93).
+pub(super) fn unfenced(reply: &str) -> &str {
     let Some(opened) = reply.trim().strip_prefix("```") else {
         return reply;
     };

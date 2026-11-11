@@ -99,7 +99,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 ## 5. Benchmarks (#72)
 
-- [ ] #93 Terminal-Bench 2.0 Harbor adapter. Proof: the shipped binary runs one task on the mock endpoint.
+- [x] #93 Terminal-Bench 2.0 Harbor adapter: `larry acp`, an ACP agent Harbor's generic `acp` agent drives (ADR 0035). Proof: a Harbor task through the shipped binary on the mock endpoint, rewarded by its verifier: PR #186.
 - [ ] #94 Harness-Bench runner, model held constant across five harnesses. Proof: pass rate, cost per
   accepted task, p50/p95/p99, peak RSS per harness.
 - [ ] #95 scored runs and the published comparison (spends model money).

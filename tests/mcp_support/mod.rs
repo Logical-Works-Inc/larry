@@ -4,10 +4,13 @@
 //! JSON-RPC message per line on the child's stdin and stdout). Every suite
 //! speaks to the real binary through its public interface and nothing else.
 
+#[path = "../support/larry_child.rs"]
+mod larry_child;
+
 use lgwks_std::json::{self, Value};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Stdio};
 
 /// A fallible test step; failures propagate instead of panicking.
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -62,21 +65,11 @@ impl Session {
 
     /// `start` with `env` set as well: the operator's executor settings.
     pub fn start_with(env: &[(&str, &OsStr)]) -> TestResult<Self> {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
-            .arg("mcp")
-            .env_clear()
-            .env("PATH", std::env::var("PATH")?)
-            .envs(env.iter().copied())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdin = child.stdin.take().ok_or("child stdin was not piped")?;
-        let stdout = child.stdout.take().ok_or("child stdout was not piped")?;
+        let (child, stdin, stdout) = larry_child::start("mcp", env, Stdio::null())?;
         Ok(Self {
             child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            stdout,
         })
     }
 

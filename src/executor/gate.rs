@@ -61,15 +61,32 @@ const TASK_COST: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
-const EXECUTOR_CAPABILITIES: [Scope; 4] = [
+const EXECUTOR_CAPABILITIES: [Scope; 5] = [
+    Scope::FileRead,
+    Scope::FileWrite,
+    Scope::ProcessSpawn,
+    Scope::ModelInvoke,
+    Scope::ModelCommand,
+];
+
+/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
+/// command (larry#93) is never in it: only an operator who isolates the commands
+/// outside Larry, as a Harbor task container does, names `model.command`.
+const DEFAULT_POLICY: [Scope; 4] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
 ];
 
-/// The policy when `LARRY_POLICY` is unset: the four scopes the executor uses.
+/// The policy when `LARRY_POLICY` is unset.
 fn default_policy() -> BTreeSet<Scope> {
+    DEFAULT_POLICY.iter().copied().collect()
+}
+
+/// The scopes a terminal session needs (larry#93): everything a briefed task needs,
+/// plus the model choosing the commands.
+pub(super) fn session_scopes() -> BTreeSet<Scope> {
     EXECUTOR_CAPABILITIES.iter().copied().collect()
 }
 
@@ -173,7 +190,7 @@ pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<
 /// The scopes one task requires: repository read and process spawn always,
 /// and file write plus model invoke when the task carries a brief the model
 /// writes.
-fn required_scopes(task: &Task) -> BTreeSet<Scope> {
+pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     let mut scopes = BTreeSet::new();
     scopes.insert(Scope::FileRead);
     scopes.insert(Scope::ProcessSpawn);
@@ -346,12 +363,23 @@ where
     }
 }
 
-/// Admits `task` to the runtime and runs its body only inside the authorized
-/// owner call. A denied task returns a sealed report naming the refusal and
-/// runs nothing; a runtime failure is a typed error; an admitted task's report
+/// What one gated run presents: the scopes it needs, the path its effect binds
+/// to, and the document bytes its payload binds to.
+pub(super) struct Subject<'a> {
+    /// The scopes the run needs.
+    pub(super) required: BTreeSet<Scope>,
+    /// The repository a task clones, or the directory a session works in.
+    pub(super) path: &'a Path,
+    /// The task document, or the session's canonical document.
+    pub(super) bytes: &'a [u8],
+}
+
+/// Admits `subject` to the runtime and runs its body only inside the authorized
+/// owner call. A denied run returns a sealed report naming the refusal and
+/// runs nothing; a runtime failure is a typed error; an admitted run's report
 /// (or its own typed failure) is the body's outcome.
 pub(super) fn admit_and_run(
-    task: &Task,
+    subject: Subject<'_>,
     settings: &Settings,
     task_id: &str,
     task_digest: &str,
@@ -359,7 +387,7 @@ pub(super) fn admit_and_run(
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
     let policy = &settings.policy;
-    let required = required_scopes(task);
+    let required = subject.required;
     let capabilities = EXECUTOR_CAPABILITIES
         .iter()
         .copied()
@@ -405,9 +433,9 @@ pub(super) fn admit_and_run(
 
     let slot: Rc<RefCell<Option<Result<Report, ExecError>>>> = Rc::new(RefCell::new(None));
     let owner = TaskOwner {
-        repo: task.repo(),
+        repo: subject.path,
         tenant,
-        task_bytes: task.bytes(),
+        task_bytes: subject.bytes,
         run: Some(run),
         slot: Rc::clone(&slot),
     };
