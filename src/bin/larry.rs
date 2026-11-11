@@ -1,4 +1,5 @@
-//! Native AppCUI launcher, `larry mcp`, the MCP stdio server (larry#84),
+//! Native AppCUI launcher, `larry mcp`, the MCP stdio server (larry#84), `larry acp`,
+//! the Agent Client Protocol agent Harbor runs Terminal-Bench through (larry#93),
 //! `larry model`, one completion through the configured gateway (larry#83),
 //! `larry exec`, the task-document executor (larry#85), and `larry verify` and
 //! `larry key`, the receipt check and the key it trusts (larry#86), and
@@ -387,6 +388,11 @@ fn main() -> ExitCode {
                 .map(|()| ExitCode::SUCCESS)
                 .map_err(|error| format!("MCP server failed: {error}"))
         }
+        [ref command] if command == "acp" => {
+            larry_demo::acp::serve(io::BufReader::new(io::stdin()), io::stdout().lock())
+                .map(|()| ExitCode::SUCCESS)
+                .map_err(|error| format!("ACP agent failed: {error}"))
+        }
         [ref command] if command == "model" => model_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
@@ -422,7 +428,7 @@ fn main() -> ExitCode {
                 .map_err(|error| error.to_string())
         }
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
         )),
     };
     match outcome {

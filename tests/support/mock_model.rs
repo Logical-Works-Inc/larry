@@ -99,6 +99,9 @@ pub(crate) struct Config {
     pub(crate) script: Vec<Option<Fault>>,
     /// Chance in 1000 that an unscripted request draws a fault.
     pub(crate) fault_per_mille: u32,
+    /// Reply content for request index `n` (larry#93: a terminal session's
+    /// scripted commands); indexes past the end compose words from the seed.
+    pub(crate) contents: Vec<String>,
 }
 
 impl Config {
@@ -110,6 +113,7 @@ impl Config {
             max_connections: 8,
             script: Vec::new(),
             fault_per_mille: 0,
+            contents: Vec::new(),
         }
     }
 }
@@ -258,15 +262,25 @@ fn fold(request: &Request) -> u64 {
     u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
 }
 
-/// A well-formed chat completion for `model`.
-fn completion(model: &str, request: &Request, rng: &mut Seeded) -> Result<Vec<u8>, Failure> {
+/// A well-formed chat completion for `model`: the scripted content when there is
+/// one, otherwise words drawn from the seed.
+fn completion(
+    model: &str,
+    request: &Request,
+    rng: &mut Seeded,
+    scripted: Option<&String>,
+) -> Result<Vec<u8>, Failure> {
     let count = usize::try_from(rng.below(10)?.saturating_add(3))?;
     let mut words = Vec::with_capacity(count);
     for _ in 0..count {
         words.push(*VOCAB.get(rng.index(VOCAB.len())?).ok_or(Failure::Table)?);
     }
+    let (content, produced) = match scripted {
+        Some(text) => (text.clone(), text.len().div_ceil(4)),
+        None => (words.join(" "), count),
+    };
     let prompt = u64::try_from(request.body.len().div_ceil(4))?;
-    let produced = u64::try_from(count)?;
+    let produced = u64::try_from(produced)?;
     let value = json!({
         "id": format!("chatcmpl-{:016x}", rng.next_u64()),
         "object": "chat.completion",
@@ -274,7 +288,7 @@ fn completion(model: &str, request: &Request, rng: &mut Seeded) -> Result<Vec<u8
         "model": model,
         "choices": [{
             "index": 0,
-            "message": { "role": "assistant", "content": words.join(" ") },
+            "message": { "role": "assistant", "content": content },
             "finish_reason": "stop"
         }],
         "usage": {
@@ -338,7 +352,8 @@ impl State {
         if body["stream"].as_bool() == Some(true) {
             return reject(400, "streaming is not supported");
         }
-        let good = completion(model, request, &mut rng)?;
+        let scripted = self.config.contents.get(usize::try_from(index)?);
+        let good = completion(model, request, &mut rng, scripted)?;
         apply(fault, good)
     }
 

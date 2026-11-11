@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_std::json::{self, Serialize};
 
+pub mod acp;
 pub mod eval;
 pub mod executor;
 pub mod governance;
@@ -17,6 +18,8 @@ pub mod model;
 pub mod native;
 pub mod rerank;
 pub mod serve;
+#[cfg(test)]
+pub(crate) mod sim_error;
 pub mod theme;
 
 /// Distinguishes the temporary files of concurrent replacements inside one process.

@@ -6,69 +6,18 @@
 //! the reference model says. One seed drives every path, depth and byte.
 
 use std::error::Error;
-use std::fmt;
 use std::fs;
-use std::io;
-use std::num::TryFromIntError;
 use std::path::PathBuf;
 
 use lgwks_std::json::{Map, Value, json};
-use lgwks_std::seeded::{DrawError, Seeded};
+use lgwks_std::seeded::Seeded;
 
 use super::{AuthorFault, Brief, MAX_FILES, MAX_GOAL_BYTES, checked_target, file_text};
 use crate::executor::{ExecError, TaskError};
+use crate::sim_error::SimError;
 
 /// What every test returns.
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// Why a simulation helper could not build its input.
-#[derive(Debug)]
-pub(super) enum SimError {
-    /// The seeded stream refused a draw.
-    Draw(DrawError),
-    /// A drawn number does not fit its target type.
-    Range(TryFromIntError),
-    /// A scratch directory could not be made or cleared.
-    Io(io::Error),
-}
-
-impl fmt::Display for SimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
-            Self::Io(ref cause) => write!(out, "scratch directory: {cause}"),
-        }
-    }
-}
-
-impl Error for SimError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            Self::Draw(ref cause) => Some(cause),
-            Self::Range(ref cause) => Some(cause),
-            Self::Io(ref cause) => Some(cause),
-        }
-    }
-}
-
-impl From<DrawError> for SimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<TryFromIntError> for SimError {
-    fn from(cause: TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<io::Error> for SimError {
-    fn from(cause: io::Error) -> Self {
-        Self::Io(cause)
-    }
-}
 
 /// The seeds every simulation runs.
 const SEEDS: u64 = 64;
@@ -103,7 +52,7 @@ pub(super) fn scratch(name: &str) -> Result<PathBuf, SimError> {
     let path = std::env::temp_dir().join(format!("larry-author-{name}-{}", std::process::id()));
     match fs::remove_dir_all(&path) {
         Ok(()) => {}
-        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
         Err(cause) => return Err(SimError::Io(cause)),
     }
     fs::create_dir_all(&path)?;

@@ -137,6 +137,9 @@ pub enum Scope {
     ProcessSpawn,
     /// Invoke a model provider with budgeted tokens.
     ModelInvoke,
+    /// Run a shell command the model chose (larry#93). No default policy admits it:
+    /// an operator grants it only where something outside Larry isolates the command.
+    ModelCommand,
 }
 
 /// The unit a budget is denominated in.

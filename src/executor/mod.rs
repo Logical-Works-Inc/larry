@@ -6,6 +6,7 @@ mod gate;
 mod ledger;
 mod receipt;
 mod run;
+mod session;
 mod task;
 mod workspace;
 
@@ -27,6 +28,8 @@ use crate::model::{ModelClient, ModelConfig, ModelError};
 pub use author::AuthorFault;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
+pub use session::SessionError;
+pub(crate) use session::{Observer, run_session};
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -129,6 +132,8 @@ pub enum ExecError {
     Gate(RuntimeError),
     /// The task journals directory could not be created, listed or tidied (larry#75).
     Journals(std::io::Error),
+    /// A terminal session was refused before anything ran (larry#93).
+    Session(SessionError),
 }
 
 impl fmt::Display for ExecError {
@@ -179,6 +184,7 @@ impl fmt::Display for ExecError {
             } => write!(out, "exec could not write {path}: {fault}"),
             Self::Gate(ref cause) => write!(out, "exec gate: {cause}"),
             Self::Journals(ref cause) => write!(out, "exec journals: {cause}"),
+            Self::Session(ref cause) => write!(out, "session: {cause}"),
         }
     }
 }
@@ -203,6 +209,7 @@ impl std::error::Error for ExecError {
             Self::Author { ref fault, .. } => Some(fault),
             Self::Gate(ref cause) => Some(cause),
             Self::Journals(ref cause) => Some(cause),
+            Self::Session(ref cause) => Some(cause),
             Self::KeyMissing
             | Self::ModelUnconfigured
             | Self::StateDirUnset
@@ -359,12 +366,7 @@ const fn backoff(wait: Duration) -> bool {
 /// task runs only after the admission gate authorized it (larry#164): the task body is the
 /// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
-    let ledger = Ledger::open(&settings.state_dir)?;
-    let key = ledger.signing_key()?;
-    ledger.reap()?;
-    sweep(&settings.state_dir, &ledger.live_tasks()?)?;
-    // Every journal a killed executor left is settled before a new task runs (larry#75).
-    gate::recover(&settings.state_dir, &settings.policy)?;
+    let (ledger, key) = prepare(settings)?;
     let task_id = fresh_task_id(task.bytes());
     let task_digest = digest_hex(task.bytes());
     if task.has_model_commands() {
@@ -379,9 +381,26 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
             &key,
         ));
     }
-    gate::admit_and_run(task, settings, &task_id, &task_digest, &key, || {
+    let subject = gate::Subject {
+        required: gate::required_scopes(task),
+        path: task.repo(),
+        bytes: task.bytes(),
+    };
+    gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
         run_task(task, settings, &task_id, &task_digest, &ledger, &key)
     })
+}
+
+/// What every run does first: opens the ledger and its receipt key, reaps the process
+/// groups a killed executor left, sweeps dead workspaces, and settles every journal a
+/// killed executor left before anything new runs (larry#75).
+fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), ExecError> {
+    let ledger = Ledger::open(&settings.state_dir)?;
+    let key = ledger.signing_key()?;
+    ledger.reap()?;
+    sweep(&settings.state_dir, &ledger.live_tasks()?)?;
+    gate::recover(&settings.state_dir, &settings.policy)?;
+    Ok((ledger, key))
 }
 
 /// The task body the gate authorizes: clones the repository at the base, has

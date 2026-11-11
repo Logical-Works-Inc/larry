@@ -1,28 +1,137 @@
-//! Newline-delimited stdio framing and JSON-RPC 2.0 reply shapes.
+//! Newline-delimited stdio framing and JSON-RPC 2.0 message shapes, shared by
+//! `larry mcp` and `larry acp` (larry#93).
 //!
 //! Written from the MCP specification (2026-07-28 and 2025-11-25, "Transports:
-//! stdio"): one JSON-RPC message per line, UTF-8, no embedded newlines. The
-//! frame bound is Larry's own: a line longer than the bound is discarded as it
-//! streams in, so a peer that never sends a newline cannot grow the server's
-//! memory.
+//! stdio") and the Agent Client Protocol's stdio transport, which agree: one
+//! JSON-RPC message per line, UTF-8, no embedded newlines. The frame bound is
+//! Larry's own: a line longer than the bound is discarded as it streams in, so a
+//! peer that never sends a newline cannot grow the server's memory.
 
-use lgwks_std::json::{self, Value, json};
+use lgwks_std::json::{self, Map, Value, json};
 use std::io::{self, BufRead, ErrorKind};
 
 /// Largest accepted frame in bytes, excluding the terminating newline.
-pub(super) const MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// JSON-RPC 2.0: the frame was not valid JSON.
-pub(super) const PARSE_ERROR: i64 = -32700;
+pub(crate) const PARSE_ERROR: i64 = -32700;
 /// JSON-RPC 2.0: the frame was JSON but not a valid request.
-pub(super) const INVALID_REQUEST: i64 = -32600;
+pub(crate) const INVALID_REQUEST: i64 = -32600;
 /// JSON-RPC 2.0: the method does not exist.
-pub(super) const METHOD_NOT_FOUND: i64 = -32601;
+pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 /// JSON-RPC 2.0: the parameters are invalid.
-pub(super) const INVALID_PARAMS: i64 = -32602;
+pub(crate) const INVALID_PARAMS: i64 = -32602;
+/// JSON-RPC 2.0: the server failed on its own side.
+pub(crate) const INTERNAL_ERROR: i64 = -32603;
 /// MCP 2026-07-28 `UnsupportedProtocolVersionError`: inside the range the spec
 /// reserves for itself (-32020 to -32099); the only code from it this server emits.
 pub(super) const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+
+/// One JSON-RPC 2.0 message, validated.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Envelope<'frame> {
+    /// A request: it gets exactly one reply.
+    Request {
+        /// Its id, a string or an integer.
+        id: &'frame Value,
+        /// The method.
+        method: &'frame str,
+        /// The parameters, when the request carries them.
+        params: Option<&'frame Map>,
+    },
+    /// A notification: it gets no reply.
+    Notification {
+        /// The method.
+        method: &'frame str,
+        /// The parameters, when the notification carries them.
+        params: Option<&'frame Map>,
+    },
+    /// A response to a request this side never sends; it gets no reply.
+    Response,
+}
+
+/// Parses one frame into its JSON object, or the error reply JSON-RPC owes it.
+pub(crate) fn object(bytes: &[u8]) -> Result<Map, Value> {
+    match json::from_slice::<Value>(bytes) {
+        Err(cause) => Err(error(
+            &Value::Null,
+            PARSE_ERROR,
+            &format!("parse error: {cause}"),
+        )),
+        Ok(Value::Object(frame)) => Ok(frame),
+        Ok(_) => Err(error(
+            &Value::Null,
+            INVALID_REQUEST,
+            "a frame must be one JSON object; batches are not supported",
+        )),
+    }
+}
+
+/// Validates one JSON-RPC object. An invalid message is `Err` with the reply it
+/// is owed, or with `None` when JSON-RPC answers it with silence (a notification
+/// whose params are not an object).
+pub(crate) fn envelope(frame: &Map) -> Result<Envelope<'_>, Option<Value>> {
+    let id = match frame.get("id") {
+        None => None,
+        Some(value) if is_valid_id(value) => Some(value),
+        Some(_) => {
+            return Err(Some(error(
+                &Value::Null,
+                INVALID_REQUEST,
+                "id must be a string or an integer",
+            )));
+        }
+    };
+    let reply_id = match id {
+        Some(value) => value,
+        None => &Value::Null,
+    };
+    if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(Some(error(
+            reply_id,
+            INVALID_REQUEST,
+            "jsonrpc must be \"2.0\"",
+        )));
+    }
+    let Some(method_value) = frame.get("method") else {
+        if frame.contains_key("result") || frame.contains_key("error") {
+            return Ok(Envelope::Response);
+        }
+        return Err(Some(error(reply_id, INVALID_REQUEST, "method is required")));
+    };
+    let Some(method) = method_value.as_str() else {
+        return Err(Some(error(
+            reply_id,
+            INVALID_REQUEST,
+            "method must be a string",
+        )));
+    };
+    let params = match frame.get("params") {
+        None => None,
+        Some(value) => match value.as_object() {
+            Some(map) => Some(map),
+            None => {
+                return Err(id.map(|request_id| {
+                    error(request_id, INVALID_PARAMS, "params must be an object")
+                }));
+            }
+        },
+    };
+    Ok(match id {
+        Some(id) => Envelope::Request { id, method, params },
+        None => Envelope::Notification { method, params },
+    })
+}
+
+/// Whether `value` is a legal request id: a string or an integer, never null.
+fn is_valid_id(value: &Value) -> bool {
+    value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
+}
+
+/// A notification frame: `method` with `params`, no id.
+pub(crate) fn notification(method: &str, params: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "method": method, "params": params })
+}
 /// The JSON-RPC 2.0 internal error (-32603) reply, sent only when a value cannot be
 /// encoded, which the shapes built here never hit.
 const FALLBACK_REPLY: &[u8] =
@@ -30,7 +139,7 @@ const FALLBACK_REPLY: &[u8] =
 
 /// One unit read from the peer.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Frame {
+pub(crate) enum Frame {
     /// A complete line with its newline and one trailing carriage return removed.
     Line(Vec<u8>),
     /// A line over the bound; its bytes were discarded without being stored.
@@ -43,7 +152,7 @@ pub(super) enum Frame {
 ///
 /// A final line without a newline is served like a terminated one. Memory use
 /// is bounded by `max` plus one buffer chunk whatever the peer sends.
-pub(super) fn read_frame<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Frame> {
+pub(crate) fn read_frame<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Frame> {
     let mut line: Vec<u8> = Vec::new();
     let mut oversized = false;
     let mut saw_bytes = false;
@@ -97,7 +206,7 @@ fn finish(mut line: Vec<u8>) -> Vec<u8> {
 }
 
 /// A success reply for request `id`.
-pub(super) fn result(id: &Value, result: Value) -> Value {
+pub(crate) fn result(id: &Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
@@ -105,7 +214,7 @@ pub(super) fn result(id: &Value, result: Value) -> Value {
 /// the reply then omits `id`: the MCP schemas (2026-07-28 and 2025-11-25,
 /// `JSONRPCErrorResponse`) type `id` as optional and string or integer, so a
 /// null id fails a schema-checking client where an absent one is valid.
-pub(super) fn error(id: &Value, code: i64, message: &str) -> Value {
+pub(crate) fn error(id: &Value, code: i64, message: &str) -> Value {
     with_id(
         id,
         json!({ "jsonrpc": "2.0", "error": { "code": code, "message": message } }),
@@ -133,7 +242,7 @@ fn with_id(id: &Value, mut frame: Value) -> Value {
 /// Encodes one reply as a newline-terminated compact line.
 ///
 /// Compact JSON never contains a raw newline.
-pub(super) fn encode(value: &Value) -> Vec<u8> {
+pub(crate) fn encode(value: &Value) -> Vec<u8> {
     let mut bytes = match json::to_vec(value) {
         Ok(encoded) => encoded,
         Err(_) => FALLBACK_REPLY.to_vec(),
