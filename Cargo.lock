@@ -1763,9 +1763,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "8.2.0"
+version = "8.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee322370dd3a6d9c0abfc251f48b532d09d4d0d93d109d41f53909bdc05dbd7e"
+checksum = "afeddb49164207866d8001342b27285f8dc2b45492320fba1a3a236af7f1e286"
 dependencies = [
  "lgwks_ast",
  "lgwks_deps",

@@ -254,5 +254,22 @@ fn the_cargo_sweep_names_every_locked_estate_release() -> Result<(), Box<dyn std
         named, wanted,
         "the sweep's newest-release line must list the locked {SWEEP_ESTATE:?} in order"
     );
+    // larry#187: the product plan's pin ruling names the same releases, so it follows the lock too.
+    let plan = std::fs::read_to_string(root().join("docs").join("product").join("README.md"))?;
+    let Some(ruling) = plan
+        .lines()
+        .find(|line| line.contains("Newest estate pins"))
+    else {
+        return Err("docs/product/README.md has no `Newest estate pins` ruling".into());
+    };
+    for name in ["lgwks_std", "lgwks_bot", "lgwks_deps"] {
+        for version in locked_versions(&lock, name) {
+            let pin = format!("{name} {version}");
+            assert!(
+                ruling.contains(&pin),
+                "the product plan's pin ruling must name the locked `{pin}`"
+            );
+        }
+    }
     Ok(())
 }
