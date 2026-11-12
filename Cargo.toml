@@ -50,8 +50,9 @@ rust-version = "1.98"
 lgwks_std = { version = "=4.1.1", default-features = false }
 # The runtime's owner (larry#68). Defaults off: the clock and skew rows (larry#74) are
 # std-only modules, so no member compiles the driver, the ECS world or `script!` until a
-# row that needs one turns its feature on.
-lgwks_bot = { version = "=8.2.0", default-features = false }
+# row that needs one turns its feature on. 8.3.0 (larry#187) adds `RecordJournal::admits` and
+# `RecordProjection::admit` (crates#898, #905, #906), which larry#90 builds on.
+lgwks_bot = { version = "=8.3.0", default-features = false }
 # The dependency-admission storefront. The larry package opts into `appcui` and `sqlite`; the
 # published storefront owns that dependency and its transitive admission.
 lgwks_deps = { version = "=6.3.0", default-features = false }
