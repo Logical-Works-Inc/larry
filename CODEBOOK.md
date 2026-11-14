@@ -45,7 +45,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
 | `error` | Every refused runtime operation |
 | `runtime` | Settings, `TickReport`, stage 2 (admit, reserve, dispatch), `restore` |
-| `runtime::instant` | The tick's one pinned instant: `lgwks_bot::clock` read as time since the Unix epoch (larry#74) |
+| `runtime::instant` | The tick's one pinned instant and the live clock's epoch anchor (`live_clock`): `lgwks_bot::clock` read as time since the Unix epoch (larry#74, #182) |
 | `runtime::admission` | E28 durable admission before the acknowledgement, the pending set, safe-boundary promotion (ADR 0025) |
 | `runtime::approval` | E30 durable questions and answers, the question book folded from the journal, the approval gate (ADR 0027) |
 | `runtime::display` | E65 display and admission on the real command path |

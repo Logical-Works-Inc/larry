@@ -68,6 +68,8 @@ logicalworks-crates and ported there with its tests, never kept as a second copy
 decoupled"); larry#68 is the port map, one row per PR, and its first row keeps the test doubles out of
 every shipped build. Clock, journal file, fence, gate and retry run on lgwks_bot (#74 to #78); the
 projection (#79) and the tick and consumer (#80) are the rows left.
+- larry#182 defect 1: the executor's live clock is anchored at the Unix epoch (`runtime::instant::live_clock`),
+  so its 60 s lease expires; 3 falsifier tests, PR #193, issue #194.
 
 **Track 2, Face 2: the operator agent (the Copilot answer).** The revenue slice's agent gateway (moo#184).
 A model limited to each app's manifest of typed actions with a risk class. Reads run in the client;

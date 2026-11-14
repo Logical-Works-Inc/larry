@@ -1,11 +1,17 @@
 //! The tick's one observed instant, sampled from the estate's declared clock (E30, larry#74).
 //!
-//! Larry keeps no clock: the time source is `lgwks_bot::clock::Clock`. That clock carries no
-//! epoch (logicalworks-crates#845 asks for one it can record), so the convention is fixed here,
-//! once: a reading is elapsed time since 1970-01-01T00:00Z. A virtual clock placed at a recorded
-//! reading therefore replays the same instants on any host, and a live host's wall clock
-//! (`Clock::wall_at`) follows monotonic time, so a tick never pins an instant earlier than the
-//! one before it.
+//! Larry keeps no clock: the time source is `lgwks_bot::clock::Clock`. Its readings carry no
+//! epoch, so the convention is fixed here, once: a reading is elapsed time since
+//! 1970-01-01T00:00Z. A virtual clock placed at a recorded reading therefore replays the same
+//! instants on any host, and a live host builds its clock with [`live_clock`], which places
+//! `Clock::wall_at` at the reading now and then follows monotonic time, so a tick never pins an
+//! instant earlier than the one before it. Placing the clock is what anchors it: `Clock::wall`
+//! starts at zero, so a tick on it would pin 1970 plus uptime while an authority expiry sat in
+//! the present (larry#182).
+//!
+//! `lgwks_bot` 8.4.0 also ships `EpochClock` and `RecordedInstant` (logicalworks-crates#845,
+//! closed); the runtime keeps `Clock` because the tick, the gate and the fence all consume it,
+//! and the live placement here is the whole gap that needed closing (ADR 0016).
 
 use std::time::SystemTime;
 
@@ -25,9 +31,27 @@ pub(super) fn sample(clock: &Clock) -> Result<SystemTime, RuntimeError> {
         .ok_or(RuntimeError::ClockOutOfRange { elapsed })
 }
 
+/// The live clock under the runtime's convention: a reading is elapsed time since
+/// 1970-01-01T00:00Z, so a tick's instant and an authority expiry share one timeline.
+///
+/// This is the only production constructor for a live runtime clock. [`Clock::wall`] starts at
+/// zero, and pairing it with an expiry read from `SystemTime::now` put the lease about 56 years
+/// away (larry#182).
+///
+/// # Errors
+///
+/// [`RuntimeError::ClockBeforeEpoch`] when the system clock reads before the Unix epoch, so no
+/// reading can be placed after it.
+pub fn live_clock() -> Result<Clock, RuntimeError> {
+    let elapsed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(RuntimeError::ClockBeforeEpoch)?;
+    Ok(Clock::wall_at(elapsed))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Clock, RuntimeError, SystemTime, sample};
+    use super::{Clock, RuntimeError, SystemTime, live_clock, sample};
     use std::time::Duration;
 
     /// A virtual clock placed at a reading pins exactly that instant after the epoch, a read
@@ -73,6 +97,33 @@ mod tests {
         assert!(
             runtime.contains("clock: Clock") && runtime.contains("use lgwks_bot::clock::Clock;"),
             "the runtime's clock field is lgwks_bot's clock"
+        );
+        Ok(())
+    }
+
+    /// The live clock is anchored after 2023, not at 1970: a zero-origin `Clock::wall` reads
+    /// 1970 plus uptime, which is the larry#182 defect. The typed refusal carries its source.
+    #[test]
+    fn a_live_clock_is_anchored_at_the_epoch_not_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let sampled = sample(&live_clock()?)?;
+        let anchored = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_700_000_000))
+            .ok_or("anchor instant overflow")?;
+        assert!(
+            sampled > anchored,
+            "the live clock reads after 2023, not 1970: {sampled:?}"
+        );
+        let before = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .ok_or("the platform cannot represent an instant before the epoch")?;
+        let cause = match before.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(_) => return Err("a before-epoch instant must not subtract cleanly".into()),
+            Err(cause) => cause,
+        };
+        let refusal = RuntimeError::ClockBeforeEpoch(cause);
+        assert!(
+            refusal.to_string().contains("before the Unix epoch"),
+            "the refusal names the epoch: {refusal}"
         );
         Ok(())
     }
