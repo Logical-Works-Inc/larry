@@ -84,7 +84,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #99 E71 a restart recharges no offline authority, old settings revive nothing (ADR 0026): PR #175, 790 tests.
 - [x] #98 E30 durable scoped questions, expiry never consent (ADR 0027), PR #25 ported: PR #176, 797 tests.
 - [x] #182 defects 2 and 7: a restart spends the dispatch budget the journal recorded, and nothing in memory moves before the sync (ADR 0017, ADR 0036): PR #199, 831 tests.
-- [x] #182 defect 3: a run id never repeats across processes, and a client retry that names its idempotency key runs once (ADR 0037). Proof: the keyed retry runs its command once and both receipts verify; a killed run's keyed retry answers from its recovered journal and runs nothing; 858 tests. PR #200.
+- [x] #182 defect 3: a run id never repeats across processes, and a client retry that names its idempotency key runs once (ADR 0037). Proof: the keyed retry runs its command once and both receipts verify; a killed run's keyed retry answers from its recovered journal and runs nothing; 858 tests. PR #218.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 
