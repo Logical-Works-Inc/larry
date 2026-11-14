@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
+use crate::model::RouteError;
 use score::{Ending, Outcome, card};
 pub use score::{PriceError, PriceFault, Prices, Scorecard};
 use set::{EvalTask, TaskSet};
@@ -30,7 +31,8 @@ pub use set::{MAX_SET_BYTES, SetError};
 pub enum EvalError {
     /// The task set was refused before any task ran.
     Set(SetError),
-    /// No `LARRY_MODEL_KEY` is set, so no arm is configured.
+    /// No model route is configured (no tenant default and no `LARRY_MODEL_*`
+    /// environment route), so no arm is configured.
     ModelUnconfigured,
     /// The state directory is not UTF-8, so no task document can name an origin in it.
     StatePath(PathBuf),
@@ -62,9 +64,9 @@ impl fmt::Display for EvalError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Set(ref cause) => write!(out, "eval set: {cause}"),
-            Self::ModelUnconfigured => {
-                out.write_str("eval LARRY_MODEL_KEY is unset: an arm needs its model")
-            }
+            Self::ModelUnconfigured => out.write_str(
+                "eval has no model route (larry route add, or LARRY_MODEL_URL, LARRY_MODEL and LARRY_MODEL_KEY): an arm needs its model",
+            ),
             Self::StatePath(ref path) => {
                 write!(out, "eval state directory is not UTF-8: {}", path.display())
             }
@@ -205,7 +207,16 @@ fn run_one(settings: &Settings, index: usize, task: &EvalTask) -> Result<Outcome
 /// stops with a typed error, while a model refusal is the arm's and is scored.
 pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecard, EvalError> {
     let set = TaskSet::parse(bytes).map_err(EvalError::Set)?;
-    let model = settings.model_name().ok_or(EvalError::ModelUnconfigured)?;
+    let route = match settings.arm_route() {
+        Ok(route) => route,
+        Err(ExecError::Route(RouteError::NoRoute)) => return Err(EvalError::ModelUnconfigured),
+        Err(cause) => {
+            return Err(EvalError::Exec {
+                id: String::from("(route)"),
+                cause,
+            });
+        }
+    };
     settings.sweep_origins().map_err(|cause| EvalError::Exec {
         id: String::from("(sweep)"),
         cause,
@@ -214,7 +225,7 @@ pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecar
     for (index, task) in set.tasks.iter().enumerate() {
         outcomes.push(run_one(settings, index, task)?);
     }
-    Ok(card(&set.name, model, prices, &outcomes))
+    Ok(card(&set.name, route.model(), prices, &outcomes).with_route(route.id()))
 }
 
 #[cfg(test)]

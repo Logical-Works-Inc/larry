@@ -69,15 +69,15 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill, the observed clip |
 | `executor::session` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035) |
-| `executor::ledger` | The SQLite record of live groups, the reap after a kill -9, the receipt key |
+| `executor::ledger`, `executor::routes` | The SQLite record of live groups, the reap after a kill -9, the receipt key and the per-tenant route table; `larry route` and the route a task resolves to (larry#201, ADR 0039) |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
 | `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
 | `eval` | `larry eval`: one arm over a matched set, origins, outcomes, the scorecard (ADR 0009) |
 | `eval::set` | The bounded task set and its typed refusals, checked before any task runs |
 | `eval::score` | Whole-number prices and costs, nearest-rank percentiles, the card |
-| `model` | The blocking chat-completions client to 9router (ADR 0003) |
+| `model` | The blocking chat-completions client, built per task over its route; no gateway or model is compiled in (ADR 0003, 0039) |
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
-| `model::config` | Gateway, key (never shown), pinned model, temperature, timeout, retry |
+| `model::config`, `model::route` | Key read from the route's variable (never shown), timeout, retry, the `env` route; the route (id, URL, model, key variable, residency), its checks and the resolver (larry#201) |
 | `model::wire` | The request body and the reply parser |
 | `native` | The native AppCUI view: session state, commands and saturating geometry |
 | `native::render` | Painting the forge chrome: transcript, panels, dashboard, input, status hub |
@@ -104,7 +104,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
 | `governance::sim_*` | Seeded ports of the Python controls, parser references, bounds and two-root checks |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
+| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
@@ -117,4 +117,4 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` under the `executor.db.lock` file lock, one executor at a time.
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).
-- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that exercises every helper: `support/origin.rs` the journeys' origin repository, `support/mcp_task.rs` the operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/larry_child.rs` the long-running stdio child (`larry mcp`, `larry acp`), `support/serve_cli.rs` `larry serve`; the in-crate `sim_*` modules share the test-only `sim_error::SimError`.
+- Shared test fixtures live in `tests/support`, `tests/sim_kit` and `tests/fence_kit`, each with a test that exercises every helper: `support/origin.rs` the journeys' origin repository, `support/mcp_task.rs` the operator session behind `larry_submit_task`, `support/larry_cli.rs` the `larry` child, `support/larry_child.rs` the long-running stdio child (`larry mcp`, `larry acp`), `support/serve_cli.rs` `larry serve`, `support/route_cli.rs` `larry route` and its state directory; the in-crate `sim_*` modules share the test-only `sim_error::SimError`.

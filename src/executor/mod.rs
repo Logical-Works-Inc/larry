@@ -7,6 +7,7 @@ mod identity;
 mod ledger;
 mod receipt;
 mod recovery;
+pub mod routes;
 mod run;
 mod session;
 mod task;
@@ -15,6 +16,7 @@ mod workspace;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) use author::is_writable_path;
@@ -25,7 +27,7 @@ use lgwks_std::sign::PublicKey;
 use run::run_command;
 use workspace::{Workspace, sweep};
 
-use crate::model::{ModelClient, ModelConfig, ModelError};
+use crate::model::{ModelClient, ModelConfig, ModelError, Route, RouteError};
 pub use author::AuthorFault;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
@@ -118,10 +120,12 @@ pub enum ExecError {
     KeySeedLength(std::array::TryFromSliceError),
     /// A receipt was refused.
     Receipt(ReceiptError),
-    /// A `LARRY_MODEL_*` setting is unusable.
+    /// A `LARRY_MODEL_*` setting is unusable, or the variable a route names for
+    /// its key is unset.
     ModelConfig(ModelError),
-    /// The task carries a brief and no `LARRY_MODEL_KEY` is set, so no model can write it.
-    ModelUnconfigured,
+    /// The route a task's model calls would use is unknown, absent or damaged
+    /// (larry#201): nothing was sent.
+    Route(RouteError),
     /// The model step could not write one of the brief's files; nothing was sealed.
     Author {
         /// The repo-relative path being written.
@@ -182,9 +186,7 @@ impl fmt::Display for ExecError {
             }
             Self::Receipt(ref cause) => write!(out, "verify: {cause}"),
             Self::ModelConfig(ref cause) => write!(out, "exec model config: {cause}"),
-            Self::ModelUnconfigured => {
-                out.write_str("exec LARRY_MODEL_KEY is unset: a task with a goal needs the model")
-            }
+            Self::Route(ref cause) => write!(out, "exec: {cause}"),
             Self::Author {
                 ref path,
                 ref fault,
@@ -218,13 +220,13 @@ impl std::error::Error for ExecError {
             Self::Receipt(ref cause) => Some(cause),
             Self::KeySeedLength(ref cause) => Some(cause),
             Self::ModelConfig(ref cause) => Some(cause),
+            Self::Route(ref cause) => Some(cause),
             Self::Author { ref fault, .. } => Some(fault),
             Self::Gate(ref cause) => Some(cause),
             Self::Unsealed(ref cause) => Some(cause),
             Self::Journals(ref cause) => Some(cause),
             Self::Session(ref cause) => Some(cause),
             Self::KeyMissing
-            | Self::ModelUnconfigured
             | Self::StateDirUnset
             | Self::BadTimeout { .. }
             | Self::BadPolicy { .. }
@@ -345,8 +347,13 @@ impl Report {
     }
 }
 
+/// Reads one environment variable: the process environment in the binary, a
+/// table in a test. A route's key is read through it when a task reaches the
+/// model, not before, so a key rotated between two tasks is the next task's.
+type EnvReader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Settings the executor reads from its environment.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Settings {
     /// Directory holding the ledger and the workspaces.
@@ -355,15 +362,30 @@ pub struct Settings {
     timeout: Duration,
     /// The PATH the acceptance commands and git run under.
     path: String,
-    /// The gateway a brief's files are written through; `None` without `LARRY_MODEL_KEY`.
-    model: Option<ModelConfig>,
     /// The scopes `LARRY_POLICY` admits; what the gate authorizes tasks against.
     policy: BTreeSet<Scope>,
+    /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
+    read: EnvReader,
+}
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.debug_struct("Settings")
+            .field("state_dir", &self.state_dir)
+            .field("timeout", &self.timeout)
+            .field("path", &self.path)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Settings {
     /// Reads the settings through `read`, which yields one variable or `None`.
-    pub fn from_env(read: impl Fn(&str) -> Option<String>) -> Result<Settings, ExecError> {
+    /// The model is not read here: a task's route is resolved, and its key and
+    /// `LARRY_MODEL_*` knobs are read, only when the task reaches a model.
+    pub fn from_env(
+        read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Result<Settings, ExecError> {
         let state_dir = state_dir(&read)?;
         let timeout_ms = match read("LARRY_EXEC_TIMEOUT_MS") {
             None => DEFAULT_TIMEOUT_MS,
@@ -374,16 +396,13 @@ impl Settings {
         };
         // An absent PATH is the empty string: the optional value collects to nothing.
         let path: String = read("PATH").into_iter().collect();
-        let model = match read("LARRY_MODEL_KEY").filter(|key| !key.is_empty()) {
-            None => None,
-            Some(_) => Some(ModelConfig::from_env(&read).map_err(ExecError::ModelConfig)?),
-        };
+        let policy = gate::policy(&read)?;
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
-            model,
-            policy: gate::policy(&read)?,
+            policy,
+            read: Arc::new(read),
         })
     }
 
@@ -392,9 +411,25 @@ impl Settings {
         self.state_dir.as_path()
     }
 
-    /// The pinned model a brief's files are written by, when a key is configured.
-    pub(crate) fn model_name(&self) -> Option<&str> {
-        self.model.as_ref().map(ModelConfig::model)
+    /// The route a task naming `named` (or none) sends its model calls to: the
+    /// named route, else the tenant's default, else the environment's, else a
+    /// refusal. Nothing is sent to resolve it.
+    pub(crate) fn route(&self, ledger: &Ledger, named: Option<&str>) -> Result<Route, ExecError> {
+        routes::resolve_for(ledger, &self.state_dir, named, &|name: &str| {
+            (self.read)(name)
+        })
+    }
+
+    /// The route `larry eval` scores: what a task naming none resolves to.
+    pub(crate) fn arm_route(&self) -> Result<Route, ExecError> {
+        self.route(&Ledger::open(&self.state_dir)?, None)
+    }
+
+    /// The model configuration for calls over `route`: its key is read now, from
+    /// the variable the route names.
+    pub(crate) fn model_config(&self, route: &Route) -> Result<ModelConfig, ExecError> {
+        ModelConfig::for_route(route, &|name: &str| (self.read)(name))
+            .map_err(ExecError::ModelConfig)
     }
 
     /// Makes `dir`, whose files are written, a one-commit repository under these settings.
@@ -482,6 +517,41 @@ fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), 
     Ok((ledger, key))
 }
 
+/// What a task with a brief needs before anything is cloned: the route its model
+/// calls go to and a client built from it.
+struct ModelStep<'task> {
+    /// The route the task resolved to; the sealed report records it.
+    route: Route,
+    /// The brief the model writes files for.
+    brief: &'task author::Brief,
+    /// The client over `route`, holding the key read for this task alone.
+    client: ModelClient,
+}
+
+/// Resolves the task's route and builds its client, only when the task has a
+/// brief: a task with none never reaches a model, so its route is only checked
+/// when it names one, and a typo in a model setting fails nothing it does not use.
+/// An unknown name is refused here, before any byte leaves the host.
+fn model_step<'task>(
+    task: &'task Task,
+    settings: &Settings,
+    ledger: &Ledger,
+) -> Result<Option<ModelStep<'task>>, ExecError> {
+    let Some(brief) = task.brief() else {
+        if let Some(named) = task.route() {
+            settings.route(ledger, Some(named))?;
+        }
+        return Ok(None);
+    };
+    let route = settings.route(ledger, task.route())?;
+    let client = ModelClient::new(settings.model_config(&route)?, backoff);
+    Ok(Some(ModelStep {
+        route,
+        brief,
+        client,
+    }))
+}
+
 /// The task body the gate authorizes: clones the repository at the base, has
 /// the model write the brief's files when the task carries one, runs each
 /// acceptance command in order, and returns the report with the staged diff,
@@ -495,13 +565,7 @@ fn run_task(
     ledger: &Ledger,
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Report, ExecError> {
-    let author = match task.brief() {
-        None => None,
-        Some(brief) => {
-            let config = settings.model.clone().ok_or(ExecError::ModelUnconfigured)?;
-            Some((brief, ModelClient::new(config, backoff)))
-        }
-    };
+    let step = model_step(task, settings, ledger)?;
     let workspace = Workspace::create(
         &settings.state_dir,
         task.repo(),
@@ -509,9 +573,21 @@ fn run_task(
         task_id,
         &settings.path,
     )?;
-    let authored = match author {
+    let authored = match step {
         None => None,
-        Some((brief, client)) => Some(author::author(brief, workspace.path(), &client)?),
+        Some(ModelStep {
+            route,
+            brief,
+            client,
+        }) => {
+            let mut records = author::author(brief, workspace.path(), &client)?;
+            for record in &mut records {
+                if let Some(object) = record.as_object_mut() {
+                    object.insert(String::from("route"), route.seal());
+                }
+            }
+            Some(records)
+        }
     };
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {

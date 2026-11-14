@@ -25,6 +25,7 @@ pub fn operator(
             "LARRY_MODEL_URL",
             OsString::from(format!("http://{gateway}/v1")),
         ),
+        ("LARRY_MODEL", OsString::from("mock-model")),
         ("LARRY_MODEL_KEY", OsString::from("mcp-key")),
         ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
     ];
