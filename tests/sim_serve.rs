@@ -22,7 +22,9 @@ use std::sync::Barrier;
 
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
-use serve_cli::{Serving, exchange, fresh_state_dir, get, issue_key, probe_body};
+use serve_cli::{
+    Serving, exchange, fill_key_store, fresh_state_dir, get, issue_key, probe_body, revoke,
+};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -302,6 +304,15 @@ fn draw(rng: &mut Seeded, keyed: &[Keyed]) -> Result<Case, Box<dyn Error>> {
     })
 }
 
+/// A host on a free loopback port over the store in `state`.
+fn start_host(state: &Path) -> Result<Serving, Box<dyn Error>> {
+    let dir = state.display().to_string();
+    Serving::start(&[
+        ("LARRY_SERVE_ADDR", "127.0.0.1:0"),
+        ("LARRY_STATE_DIR", dir.as_str()),
+    ])
+}
+
 /// One pass on a fresh host over a fresh store: every drawn request checked
 /// against its reference answer, and the trace hash of what was sent and
 /// answered. Keys are random, so the trace hashes the request with its key
@@ -469,5 +480,135 @@ fn sim_serve_two_identities_on_one_path_at_once_each_see_only_themselves() -> Te
     })?;
     let (status, stderr) = serving.signal_and_wait("TERM")?;
     assert!(status.success(), "the host stops clean: {stderr}");
+    Ok(())
+}
+
+/// Requests one denial pass sends.
+const DENIAL_CASES: usize = 96;
+
+/// The seeds the denial sim sweeps.
+const DENIAL_SEEDS: [u64; 4] = [1, 2, 0x5EED_0089, 0xDEAD_BEEF];
+
+/// One pass on a fresh host: each request names either a tenant that holds no
+/// key, or a tenant that holds one and is sent another tenant's key or a tampered
+/// one. Each must be `401`. Returns the trace hash of what was sent and answered.
+fn run_denial_pass(seed: u64) -> Result<String, Box<dyn Error>> {
+    let state = fresh_state_dir();
+    let mut rng = Seeded::from_seed(seed);
+    let keyed = key_tenants(&mut rng, &state)?;
+    let mut serving = start_host(&state)?;
+    let mut trace = Hasher::new();
+    for index in 0..DENIAL_CASES {
+        let (name, sent, kind) = if rng.index(2)? == 0 {
+            let len = rng.index(TENANT_MAX)?.saturating_add(1);
+            let stranger = loop {
+                let drawn = tenant(&mut rng, len)?;
+                if !keyed.iter().any(|known| known.name == drawn) {
+                    break drawn;
+                }
+            };
+            let other = choose_ref(&mut rng, &keyed)?;
+            (stranger, other.key.clone(), "unknown")
+        } else {
+            let own = choose_ref(&mut rng, &keyed)?;
+            let other = choose_ref(&mut rng, &keyed)?;
+            let sent = if other.name == own.name {
+                format!("{}x", own.key)
+            } else {
+                other.key.clone()
+            };
+            (own.name.clone(), sent, "wrong-key")
+        };
+        let path = format!("/t/{name}/whoami");
+        let answered = exchange(serving.addr(), "GET", &path, b"", Some(&sent))?;
+        assert_eq!(
+            answered,
+            (401, String::from(UNKNOWN)),
+            "seed {seed:#x} case {index}: {kind} {path} is refused"
+        );
+        trace.write_framed(kind.as_bytes());
+        trace.write_framed(path.as_bytes());
+        trace.write_framed(&answered.0.to_be_bytes());
+        trace.write_framed(answered.1.as_bytes());
+    }
+    let (status, stderr) = serving.signal_and_wait("TERM")?;
+    assert!(
+        status.success(),
+        "the denial pass's host stops clean: {stderr}"
+    );
+    Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
+}
+
+#[test]
+fn sim_unknown_tenant_and_wrong_key_both_get_401_for_every_seed() -> TestResult {
+    for seed in DENIAL_SEEDS {
+        let first = run_denial_pass(seed)?;
+        assert_eq!(
+            run_denial_pass(seed)?,
+            first,
+            "seed {seed:#x}: the same seed on a fresh host gives the same trace"
+        );
+    }
+    Ok(())
+}
+
+/// The key cap the edge admits, `MAX_TENANT_KEYS`.
+const CAP_ROWS: usize = 65_536;
+
+/// The names a reload pass issues keys for; the seed picks which one is revoked.
+const RELOAD_NAMES: [&str; 3] = ["ada", "bo", "cy"];
+
+/// One reload pass: each SIGHUP prints one line counting the keys the store held
+/// when it was read. A revoke lowers the count by one, and a store grown past the
+/// cap reloads closed with its count. Returns the trace hash of the lines.
+fn reload_pass(seed: u64) -> Result<String, Box<dyn Error>> {
+    let state = fresh_state_dir();
+    for name in RELOAD_NAMES {
+        issue_key(&state, name)?;
+    }
+    let victim = RELOAD_NAMES[Seeded::from_seed(seed).index(RELOAD_NAMES.len())?];
+    let mut serving = start_host(&state)?;
+    let mut trace = Hasher::new();
+    serving.signal("HUP")?;
+    let first = serving.next_line()?;
+    assert!(
+        first.contains("\"reloaded\":true") && first.contains("\"keyed_tenants\":3"),
+        "seed {seed:#x}: the first reload counts three keys: {first}"
+    );
+    let revoked = revoke(&state, victim)?;
+    assert!(
+        revoked.status.success(),
+        "seed {seed:#x}: the revoke exits 0"
+    );
+    serving.signal("HUP")?;
+    let second = serving.next_line()?;
+    assert!(
+        second.contains("\"keyed_tenants\":2"),
+        "seed {seed:#x}: the reload after a revoke counts two keys: {second}"
+    );
+    fill_key_store(&state, 0, CAP_ROWS)?;
+    serving.signal("HUP")?;
+    let grown = serving.next_line()?;
+    assert!(
+        grown.contains("\"reloaded\":false") && grown.contains("65538"),
+        "seed {seed:#x}: a store past the cap reloads closed, naming its count: {grown}"
+    );
+    for line in [&first, &second, &grown] {
+        trace.write_framed(line.as_bytes());
+    }
+    let (status, stderr) = serving.signal_and_wait("TERM")?;
+    assert!(status.success(), "seed {seed:#x}: stops clean: {stderr}");
+    Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
+}
+
+#[test]
+fn sim_each_reload_prints_one_line_counting_the_store_it_read_for_every_seed() -> TestResult {
+    for seed in DENIAL_SEEDS {
+        assert_eq!(
+            reload_pass(seed)?,
+            reload_pass(seed)?,
+            "seed {seed:#x}: the same seed gives the same reload trace"
+        );
+    }
     Ok(())
 }

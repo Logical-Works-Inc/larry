@@ -88,7 +88,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `theme` | View colours |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008); `mcp::wire` the stdio framing and envelope |
 | `acp` | `larry acp`: the Agent Client Protocol agent Harbor drives; each prompt a terminal session (ADR 0035) |
-| `serve` | `larry serve`: the address, tenant keys, the routes on `lgwks_bot::app`, the stop signals (ADR 0021, 0022) |
+| `serve`, `serve::error` | `larry serve`: the address, tenant keys, the snapshot a SIGHUP reloads, the routes on `lgwks_bot::app`, the stop signals; its typed refusals (ADR 0021, 0022, 0040) |
 | `governance` | `larry governance`: the structural checker over the governed documents and its report (ADR 0010) |
 | `governance::documents` | The bounded load of the top-level documents and the `docs/` tree; split documents read whole (ADR 0015) |
 | `governance::markdown` | Frontmatter, fences, local links and GitHub heading ids |

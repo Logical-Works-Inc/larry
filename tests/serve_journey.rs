@@ -21,12 +21,21 @@ mod serve_cli;
 
 use std::error::Error;
 use std::io::{self, Write as _};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serve_cli::{Serving, exchange, fresh_state_dir, get, issue_key, probe_body};
+use lgwks_std::json::{self, Value};
+use serve_cli::{
+    Serving, exchange, fill_key_store, fresh_state_dir, get, issue_key, probe_body, revoke,
+};
+
+/// Keyed probes each latency column of the revoke journey samples.
+const REVOKE_PROBES: usize = 1_000;
+
+/// The edge's key cap, `MAX_TENANT_KEYS`: a store holds at most this many rows.
+const KEY_CAP: usize = 65_536;
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -43,13 +52,26 @@ const UNKNOWN: &str = "name yourself";
 /// The probe path of the one tenant most journeys key.
 const ACME_PROBE: &str = "/t/acme/healthz";
 
-/// A host on a free loopback port over `state`.
-fn start_on(state: &Path) -> Result<Serving, Box<dyn Error>> {
+/// A host on `addr` over the store in `state`.
+fn start_at(addr: &str, state: &Path) -> Result<Serving, Box<dyn Error>> {
     let dir = state.display().to_string();
     Serving::start(&[
-        ("LARRY_SERVE_ADDR", "127.0.0.1:0"),
+        ("LARRY_SERVE_ADDR", addr),
         ("LARRY_STATE_DIR", dir.as_str()),
     ])
+}
+
+/// A host on a free loopback port over `state`.
+fn start_on(state: &Path) -> Result<Serving, Box<dyn Error>> {
+    start_at("127.0.0.1:0", state)
+}
+
+/// The message of a start that must be refused; an error if the host was served.
+fn refusal(started: Result<Serving, Box<dyn Error>>, what: &str) -> Result<String, Box<dyn Error>> {
+    match started {
+        Ok(_) => Err(format!("{what} was served").into()),
+        Err(error) => Ok(error.to_string()),
+    }
 }
 
 /// A fresh state directory with a key for `acme`, a host over it, and the key.
@@ -298,5 +320,196 @@ fn a_taken_port_is_refused_with_its_address() -> TestResult {
         message.contains("exit status: 1") && message.contains(&format!("cannot bind {taken}")),
         "a taken port is refused naming it, exit 1: {message}"
     );
+    Ok(())
+}
+
+/// `probes` keyed requests for `path` over fresh connections, each answered `status`;
+/// their latencies.
+fn timed_probes(
+    addr: SocketAddr,
+    path: &str,
+    key: &str,
+    probes: usize,
+    status: u16,
+) -> Result<Vec<Duration>, Box<dyn Error>> {
+    let mut latencies = Vec::with_capacity(probes);
+    for round in 0..probes {
+        let started = Instant::now();
+        let (answered, _) = get(addr, path, Some(key))?;
+        latencies.push(started.elapsed());
+        assert_eq!(answered, status, "probe {round} of {path} answers {status}");
+    }
+    Ok(latencies)
+}
+
+/// One labelled line of nearest-rank p50, p95 and p99 over `latencies`.
+fn percentile_line(label: &str, mut latencies: Vec<Duration>) -> String {
+    latencies.sort_unstable();
+    format!(
+        "{label} over {} requests: p50 {:?} p95 {:?} p99 {:?}\n",
+        latencies.len(),
+        percentile(&latencies, 50),
+        percentile(&latencies, 95),
+        percentile(&latencies, 99)
+    )
+}
+
+#[test]
+fn a_non_loopback_bind_without_the_plaintext_opt_in_is_refused() -> TestResult {
+    let state = fresh_state_dir();
+    let message = refusal(start_at("0.0.0.0:0", &state), "0.0.0.0 without the opt-in")?;
+    assert!(
+        message.contains("exit status: 1")
+            && message.contains("0.0.0.0:0")
+            && message.contains("LARRY_SERVE_PLAINTEXT=1"),
+        "a non-loopback bind is refused naming its address and the opt-in, exit 1: {message}"
+    );
+    let mut loopback = start_at("127.0.0.1:0", &state)?;
+    let (status, stderr) = loopback.signal_and_wait("TERM")?;
+    assert!(status.success(), "loopback starts with no opt-in: {stderr}");
+    let dir = state.display().to_string();
+    let mut opted = Serving::start(&[
+        ("LARRY_SERVE_ADDR", "0.0.0.0:0"),
+        ("LARRY_SERVE_PLAINTEXT", "1"),
+        ("LARRY_STATE_DIR", dir.as_str()),
+    ])?;
+    let on_loopback = SocketAddr::from(([127, 0, 0, 1], opted.addr().port()));
+    assert_eq!(
+        get(on_loopback, "/healthz", None)?,
+        (200, String::from("ok")),
+        "the opted-in host answers on loopback"
+    );
+    let (status, stderr) = opted.signal_and_wait("TERM")?;
+    assert!(status.success(), "the opted-in host stops clean: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn a_plaintext_flag_other_than_one_is_refused() -> TestResult {
+    for value in ["true", "0", "", "yes"] {
+        let started = Serving::start(&[
+            ("LARRY_SERVE_ADDR", "127.0.0.1:0"),
+            ("LARRY_SERVE_PLAINTEXT", value),
+        ]);
+        let message = refusal(started, &format!("{value:?} as the opt-in"))?;
+        assert!(
+            message.contains("exit status: 1")
+                && message.contains(&format!("LARRY_SERVE_PLAINTEXT={value:?}")),
+            "{value:?} is refused naming itself, exit 1: {message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_revoked_key_gets_401_on_its_next_request_with_no_restart() -> TestResult {
+    let state = fresh_state_dir();
+    let acme = issue_key(&state, "acme")?;
+    let beta = issue_key(&state, "beta")?;
+    let mut serving = start_on(&state)?;
+    let addr = serving.addr();
+    let before = timed_probes(addr, ACME_PROBE, &acme, REVOKE_PROBES, 200)?;
+    let revoked = revoke(&state, "acme")?;
+    assert!(
+        revoked.status.success(),
+        "the revoke exits 0: {}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert_eq!(
+        get(addr, ACME_PROBE, Some(&acme))?.0,
+        200,
+        "the running host keeps the key until it reads the store on SIGHUP"
+    );
+    serving.signal("HUP")?;
+    let ack = serving.next_line()?;
+    let printed: Value = json::from_str(&ack)?;
+    assert_eq!(
+        printed.get("reloaded").and_then(Value::as_bool),
+        Some(true),
+        "the reload acknowledges on stdout: {ack}"
+    );
+    assert_eq!(
+        get(addr, ACME_PROBE, Some(&acme))?,
+        (401, String::from(UNKNOWN)),
+        "the revoked key gets 401 on its next request"
+    );
+    let after = timed_probes(addr, "/t/beta/healthz", &beta, REVOKE_PROBES, 200)?;
+    let mut report = percentile_line("acme keyed probes before the revoke", before);
+    report.push_str(&percentile_line(
+        "beta keyed probes after the reload",
+        after,
+    ));
+    io::stderr().lock().write_all(report.as_bytes())?;
+    let (status, stderr) = serving.signal_and_wait("TERM")?;
+    assert!(status.success(), "stops clean after the reload: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn a_revoke_of_an_unkeyed_tenant_is_refused() -> TestResult {
+    let state = fresh_state_dir();
+    issue_key(&state, "acme")?;
+    let output = revoke(&state, "ghost")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty(), "a refused revoke prints no line");
+    assert!(
+        stderr.contains("\"ghost\" holds no key to revoke"),
+        "the refusal names the tenant: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_revoke_survives_a_hard_kill_and_restart() -> TestResult {
+    let state = fresh_state_dir();
+    let acme = issue_key(&state, "acme")?;
+    let mut first = start_on(&state)?;
+    let addr = first.addr();
+    assert_eq!(
+        get(addr, ACME_PROBE, Some(&acme))?.0,
+        200,
+        "the first host serves the key"
+    );
+    let revoked = revoke(&state, "acme")?;
+    assert!(revoked.status.success(), "the revoke exits 0");
+    let (status, _) = first.signal_and_wait("KILL")?;
+    assert!(!status.success(), "kill -9 is not a clean exit: {status}");
+    let mut second = start_at(&addr.to_string(), &state)?;
+    assert_eq!(
+        get(addr, ACME_PROBE, Some(&acme))?,
+        (401, String::from(UNKNOWN)),
+        "the restarted host reads the revoke from executor.db"
+    );
+    let (status, stderr) = second.signal_and_wait("TERM")?;
+    assert!(status.success(), "the second host stops clean: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn a_key_store_past_the_cap_refuses_startup() -> TestResult {
+    let state = fresh_state_dir();
+    let acme = issue_key(&state, "acme")?;
+    fill_key_store(&state, 0, KEY_CAP)?;
+    let message = refusal(start_at("127.0.0.1:0", &state), "a store past the cap")?;
+    assert!(
+        message.contains("exit status: 1")
+            && message.contains("65537")
+            && message.contains("65536"),
+        "startup is refused naming the count and the cap, exit 1: {message}"
+    );
+    let removed = revoke(&state, "tenant-0")?;
+    assert!(
+        removed.status.success(),
+        "one revoke brings the store to the cap"
+    );
+    let mut serving = start_on(&state)?;
+    assert_eq!(
+        get(serving.addr(), ACME_PROBE, Some(&acme))?.0,
+        200,
+        "at the cap the host starts and serves"
+    );
+    let (status, stderr) = serving.signal_and_wait("TERM")?;
+    assert!(status.success(), "stops clean at the cap: {stderr}");
     Ok(())
 }
