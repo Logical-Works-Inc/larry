@@ -126,11 +126,14 @@ where
     ///
     /// The command is journaled and the journal's file synced before this
     /// returns, so the acknowledgement survives a kill -9; a tick reduces it
-    /// later, in journal order. A `display` is checked against the command
-    /// here and kept in memory with it: a restore admits the command without
-    /// one, and its reach then refuses an owner that needs a binding. A retry under the same identity and content
-    /// is acknowledged again as [`CommandAcceptance::DuplicateReplay`] and
-    /// never reduced twice.
+    /// later, in journal order. Nothing in memory holds the command until the
+    /// sync returns: the pending queue and the question book are filled only
+    /// after it, so a caller that receives `Err` from the sync has had neither
+    /// moved (larry#182). A `display` is checked against the command here and
+    /// kept in memory with it: a restore admits the command without one, and
+    /// its reach then refuses an owner that needs a binding. A retry under the
+    /// same identity and content is acknowledged again as
+    /// [`CommandAcceptance::DuplicateReplay`] and never reduced twice.
     ///
     /// # Errors
     ///
@@ -140,7 +143,8 @@ where
     /// are pending, [`RuntimeError::Command`] for a conflicting or foreign
     /// retry, the display check's refusal for a bound submission, and the
     /// journal's append and sync refusals. Nothing is written on any refusal
-    /// but a sync refusal, whose entry a restore then admits.
+    /// but a sync refusal, whose entry stays on disk: no in-memory queue or
+    /// question book holds it, and a restore is what admits it, once.
     pub(super) fn admit(
         &mut self,
         command: Command,
@@ -174,6 +178,13 @@ where
         }
         let held = command.clone();
         let acceptance = self.journal.accept_command(command)?;
+        // Nothing in memory moves until the entry is durable (larry#182). A
+        // caller told its command went into the pending set must be able to
+        // read it back after a crash, and a caller told its sync failed must
+        // not have the next tick execute the command anyway. On a sync refusal
+        // the entry stays on disk and no in-memory queue or question holds it:
+        // a restore reads that entry and admits it exactly once (E28).
+        self.journal.sync()?;
         if acceptance == CommandAcceptance::Initial {
             self.questions.fold(&held);
             self.admitted.push_back(Admitted {
@@ -182,7 +193,6 @@ where
                 display,
             });
         }
-        self.journal.sync()?;
         Ok(acceptance)
     }
 

@@ -121,9 +121,14 @@ where
         run: RunId,
         intent: EffectIntent,
         outcome: EffectOutcome,
+        dispatches: u8,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
-        let payload = OutcomePayload { intent, outcome };
+        let payload = OutcomePayload {
+            intent,
+            outcome,
+            dispatches,
+        };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::EffectOutcomeRecorded, bytes)
     }

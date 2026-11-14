@@ -130,6 +130,11 @@ pub enum ExecError {
     },
     /// The admission gate refused to run the task.
     Gate(RuntimeError),
+    /// The task body ran and its report was sealed, but the runtime could not
+    /// make the run's record durable, so the sealed report is not returned
+    /// (larry#182). A sealed report is only a receipt for work whose record
+    /// landed, and a tick that failed its sync proves the record did not.
+    Unsealed(RuntimeError),
     /// The task journals directory could not be created, listed or tidied (larry#75).
     Journals(std::io::Error),
     /// A terminal session was refused before anything ran (larry#93).
@@ -183,6 +188,10 @@ impl fmt::Display for ExecError {
                 ref fault,
             } => write!(out, "exec could not write {path}: {fault}"),
             Self::Gate(ref cause) => write!(out, "exec gate: {cause}"),
+            Self::Unsealed(ref cause) => write!(
+                out,
+                "exec run finished but its record is not durable, so no report is returned: {cause}"
+            ),
             Self::Journals(ref cause) => write!(out, "exec journals: {cause}"),
             Self::Session(ref cause) => write!(out, "session: {cause}"),
         }
@@ -208,6 +217,7 @@ impl std::error::Error for ExecError {
             Self::ModelConfig(ref cause) => Some(cause),
             Self::Author { ref fault, .. } => Some(fault),
             Self::Gate(ref cause) => Some(cause),
+            Self::Unsealed(ref cause) => Some(cause),
             Self::Journals(ref cause) => Some(cause),
             Self::Session(ref cause) => Some(cause),
             Self::KeyMissing

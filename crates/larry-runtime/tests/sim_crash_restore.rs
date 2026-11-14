@@ -14,7 +14,7 @@ mod support;
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use larry_contracts::authority::Scope;
 use larry_contracts::effect::ReconciliationStrategy;
@@ -27,7 +27,9 @@ use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::projection::replay_authorizations;
 use larry_runtime::runtime::restore;
 use lgwks_bot::journal::JournalError;
-use sim_kit::{Offer, Sim, dispatch, read_work, reader, reopen, replay, trace, work};
+use sim_kit::{
+    Offer, Sim, dispatch, fresh_journal, read_work, reader, remove, reopen, replay, trace, work,
+};
 use support::{
     TestRuntime, assert_state, cancel, clock, command_id, operation, proposal, run, runtime_with,
     settings, submit, succeeded, tenant, unknown,
@@ -454,26 +456,6 @@ fn sim_crash_unknown_permanent_stays_unknown() -> Outcome {
     })
 }
 
-/// A journal file for `name` and `seed` in the OS temporary directory, absent
-/// when the drive starts so both replays of a seed start from nothing.
-fn journal_file(name: &str, seed: u64) -> Sim<PathBuf> {
-    let path = std::env::temp_dir().join(format!(
-        "larry-sim-{}-{name}-{seed}.journal",
-        std::process::id()
-    ));
-    remove(&path)?;
-    Ok(path)
-}
-
-/// Removes `path` if it exists.
-fn remove(path: &Path) -> Sim<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// The `FileRead` runtime over the durable journal at `path`, replaying what
 /// the file already holds.
 fn durable(owner: ScriptedOwner, path: &Path) -> Sim<TestRuntime> {
@@ -496,7 +478,7 @@ fn tenant_of(entry: &JournalEntry) -> Option<TenantId> {
 #[test]
 fn sim_crash_restore_from_the_file_after_a_drop_keeps_every_acknowledged_entry() -> Outcome {
     replay(160_u64..168, |seed| -> Sim<ContentDigest> {
-        let path = journal_file("drop", seed)?;
+        let path = fresh_journal("drop", seed)?;
         let mut runtime = durable(ScriptedOwner::scripted([unknown(operation(24))]), &path)?;
         let strat = ReconciliationStrategy::Queryable;
         dispatch(&mut runtime, 24, 24, &[Scope::FileRead], 5, strat)?;
@@ -531,7 +513,7 @@ fn sim_crash_restore_from_the_file_after_a_drop_keeps_every_acknowledged_entry()
 #[test]
 fn sim_a_torn_tail_is_taken_back_and_the_run_restores() -> Outcome {
     replay(168_u64..176, |seed| -> Sim<(ContentDigest, u64)> {
-        let path = journal_file("torn", seed)?;
+        let path = fresh_journal("torn", seed)?;
         let mut runtime = durable(ScriptedOwner::scripted([unknown(operation(25))]), &path)?;
         let strat = ReconciliationStrategy::Queryable;
         dispatch(&mut runtime, 25, 25, &[Scope::FileRead], 5, strat)?;
@@ -571,8 +553,8 @@ fn sim_a_torn_tail_is_taken_back_and_the_run_restores() -> Outcome {
 fn sim_two_tenants_journals_stay_separate_across_a_crash() -> Outcome {
     replay(176_u64..184, |seed| -> Sim<Vec<ContentDigest>> {
         let paths = [
-            journal_file("tenant-1", seed)?,
-            journal_file("tenant-2", seed)?,
+            fresh_journal("tenant-1", seed)?,
+            fresh_journal("tenant-2", seed)?,
         ];
         let strat = ReconciliationStrategy::IdempotentRetrySafe;
         for (n, path) in (1_u8..).zip(&paths) {
@@ -612,7 +594,7 @@ fn sim_two_tenants_journals_stay_separate_across_a_crash() -> Outcome {
 #[test]
 fn sim_a_second_opener_is_refused_while_the_first_holds_the_file() -> Outcome {
     replay(184_u64..192, |seed| -> Sim<usize> {
-        let path = journal_file("locked", seed)?;
+        let path = fresh_journal("locked", seed)?;
         let owner = ScriptedOwner::scripted([succeeded(operation(26)), succeeded(operation(27))]);
         let mut first = durable(owner, &path)?;
         let strat = ReconciliationStrategy::IdempotentRetrySafe;

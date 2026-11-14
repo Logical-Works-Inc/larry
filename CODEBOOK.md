@@ -36,8 +36,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | Module | Owns |
 |---|---|
 | `journal` | The bounded append-only authoritative record; `journal::durable` its `RecordJournal` file, group-committed (larry#75, ADR 0023) |
-| `payload` | Typed bodies of the closed event vocabulary |
-| `projection` | The fold, effect phases and the replay report |
+| `payload` | The typed bodies of the closed event vocabulary, including each outcome's dispatch count (larry#182, ADR 0036) |
+| `projection` | The fold, effect phases, each effect's recorded dispatch count and the replay report (larry#182) |
 | `protocol` | E47 version and capability negotiation: the offer, its typed refusals |
 | `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
 | `fence` (private) | Dispatch-time freshness on one `lgwks_bot::broker` environment, and `effect_key`, the one key an intent derives (larry#76, ADR 0024) |
@@ -46,7 +46,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `error` | Every refused runtime operation |
 | `runtime` | Settings, `TickReport`, stage 2 (admit, reserve, dispatch), `restore` |
 | `runtime::instant` | The tick's one pinned instant and the live clock's epoch anchor (`live_clock`): `lgwks_bot::clock` read as time since the Unix epoch (larry#74, #182) |
-| `runtime::admission` | E28 durable admission before the acknowledgement, the pending set, safe-boundary promotion (ADR 0025) |
+| `runtime::admission` | E28 durable admission before the acknowledgement, the pending set, safe-boundary promotion, nothing in memory before the sync (ADR 0025, ADR 0036) |
 | `runtime::approval` | E30 durable questions and answers, the question book folded from the journal, the approval gate (ADR 0027) |
 | `runtime::display` | E65 display and admission on the real command path |
 | `runtime::ingress` | `submit_protocol`: negotiate, tenant check and bounded backoff before the queue (E47) |
