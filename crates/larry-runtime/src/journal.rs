@@ -65,6 +65,10 @@ pub struct Journal {
     capacity: usize,
     /// The file every entry reaches before the index, when opened durable.
     durable: Option<durable::Backing>,
+    /// Set by the first refused [`Journal::sync`] (larry#209): the file's
+    /// outcome is unknown, so this handle takes no new entry. A restore over
+    /// the file is the only way to write again.
+    refused: bool,
     /// Whether the next [`Journal::sync`] appends and then refuses as a lost
     /// acknowledgment (larry#182), for the in-crate admission falsifier.
     #[cfg(test)]
@@ -82,6 +86,7 @@ impl Clone for Journal {
             consumer_index: self.consumer_index.clone(),
             capacity: self.capacity,
             durable: None,
+            refused: self.refused,
             #[cfg(test)]
             lose_sync: self.lose_sync,
         }
@@ -147,18 +152,24 @@ impl Journal {
     /// # Errors
     ///
     /// [`RuntimeError::Durable`] when the store refuses or cannot say whether
-    /// the bytes landed, after which every later sync refuses too, and
-    /// [`RuntimeError::DurabilityShort`] when its promise is under a crash.
-    /// A journal built by [`Journal::lost_acknowledgement`] appends its staged
-    /// records and then reports the lost acknowledgment a real store produces
-    /// (larry#182), so a caller can prove what it does when a sync refuses.
+    /// the bytes landed, and [`RuntimeError::DurabilityShort`] when its promise
+    /// is under a crash. Either one latches the journal: every later
+    /// [`Journal::accept_command`] and [`Journal::record`] in this process is
+    /// refused with [`RuntimeError::Durable`] before the index moves, and only a
+    /// restore over the file writes again (larry#209). A journal built by
+    /// [`Journal::lost_acknowledgement`] appends its staged records and then
+    /// reports the lost acknowledgment a real store produces (larry#182).
     pub(crate) fn sync(&mut self) -> Result<(), RuntimeError> {
         match self.durable.as_mut() {
             Some(backing) => {
-                backing.sync()?;
+                if let Err(error) = backing.sync() {
+                    self.refused = true;
+                    return Err(error);
+                }
                 #[cfg(test)]
                 if self.lose_sync {
                     self.lose_sync = false;
+                    self.refused = true;
                     return Err(RuntimeError::Durable(
                         lgwks_bot::journal::JournalError::OutcomeUnknown {
                             cause: std::io::Error::other(
@@ -171,6 +182,29 @@ impl Journal {
             }
             None => Ok(()),
         }
+    }
+
+    /// The refusal every write takes once an earlier sync was refused (larry#209).
+    ///
+    /// The file's outcome is unknown after a refused sync, and the store latches
+    /// its own handle for the same reason, so no later append of this process
+    /// may move the index or the file. The next open replays the truth.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Durable`] with [`lgwks_bot::journal::JournalError::OutcomeUnknown`]
+    /// while the journal is latched.
+    fn refuse_if_refused(&self) -> Result<(), RuntimeError> {
+        if self.refused {
+            return Err(RuntimeError::Durable(
+                lgwks_bot::journal::JournalError::OutcomeUnknown {
+                    cause: std::io::Error::other(
+                        "an earlier sync was refused; reopen the journal to replay the file",
+                    ),
+                },
+            ));
+        }
+        Ok(())
     }
 
     /// A journal over the same file that reports the next sync as a lost
@@ -215,6 +249,7 @@ impl Journal {
             last_sequence: BTreeMap::new(),
             capacity,
             durable: None,
+            refused: false,
             #[cfg(test)]
             lose_sync: false,
         })
@@ -320,9 +355,12 @@ impl Journal {
     /// # Errors
     ///
     /// Returns [`RuntimeError::Command`] for a same-identity/different-content
-    /// retry or a cross-tenant retry, and [`RuntimeError::JournalFull`] when
-    /// the append would exceed the ceiling.
+    /// retry or a cross-tenant retry, [`RuntimeError::JournalFull`] when
+    /// the append would exceed the ceiling, and the refusal of
+    /// [`Journal::sync`] while an earlier sync is refused (larry#209). A
+    /// refused call moves nothing, not even for a retry of a journaled command.
     pub fn accept_command(&mut self, command: Command) -> Result<CommandAcceptance, RuntimeError> {
+        self.refuse_if_refused()?;
         let acceptance = accept(self.command(command.id()), &command)?;
         if acceptance == CommandAcceptance::Initial {
             self.reserve_one()?;
@@ -342,6 +380,7 @@ impl Journal {
     /// a gap or reuse a number, and [`RuntimeError::JournalFull`] when the
     /// append would exceed the ceiling.
     pub fn record(&mut self, event: Event) -> Result<(), RuntimeError> {
+        self.refuse_if_refused()?;
         let run = event.run();
         validate_append(self.last_sequence(run), event.sequence())?;
         self.reserve_one()?;

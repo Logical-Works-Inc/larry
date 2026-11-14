@@ -144,7 +144,10 @@ where
     /// retry, the display check's refusal for a bound submission, and the
     /// journal's append and sync refusals. Nothing is written on any refusal
     /// but a sync refusal, whose entry stays on disk: no in-memory queue or
-    /// question book holds it, and a restore is what admits it, once.
+    /// question book holds it, and a restore is what admits it, once. After a
+    /// sync refusal every later admit in this process, a retry included, is
+    /// refused with the journal's typed error before the index moves (larry#209),
+    /// so no path in this process admits the command.
     pub(super) fn admit(
         &mut self,
         command: Command,
@@ -183,7 +186,9 @@ where
         // read it back after a crash, and a caller told its sync failed must
         // not have the next tick execute the command anyway. On a sync refusal
         // the entry stays on disk and no in-memory queue or question holds it:
-        // a restore reads that entry and admits it exactly once (E28).
+        // a restore reads that entry and admits it exactly once (E28). The
+        // journal latches on that refusal (larry#209), so this process's retry
+        // is refused by `accept_command` and never reaches `DuplicateReplay`.
         self.journal.sync()?;
         if acceptance == CommandAcceptance::Initial {
             self.questions.fold(&held);
