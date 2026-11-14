@@ -13,10 +13,12 @@
 mod route_cli;
 
 use std::error::Error;
+use std::path::Path;
 use std::sync::Barrier;
 
 use larry_demo::executor::routes::RouteCliError;
 use larry_demo::model::RouteError;
+use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
 use route_cli::{GATEWAY, POOL, Scratch, TestResult, add, joined, listed, parse, route_run};
@@ -146,14 +148,24 @@ fn reference(field: &str, text: &str) -> Option<RouteError> {
             !text.is_empty() && text.len() <= 256 && text.chars().all(|ch| ch.is_ascii_graphic()),
             RouteError::BadModel,
         ),
-        "--key-env" => (
-            chars
+        "--key-env" => {
+            let shaped = chars
                 .next()
                 .is_some_and(|first| first.is_ascii_uppercase() || first == '_')
                 && text.len() <= 64
-                && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'),
-            RouteError::BadKeyEnv,
-        ),
+                && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+            let namespaced = text
+                .strip_prefix("LARRY_KEY_")
+                .is_some_and(|rest| !rest.is_empty());
+            (
+                shaped && namespaced,
+                if shaped {
+                    RouteError::KeyEnvOutsideNamespace
+                } else {
+                    RouteError::BadKeyEnv
+                },
+            )
+        }
         "--residency" => (
             text.chars().count() == 2 && text.chars().all(|ch| ch.is_ascii_uppercase()),
             RouteError::BadResidency,
@@ -208,6 +220,24 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
         ("ok", "--key-env", "lower", RouteError::BadKeyEnv),
         ("ok", "--key-env", "1ABC", RouteError::BadKeyEnv),
         ("ok", "--key-env", "A-B", RouteError::BadKeyEnv),
+        (
+            "ok",
+            "--key-env",
+            "GH_TOKEN",
+            RouteError::KeyEnvOutsideNamespace,
+        ),
+        (
+            "ok",
+            "--key-env",
+            "LARRY_MODEL_KEY",
+            RouteError::KeyEnvOutsideNamespace,
+        ),
+        (
+            "ok",
+            "--key-env",
+            "LARRY_KEY_",
+            RouteError::KeyEnvOutsideNamespace,
+        ),
         ("ok", "--temperature", "3", RouteError::BadTemperature),
         ("ok", "--temperature", "-1", RouteError::BadTemperature),
         ("ok", "--temperature", "nan", RouteError::BadTemperature),
@@ -264,7 +294,7 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
         "--model",
         "m",
         "--key-env",
-        "K",
+        "LARRY_KEY_K",
     ];
     assert!(
         matches!(
@@ -303,8 +333,11 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
     let mut rng = Seeded::from_seed(0xFA7F1);
     let fields = ["id", "--model", "--key-env", "--residency", "--describe"];
     for case in 0..256_usize {
-        let value = garbage(&mut rng)?;
+        let mut value = garbage(&mut rng)?;
         let flag = fields.get(case % fields.len()).ok_or("a field")?;
+        if *flag == "--key-env" && rng.below(2)? == 0 {
+            value.insert_str(0, "LARRY_KEY_");
+        }
         let outcome = if *flag == "id" {
             add(state.path(), &value, &[], &[])
         } else {
@@ -422,6 +455,241 @@ fn sim_same_seed_same_route_trace_hash() -> TestResult {
             trace_of(seed.saturating_add(100))?,
             "seed {seed}: another seed, another trace"
         );
+    }
+    Ok(())
+}
+
+/// Giant and empty: a key variable of every length from 0 to 72 bytes, cut from
+/// the prefix and then padded with `A`. The written bounds are three ranges: a
+/// name shorter than `LARRY_KEY_` plus one byte is empty (not a name) or outside
+/// the namespace, 11 to 64 bytes is stored, and 65 or more is not a name. Bug
+/// caught: a bound off by one on either side of the prefix or of the 64-byte cap.
+#[test]
+fn sim_key_variable_length_walk_matches_the_written_bounds() -> TestResult {
+    let state = Scratch::new()?;
+    let ladder = format!("LARRY_KEY_{}", "A".repeat(72));
+    for length in 0..=72_usize {
+        let name: String = ladder.chars().take(length).collect();
+        let wanted = match length {
+            0 | 65.. => Some(RouteError::BadKeyEnv),
+            1..=10 => Some(RouteError::KeyEnvOutsideNamespace),
+            11..=64 => None,
+        };
+        match (
+            add(state.path(), "walk", &[("--key-env", name.as_str())], &[]),
+            wanted,
+        ) {
+            (Ok(_), None) => {}
+            (Err(RouteCliError::Route(ref got)), Some(ref want)) if got == want => {}
+            (other, want) => {
+                return Err(format!("{length} bytes: wanted {want:?}, got {other:?}").into());
+            }
+        }
+    }
+    let (ids, _) = listed(state.path())?;
+    assert_eq!(ids, ["walk"], "the accepted lengths replaced one row");
+    Ok(())
+}
+
+/// The monkey: 512 seeded one-to-three-key edits (delete, overwrite, insert) of
+/// a valid `LARRY_KEY_ROUTER` with letters, a digit, a hyphen, a non-ASCII
+/// letter and a space. Each result agrees with the reference reading of the
+/// rules by exact variant, and the one row holds the last accepted name. Bug
+/// caught: a check that reads only the prefix, or only the shape, so a mutant
+/// slips through one of them.
+#[test]
+fn sim_monkey_edits_of_a_valid_key_variable_agree_with_the_reference() -> TestResult {
+    /// What the monkey types.
+    const KEYS: [char; 8] = ['L', 'Y', '_', 'a', '7', '-', '\u{c9}', ' '];
+    let state = Scratch::new()?;
+    let mut rng = Seeded::from_seed(0x0DDB_1750);
+    let (mut accepted, mut refused) = (0_u32, 0_u32);
+    let mut last_good: Option<String> = None;
+    for case in 0..512_u32 {
+        let mut chars: Vec<char> = "LARRY_KEY_ROUTER".chars().collect();
+        for _ in 0..=rng.below(3)? {
+            let at = usize::try_from(rng.below(u64::try_from(chars.len().saturating_add(1))?)?)?;
+            let key = *KEYS.get(usize::try_from(rng.below(8)?)?).ok_or("a key")?;
+            match rng.below(3)? {
+                0 => {
+                    chars = chars
+                        .into_iter()
+                        .enumerate()
+                        .filter(|entry| entry.0 != at)
+                        .map(|entry| entry.1)
+                        .collect();
+                }
+                1 => {
+                    if let Some(slot) = chars.get_mut(at) {
+                        *slot = key;
+                    }
+                }
+                _ => chars.insert(at, key),
+            }
+        }
+        let name: String = chars.into_iter().collect();
+        match (
+            add(state.path(), "mutant", &[("--key-env", name.as_str())], &[]),
+            reference("--key-env", &name),
+        ) {
+            (Ok(_), None) => {
+                accepted = accepted.saturating_add(1);
+                last_good = Some(name);
+            }
+            (Err(RouteCliError::Route(ref got)), Some(ref want)) if got == want => {
+                refused = refused.saturating_add(1);
+            }
+            (other, want) => {
+                return Err(format!("case {case} {name:?}: wanted {want:?}, got {other:?}").into());
+            }
+        }
+    }
+    assert!(
+        accepted > 0 && refused > 0,
+        "the monkey reached both answers: {accepted} accepted, {refused} refused"
+    );
+    let value = parse(&route_run(state.path(), &[], &["list", "--json"])?)?;
+    assert_eq!(
+        value["routes"][0]["key_env"].as_str(),
+        last_good.as_deref(),
+        "the one row holds the last accepted name"
+    );
+    Ok(())
+}
+
+/// Rewrites the key variable of every route row in `state`'s store, the way a
+/// saboteur with the file in hand would.
+fn set_key_env(state: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+    let store = Connection::open(state.join("executor.db"))?;
+    store.execute("UPDATE routes SET key_env = ?1", [name])?;
+    Ok(())
+}
+
+/// The saboteur with the store file, and the neighbour: one tenant's row is
+/// rewritten to name a process secret, a cloud key, the bare prefix and a
+/// lower-case name. That tenant's list and resolve are refused as `Damaged`
+/// naming the row and the exact check it fails, never read; the neighbour's
+/// table answers throughout; putting a good name back recovers the victim. Bug
+/// caught: a row read back without the checks a new route passes, so an edited
+/// store sends the operator's secret to the tenant's host.
+#[test]
+fn sim_a_row_edited_outside_the_namespace_fails_its_own_tenant_alone() -> TestResult {
+    let (victim, bystander) = (Scratch::new()?, Scratch::new()?);
+    for state in [&victim, &bystander] {
+        add(state.path(), "main", &[], &["--default"])?;
+    }
+    let edits = [
+        ("GH_TOKEN", RouteError::KeyEnvOutsideNamespace),
+        ("LARRY_MODEL_KEY", RouteError::KeyEnvOutsideNamespace),
+        ("AWS_SECRET_ACCESS_KEY", RouteError::KeyEnvOutsideNamespace),
+        ("LARRY_KEY_", RouteError::KeyEnvOutsideNamespace),
+        ("lower", RouteError::BadKeyEnv),
+    ];
+    for (name, cause) in edits {
+        set_key_env(victim.path(), name)?;
+        for args in [&["list"][..], &["resolve"][..]] {
+            match route_run(victim.path(), &[], args) {
+                Err(RouteCliError::Route(RouteError::Damaged {
+                    ref id,
+                    cause: Some(ref inner),
+                })) if id == "main" && **inner == cause => {}
+                other => {
+                    return Err(format!(
+                        "{name} {args:?}: wanted Damaged({cause:?}), got {other:?}"
+                    )
+                    .into());
+                }
+            }
+            route_run(bystander.path(), &[], args)?;
+        }
+    }
+    set_key_env(victim.path(), "LARRY_KEY_BACK")?;
+    let value = parse(&route_run(victim.path(), &[], &["list", "--json"])?)?;
+    assert_eq!(
+        value["routes"][0]["key_env"].as_str(),
+        Some("LARRY_KEY_BACK"),
+        "a good name back and the victim reads again"
+    );
+    Ok(())
+}
+
+/// Hyperscale and the neighbour: 8 threads at once, each adding 16 routes of its
+/// own ids, a seeded half of them naming an honest `LARRY_KEY_T<n>` variable and
+/// the rest naming a process secret or the bare prefix. The plan is drawn before
+/// any thread starts; every add is answered as the reference says, and the
+/// table ends holding exactly the honest ids and no secret's name. Bug caught: a
+/// check done after the write, or a shared scratch that lets a hostile add leave
+/// a row behind.
+#[test]
+fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> TestResult {
+    /// What the saboteur threads try to store.
+    const HOSTILE: [&str; 5] = [
+        "GH_TOKEN",
+        "LARRY_MODEL_KEY",
+        "LARRY_KEY_",
+        "AWS_SECRET_ACCESS_KEY",
+        "HOME",
+    ];
+    let state = Scratch::new()?;
+    let mut rng = Seeded::from_seed(0x5AB0_7E42);
+    let mut plans: Vec<Vec<(String, String)>> = Vec::new();
+    for thread in 0..8_u32 {
+        let mut plan = Vec::new();
+        for step in 0..16_u32 {
+            let key = if rng.below(2)? == 0 {
+                format!("LARRY_KEY_T{thread}")
+            } else {
+                String::from(
+                    *HOSTILE
+                        .get(usize::try_from(rng.below(5)?)?)
+                        .ok_or("a hostile name")?,
+                )
+            };
+            plan.push((format!("t{thread}-{step}"), key));
+        }
+        plans.push(plan);
+    }
+    let barrier = Barrier::new(plans.len());
+    std::thread::scope(|scope| -> TestResult {
+        let mut handles = Vec::new();
+        for plan in &plans {
+            let (barrier, path) = (&barrier, state.path());
+            handles.push(scope.spawn(move || -> Result<(), String> {
+                barrier.wait();
+                for entry in plan {
+                    let (id, key) = (&entry.0, &entry.1);
+                    match (
+                        add(path, id, &[("--key-env", key.as_str())], &[]),
+                        reference("--key-env", key),
+                    ) {
+                        (Ok(_), None) => {}
+                        (Err(RouteCliError::Route(ref got)), Some(ref want)) if got == want => {}
+                        (other, want) => {
+                            return Err(format!("{id} {key}: wanted {want:?}, got {other:?}"));
+                        }
+                    }
+                }
+                Ok(())
+            }));
+        }
+        for handle in handles {
+            joined(handle)??;
+        }
+        Ok(())
+    })?;
+    let mut honest: Vec<&str> = plans
+        .iter()
+        .flatten()
+        .filter(|entry| reference("--key-env", &entry.1).is_none())
+        .map(|entry| entry.0.as_str())
+        .collect();
+    honest.sort_unstable();
+    let (stored, _) = listed(state.path())?;
+    assert_eq!(stored, honest, "exactly the honest ids are stored");
+    let value = parse(&route_run(state.path(), &[], &["list", "--json"])?)?;
+    for route in value["routes"].as_array().ok_or("a routes array")? {
+        let key = route["key_env"].as_str().ok_or("a key variable")?;
+        assert!(key.starts_with("LARRY_KEY_T"), "{key} is an honest name");
     }
     Ok(())
 }

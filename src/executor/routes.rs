@@ -2,8 +2,8 @@
 //! tenant owns in the state directory's store: `larry route add` stores one,
 //! `list` shows them, `remove` and `default` change the table, and `resolve`
 //! shows which route a task naming an id (or none) would use. The key is never
-//! an argument and never stored: a route names the variable that holds it, and
-//! the variable is read only when a task reaches the model.
+//! an argument and never stored: a route names the `LARRY_KEY_*` variable that
+//! holds it, and the variable is read only when a task reaches the model.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -15,7 +15,7 @@ use super::{ExecError, Ledger, digest_hex, identity, state_dir};
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
 /// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <VAR> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
+const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
 
 /// Why `larry route` did not finish.
 #[derive(Debug)]

@@ -160,7 +160,10 @@ impl ModelConfig {
     }
 
     /// The configuration for one task's model calls over `route`: the key is
-    /// read from the variable the route names, now, and nowhere else.
+    /// read from the variable the route names, now, and nowhere else. That
+    /// variable is `LARRY_MODEL_KEY` for the environment route and a
+    /// `LARRY_KEY_*` name for a stored one (`Route::new` refuses any other), so
+    /// a tenant's route can never make the executor send another secret.
     ///
     /// # Errors
     ///

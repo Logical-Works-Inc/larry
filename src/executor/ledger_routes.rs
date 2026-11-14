@@ -135,7 +135,8 @@ impl Ledger {
     /// # Errors
     ///
     /// [`RouteError::Damaged`] (as [`ExecError::Route`]) naming a stored row
-    /// that fails validation or a second default; [`ExecError::Sql`] otherwise.
+    /// that fails validation (a key variable outside `LARRY_KEY_*` included) or
+    /// a second default; [`ExecError::Sql`] otherwise.
     pub(crate) fn routes(&self, tenant: &str) -> Result<Table, ExecError> {
         let mut statement = self
             .conn
@@ -241,7 +242,7 @@ mod tests {
             kind: Kind::OpenAiChat,
             base_url: "http://gateway.test:9/v1",
             model,
-            key_env: "TEST_KEY",
+            key_env: "LARRY_KEY_TEST",
             temperature: Some(0.5),
             request_bytes: None,
             residency: Some("CA"),
@@ -330,7 +331,19 @@ mod tests {
         );
 
         ledger.conn.execute(
-            "UPDATE routes SET kind = 'bogus' WHERE tenant = 'tenant-b'",
+            "UPDATE routes SET key_env = 'GH_TOKEN' WHERE tenant = 'tenant-b'",
+            [],
+        )?;
+        assert!(
+            matches!(
+                ledger.routes("tenant-b"),
+                Err(ExecError::Route(RouteError::Damaged { cause: Some(ref inner), .. }))
+                    if **inner == RouteError::KeyEnvOutsideNamespace
+            ),
+            "a row naming a variable outside LARRY_KEY_ is damaged, not read"
+        );
+        ledger.conn.execute(
+            "UPDATE routes SET key_env = 'LARRY_KEY_TEST', kind = 'bogus' WHERE tenant = 'tenant-b'",
             [],
         )?;
         assert!(

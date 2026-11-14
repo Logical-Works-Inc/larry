@@ -77,7 +77,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `eval::score` | Whole-number prices and costs, nearest-rank percentiles, the card |
 | `model` | The blocking chat-completions client, built per task over its route; no gateway or model is compiled in (ADR 0003, 0039) |
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
-| `model::config`, `model::route` | Key read from the route's variable (never shown), timeout, retry, the `env` route; the route (id, URL, model, key variable, residency), its checks and the resolver (larry#201) |
+| `model::config`, `model::route` | Key read from the route's variable (never shown; a stored route's is `LARRY_KEY_*` only), timeout, retry, the `env` route; the route (id, URL, model, key variable, residency), its checks and the resolver (larry#201) |
 | `model::wire` | The request body and the reply parser |
 | `native` | The native AppCUI view: session state, commands and saturating geometry |
 | `native::render` | Painting the forge chrome: transcript, panels, dashboard, input, status hub |

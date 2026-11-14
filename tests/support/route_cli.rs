@@ -89,7 +89,7 @@ pub fn route_run(
 const DEFAULTS: [(&str, &str); 7] = [
     ("--url", GATEWAY),
     ("--model", "model-1"),
-    ("--key-env", "SIM_KEY"),
+    ("--key-env", "LARRY_KEY_SIM"),
     ("--residency", "CA"),
     ("--temperature", "0.5"),
     ("--request-bytes", "4096"),

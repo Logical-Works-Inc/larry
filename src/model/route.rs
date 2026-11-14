@@ -29,6 +29,10 @@ const MAX_URL_BYTES: usize = 2048;
 const MAX_MODEL_BYTES: usize = 256;
 /// Longest key variable name, in bytes.
 const MAX_KEY_ENV_BYTES: usize = 64;
+/// The namespace a stored route's key variable lives in. A route is tenant
+/// data, so it may only name a variable the operator set aside for routes; the
+/// process's other secrets (`GH_TOKEN`, cloud keys, `LARRY_MODEL_KEY`) are out.
+const KEY_ENV_PREFIX: &str = "LARRY_KEY_";
 /// Longest capability description, in bytes.
 const MAX_DESCRIBE_BYTES: usize = 1024;
 /// The request body bound a route gets when it names none: 1 MiB.
@@ -56,6 +60,9 @@ pub enum RouteError {
     BadModel,
     /// The key variable name is not `[A-Z_][A-Z0-9_]{0,63}`.
     BadKeyEnv,
+    /// The key variable is not `LARRY_KEY_` followed by at least one more byte, so
+    /// it could name a secret the operator never set aside for routes.
+    KeyEnvOutsideNamespace,
     /// The temperature is not a number from 0 to 2.
     BadTemperature,
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
@@ -101,6 +108,10 @@ impl fmt::Display for RouteError {
             Self::BadKeyEnv => out.write_str(
                 "route key-env must name a variable: A-Z, 0-9 and _, not starting with a digit, at most 64 bytes",
             ),
+            Self::KeyEnvOutsideNamespace => write!(
+                out,
+                "route key-env must start with {KEY_ENV_PREFIX} and name at least one more byte"
+            ),
             Self::BadTemperature => out.write_str("route temperature must be a number from 0 to 2"),
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
@@ -137,6 +148,7 @@ impl std::error::Error for RouteError {
             | Self::BadUrl
             | Self::BadModel
             | Self::BadKeyEnv
+            | Self::KeyEnvOutsideNamespace
             | Self::BadTemperature
             | Self::BadResidency
             | Self::BadRequestBytes
@@ -286,20 +298,33 @@ fn is_describe(text: &str) -> bool {
 }
 
 impl Route {
-    /// A route a tenant stores. Every field is checked, and `env` is refused.
+    /// A route a tenant stores. Every field is checked, `env` is refused, and
+    /// the key variable must be `LARRY_KEY_` and at least one more byte, so a
+    /// stored route never names a secret the operator did not set aside for it.
     ///
     /// # Errors
     ///
-    /// The [`RouteError`] of the first field that fails its check.
+    /// The [`RouteError`] of the first field that fails its check; the key
+    /// namespace is checked after the fields.
     pub(crate) fn new(draft: &Draft<'_>) -> Result<Route, RouteError> {
         if draft.id == ENV_ROUTE {
             return Err(RouteError::ReservedId);
         }
-        Route::build(draft)
+        let route = Route::build(draft)?;
+        let in_namespace = route
+            .key_env
+            .strip_prefix(KEY_ENV_PREFIX)
+            .is_some_and(|rest| !rest.is_empty());
+        if in_namespace {
+            Ok(route)
+        } else {
+            Err(RouteError::KeyEnvOutsideNamespace)
+        }
     }
 
     /// The route the operator's environment declares: every check but the
-    /// reserved id, which is its own.
+    /// reserved id, which is its own, and the key namespace, since the operator
+    /// names `LARRY_MODEL_KEY` themself.
     ///
     /// # Errors
     ///
@@ -486,7 +511,7 @@ mod tests {
             kind: Kind::OpenAiChat,
             base_url: "https://gateway.example:8443/v1/",
             model: "model-1",
-            key_env: "ALPHA_KEY",
+            key_env: "LARRY_KEY_ALPHA",
             temperature: Some(0.5),
             request_bytes: Some(2048),
             residency: Some("CA"),
@@ -549,16 +574,33 @@ mod tests {
                 "{model:.20}"
             );
         }
-        let long_key = "A".repeat(65);
-        for name in ["", "lower", "1ABC", "A-B", long_key.as_str()] {
+        let long_key = format!("LARRY_KEY_{}", "A".repeat(55));
+        let top_key = format!("LARRY_KEY_{}", "A".repeat(54));
+        for name in ["", "lower", "1ABC", "LARRY_KEY_A-B", long_key.as_str()] {
             assert_eq!(
                 built(|fields| fields.key_env = name),
                 Err(RouteError::BadKeyEnv),
                 "{name:.20}"
             );
         }
-        built(|fields| fields.key_env = "_")?;
-        built(|fields| fields.key_env = &long_key[1..])?;
+        built(|fields| fields.key_env = &top_key)?;
+        built(|fields| fields.key_env = "LARRY_KEY_A")?;
+        for name in [
+            "LARRY_MODEL_KEY",
+            "GH_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "_",
+            "LARRY_KEY_",
+            "LARRY_KEY",
+            "XLARRY_KEY_A",
+            "LARRY_KEYS_A",
+        ] {
+            assert_eq!(
+                built(|fields| fields.key_env = name),
+                Err(RouteError::KeyEnvOutsideNamespace),
+                "{name}"
+            );
+        }
         for value in [f64::NAN, f64::INFINITY, -0.5, 2.5] {
             assert_eq!(
                 built(|fields| fields.temperature = Some(value)),
@@ -597,6 +639,11 @@ mod tests {
             Err(RouteError::BadDescribe),
             "escape"
         );
+        Route::environment(&Draft {
+            id: ENV_ROUTE,
+            key_env: "LARRY_MODEL_KEY",
+            ..accepted()
+        })?;
         Ok(())
     }
 
@@ -628,7 +675,7 @@ mod tests {
             "residency sealed: {sealed}"
         );
         assert!(
-            !sealed.contains("ALPHA_KEY"),
+            !sealed.contains("LARRY_KEY_ALPHA"),
             "the key variable stays out: {sealed}"
         );
         assert!(!sealed.contains("/v1"), "the URL path stays out: {sealed}");

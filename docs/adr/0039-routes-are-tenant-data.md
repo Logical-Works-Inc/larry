@@ -26,10 +26,14 @@ tenant. A compiled-in default also sent a prompt somewhere nobody chose whenever
 ## Decision
 
 - A route is a row in the state directory's store, keyed by tenant and id: provider kind (`openai-chat`
-  today), base URL, the NAME of the variable that holds the key, model id, optional temperature, a request
-  byte bound (1 KiB to 16 MiB, default 1 MiB), a residency (ISO 3166-1 alpha-2) and a description of at most
-  1 KiB. The key is read from its variable only when a task reaches the model, and is never stored, logged
-  or put in an error or a report.
+  today), base URL, the NAME of the `LARRY_KEY_*` variable that holds the key, model id, optional
+  temperature, a request byte bound (1 KiB to 16 MiB, default 1 MiB), a residency (ISO 3166-1 alpha-2) and
+  a description of at most 1 KiB. The key is read from its variable only when a task reaches the model,
+  and is never stored, logged or put in an error or a report.
+- A stored route may name only `LARRY_KEY_` and at least one more byte (`KeyEnvOutsideNamespace`
+  otherwise), because its variable's value is sent as the bearer token to the route's host: a tenant must
+  not name `GH_TOKEN`, a cloud key or the operator's `LARRY_MODEL_KEY` (CWE-200). Only the `env` route
+  names `LARRY_MODEL_KEY`. A stored row outside the namespace is `Damaged`, never read.
 - A tenant holds at most 256 routes and one default. A full table refuses the next route as `TableFull`;
   the count and the insert are one statement, so concurrent adders cannot pass the bound.
 - A task resolves a route in one pure order: the route it names, else the tenant's default, else the

@@ -81,7 +81,7 @@ struct Tenant<'tenant> {
 }
 
 impl<'tenant> Tenant<'tenant> {
-    /// A Canadian tenant on `model-a` with the key `secret-a` in `KEY_A`.
+    /// A Canadian tenant on `model-a` with the key `secret-a` in `LARRY_KEY_A`.
     fn standard(state: &'tenant TempDir, origin: &'tenant TempDir, mock: &'tenant Handle) -> Self {
         Tenant {
             state,
@@ -89,7 +89,7 @@ impl<'tenant> Tenant<'tenant> {
             mock,
             model: "model-a",
             residency: "CA",
-            key_var: "KEY_A",
+            key_var: "LARRY_KEY_A",
             key: "secret-a",
         }
     }
@@ -221,7 +221,7 @@ fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult
             let two = Tenant {
                 model: "model-b",
                 residency: "DE",
-                key_var: "KEY_B",
+                key_var: "LARRY_KEY_B",
                 key: "secret-b",
                 ..Tenant::standard(&state_b, &origin_b, mock_b)
             };
@@ -321,7 +321,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
     let secret = OsStr::new("topsecret-key-bytes");
     let added = larry_route(
         state.path(),
-        &[("ROUTE_KEY", secret)],
+        &[("LARRY_KEY_ROUTE", secret)],
         &[
             "add",
             "main",
@@ -330,7 +330,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
             "--model",
             "model-a",
             "--key-env",
-            "ROUTE_KEY",
+            "LARRY_KEY_ROUTE",
             "--residency",
             "CA",
             "--describe",
@@ -353,7 +353,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
     );
     assert_eq!(
         value["routes"][0]["key_env"].as_str(),
-        Some("ROUTE_KEY"),
+        Some("LARRY_KEY_ROUTE"),
         "the listing names the key's variable, not its value"
     );
     let text = larry_route(state.path(), &[], &["list"])?;
@@ -458,7 +458,7 @@ fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
     let (state, origin) = fixture()?;
     mock_model::run(Config::seeded(7), |mock| -> TestResult {
         let tenant = Tenant {
-            key_var: "ROUTE_KEY_UNSET",
+            key_var: "LARRY_KEY_UNSET",
             key: "",
             ..Tenant::standard(&state, &origin, mock)
         };
@@ -469,11 +469,86 @@ fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
             "an unset key variable fails the task"
         );
         assert!(
-            stderr_of(&output).contains("ROUTE_KEY_UNSET"),
+            stderr_of(&output).contains("LARRY_KEY_UNSET"),
             "the refusal names the variable: {}",
             stderr_of(&output)
         );
         assert_eq!(mock.served(), 0, "nothing reached the gateway");
+        Ok(())
+    })
+}
+
+/// A tenant's route is data, so it cannot make the executor send a secret the
+/// operator never set aside for routes. `larry route add` naming the operator's
+/// `LARRY_MODEL_KEY`, a cloud token or the bare prefix is refused (exit 1) naming
+/// the `LARRY_KEY_` rule and never the value, nothing is stored, and a task
+/// naming that route afterwards is refused with the operator's secrets in the
+/// child's environment: the gateway counts zero requests and sees no
+/// `Authorization` header. Bug caught: a stored `--key-env GH_TOKEN` whose value
+/// is sent as the bearer token to the tenant's chosen host (CWE-200).
+#[test]
+fn a_stored_route_cannot_name_a_variable_outside_its_namespace() -> TestResult {
+    let (state, origin) = fixture()?;
+    mock_model::run(Config::seeded(9), |mock| -> TestResult {
+        let tenant = Tenant::standard(&state, &origin, mock);
+        let url = format!("http://{}/v1", host_of(mock));
+        let secret = OsStr::new("operator-secret-bytes");
+        for variable in ["LARRY_MODEL_KEY", "GH_TOKEN", "LARRY_KEY_"] {
+            let refused = larry_route(
+                state.path(),
+                &[(variable, secret)],
+                &[
+                    "add",
+                    "x",
+                    "--url",
+                    &url,
+                    "--model",
+                    "model-a",
+                    "--key-env",
+                    variable,
+                    "--residency",
+                    "CA",
+                    "--default",
+                ],
+            )?;
+            assert_eq!(
+                refused.status.code(),
+                Some(1),
+                "{variable} is refused: {}",
+                stderr_of(&refused)
+            );
+            assert!(
+                stderr_of(&refused).contains("must start with LARRY_KEY_"),
+                "{variable}: the refusal names the namespace: {}",
+                stderr_of(&refused)
+            );
+            assert!(
+                !holds(stderr_of(&refused).as_bytes(), secret.as_encoded_bytes()),
+                "{variable}: the refusal shows no value"
+            );
+        }
+        let stored = larry_route(state.path(), &[], &["list"])?;
+        assert!(stored.stdout.is_empty(), "no refused route was stored");
+        let task = tenant.briefed(Some("x"), None)?;
+        let output = tenant.exec_with(
+            &task,
+            &[
+                ("LARRY_MODEL_KEY", secret),
+                ("GH_TOKEN", secret),
+                ("LARRY_KEY_", secret),
+            ],
+        )?;
+        assert!(!output.status.success(), "a route nobody stored fails");
+        assert!(
+            stderr_of(&output).contains("no route has the id x"),
+            "the task names no stored route: {}",
+            stderr_of(&output)
+        );
+        assert_eq!(mock.served(), 0, "nothing reached the gateway");
+        assert!(
+            mock.authorizations().is_empty(),
+            "no bearer header left the host"
+        );
         Ok(())
     })
 }
