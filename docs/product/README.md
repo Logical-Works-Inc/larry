@@ -79,11 +79,13 @@ from the first run. The human-view issues (#27 to #46 errands and threats, #54, 
 estates) are its acceptance cases.
 
 **Track 3, Face 3: the executor for power users (the cost router).** The Director plans with Claude; Larry
-executes on a cheaper model through the estate's 9router, DeepSeek V4.1 Flash first. Claude hands a typed
+executes on a cheaper model that the tenant's route table names (ADR 0039), DeepSeek V4.1 Flash first. No
+gateway or model is compiled in; 9router is one possible route the operator adds. Claude hands a typed
 task (goal, repo, files, acceptance commands) through an MCP tool; Larry returns a diff, the command output
 and a receipt; only Claude-approved work lands. It runs on the Director's own code and uses the same gate
-as Track 2, so it exercises the gate on real work every day. DeepSeek's first-party API is hosted outside
-Canada, so customer data never takes this path; Face 2 picks a host per tenant.
+as Track 2, so it exercises the gate on real work every day. The per-tenant route and its declared
+residency have shipped; refusal by residency and egress is open in #203. DeepSeek's first-party API is
+hosted outside Canada, so customer data never takes this path; Face 2 picks a host per tenant.
 
 **Track 4, learning (larry#60 to #66).** The harness becomes a versioned, content-hashed journal value;
 propose, probe and compose run as journalled steps; no grader verdict reaches the improver; lessons live

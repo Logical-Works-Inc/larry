@@ -485,6 +485,63 @@ fn sim_receipts_match_the_python_rules() -> SimResult {
     Ok(())
 }
 
+/// A seeded 64-digit lowercase hex digest.
+fn seeded_digest(rng: &mut Seeded) -> Result<String, SimError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    (0..64).map(|_| Ok(char::from(*pick(rng, HEX)?))).collect()
+}
+
+/// A receipt carries exactly one digest pair (larry#150, ADR 0013): SHA-256 from the retired
+/// Python tool or BLAKE3 from `larry-rerank`. Both pairs at once, or one pair plus a stray key of
+/// the other, is refused as a shape fault; a BLAKE3 pair alone is admitted.
+#[test]
+fn sim_a_receipt_with_both_digest_pairs_is_refused() -> SimResult {
+    for seed in 0..256 {
+        let mut rng = Seeded::from_seed(seed);
+        let scratch = Scratch::new("receipt-pairs")?;
+        let mut pre = valid_receipt(&mut rng)?;
+        let case = rng.below(3)?;
+        match case {
+            0 => {
+                pre.insert("query_blake3", Value::from(seeded_digest(&mut rng)?));
+                pre.insert("candidates_blake3", Value::from(seeded_digest(&mut rng)?));
+            }
+            1 => {
+                let stray = *pick(&mut rng, &["query_blake3", "candidates_blake3"])?;
+                pre.insert(stray, Value::from(seeded_digest(&mut rng)?));
+            }
+            _ => {
+                pre.remove("query_sha256");
+                pre.remove("candidates_sha256");
+                pre.insert("query_blake3", Value::from(seeded_digest(&mut rng)?));
+                pre.insert("candidates_blake3", Value::from(seeded_digest(&mut rng)?));
+            }
+        }
+        let mut post = valid_receipt(&mut rng)?;
+        post.insert("phase", Value::from("post-exec"));
+        for (name, receipt) in [("pre", &pre), ("post", &post)] {
+            scratch.write(
+                &format!("tools/receipts/{name}.json"),
+                pyjson::dumps(&Value::Object(receipt.clone()), None).as_bytes(),
+            )?;
+        }
+        let expected: Vec<String> = if case == 2 {
+            Vec::new()
+        } else {
+            vec![
+                String::from("reranker receipt tools/receipts/pre.json: invalid identity or shape"),
+                String::from("reranker receipts: both pre-exec and post-exec phases are required"),
+            ]
+        };
+        assert_eq!(
+            receipts::receipt_errors(scratch.path()),
+            expected,
+            "seed {seed}: case {case}, receipt {pre:?}"
+        );
+    }
+    Ok(())
+}
+
 /// The errors of the whole check of `scratch`.
 fn check_errors(scratch: &Scratch) -> Vec<String> {
     let report: super::Report = check(scratch.path());

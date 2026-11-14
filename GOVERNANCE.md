@@ -74,7 +74,7 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - `larry governance` in CI and locally (ADR 0010): frontmatter, local links, unique contiguous R, D, E, C and axis
   inventories that cannot shrink, requirement-to-decision-and-falsifier mapping, execution-cell allocation,
   log.md inventory agreement, the crash-case fraction, four diagrams in the specification, the owner and
-  memory anchors in AGENTS.md, reranker receipts (SHA-256 or BLAKE3, ADR 0013), the tracker render and
+  memory anchors in AGENTS.md, reranker receipts (SHA-256 or BLAKE3, never both, ADR 0013), the tracker render and
   the 120-line law on every governed document; a split document is read as its index and parts (ADR 0015).
   Its negative controls run in the workspace tests. It checks structure, never runtime behaviour, Mermaid
   rendering or prose truth.

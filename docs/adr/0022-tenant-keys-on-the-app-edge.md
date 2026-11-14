@@ -13,7 +13,7 @@ sources: [larry#89, larry#88, logicalworks-crates#880, RFC 6750, docs/adr/0021-s
 
 # 0022: tenant bearer keys on the app edge's authenticator
 
-Status: accepted, 2026-11-09 (larry#89)
+Status: accepted, 2026-11-09 (larry#89); superseded in part by ADR 0040 (the bind, revoke and the key cap)
 
 ## Context
 

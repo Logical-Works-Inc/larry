@@ -8,7 +8,7 @@ generated: {by: claude-code, at: 2026-11-14}
 verified: {by: claude-code, method: nextest run of the route simulations and journeys on Oracle}
 status: accepted
 stale_after: 2027-02-14
-sources: [larry#201, larry#200, docs/product/README.md, docs/adr/0003-model-client-on-lgwks-std-http.md, docs/adr/0004-sqlite-ledger.md, docs/adr/0037-run-identity-and-idempotency-keys.md, ISO 3166-1 alpha-2, RFC 6750 section 2.1]
+sources: [larry#201, larry#200, docs/product/README.md, docs/adr/0003-model-client-on-lgwks-std-http.md, docs/adr/0004-executor-process-groups-and-ledger.md, docs/adr/0037-run-identity-and-idempotency-keys.md, ISO 3166-1 alpha-2, RFC 6750 section 2.1]
 ---
 
 # 0039: a model route is data a tenant owns, not a gateway in the binary

@@ -49,7 +49,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Effect keys, retry, dispatch certainty (larry#78) | `lgwks_bot::effect`, `retry`, defaults off: no new crate | the inline attempt counter in `larry-runtime` (larry#68) |
 | Receipts signed (larry#86, ADR 0006) | `lgwks_std::sign` (ed25519), seed in `lgwks_deps` `sqlite` | forge's SipHash audit chain: a MAC, no offline check |
 | Sealed records at rest | `lgwks_bot::sealed` | none needed |
-| Model client to 9router | `lgwks_std::http` + `json` + `retry`, ported from forge-providers | `async-openai`: a second client, more crates |
+| Model client on the tenant route table (ADR 0039) | `lgwks_std::http` + `json` + `retry`, ported from forge-providers | `async-openai`: a second client, more crates |
 | Code reading, diffs | `lgwks_ast` | `syn`: the estate has one reader |
 | Prompt-injection screen (larry#37) | `lgwks_deps` `llm-guard` | a classifier of our own first |
 | Rerank port (larry#53) | `lgwks_deps` `ml-candle`, `ml-tokenizers` | Python reranker: banned |
