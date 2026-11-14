@@ -16,7 +16,9 @@ use larry_runtime::projection::ProjectionBackend;
 
 use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, replay, work};
-use support::{TestRuntime, assert_state, operation, run, succeeded, unknown};
+use support::{
+    TestRuntime, assert_state, command_id, operation, proposal, run, succeeded, tenant, unknown,
+};
 
 /// Fallible test outcome; setup failures propagate instead of panicking.
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -529,6 +531,75 @@ fn timed_reader(owner: ScriptedOwner, clock: lgwks_bot::clock::Clock) -> Sim<Tes
         owner,
         clock,
     )?)
+}
+
+/// Source: E30 (expiry is a pinned input, never consent by timeout). On the runtime's own
+/// timeline the lease ends exactly at `observed_at + lease`: work admitted one second before it
+/// is authorized, and a tick at the lease is refused with the exact `AuthorityExpired`
+/// (larry#182). Virtual clock, no sleep, every seed a different lease.
+#[test]
+fn sim_lease_expiry_matches_the_pinned_lease_for_every_seed() -> Outcome {
+    use larry_contracts::authority::BudgetUnit;
+    use larry_contracts::replay::{
+        CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot,
+    };
+    use lgwks_bot::clock::Clock;
+
+    replay(184_u64..192, |seed| -> Sim<(bool, usize)> {
+        let at = support::epoch()?;
+        let mut state = seed;
+        let lease = match spin(&mut state).checked_rem(120) {
+            Some(value) => value.saturating_add(1),
+            None => 1,
+        };
+        let valid_until = at
+            .checked_add(Duration::from_secs(lease))
+            .ok_or("fixture validity overflow")?;
+        let settings = larry_runtime::runtime::RuntimeSettings::with_defaults(
+            PolicySnapshot::new(1, [Scope::FileRead].into_iter().collect()),
+            CapabilitySnapshot::new([Scope::FileRead].into_iter().collect()),
+            ValiditySnapshot::new(valid_until),
+            BudgetUnit::Requests,
+            100,
+        );
+        let clock = Clock::virtual_at(at.duration_since(std::time::SystemTime::UNIX_EPOCH)?);
+        let mut runtime: TestRuntime =
+            larry_runtime::runtime::Runtime::new(settings, ScriptedOwner::new(), clock.clone())?;
+        let early = proposal(
+            run(26),
+            tenant(26),
+            operation(26),
+            &[Scope::FileRead],
+            1,
+            ReconciliationStrategy::RequiresHuman,
+        );
+        runtime.submit(support::submit(command_id(26), &early)?)?;
+        clock.advance(Duration::from_secs(lease.saturating_sub(1)))?;
+        let first = runtime.tick()?;
+        assert!(
+            first.denied().is_empty(),
+            "seed {seed} (lease {lease}s): one second inside the lease is authorized"
+        );
+        let late = proposal(
+            run(27),
+            tenant(26),
+            operation(27),
+            &[Scope::FileRead],
+            1,
+            ReconciliationStrategy::RequiresHuman,
+        );
+        runtime.submit(support::submit(command_id(27), &late)?)?;
+        clock.advance(Duration::from_secs(2))?;
+        let second = runtime.tick()?;
+        let refused = second.denied().iter().any(|&(reported, reason)| {
+            reported == operation(27) && reason == DenialReason::AuthorityExpired
+        });
+        assert!(
+            refused,
+            "seed {seed} (lease {lease}s): the lease ends at the pinned instant plus the lease"
+        );
+        Ok((refused, second.denied().len()))
+    })
 }
 
 /// Source: E30 (expiry is a pinned input), R72/E56 (no blind resend). A retry

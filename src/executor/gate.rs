@@ -43,7 +43,6 @@ use larry_runtime::protocol::{
     ProtocolVersionRange,
 };
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
-use lgwks_bot::clock::Clock;
 use lgwks_bot::journal::JournalError;
 
 use super::{ExecError, Report, Settings, Task};
@@ -442,9 +441,9 @@ pub(super) fn admit_and_run(
     std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
     let path = journal_path(&settings.state_dir, task_id);
     let run_settings = task_settings(policy, expiry);
-    let opened = Journal::open(&path, run_settings.journal_capacity).and_then(|journal| {
-        restore::<FoldProjection, _>(run_settings, owner, Clock::wall(), journal)
-    });
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let opened = Journal::open(&path, run_settings.journal_capacity)
+        .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
     let outcome = match opened {
         Ok(mut runtime) => {
             let admission = Admission {
@@ -623,8 +622,12 @@ const fn unknown(intent: &EffectIntent) -> EffectOutcome {
 fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError> {
     let run_settings = task_settings(policy, lease_end(SystemTime::now())?);
     let journal = Journal::open(path, run_settings.journal_capacity)?;
-    let mut runtime =
-        restore::<FoldProjection, _>(run_settings, Recovered, Clock::wall(), journal)?;
+    let mut runtime = restore::<FoldProjection, _>(
+        run_settings,
+        Recovered,
+        larry_runtime::live_clock()?,
+        journal,
+    )?;
     runtime.tick()?;
     Ok(())
 }
@@ -671,4 +674,34 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<usize, E
         set_aside = set_aside.saturating_add(1);
     }
     Ok(set_aside)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::{GATE_LEASE, lease_end};
+
+    /// The executor's lease and the runtime's tick are one timeline: the live clock the executor
+    /// passes reads after 2023, not 1970, and the expiry sits one lease after that reading
+    /// (larry#182).
+    #[test]
+    fn the_executors_lease_and_the_runtimes_tick_share_one_timeline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let clock = larry_runtime::live_clock()?;
+        let tick = SystemTime::UNIX_EPOCH
+            .checked_add(clock.now())
+            .ok_or("tick instant overflow")?;
+        let anchored = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_700_000_000))
+            .ok_or("anchor instant overflow")?;
+        assert!(
+            tick > anchored,
+            "the live clock is anchored after 2023, not at 1970: {tick:?}"
+        );
+        let expiry = lease_end(tick)?;
+        let gap = expiry.duration_since(tick)?;
+        assert_eq!(gap, GATE_LEASE, "the expiry sits one lease after the tick");
+        Ok(())
+    }
 }

@@ -294,8 +294,11 @@ fn e63_a_proof_past_its_lease_is_refused_before_the_owner_is_reached()
             lgwks_std::json::to_vec(&proposal)?.into_boxed_slice(),
         ),
     )?;
+    // The clock starts where the live constructor places it, so the 60 s lease and the
+    // runtime's tick sit on the host's own timeline rather than 1970 (larry#182).
+    let placed = larry_runtime::live_clock()?.now();
     let at = SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_secs(1_700_000_000))
+        .checked_add(placed)
         .ok_or("fixture epoch is outside the platform time range")?;
     let valid_until = at
         .checked_add(Duration::from_secs(60))
@@ -308,13 +311,42 @@ fn e63_a_proof_past_its_lease_is_refused_before_the_owner_is_reached()
         1,
     );
     let owner = ScriptedOwner::scripted([EffectOutcome::Unknown { operation }]);
-    let clock = lgwks_bot::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
+    let clock = lgwks_bot::clock::Clock::virtual_at(placed);
     let mut runtime: TestRuntime = Runtime::new(settings, owner, clock.clone())?;
     runtime.submit(command)?;
     runtime.tick()?;
     let dispatched_before = runtime.owner().dispatched().len();
-    clock.advance(Duration::from_secs(120))?;
-    runtime.tick()?;
+
+    // One lease plus one second: a fresh command is refused on the tick for authority alone.
+    clock.advance(Duration::from_secs(61))?;
+    let later_operation = OperationId::from_bytes([0x9b; 16]);
+    let later = larry_runtime::payload::WorkProposal::new(
+        RunId::from_bytes([0x9c; 16]),
+        tenant,
+        later_operation,
+        [Scope::FileRead].into_iter().collect(),
+        1,
+        BudgetUnit::Requests,
+        ReconciliationStrategy::RequiresHuman,
+    );
+    let later_command = Command::new(
+        CommandId::from_bytes([0x9d; 16]),
+        tenant,
+        Vec::new(),
+        CommandContent::new(
+            CommandKind::Submit,
+            lgwks_std::json::to_vec(&later)?.into_boxed_slice(),
+        ),
+    )?;
+    runtime.submit(later_command)?;
+    let report = runtime.tick()?;
+    assert!(
+        report.denied().iter().any(|&(operation, reason)| {
+            operation == later_operation && reason == DenialReason::AuthorityExpired
+        }),
+        "T + 61 s is refused for authority: {:?}",
+        report.denied()
+    );
     runtime.tick()?;
     assert_eq!(
         runtime.owner().dispatched().len(),

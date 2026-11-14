@@ -44,7 +44,7 @@ mod admission;
 mod approval;
 mod display;
 mod ingress;
-mod instant;
+pub(crate) mod instant;
 mod live;
 mod reach;
 mod reconcile;

@@ -95,6 +95,7 @@ pub mod runtime;
 mod fence;
 
 pub use fence::{FenceError, FenceRefusal, RevocationFence};
+pub use runtime::instant::live_clock;
 
 /// Maximum ready-work descriptors before admission applies backpressure
 /// (Cell 05: 256 descriptors, no silent drop).

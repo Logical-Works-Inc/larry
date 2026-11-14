@@ -133,6 +133,9 @@ pub enum RuntimeError {
         /// The reading since the epoch that could not be placed.
         elapsed: std::time::Duration,
     },
+    /// The system clock reads before the Unix epoch, so no live reading can be placed after it
+    /// and the runtime has no instant to pin (E30, larry#182).
+    ClockBeforeEpoch(std::time::SystemTimeError),
     /// A Larry field cannot name an lgwks_bot effect key (larry#76, larry#78).
     EffectIdentity {
         /// The operation whose key could not be formed.
@@ -246,6 +249,9 @@ impl fmt::Display for RuntimeError {
                 f,
                 "clock reading {elapsed:?} after the Unix epoch is outside the platform's time range"
             ),
+            Self::ClockBeforeEpoch(ref cause) => {
+                write!(f, "the system clock reads before the Unix epoch: {cause}")
+            }
             Self::EffectIdentity { operation, field } => write!(
                 f,
                 "operation {operation}'s {field} names no effect key: all-zero or past the last generation"
@@ -280,6 +286,7 @@ impl std::error::Error for RuntimeError {
             Self::Question(ref err) => Some(err),
             Self::Durable(ref err) => Some(err),
             Self::Fence(ref err) => Some(err),
+            Self::ClockBeforeEpoch(ref cause) => Some(cause),
             Self::DurableRepeat { .. } | Self::DurabilityShort { .. } => None,
             Self::UnsupportedDecision(_)
             | Self::UnsupportedCommand(_)
