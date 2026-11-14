@@ -23,7 +23,7 @@ use larry_runtime::error::RuntimeError;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 use run::run_command;
-use workspace::{Workspace, sweep};
+use workspace::{Workspace, report_members, sweep};
 
 use crate::model::{ModelClient, ModelConfig, ModelError};
 pub use author::AuthorFault;
@@ -529,10 +529,15 @@ fn run_task(
     let mut body = lgwks_std::json::json!({
         "task_id": task_id,
         "task_digest": task_digest,
-        "diff": diff,
         "results": results,
         "denied": [],
     });
+    // The diff members name whether the diff is the whole change (larry#206).
+    if let Some(object) = body.as_object_mut() {
+        for (name, member) in report_members(diff) {
+            object.insert(name.to_owned(), member);
+        }
+    }
     // Only a briefed run names what the model wrote, so a plain run's report keeps its shape.
     if let Some(records) = authored
         && let Some(object) = body.as_object_mut()

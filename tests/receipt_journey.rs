@@ -434,3 +434,108 @@ fn an_offline_verifier_trusts_only_the_printed_key() -> TestResult {
     assert_refused(&verify_in(state.path(), b"")?, "not valid JSON");
     Ok(())
 }
+
+#[test]
+fn a_task_over_one_mib_seals_unaccepted_and_verify_agrees() -> TestResult {
+    // A change of 1.2 MB is cut at 1 MiB: the report says so, is never accepted and verifies as rejected.
+    let (state, origin) = fixture()?;
+    let task = task_json(
+        origin.path(),
+        "HEAD",
+        r#"[["sh","-c","head -c 1200000 /dev/zero | tr '\\000' x > BIG"]]"#,
+    );
+    let output = run_exec(state.path(), &task, None)?;
+    let report = report_of(&output)?;
+    assert!(
+        !flag_of(&report, "accepted")?,
+        "a cut diff is never accepted"
+    );
+    assert!(
+        flag_of(&report, "diff_truncated")?,
+        "the report says the diff was cut"
+    );
+    assert!(
+        number_of(&report, "diff_bytes")? > 1_048_576,
+        "the full diff is larger than the kept megabyte"
+    );
+    assert_eq!(
+        text_of(&report, "diff")?.len(),
+        1_048_576,
+        "the kept diff is exactly the limit"
+    );
+    assert_eq!(
+        text_of(&report, "diff_digest")?.len(),
+        64,
+        "the digest is 64 hex characters"
+    );
+    let verified = verify_in(state.path(), &output.stdout)?;
+    assert_eq!(
+        verified.status.code(),
+        Some(2),
+        "a cut diff verifies as rejected"
+    );
+    assert!(
+        !flag_of(&verdict_of(&verified)?, "accepted")?,
+        "the verdict says not accepted"
+    );
+    let flipped = edited_bytes(&report, &[Step::Key("diff_truncated")], json::json!(false))?;
+    assert_refused(&verify_in(state.path(), &flipped)?, "altered");
+    assert_eq!(
+        fs::read_dir(state.path().join("ws"))?.count(),
+        0,
+        "the run's workspace is removed when the run ends"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failing_command_that_prints_two_mib_keeps_its_last_line() -> TestResult {
+    // 2 MiB of 'a', a newline, LAST-LINE and a newline, then exit 1: 2097163 bytes in all.
+    let (state, origin) = fixture()?;
+    let task = task_json(
+        origin.path(),
+        "HEAD",
+        r#"[["sh","-c","head -c 2097152 /dev/zero | tr '\\000' a; echo; echo LAST-LINE; exit 1"]]"#,
+    );
+    let output = run_exec(state.path(), &task, None)?;
+    let report = report_of(&output)?;
+    let result = result_at(&report, 0)?;
+    let stdout = text_of(result, "stdout")?;
+    assert!(
+        stdout.ends_with("LAST-LINE\n"),
+        "the last line of a failing command is kept"
+    );
+    assert_eq!(
+        number_of(result, "stdout_dropped")?,
+        1_048_587,
+        "the dropped count is exact: 2097163 bytes less the 1048576 kept"
+    );
+    assert!(
+        stdout.contains("bytes dropped"),
+        "a marker line says what was dropped"
+    );
+    assert!(
+        stdout.len() <= 1_048_576 + 64,
+        "the kept output stays within the bound plus its marker"
+    );
+    assert_eq!(number_of(result, "exit_code")?, 1, "the command exited 1");
+
+    // Matched workload: the same failing command, 32 runs, timed end to end.
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        let rerun = run_exec(state.path(), &task, None)?;
+        samples.push(started.elapsed());
+        report_of(&rerun)?;
+    }
+    samples.sort();
+    let mut err = io::stderr().lock();
+    writeln!(
+        err,
+        "capture p50={:.3} p95={:.3} p99={:.3} n={SAMPLES}",
+        millis(percentile(&samples, 50)),
+        millis(percentile(&samples, 95)),
+        millis(percentile(&samples, 99)),
+    )?;
+    Ok(())
+}

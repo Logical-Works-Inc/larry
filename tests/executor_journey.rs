@@ -459,10 +459,17 @@ fn a_noisy_command_is_truncated_not_blocked() -> TestResult {
         flag_of(result, "truncated")?,
         "output past the cap must be flagged truncated"
     );
+    // The head and the tail together keep the cap; a marker line says what fell between them
+    // (larry#206). 3 MiB less the cap is dropped, exactly.
+    let kept = text_of(result, "stdout")?.len();
+    assert!(
+        (STDOUT_CAP..=STDOUT_CAP.saturating_add(64)).contains(&kept),
+        "stdout must keep the cap plus one marker line, got {kept}"
+    );
     assert_eq!(
-        text_of(result, "stdout")?.len(),
-        STDOUT_CAP,
-        "stdout must be cut to exactly the cap"
+        number_of(result, "stdout_dropped")?,
+        2_097_152,
+        "the dropped count is exact: 3145728 bytes less the 1048576 kept"
     );
     assert_eq!(
         number_of(result, "exit_code")?,
