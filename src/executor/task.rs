@@ -633,7 +633,7 @@ mod tests {
                 Err(TaskError::ArgvTooLong { index: 0, len: 65 })
             ));
             let big_item = "x".repeat(MAX_ARG_BYTES.saturating_add(1));
-            let big_argv = lgwks_std::json::json!([[big_item.clone()]]);
+            let big_argv = lgwks_std::json::json!([[big_item]]);
             assert!(matches!(
                 Task::parse(&rendered(&repo, &base, big_argv)),
                 Err(TaskError::ArgTooLarge { index: 0, len }) if len == MAX_ARG_BYTES.saturating_add(1)

@@ -69,7 +69,7 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - design-gate at commit: a recorded plan covers every staged file.
 - rust-surface at commit: a new `pub` item needs a caller outside its crate (tests never count), so new
   `larry-runtime` API lands only once a package depends on the runtime (larry#68 step 4).
-- `lgwks-deps check .` (lgwks_deps 6.3.0) locally: every direct dependency has a schema-3 row in
+- `lgwks-deps check .` (lgwks_deps 7.2.0) locally: every direct dependency has a schema-3 row in
   `contract/APPROVED.toml` with its license, retirement plan and measured cost. CI does not run it.
 - `larry governance` in CI and locally (ADR 0010): frontmatter, local links, unique contiguous R, D, E, C and axis
   inventories that cannot shrink, requirement-to-decision-and-falsifier mapping, execution-cell allocation,

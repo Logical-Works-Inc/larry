@@ -105,10 +105,10 @@ fn locked_versions_reads_only_whole_package_entries() {
 }
 
 /// The macro release each locked appcui release was built with. appcui's own
-/// requirement (`^0.3.6`) admits newer macros that emit traits only newer appcui
+/// requirement (`^0.3.9`) admits newer macros that emit traits only newer appcui
 /// defines, so a plain `cargo update` breaks the build (logicalworks-crates#841,
 /// larry#170); the lock holds the pair until lgwks_deps pins it upstream.
-const APPCUI_MACRO_PAIRS: [(&str, &str); 1] = [("0.5.5", "0.3.6")];
+const APPCUI_MACRO_PAIRS: [(&str, &str); 1] = [("0.5.8", "0.3.9")];
 
 #[test]
 fn the_lock_holds_appcui_proc_macro_at_the_release_appcui_was_built_with()
@@ -268,6 +268,20 @@ fn the_cargo_sweep_names_every_locked_estate_release() -> Result<(), Box<dyn std
             assert!(
                 ruling.contains(&pin),
                 "the product plan's pin ruling must name the locked `{pin}`"
+            );
+        }
+    }
+    // larry#189: the ship checklist's `#189` line names the three estate releases that pin moved.
+    let ship = std::fs::read_to_string(root().join("docs").join("product").join("SHIP.md"))?;
+    let Some(ticked) = ship.lines().find(|line| line.contains("#189")) else {
+        return Err("docs/product/SHIP.md has no `#189` line".into());
+    };
+    for name in ["lgwks_std", "lgwks_bot", "lgwks_deps"] {
+        for version in locked_versions(&lock, name) {
+            let pin = format!("{name} {version}");
+            assert!(
+                ticked.contains(&pin),
+                "the ship checklist's `#189` line must name the locked `{pin}`"
             );
         }
     }

@@ -18,8 +18,8 @@
 # storefront, so `lgwks-deps check` reports them as owned without a row. The
 # AppCUI edge is `lgwks_deps`/`appcui`, not a direct appcui dependency; that
 # storefront admission is recorded in `docs/architecture/visual-pass.md`. Its
-# proc-macro is held at 0.3.6 in Cargo.lock until
-# Logical-Works-Inc/logicalworks-crates#841 lands.
+# proc-macro is held at the release appcui was built with (appcui 0.5.8 needs
+# `^0.3.9`) in Cargo.lock until Logical-Works-Inc/logicalworks-crates#841 lands.
 #
 # `lgwks_bot` (defaults off) is an edge of larry-contracts and larry-runtime from larry#74, the
 # clock and skew rows; as an `lgwks_*` crate it is estate-owned and needs no row.
@@ -37,7 +37,7 @@ accepted_licenses = "MIT, Apache-2.0"
 [[approved]]
 crate = "thiserror"
 tier = "boundary"
-version = "=2.0.20"
+version = "=2.0.21"
 license = "MIT OR Apache-2.0"
 owner = "larry-contracts"
 capability = "error-derive"

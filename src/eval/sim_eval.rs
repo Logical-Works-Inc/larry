@@ -453,7 +453,7 @@ fn sim_eval_fat_finger_sets_get_their_exact_error() -> TestResult {
             matches!(error, SetError::DuplicateId { index: 1 }),
             "seed {seed}: {error}"
         );
-        let mut extra = set.clone();
+        let mut extra = set;
         extra
             .as_object_mut()
             .ok_or("set object")?

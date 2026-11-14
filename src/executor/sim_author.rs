@@ -198,8 +198,8 @@ fn sim_author_weird_bytes_replies_are_written_as_the_reference_model_says() -> T
                 let want = with_newline(&reply);
                 (reply, want)
             }
-            1 => (format!("```{lang}\n{body}```"), body.clone()),
-            2 => (format!(" \n\t```{lang}\n{body}```\r\n "), body.clone()),
+            1 => (format!("```{lang}\n{body}```"), body),
+            2 => (format!(" \n\t```{lang}\n{body}```\r\n "), body),
             _ => {
                 let reply = format!("```{lang}\n{raw}x");
                 let want = with_newline(&reply);
