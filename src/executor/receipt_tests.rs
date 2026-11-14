@@ -250,7 +250,7 @@ fn sim_sealed_reports_verify_and_every_tamper_is_refused_for_every_seed() -> Tes
             "seed {seed}: a receipt that names no signature is refused"
         );
 
-        let mut short_signature = sealed.clone();
+        let mut short_signature = sealed;
         set(
             receipt_of(&mut short_signature)?,
             "signature",
