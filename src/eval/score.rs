@@ -23,6 +23,27 @@ pub struct Prices {
     input: u64,
     /// Price of a million completion tokens.
     output: u64,
+    /// Price of a million prompt tokens read from the provider's cache; the input
+    /// price when the operator declared none (larry#230).
+    cached: Option<u64>,
+    /// Price of a million prompt tokens written to the provider's cache; the input
+    /// price when the operator declared none (larry#230).
+    cache_write: Option<u64>,
+}
+
+/// The tokens one task spent, as the gateway reported them (larry#230).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Spent {
+    /// Prompt tokens, cached and written ones included.
+    pub(crate) prompt: u64,
+    /// Completion tokens.
+    pub(crate) completion: u64,
+    /// Prompt tokens read from the provider's cache, summed over the records that reported them.
+    pub(crate) cached: u64,
+    /// Prompt tokens written to the provider's cache, summed over the records that reported them.
+    pub(crate) written: u64,
+    /// Whether every completion of the task reported its cached tokens.
+    pub(crate) cache_reported: bool,
 }
 
 /// Why a price setting was refused.
@@ -111,7 +132,9 @@ pub(crate) fn parse_price(text: &str) -> Result<u64, PriceFault> {
 }
 
 impl Prices {
-    /// Reads `LARRY_EVAL_PRICE_IN` and `LARRY_EVAL_PRICE_OUT` through `read`.
+    /// Reads `LARRY_EVAL_PRICE_IN` and `LARRY_EVAL_PRICE_OUT` through `read`, and
+    /// the optional `LARRY_EVAL_PRICE_CACHED` and `LARRY_EVAL_PRICE_CACHE_WRITE`
+    /// (unset or empty: not declared, so the input price applies).
     pub fn from_env(read: impl Fn(&str) -> Option<String>) -> Result<Prices, PriceError> {
         let one = |variable: &'static str| -> Result<u64, PriceError> {
             let text = read(variable)
@@ -119,24 +142,64 @@ impl Prices {
                 .ok_or(PriceError::Missing { variable })?;
             parse_price(text.trim()).map_err(|fault| PriceError::Refused { variable, fault })
         };
+        let optional = |variable: &'static str| -> Result<Option<u64>, PriceError> {
+            match read(variable).filter(|value| !value.trim().is_empty()) {
+                None => Ok(None),
+                Some(text) => parse_price(text.trim())
+                    .map(Some)
+                    .map_err(|fault| PriceError::Refused { variable, fault }),
+            }
+        };
         Ok(Prices {
             input: one("LARRY_EVAL_PRICE_IN")?,
             output: one("LARRY_EVAL_PRICE_OUT")?,
+            cached: optional("LARRY_EVAL_PRICE_CACHED")?,
+            cache_write: optional("LARRY_EVAL_PRICE_CACHE_WRITE")?,
         })
     }
 
     /// The prices of a test, in micro-dollars per million tokens.
     #[cfg(test)]
     pub(crate) const fn micro(input: u64, output: u64) -> Prices {
-        Prices { input, output }
+        Prices {
+            input,
+            output,
+            cached: None,
+            cache_write: None,
+        }
     }
 
-    /// What `prompt` and `completion` tokens cost, in picodollars. Cannot overflow:
-    /// two products of a `u64` and a price under 2^34 sum below 2^99.
-    pub(crate) fn cost(self, prompt: u64, completion: u64) -> u128 {
-        u128::from(prompt)
+    /// These prices with the cache rates a test declares.
+    #[cfg(test)]
+    pub(crate) const fn with_cache(self, cached: Option<u64>, cache_write: Option<u64>) -> Prices {
+        Prices {
+            cached,
+            cache_write,
+            ..self
+        }
+    }
+
+    /// What `spent` costs, in picodollars: the prompt tokens neither cached nor
+    /// written at the input price, the cached and written ones at their own
+    /// price (the input price when none was declared), the completion at the
+    /// output price. Cannot overflow: four products of a `u64` and a price under
+    /// 2^34 sum below 2^100.
+    pub(crate) fn cost(self, spent: Spent) -> u128 {
+        let plain = spent
+            .prompt
+            .saturating_sub(spent.cached)
+            .saturating_sub(spent.written);
+        let rate = |declared: Option<u64>| match declared {
+            Some(price) => price,
+            None => self.input,
+        };
+        u128::from(plain)
             .saturating_mul(u128::from(self.input))
-            .saturating_add(u128::from(completion).saturating_mul(u128::from(self.output)))
+            .saturating_add(u128::from(spent.cached).saturating_mul(u128::from(rate(self.cached))))
+            .saturating_add(
+                u128::from(spent.written).saturating_mul(u128::from(rate(self.cache_write))),
+            )
+            .saturating_add(u128::from(spent.completion).saturating_mul(u128::from(self.output)))
     }
 }
 
@@ -176,8 +239,8 @@ pub(crate) struct Outcome {
     pub(crate) ending: Ending,
     /// Wall time, origin clone to seal, in microseconds.
     pub(crate) micros: u64,
-    /// Prompt and completion tokens, when every completion reported them.
-    pub(crate) tokens: Option<(u64, u64)>,
+    /// Prompt, completion and cache tokens, when every completion reported its counts.
+    pub(crate) tokens: Option<Spent>,
 }
 
 /// The scorecard of one arm over one set.
@@ -217,12 +280,15 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
     let rejected = count(|ending| *ending == Ending::Rejected);
     let refused = count(|ending| matches!(*ending, Ending::Refused(_)));
     let (mut prompt, mut completion, mut pico) = (0_u64, 0_u64, 0_u128);
+    let (mut cached, mut written) = (0_u64, 0_u64);
     let mut results = Vec::with_capacity(outcomes.len());
     for outcome in outcomes {
-        let cost = outcome.tokens.map(|(spent_in, spent_out)| {
-            prompt = prompt.saturating_add(spent_in);
-            completion = completion.saturating_add(spent_out);
-            let task_cost = prices.cost(spent_in, spent_out);
+        let cost = outcome.tokens.map(|spent| {
+            prompt = prompt.saturating_add(spent.prompt);
+            completion = completion.saturating_add(spent.completion);
+            cached = cached.saturating_add(spent.cached);
+            written = written.saturating_add(spent.written);
+            let task_cost = prices.cost(spent);
             pico = pico.saturating_add(task_cost);
             usd(task_cost)
         });
@@ -236,8 +302,10 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
             "outcome": ending,
             "reason": reason,
             "micros": outcome.micros,
-            "prompt_tokens": outcome.tokens.map(|pair| pair.0),
-            "completion_tokens": outcome.tokens.map(|pair| pair.1),
+            "prompt_tokens": outcome.tokens.map(|spent| spent.prompt),
+            "completion_tokens": outcome.tokens.map(|spent| spent.completion),
+            "cached_tokens": outcome.tokens.map(|spent| spent.cached),
+            "cache_write_tokens": outcome.tokens.map(|spent| spent.written),
             "cost_usd": cost,
         }));
     }
@@ -260,6 +328,14 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
             "acceptance_permille": accepted.saturating_mul(1000).checked_div(outcomes.len()),
             "prompt_tokens": prompt,
             "completion_tokens": completion,
+            "cached_tokens": cached,
+            "cache_write_tokens": written,
+            "cache_hit_permille": cached.saturating_mul(1000).checked_div(prompt),
+            "cache_complete": outcomes
+                .iter()
+                .all(|done| done.tokens.is_none_or(|spent| spent.cache_reported)),
+            "price_cached_declared": prices.cached.is_some(),
+            "price_cache_write_declared": prices.cache_write.is_some(),
             "cost_usd": usd(pico),
             "cost_picousd": pico.to_string(),
             "cost_per_accepted_task_usd": per_accepted.map(usd),

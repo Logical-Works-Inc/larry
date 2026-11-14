@@ -11,7 +11,9 @@ use std::error::Error;
 use lgwks_std::json::{Map, Value, json};
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::score::{Ending, Outcome, PriceFault, Prices, card, parse_price, percentile, usd};
+use super::score::{
+    Ending, Outcome, PriceFault, Prices, Spent, card, parse_price, percentile, usd,
+};
 use super::set::{SetError, TaskSet};
 use crate::executor::TaskError;
 
@@ -157,6 +159,17 @@ fn reference_cost(prompt: u64, completion: u64, input: u64, output: u64) -> Opti
         .checked_add(u128::from(completion).checked_mul(u128::from(output))?)
 }
 
+/// A spend with no cache report: every prompt token at the input price.
+const fn plain(prompt: u64, completion: u64) -> Spent {
+    Spent {
+        prompt,
+        completion,
+        cached: 0,
+        written: 0,
+        cache_reported: true,
+    }
+}
+
 /// giant-and-empty and saboteur: seeded prices to the bound and token counts to
 /// `u64::MAX` cost what wide arithmetic says, print back to the same picodollars,
 /// and a scorecard over seeded outcomes keeps every invariant: the counts add up,
@@ -171,7 +184,11 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
         let prices = Prices::micro(input, output);
         let (prompt, completion) = (rng.next_u64(), rng.next_u64());
         let wide = reference_cost(prompt, completion, input, output).ok_or("reference overflow")?;
-        assert_eq!(prices.cost(prompt, completion), wide, "seed {seed}: cost");
+        assert_eq!(
+            prices.cost(plain(prompt, completion)),
+            wide,
+            "seed {seed}: cost"
+        );
         assert_eq!(
             read_usd(&usd(wide)),
             Some(wide),
@@ -188,11 +205,11 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
             let tokens = match ending {
                 Ending::Refused(_) => None,
                 _ if rng.below(10)? == 0 => None,
-                _ => Some((rng.below(1 << 24)?, rng.below(1 << 20)?)),
+                _ => Some(plain(rng.below(1 << 24)?, rng.below(1 << 20)?)),
             };
-            if let Some((spent_in, spent_out)) = tokens {
-                let task_cost =
-                    reference_cost(spent_in, spent_out, input, output).ok_or("overflow")?;
+            if let Some(spent) = tokens {
+                let task_cost = reference_cost(spent.prompt, spent.completion, input, output)
+                    .ok_or("overflow")?;
                 known = known.checked_add(task_cost).ok_or("overflow")?;
             }
             outcomes.push(Outcome {
@@ -255,6 +272,181 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
                 "seed {seed}: a refusal says why"
             );
         }
+    }
+    Ok(())
+}
+
+/// A seeded spend of `prompt` tokens whose cached and written counts fit inside it.
+fn spend_within(rng: &mut Seeded, prompt: u64, reported: bool) -> Result<Spent, DrawError> {
+    let cached = rng.below(prompt.saturating_add(1))?;
+    let written = rng.below(prompt.saturating_sub(cached).saturating_add(1))?;
+    Ok(Spent {
+        prompt,
+        completion: rng.below(1 << 20)?,
+        cached,
+        written,
+        cache_reported: reported,
+    })
+}
+
+/// The reference cost of `spent` by checked wide arithmetic: plain prompt tokens at
+/// `input`, cached and written ones at their declared rate or `input`, completion at `output`.
+fn reference_cache_cost(
+    spent: Spent,
+    rates: (u64, u64),
+    declared: (Option<u64>, Option<u64>),
+) -> Option<u128> {
+    let (input, output) = rates;
+    let price = |own: Option<u64>| match own {
+        Some(value) => value,
+        None => input,
+    };
+    let plain_tokens = u128::from(spent.prompt)
+        .checked_sub(u128::from(spent.cached))?
+        .checked_sub(u128::from(spent.written))?;
+    plain_tokens
+        .checked_mul(u128::from(input))?
+        .checked_add(u128::from(spent.cached).checked_mul(u128::from(price(declared.0)))?)?
+        .checked_add(u128::from(spent.written).checked_mul(u128::from(price(declared.1)))?)?
+        .checked_add(u128::from(spent.completion).checked_mul(u128::from(output))?)
+}
+
+/// giant-and-empty, liar-upstream and fat-finger: for 256 seeds a spend whose cached and
+/// written tokens fit the prompt (up to `u64::MAX`), priced with and without the two
+/// optional cache rates, costs what wide checked arithmetic says; an undeclared rate is
+/// the input rate; the card's cached tokens, written tokens and cache-hit permille equal
+/// the reference sums; the card names which rates were declared; and one outcome that did
+/// not report its cached tokens makes `cache_complete` false. Catches a cached token
+/// billed at the full input price, a written one billed twice, a cache-hit rate computed
+/// over the wrong total, and a card that calls a partial report complete.
+#[test]
+fn sim_cached_tokens_are_priced_at_their_own_rate() -> TestResult {
+    for seed in 0..256 {
+        let mut rng = Seeded::from_seed(seed);
+        let (input, output) = (rng.below(10_000_000_001)?, rng.below(10_000_000_001)?);
+        let cached_rate = match rng.below(2)? {
+            0 => None,
+            _ => Some(rng.below(10_000_000_001)?),
+        };
+        let write_rate = match rng.below(2)? {
+            0 => None,
+            _ => Some(rng.below(10_000_000_001)?),
+        };
+        let prices = Prices::micro(input, output).with_cache(cached_rate, write_rate);
+        let ceiling = if rng.below(8)? == 0 {
+            u64::MAX
+        } else {
+            rng.below(1 << 40)?
+        };
+        let spent = spend_within(&mut rng, ceiling, true)?;
+        let want = reference_cache_cost(spent, (input, output), (cached_rate, write_rate))
+            .ok_or("reference overflow")?;
+        assert_eq!(prices.cost(spent), want, "seed {seed}: cost of {spent:?}");
+        let at_input = Prices::micro(input, output)
+            .with_cache(cached_rate.or(Some(input)), write_rate.or(Some(input)));
+        assert_eq!(
+            prices.cost(spent),
+            at_input.cost(spent),
+            "seed {seed}: an undeclared rate is the input rate"
+        );
+        let mut outcomes = Vec::new();
+        let (mut prompt_sum, mut cached_sum, mut written_sum, mut known) =
+            (0_u128, 0_u128, 0_u128, 0_u128);
+        for index in 0..rng.index(12)? {
+            let reported = rng.below(5)? != 0;
+            let size = rng.below(1 << 40)?;
+            let one = spend_within(&mut rng, size, reported)?;
+            let tokens = if rng.below(6)? == 0 { None } else { Some(one) };
+            if let Some(counted) = tokens {
+                prompt_sum = prompt_sum.saturating_add(u128::from(counted.prompt));
+                cached_sum = cached_sum.saturating_add(u128::from(counted.cached));
+                written_sum = written_sum.saturating_add(u128::from(counted.written));
+                let task =
+                    reference_cache_cost(counted, (input, output), (cached_rate, write_rate))
+                        .ok_or("overflow")?;
+                known = known.saturating_add(task);
+            }
+            outcomes.push(Outcome {
+                id: format!("t{index}"),
+                ending: Ending::Accepted,
+                micros: 1,
+                tokens,
+            });
+        }
+        let all_reported = outcomes
+            .iter()
+            .all(|done| done.tokens.is_none_or(|counted| counted.cache_reported));
+        let scored = card("set", "model", prices, &outcomes);
+        let sheet = scored.json();
+        assert_eq!(
+            sheet["cached_tokens"].as_u64(),
+            Some(u64::try_from(cached_sum)?),
+            "seed {seed}: cached tokens"
+        );
+        assert_eq!(
+            sheet["cache_write_tokens"].as_u64(),
+            Some(u64::try_from(written_sum)?),
+            "seed {seed}: written tokens"
+        );
+        let permille = match cached_sum.saturating_mul(1000).checked_div(prompt_sum) {
+            Some(share) => Some(u64::try_from(share)?),
+            None => None,
+        };
+        assert_eq!(
+            sheet["cache_hit_permille"].as_u64(),
+            permille,
+            "seed {seed}: cache hit permille"
+        );
+        assert_eq!(
+            sheet["cost_picousd"],
+            json!(known.to_string()),
+            "seed {seed}: the total prices each spend at its own rates"
+        );
+        assert_eq!(
+            sheet["cache_complete"],
+            json!(all_reported),
+            "seed {seed}: complete only when every outcome reported"
+        );
+        assert_eq!(
+            sheet["price_cached_declared"],
+            json!(cached_rate.is_some()),
+            "seed {seed}: the cached rate's declaration is on the card"
+        );
+        assert_eq!(
+            sheet["price_cache_write_declared"],
+            json!(write_rate.is_some()),
+            "seed {seed}: the write rate's declaration is on the card"
+        );
+        for (result, outcome) in sheet["results"]
+            .as_array()
+            .ok_or("results")?
+            .iter()
+            .zip(&outcomes)
+        {
+            assert_eq!(
+                result["cached_tokens"].as_u64(),
+                outcome.tokens.map(|counted| counted.cached),
+                "seed {seed}: each result names its cached tokens"
+            );
+            assert_eq!(
+                result["cache_write_tokens"].as_u64(),
+                outcome.tokens.map(|counted| counted.written),
+                "seed {seed}: each result names its written tokens"
+            );
+        }
+        let silenced = match outcomes.iter_mut().find_map(|done| done.tokens.as_mut()) {
+            Some(counted) => {
+                counted.cache_reported = false;
+                true
+            }
+            None => false,
+        };
+        let rescored = card("set", "model", prices, &outcomes);
+        assert_eq!(
+            rescored.json()["cache_complete"],
+            json!(!silenced),
+            "seed {seed}: one outcome that did not report makes the card incomplete"
+        );
     }
     Ok(())
 }

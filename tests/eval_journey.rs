@@ -367,6 +367,8 @@ fn check_card(seed: u64, arm: &Arm, scored: &Scored) -> TestResult {
         card["cost_complete"], true,
         "every completion reported usage"
     );
+    let cache = [&card["cache_complete"], &card["cached_tokens"]];
+    assert_eq!(cache, [&json!(false), &json!(0)], "seed {seed}: cache keys");
     let prompt = number(card, "prompt_tokens")?;
     let completion = number(card, "completion_tokens")?;
     assert_eq!(
@@ -417,8 +419,10 @@ fn two_arms_score_one_set_and_a_rerun_replays_the_same_card() -> TestResult {
     for seed in 0..4_u64 {
         let mut traces = Vec::new();
         let mut cards = Vec::new();
+        // One state directory is one tenant: the prompt names its cache partition, so a
+        // rerun that must replay the same gateway trace runs in the same directory.
+        let state = Scratch::new()?;
         for arm in [&CLAUDE, &FLASH, &CLAUDE] {
-            let state = Scratch::new()?;
             let scored = arm_on_seed(seed, arm, &set, &state.path)?;
             check_card(seed, arm, &scored)?;
             assert_eq!(
@@ -608,8 +612,9 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
         .collect();
     let set = json!({"name": "liars", "tasks": tasks}).to_string();
     let mut replays = Vec::new();
+    // The same tenant both times: the prompt names its cache partition (larry#230).
+    let state = Scratch::new()?;
     for _ in 0..2 {
-        let state = Scratch::new()?;
         let config = Config {
             script: LIES.iter().map(|lie| lie.0).collect(),
             ..Config::seeded(23)
