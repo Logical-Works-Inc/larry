@@ -460,7 +460,11 @@ where
                 continue;
             };
             report.admitted.push(id);
-            self.reduce(&command, display.as_ref(), at, report)?;
+            let held = Admitted::new(proposal.run, command, display);
+            // A command that fails to record its acceptance returns to the
+            // back of the pending set: it is journaled, so it must be held
+            // (larry#219).
+            self.reduce(held, self.admitted.len(), at, report)?;
         }
         Ok(())
     }

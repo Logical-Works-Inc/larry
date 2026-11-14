@@ -51,6 +51,21 @@ pub(super) struct Admitted {
     display: Option<DisplayedEffect>,
 }
 
+impl Admitted {
+    /// A pending entry for `command`, which targets `run`.
+    pub(super) const fn new(
+        run: RunId,
+        command: Command,
+        display: Option<DisplayedEffect>,
+    ) -> Self {
+        Self {
+            run,
+            command,
+            display,
+        }
+    }
+}
+
 /// The run `command` names: its question's or answer's (E30), or its
 /// proposal's.
 fn target(command: &Command) -> Result<RunId, RuntimeError> {
@@ -313,34 +328,66 @@ where
                 index = index.saturating_add(1);
                 continue;
             }
+            // The tenant is checked while the command still sits in the set,
+            // so a refusal here leaves it pending rather than dropped.
+            self.ensure_run_tenant(run, next.command.tenant())?;
             let Some(next) = self.admitted.remove(index) else {
                 break;
             };
             left = left.saturating_sub(1);
-            self.ensure_run_tenant(run, next.command.tenant())?;
             report.admitted.push(next.command.id());
-            self.reduce(&next.command, next.display.as_ref(), at, report)?;
+            self.reduce(next, index, at, report)?;
         }
         Ok(left)
     }
 
-    /// Records `command`'s acceptance and folds it: work is gated and
-    /// reserved, a cancellation requested, a question's run tracked for its
-    /// tenant. A correction's or an answer's acceptance is the whole of its
-    /// promotion: the journal is where its consumer reads it, and the answer
-    /// was folded into the question book at admission (E30).
+    /// Records `held`'s acceptance and folds it: work is gated and reserved, a
+    /// cancellation requested, a question's run tracked for its tenant. A
+    /// correction's or an answer's acceptance is the whole of its promotion:
+    /// the journal is where its consumer reads it, and the answer was folded
+    /// into the question book at admission (E30).
+    ///
+    /// The journal tells a reduced command from an unreduced one by its
+    /// `CommandAccepted` fact, and a command journaled without that fact is
+    /// pending (ADR 0025). When recording the acceptance fails, `held` goes
+    /// back into the pending set at `place` before the error returns, so the
+    /// next tick, or a restore, reduces it once; a retry of it is never a
+    /// duplicate of a command nothing holds (larry#219, ADR 0041). The set
+    /// keeps the slot the command left, so it stays within `MAX_READY_WORK`.
+    /// A failure after the acceptance is recorded is the fold's own record:
+    /// the command is reduced as far as the journal says.
+    ///
+    /// # Errors
+    ///
+    /// The acceptance record's refusal (a full journal, a latched one), or the
+    /// fold's own refusal after it.
     pub(super) fn reduce(
         &mut self,
-        command: &Command,
-        display: Option<&DisplayedEffect>,
+        held: Admitted,
+        place: usize,
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
+        let Admitted {
+            run,
+            command,
+            display,
+        } = held;
         let (id, tenant, kind) = (command.id(), command.tenant(), command.content().kind());
-        let run = target(command)?;
-        self.record_command_accepted(id, tenant, kind, run)?;
+        if let Err(error) = self.record_command_accepted(id, tenant, kind, run) {
+            let place = place.min(self.admitted.len());
+            self.admitted.insert(
+                place,
+                Admitted {
+                    run,
+                    command,
+                    display,
+                },
+            );
+            return Err(error);
+        }
         match kind {
-            CommandKind::Submit => self.submit_work(command, display, at, report),
+            CommandKind::Submit => self.submit_work(&command, display.as_ref(), at, report),
             CommandKind::Cancel => self.request_cancellation(tenant, run),
             CommandKind::Ask => self.track_run(run, tenant),
             CommandKind::Steer | CommandKind::Answer => Ok(()),
