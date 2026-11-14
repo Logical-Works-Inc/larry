@@ -14,6 +14,7 @@ use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::RunState;
 use lgwks_bot::clock::Clock;
+use lgwks_bot::journal::JournalError;
 
 use crate::MAX_READY_WORK;
 use crate::error::RuntimeError;
@@ -21,6 +22,10 @@ use crate::journal::{Journal, JournalEntry};
 use crate::owner::fixture::ScriptedOwner;
 use crate::payload::{CommandAcceptedPayload, WorkProposal};
 use crate::projection::{FoldProjection, ProjectionBackend};
+use crate::protocol::{
+    MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, ProtocolCapability, ProtocolOffer,
+    ProtocolVersionRange,
+};
 use crate::runtime::{Runtime, RuntimeSettings, restore};
 
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -506,6 +511,169 @@ fn sim_a_sync_refusal_admits_nothing_and_a_restore_admits_once() -> Outcome {
         assert!(
             restored.tick()?.admitted().is_empty(),
             "seed {seed}: the command is never admitted twice"
+        );
+        drop(restored);
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+/// The offer a headless submitter presents, the shape the executor's gate offers.
+fn offer(tenant: TenantId) -> ProtocolOffer {
+    ProtocolOffer::new(
+        tenant,
+        ProtocolVersionRange::new(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION),
+        BTreeSet::from([ProtocolCapability::SubmitCommand]),
+        true,
+        false,
+    )
+}
+
+/// Whether `result` is the typed refusal a journal whose sync was refused gives
+/// every later write: the outcome of that sync is unknown.
+fn sync_refused<T>(result: &Result<T, RuntimeError>) -> bool {
+    matches!(
+        result,
+        Err(RuntimeError::Durable(JournalError::OutcomeUnknown { .. }))
+    )
+}
+
+/// larry#182 defect 7 under a retry, through the executor's ingress: a sync
+/// refusal leaves the entry on the file, the process refuses every later write
+/// of that journal with the typed error, so the retry runs nothing; another
+/// tenant's journal in the same process is unaffected; a restore over the same
+/// file admits the command exactly once, and a second retry admits nothing.
+#[test]
+fn sim_a_retry_after_a_sync_refusal_is_refused_and_a_restore_admits_once() -> Outcome {
+    for seed in 0..64_u64 {
+        let (path, id, first) = seeded_submit(seed, "retrysync")?;
+        let tenant = first.tenant();
+        assert!(
+            offer(tenant).serves_questions().is_err(),
+            "seed {seed}: the executor's offer is headless, so it serves no question"
+        );
+        let settings = settings()?;
+        let journal = Journal::open(&path, settings.journal_capacity)?.lost_acknowledgement();
+        let mut runtime: Rt = restore(settings, ScriptedOwner::new(), clock(), journal)?;
+        let refused = runtime.submit_protocol(&offer(tenant), first.clone(), None);
+        assert!(
+            matches!(refused, Err(RuntimeError::Durable(_))),
+            "seed {seed}: the admission returns the sync refusal: {refused:?}"
+        );
+        let retry = runtime.submit_protocol(&offer(tenant), first.clone(), None);
+        assert!(
+            sync_refused(&retry),
+            "seed {seed}: the retry is refused with the typed error: {retry:?}"
+        );
+        assert!(pending(&runtime).is_empty(), "seed {seed}: nothing pending");
+        assert!(
+            runtime.tick()?.admitted().is_empty(),
+            "seed {seed}: the retry executes nothing"
+        );
+        assert!(
+            runtime.owner().dispatched().is_empty(),
+            "seed {seed}: the owner is never reached"
+        );
+
+        // Another tenant's journal, opened while this one is refused, admits.
+        let (other_path, _, other) = seeded_submit(seed + 1_000, "retryother")?;
+        let mut elsewhere = durable(ScriptedOwner::new(), &other_path)?;
+        assert_eq!(
+            elsewhere.ack(other)?,
+            CommandAcceptance::Initial,
+            "seed {seed}: another tenant is unaffected"
+        );
+        drop(elsewhere);
+        std::fs::remove_file(&other_path)?;
+        drop(runtime);
+
+        // A restore over the same file admits the command once.
+        let mut restored = durable(ScriptedOwner::new(), &path)?;
+        assert_eq!(
+            restored.tick()?.admitted(),
+            &[id],
+            "seed {seed}: the restore admits the journaled command once"
+        );
+        assert!(
+            restored.tick()?.admitted().is_empty(),
+            "seed {seed}: never admitted twice"
+        );
+        assert_eq!(
+            accepted(restored.journal())?,
+            [id],
+            "seed {seed}: reduced once"
+        );
+
+        // A second retry after the successful one admits nothing.
+        assert_eq!(
+            restored.ack(first)?,
+            CommandAcceptance::DuplicateReplay,
+            "seed {seed}: a later retry is a duplicate"
+        );
+        assert!(
+            pending(&restored).is_empty(),
+            "seed {seed}: nothing pending"
+        );
+        assert!(
+            restored.tick()?.admitted().is_empty(),
+            "seed {seed}: the second retry executes nothing"
+        );
+        drop(restored);
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+/// The same refusal reached through the ready queue, the path a `submit` takes:
+/// the queued retry is refused by the tick's own journal write, nothing runs,
+/// and a restore admits the journaled command once; a queued retry after that
+/// is a duplicate, not a second admission.
+#[test]
+fn sim_a_submit_retry_after_a_sync_refusal_is_refused_and_a_restore_admits_once() -> Outcome {
+    for seed in 0..64_u64 {
+        let (path, id, first) = seeded_submit(seed, "queuesync")?;
+        let settings = settings()?;
+        let journal = Journal::open(&path, settings.journal_capacity)?.lost_acknowledgement();
+        let mut runtime: Rt = restore(settings, ScriptedOwner::new(), clock(), journal)?;
+        let refused = runtime.ack(first.clone());
+        assert!(
+            matches!(refused, Err(RuntimeError::Durable(_))),
+            "seed {seed}: the admission returns the sync refusal: {refused:?}"
+        );
+        runtime.submit(first.clone())?;
+        let tick = runtime.tick();
+        assert!(
+            sync_refused(&tick),
+            "seed {seed}: the queued retry is refused by the tick: {tick:?}"
+        );
+        assert!(pending(&runtime).is_empty(), "seed {seed}: nothing pending");
+        assert!(
+            runtime.owner().dispatched().is_empty(),
+            "seed {seed}: the owner is never reached"
+        );
+        drop(runtime);
+
+        let mut restored = durable(ScriptedOwner::new(), &path)?;
+        assert_eq!(
+            restored.tick()?.admitted(),
+            &[id],
+            "seed {seed}: the restore admits the journaled command once"
+        );
+        assert_eq!(
+            accepted(restored.journal())?,
+            [id],
+            "seed {seed}: reduced once"
+        );
+        restored.submit(first)?;
+        let again = restored.tick()?;
+        assert_eq!(
+            again.duplicates(),
+            &[id],
+            "seed {seed}: a later retry is a duplicate"
+        );
+        assert!(
+            again.admitted().is_empty(),
+            "seed {seed}: never admitted twice"
         );
         drop(restored);
         std::fs::remove_file(&path)?;

@@ -16,6 +16,8 @@ use std::fmt;
 use lgwks_std::json::{self, Value};
 use lgwks_std::sign::{self, PublicKey, SecretKey, Signature};
 
+use super::workspace::DIFF_LIMIT;
+
 /// Domain tag: a seal over a Larry receipt never verifies as any other record.
 const TAG: &[u8] = b"larry.receipt.v1";
 
@@ -23,10 +25,13 @@ const TAG: &[u8] = b"larry.receipt.v1";
 const ALGORITHM: &str = "ed25519";
 
 /// The report member that carries the receipt.
-const RECEIPT: &str = "receipt";
+pub(crate) const RECEIPT: &str = "receipt";
 
 /// The report member that carries the verdict.
 const ACCEPTED: &str = "accepted";
+
+/// The report member that says the diff is not the whole change (larry#206).
+const DIFF_TRUNCATED: &str = "diff_truncated";
 
 /// Largest report `verify` reads, in bytes (256 MiB). A report holds at most 16
 /// commands with 1 MiB of stdout and 1 MiB of stderr each, plus a 1 MiB diff:
@@ -69,6 +74,8 @@ pub enum ReceiptError {
     Mismatch(sign::VerifyError),
     /// The sealed verdict contradicts the sealed results, or names no task.
     Inconsistent,
+    /// The receipt claims accepted over a diff it says it cut (larry#206).
+    TruncatedDiffAccepted,
 }
 
 impl ReceiptError {
@@ -90,6 +97,7 @@ impl ReceiptError {
             Self::SignatureNotHex(_) => "receipt signature is not 128 hex characters",
             Self::Mismatch(_) => "receipt does not match the report: it was altered",
             Self::Inconsistent => "receipt verdict contradicts the sealed results or names no task",
+            Self::TruncatedDiffAccepted => "receipt claims accepted over a truncated diff",
         }
     }
 }
@@ -122,7 +130,8 @@ impl Error for ReceiptError {
             | Self::MissingKey
             | Self::UntrustedKey
             | Self::MissingSignature
-            | Self::Inconsistent => None,
+            | Self::Inconsistent
+            | Self::TruncatedDiffAccepted => None,
         }
     }
 }
@@ -151,7 +160,7 @@ impl Verdict {
     }
 }
 
-/// Whether a report body is an accepted run: no denial, a diff, and every
+/// Whether a report body is an accepted run: no denial, a diff that is the whole change, and every
 /// command exited 0 inside its timeout. Anything missing or mistyped is not.
 #[must_use]
 fn acceptance(body: &Value) -> bool {
@@ -160,11 +169,27 @@ fn acceptance(body: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(Vec::is_empty);
     let has_diff = body.get("diff").is_some_and(Value::is_string);
+    let whole_diff = !diff_cut(body);
     let all_passed = body
         .get("results")
         .and_then(Value::as_array)
         .is_some_and(|results| results.iter().all(passed));
-    none_denied && has_diff && all_passed
+    none_denied && has_diff && whole_diff && all_passed
+}
+
+/// Whether the sealed diff is not the whole change (larry#206). A report that carries
+/// `diff_truncated` says so. One sealed before the member existed is cut only when its diff
+/// reaches the limit, because its length cannot show whether anything was dropped. A member
+/// that is not a boolean is cut: the refusal fails closed.
+#[must_use]
+fn diff_cut(body: &Value) -> bool {
+    match body.get(DIFF_TRUNCATED) {
+        None => body
+            .get("diff")
+            .and_then(Value::as_str)
+            .is_none_or(|diff| diff.len() >= DIFF_LIMIT),
+        Some(member) => member.as_bool() != Some(false),
+    }
 }
 
 /// Whether one command result exited 0 inside its timeout.
@@ -245,7 +270,11 @@ pub fn verify(bytes: &[u8], trusted: &PublicKey) -> Result<Verdict, ReceiptError
     sign::verify_strict(trusted, TAG, body.to_string().as_bytes(), &signature)
         .map_err(ReceiptError::Mismatch)?;
     let accepted = acceptance(&body);
-    if body.get(ACCEPTED).and_then(Value::as_bool) != Some(accepted) {
+    let claimed = body.get(ACCEPTED).and_then(Value::as_bool);
+    if claimed == Some(true) && diff_cut(&body) {
+        return Err(ReceiptError::TruncatedDiffAccepted);
+    }
+    if claimed != Some(accepted) {
         return Err(ReceiptError::Inconsistent);
     }
     let task_id = body

@@ -3,8 +3,10 @@
 
 mod author;
 mod gate;
+mod identity;
 mod ledger;
 mod receipt;
+mod recovery;
 mod run;
 mod session;
 mod task;
@@ -13,7 +15,6 @@ mod workspace;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) use author::is_writable_path;
@@ -22,7 +23,7 @@ use larry_runtime::error::RuntimeError;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 use run::run_command;
-use workspace::{Workspace, sweep};
+use workspace::{Workspace, report_members, sweep};
 
 use crate::model::{ModelClient, ModelConfig, ModelError};
 pub use author::AuthorFault;
@@ -42,9 +43,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 
 /// Largest accepted command timeout, in milliseconds (one day).
 const MAX_TIMEOUT_MS: u64 = 86_400_000;
-
-/// Characters of the task's BLAKE3 digest that name a run.
-const TASK_PREFIX_CHARS: usize = 16;
 
 /// Why `larry exec` failed; each variant keeps its cause.
 #[derive(Debug)]
@@ -111,6 +109,9 @@ pub enum ExecError {
     KeyStore(std::io::Error),
     /// The OS refused entropy for a new receipt key; there is no weaker fallback.
     Entropy(lgwks_std::random::EntropyError),
+    /// A run id could not be minted: the wall clock or the OS entropy refused, and
+    /// no value is substituted for it (larry#182 defect 3).
+    Id(lgwks_std::id::V7Error),
     /// The receipt key row is missing right after its insert.
     KeyMissing,
     /// The stored receipt key seed is not 32 bytes.
@@ -174,6 +175,7 @@ impl fmt::Display for ExecError {
             Self::Workspace(ref cause) => write!(out, "exec workspace: {cause}"),
             Self::KeyStore(ref cause) => write!(out, "exec receipt key store: {cause}"),
             Self::Entropy(ref cause) => write!(out, "exec receipt key entropy: {cause}"),
+            Self::Id(ref cause) => write!(out, "exec run id: {cause}"),
             Self::KeyMissing => out.write_str("exec receipt key row is missing after its insert"),
             Self::KeySeedLength(ref cause) => {
                 write!(out, "exec receipt key seed is not 32 bytes: {cause}")
@@ -212,6 +214,7 @@ impl std::error::Error for ExecError {
             Self::Workspace(ref cause) => Some(cause),
             Self::KeyStore(ref cause) => Some(cause),
             Self::Entropy(ref cause) => Some(cause),
+            Self::Id(ref cause) => Some(cause),
             Self::Receipt(ref cause) => Some(cause),
             Self::KeySeedLength(ref cause) => Some(cause),
             Self::ModelConfig(ref cause) => Some(cause),
@@ -276,6 +279,9 @@ pub struct Report {
     json: lgwks_std::json::Value,
     /// Whether the run was accepted.
     accepted: bool,
+    /// The sealed report exactly as it was printed, so a retry answers with the
+    /// bytes the ledger recorded rather than a re-rendering of them.
+    bytes: Vec<u8>,
 }
 
 impl Report {
@@ -285,16 +291,57 @@ impl Report {
         &self.json
     }
 
+    /// The sealed report's exact bytes, the value the ledger keeps.
+    #[must_use]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
     /// Whether the run was accepted: no denial, a diff, every command passed.
     #[must_use]
     pub const fn accepted(&self) -> bool {
         self.accepted
     }
 
+    /// Whether this report carries a seal at all: one the gate could not make
+    /// durable is never a record a retry may answer from (larry#182).
+    #[must_use]
+    pub(crate) fn carries_a_seal(&self) -> bool {
+        self.json.get(receipt::RECEIPT).is_some()
+    }
+
     /// Seals a report body under `key`.
     fn sealed(body: lgwks_std::json::Value, key: &lgwks_std::sign::SecretKey) -> Report {
         let (json, accepted) = receipt::seal(body, key);
-        Report { json, accepted }
+        let bytes = json.to_string().into_bytes();
+        Report {
+            json,
+            accepted,
+            bytes,
+        }
+    }
+
+    /// The report a ledger recorded, re-derived rather than trusted: its seal is
+    /// checked under this state directory's key and its verdict re-derived, so a
+    /// retry never answers with a record this state directory did not seal
+    /// (larry#182 defect 3).
+    ///
+    /// # Errors
+    ///
+    /// [`ExecError::Receipt`] when the recorded bytes are not a report this
+    /// directory's key seals.
+    pub(crate) fn parse(
+        bytes: &[u8],
+        key: &lgwks_std::sign::SecretKey,
+    ) -> Result<Report, ExecError> {
+        let verdict = receipt::verify(bytes, &key.public_key()).map_err(ExecError::Receipt)?;
+        let json = lgwks_std::json::from_slice(bytes)
+            .map_err(|cause| ExecError::Receipt(ReceiptError::Malformed(cause)))?;
+        Ok(Report {
+            json,
+            accepted: verdict.accepted(),
+            bytes: bytes.to_vec(),
+        })
     }
 }
 
@@ -377,10 +424,18 @@ const fn backoff(wait: Duration) -> bool {
 /// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let (ledger, key) = prepare(settings)?;
-    let task_id = fresh_task_id(task.bytes());
+    let task_id = identity::run_id(task, &settings.state_dir)?;
     let task_digest = digest_hex(task.bytes());
+    // A task that names an idempotency key is the client's statement that a retry
+    // of it is the same request, so a retry whose record the ledger already holds
+    // is answered from that record and the body never runs a second time
+    // (larry#182 defect 3).
+    let resumable = task.idempotency_key().is_some();
+    if resumable && let Some(earlier) = ledger.report(&task_id, MAX_REPORT_BYTES)? {
+        return Report::parse(&earlier, &key);
+    }
     if task.has_model_commands() {
-        return Ok(Report::sealed(
+        let report = Report::sealed(
             lgwks_std::json::json!({
                 "task_id": task_id,
                 "task_digest": task_digest,
@@ -389,27 +444,41 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
                 "denied": [MODEL_COMMANDS_DENIED],
             }),
             &key,
-        ));
+        );
+        if resumable {
+            ledger.keep_report(&task_id, &task_digest, report.bytes())?;
+        }
+        return Ok(report);
     }
     let subject = gate::Subject {
         required: gate::required_scopes(task),
         path: task.repo(),
         bytes: task.bytes(),
     };
-    gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
+    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
         run_task(task, settings, &task_id, &task_digest, &ledger, &key)
-    })
+    })?;
+    if resumable && report.carries_a_seal() {
+        ledger.keep_report(&task_id, &task_digest, report.bytes())?;
+    }
+    Ok(report)
 }
 
 /// What every run does first: opens the ledger and its receipt key, reaps the process
 /// groups a killed executor left, sweeps dead workspaces, and settles every journal a
-/// killed executor left before anything new runs (larry#75).
+/// killed executor left before anything new runs (larry#75). A run is live while a
+/// process holds its journal's lock, so no sweep and no recovery reaps a concurrent
+/// run's evidence, and neither asks for a process id (larry#182 defect 3).
 fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), ExecError> {
     let ledger = Ledger::open(&settings.state_dir)?;
     let key = ledger.signing_key()?;
     ledger.reap()?;
-    sweep(&settings.state_dir, &ledger.live_tasks()?)?;
-    gate::recover(&settings.state_dir, &settings.policy)?;
+    let state = settings.state_dir.as_path();
+    let policy = &settings.policy;
+    sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
+        recovery::journal_live(state, policy, task)
+    })?;
+    recovery::recover(&settings.state_dir, &settings.policy)?;
     Ok((ledger, key))
 }
 
@@ -460,10 +529,15 @@ fn run_task(
     let mut body = lgwks_std::json::json!({
         "task_id": task_id,
         "task_digest": task_digest,
-        "diff": diff,
         "results": results,
         "denied": [],
     });
+    // The diff members name whether the diff is the whole change (larry#206).
+    if let Some(object) = body.as_object_mut() {
+        for (name, member) in report_members(diff) {
+            object.insert(name.to_owned(), member);
+        }
+    }
     // Only a briefed run names what the model wrote, so a plain run's report keeps its shape.
     if let Some(records) = authored
         && let Some(object) = body.as_object_mut()
@@ -481,13 +555,4 @@ fn digest_hex(bytes: &[u8]) -> String {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
     hasher.finalize().to_hex()
-}
-
-/// Names one run: the task's BLAKE3 prefix, the process id and a per-process counter.
-fn fresh_task_id(bytes: &[u8]) -> String {
-    static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let digest = digest_hex(bytes);
-    let prefix: String = digest.chars().take(TASK_PREFIX_CHARS).collect();
-    let run = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{}-{run}", std::process::id())
 }

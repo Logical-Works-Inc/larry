@@ -18,8 +18,10 @@ use lgwks_std::json::Value;
 /// What every test here returns.
 pub type TestResult = Result<(), Box<dyn Error>>;
 
-/// Polls a condition at most this many times before the journey gives up.
-pub const POLL_LIMIT: u32 = 100_000;
+/// Polls a condition at most this many times before the journey gives up. The
+/// gates run every journey binary at once, so a child's clone and its first
+/// command can wait seconds for a core before it writes its first marker.
+pub const POLL_LIMIT: u32 = 2_000_000;
 
 #[path = "origin.rs"]
 mod origin;

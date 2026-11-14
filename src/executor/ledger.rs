@@ -30,6 +30,14 @@ const TENANT_KEY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS tenant_keys(tenant T
 /// Owner-only mode for the store and its write-ahead files: the seed is the key.
 const OWNER_ONLY: u32 = 0o600;
 
+/// Schema of the sealed-report table, version 4 (larry#182 defect 3): one row per
+/// keyed run id, holding the report exactly as it was printed. A client retry
+/// whose key derives that id is answered from this row, so the body never runs a
+/// second time. The row is the run's own evidence, so it is never overwritten by
+/// a later run of the same id.
+const REPORT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS reports(task_id TEXT PRIMARY KEY, \
+    task_digest TEXT NOT NULL, report BLOB NOT NULL);";
+
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
 
@@ -74,8 +82,12 @@ impl Ledger {
             .open(&database)
             .map_err(ExecError::KeyStore)?;
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
-        lgwks_deps::sqlite::migrate(&conn, 3, &[SCHEMA, KEY_SCHEMA, TENANT_KEY_SCHEMA])
-            .map_err(ExecError::Ledger)?;
+        lgwks_deps::sqlite::migrate(
+            &conn,
+            4,
+            &[SCHEMA, KEY_SCHEMA, TENANT_KEY_SCHEMA, REPORT_SCHEMA],
+        )
+        .map_err(ExecError::Ledger)?;
         for name in STORE_FILES {
             match std::fs::set_permissions(
                 state_dir.join(name),
@@ -176,6 +188,52 @@ impl Ledger {
         Ok(removed > 0)
     }
 
+    /// The sealed report `task_id` already recorded, if this state directory holds
+    /// one no longer than `limit` bytes. A keyed run id a retry derives reads its
+    /// earlier run's report here, so the body is never dispatched twice (larry#182).
+    ///
+    /// # Errors
+    ///
+    /// [`ExecError::Sql`] when the statement fails, and [`ExecError::Receipt`] when
+    /// the recorded bytes are longer than `limit`, refused rather than truncated.
+    pub(crate) fn report(&self, task_id: &str, limit: usize) -> Result<Option<Vec<u8>>, ExecError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT report FROM reports WHERE task_id = ?1",
+                rusqlite::params![task_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(ExecError::Sql)?;
+        match row {
+            Some(recorded) if recorded.len() > limit => {
+                Err(ExecError::Receipt(super::ReceiptError::TooLarge {
+                    len: recorded.len(),
+                }))
+            }
+            other => Ok(other),
+        }
+    }
+
+    /// Records `report` as `task_id`'s evidence, unless that id already holds one:
+    /// the first run's record is the run, and a later row under one id would be a
+    /// second claim about one request (larry#182 defect 3).
+    pub(crate) fn keep_report(
+        &self,
+        task_id: &str,
+        task_digest: &str,
+        report: &[u8],
+    ) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO reports (task_id, task_digest, report) VALUES (?1, ?2, ?3)",
+                rusqlite::params![task_id, task_digest, report],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
     /// Records a group that a task has started.
     pub(crate) fn insert(
         &self,
@@ -268,6 +326,12 @@ impl Ledger {
     }
 }
 
+/// Seeded adversarial simulations of the report rows a keyed retry answers from
+/// (larry#182 defect 3).
+#[cfg(test)]
+#[path = "sim_ledger.rs"]
+mod sim;
+
 /// Ledger tests: a dead leader and a damaged row are both settled.
 #[cfg(test)]
 mod tests {
@@ -329,6 +393,43 @@ mod tests {
             "the dead-leader row and the damaged row are both settled"
         );
         assert!(ledger.live_tasks()?.is_empty(), "reap leaves no row behind");
+        drop(std::fs::remove_dir_all(&directory));
+        Ok(())
+    }
+
+    /// A recorded report is read back at exactly its byte bound and refused one
+    /// byte past it, an id with no report is none, and a later record never
+    /// replaces the first under one id (larry#182 defect 3).
+    #[test]
+    fn a_report_at_its_byte_bound_is_read_and_one_byte_past_is_refused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = scratch_directory();
+        let ledger = Ledger::open(&directory)?;
+        let report = [7_u8; 16];
+        ledger.keep_report("run-a", "digest-a", &report)?;
+        assert_eq!(
+            ledger.report("run-a", report.len())?,
+            Some(report.to_vec()),
+            "a report exactly at the bound is read whole"
+        );
+        assert!(
+            matches!(
+                ledger.report("run-a", report.len().saturating_sub(1)),
+                Err(crate::executor::ExecError::Receipt(_))
+            ),
+            "a report one byte past the bound is refused, never truncated"
+        );
+        assert_eq!(
+            ledger.report("run-b", report.len())?,
+            None,
+            "an id with no record reads as none"
+        );
+        ledger.keep_report("run-a", "digest-b", &[9_u8; 8])?;
+        assert_eq!(
+            ledger.report("run-a", report.len())?,
+            Some(report.to_vec()),
+            "the first record under one id is the run"
+        );
         drop(std::fs::remove_dir_all(&directory));
         Ok(())
     }

@@ -62,8 +62,10 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 |---|---|
 | `lib` | The effect-free DEMO session state, `replace_file` (the whole-or-nothing write) and `diagnose` (one stderr line) |
 | `executor` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004) |
-| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; each task's journal file and the recovery of a dead task's (ADR 0019, 0023) |
-| `executor::task` | The bounded task document and its typed refusals |
+| `executor::identity` | The identities a run derives: the state directory's tenant and worker, its run, operation and command ids, and the run id itself, a fresh UUID version 7 or the idempotency key's (larry#182, ADR 0037) |
+| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; a retry answered from its evidence (ADR 0019, 0037) |
+| `executor::recovery`, `executor::sim_*` | The task journals a killed executor left: their path, liveness by the journal's own lock, and the recovery that sets each aside as `<task>.recovered` or `<task>.refused` without reaching the world; the seeded simulations of the identity, the recovery, the report rows and the sweep (larry#75, larry#182 defect 3, ADR 0023, ADR 0037) |
+| `executor::task` | The bounded task document, its optional `idempotency_key`, and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill, the observed clip |
 | `executor::session` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035) |
@@ -94,14 +96,12 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |
 | `governance::receipts` | The reranker receipts' shape, SHA-256 (retained) or BLAKE3 (ADR 0013) |
 | `mascot` | `larry mascot`: the one pixel grid, its SVG, preview and pet package (ADR 0014) |
-| `mascot::webp`, `mascot::sim` | The lossless VP8L encoder of the pet spritesheet (RFC 9649); its seeded round trips, the SVG check |
+| `mascot::webp`, `mascot::sim` | The lossless VP8L encoder of the pet spritesheet (RFC 9649), seeded round trips, the SVG check |
 | `rerank` | `larry-rerank`: the request, its bounds, the ranking and the create-exclusive receipt (ADR 0013) |
-| `rerank::qwen` | The pinned Qwen3 reranker on Candle and its tokenizer, feature `rerank` only |
-| `rerank::sim` | Seeded ports of the Python reranker controls, bounds, ranking and receipts |
+| `rerank::qwen`, `rerank::sim` | The pinned Qwen3 reranker on Candle and its tokenizer, feature `rerank` only; the seeded ports |
 | `governance::tracker` | `larry tracker`: the tracker page rendered from `tools/tracker/tracker.json` |
-| `governance::pyjson` | JSON printed byte for byte as CPython's `json.dumps`, for the tracker page |
+| `governance::pyjson`, `governance::pystr` | JSON printed as CPython's `json.dumps`; the CPython `str` semantics the messages need |
 | `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
-| `governance::pystr` | CPython `str` semantics the messages need: `splitlines`, `split`, `repr`, decode errors |
 | `governance::sim_*` | Seeded ports of the Python controls, parser references, bounds and two-root checks |
 | `src/main.rs` | The demo binary entry |
 | `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
