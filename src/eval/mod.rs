@@ -12,13 +12,14 @@ mod score;
 mod set;
 
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::num::TryFromIntError;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
+use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
 use score::{Ending, Outcome, card};
 pub use score::{PriceError, PriceFault, Prices, Scorecard};
@@ -91,10 +92,15 @@ impl std::error::Error for EvalError {
     }
 }
 
-/// One task's origin repository; removed when dropped, whatever the run did.
+/// One task's origin repository; removed when dropped, whatever the run did. The origin's
+/// lock is held for its whole life, so a sweep by another `larry eval` keeps it (larry#214).
 struct Origin {
     /// `<state>/eval/origin-<pid>-<index>`.
     dir: PathBuf,
+    /// The lock file beside `dir`, removed with it.
+    lock: PathBuf,
+    /// The held lock; the kernel releases it when this process dies.
+    _held: File,
 }
 
 impl Origin {
@@ -104,16 +110,25 @@ impl Origin {
             id: task.id.clone(),
             cause,
         };
-        let dir = settings
-            .state_dir()
-            .join("eval")
-            .join(format!("origin-{}-{index}", std::process::id()));
+        let eval = settings.state_dir().join("eval");
+        let name = format!("origin-{}-{index}", std::process::id());
+        let dir = eval.join(&name);
+        fs::create_dir_all(&eval).map_err(failed)?;
+        // The lock is taken before the directory exists, so no sweep can see an unlocked origin.
+        let held = hold_origin(&eval, &name).map_err(|cause| EvalError::Exec {
+            id: task.id.clone(),
+            cause,
+        })?;
         match fs::remove_dir_all(&dir) {
             Ok(()) => {}
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
             Err(cause) => return Err(failed(cause)),
         }
-        let origin = Origin { dir };
+        let origin = Origin {
+            lock: origin_lock_path(&eval, &name),
+            dir,
+            _held: held,
+        };
         for file in &task.files {
             let target = origin.dir.join(&file.0);
             if let Some(parent) = target.parent() {
@@ -135,6 +150,7 @@ impl Drop for Origin {
     fn drop(&mut self) {
         // A removal that fails leaves a directory the next run's sweep collects.
         drop(fs::remove_dir_all(&self.dir));
+        drop(fs::remove_file(&self.lock));
     }
 }
 

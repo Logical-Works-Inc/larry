@@ -2,15 +2,21 @@
 //! receipt signing key and the tenant's model routes, in `<state>/executor.db`
 //! (larry#85, larry#86, larry#201).
 
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
 use lgwks_std::process::{ProcessIdentity, reap_orphaned_group};
 use lgwks_std::sign::SecretKey;
 
 use super::ExecError;
+use super::run::await_group_gone;
+
+/// The longest `open` waits for another executor's lock on the state directory (larry#214).
+/// Past it the open is refused with [`ExecError::LedgerLockTimeout`], never a wait forever.
+const LEDGER_LOCK_BOUND: Duration = Duration::from_secs(60);
 
 /// Schema of the live-group table, version 1. `IF NOT EXISTS` because two executors
 /// starting at once on one state directory both read `user_version` 0 and both run the
@@ -75,6 +81,17 @@ impl Ledger {
     /// opens it (SQLite gives the write-ahead files the database's mode), and a
     /// store left wider by an earlier release is narrowed on every open.
     pub(crate) fn open(state_dir: &Path) -> Result<Ledger, ExecError> {
+        Self::open_within(state_dir, LEDGER_LOCK_BOUND)
+    }
+
+    /// [`Ledger::open`] with the lock wait bounded by `bound` (larry#214): a held lock
+    /// is tried again, yielding between tries, until `bound` has elapsed, then refused.
+    ///
+    /// # Errors
+    ///
+    /// [`ExecError::LedgerLockTimeout`] when another executor holds the lock for the
+    /// whole bound; the other ledger errors as [`Ledger::open`] documents.
+    fn open_within(state_dir: &Path, bound: Duration) -> Result<Ledger, ExecError> {
         std::fs::create_dir_all(state_dir).map_err(ExecError::LedgerLock)?;
         let lock = File::options()
             .create(true)
@@ -82,7 +99,7 @@ impl Ledger {
             .write(true)
             .open(state_dir.join("executor.db.lock"))
             .map_err(ExecError::LedgerLock)?;
-        lock.lock().map_err(ExecError::LedgerLock)?;
+        lock_within(&lock, bound)?;
         let database = state_dir.join("executor.db");
         File::options()
             .create(true)
@@ -293,7 +310,14 @@ impl Ledger {
                     continue;
                 }
             };
-            let _outcome = reap_orphaned_group(&identity).map_err(ExecError::Reap)?;
+            reap_orphaned_group(&identity).map_err(ExecError::Reap)?;
+            // The row goes only once the group is gone (INVARIANTS): a group that
+            // survives its bounded wait keeps its row, and the next start tries again.
+            match await_group_gone(identity.pid()) {
+                Ok(()) => {}
+                Err(ExecError::GroupSurvived { .. }) => continue,
+                Err(other) => return Err(other),
+            }
             self.forget(pid, &started)?;
             settled = settled.saturating_add(1);
         }
@@ -339,6 +363,30 @@ impl Ledger {
             )
             .map_err(ExecError::Sql)?;
         Ok(())
+    }
+}
+
+/// Takes `lock` exclusively, trying again until `bound` has elapsed on a monotonic
+/// clock, then answers [`ExecError::LedgerLockTimeout`].
+///
+/// # Errors
+///
+/// [`ExecError::LedgerLockTimeout`] when the lock stays held for `bound`, and
+/// [`ExecError::LedgerLock`] when the lock itself fails.
+fn lock_within(lock: &File, bound: Duration) -> Result<(), ExecError> {
+    let started = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {
+                let waited = started.elapsed();
+                if waited >= bound {
+                    return Err(ExecError::LedgerLockTimeout { waited });
+                }
+                std::thread::yield_now();
+            }
+            Err(TryLockError::Error(cause)) => return Err(ExecError::LedgerLock(cause)),
+        }
     }
 }
 
@@ -415,6 +463,59 @@ mod tests {
         );
         assert!(ledger.live_tasks()?.is_empty(), "reap leaves no row behind");
         drop(std::fs::remove_dir_all(&directory));
+        Ok(())
+    }
+
+    /// A group that survives its reap keeps its row, so the next start tries again. The
+    /// row's identity names a start the live group does not carry, so the reap reads it
+    /// as reused and signals nothing; the group stays up and its row stays with it (larry#214).
+    #[test]
+    fn a_surviving_group_keeps_its_row() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt;
+        let directory = scratch_directory();
+        let ledger = Ledger::open(&directory)?;
+        let mut survivor = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()?;
+        let pid = i32::try_from(survivor.id())?;
+        let stranger = ProcessIdentity::new(pid, PLATFORM_START)?;
+        ledger.insert("task-s", &stranger)?;
+        let settled = ledger.reap();
+        let group_up = lgwks_std::process::process_group_exists(pid);
+        drop(survivor.kill());
+        drop(survivor.wait());
+        drop(std::fs::remove_dir_all(&directory));
+        assert_eq!(settled?, 0, "a surviving group settles no row");
+        assert!(group_up?, "the group is still running after the reap");
+        Ok(())
+    }
+
+    /// A ledger lock another executor holds for the whole bound is refused with the typed
+    /// timeout, and the same open succeeds once the holder lets go (larry#214).
+    #[test]
+    fn a_held_ledger_lock_returns_the_typed_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::Duration;
+        let directory = scratch_directory();
+        std::fs::create_dir_all(&directory)?;
+        let holder = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join("executor.db.lock"))?;
+        holder.lock()?;
+        let refused = Ledger::open_within(&directory, Duration::from_millis(30));
+        assert!(
+            matches!(
+                refused,
+                Err(crate::executor::ExecError::LedgerLockTimeout { .. })
+            ),
+            "a held lock past its bound is the typed timeout"
+        );
+        drop(holder);
+        let reopened = Ledger::open_within(&directory, Duration::from_millis(30));
+        drop(std::fs::remove_dir_all(&directory));
+        assert!(reopened.is_ok(), "a released lock opens the ledger");
         Ok(())
     }
 

@@ -26,6 +26,7 @@ pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 use run::run_command;
 use workspace::{Workspace, report_members, sweep};
+pub(crate) use workspace::{hold_origin, origin_lock_path};
 
 use crate::model::{ModelClient, ModelConfig, ModelError, Route, RouteError};
 pub use author::AuthorFault;
@@ -76,6 +77,12 @@ pub enum ExecError {
     Sql(lgwks_deps::storefront::rusqlite::Error),
     /// A process group could not be signalled, probed or reaped.
     Reap(std::io::Error),
+    /// Another executor held the ledger lock for the whole wait, so this open gave up
+    /// rather than wait forever (larry#214).
+    LedgerLockTimeout {
+        /// How long this open waited before it gave up.
+        waited: std::time::Duration,
+    },
     /// An acceptance command could not be started, waited on or read.
     Spawn {
         /// The program that failed.
@@ -164,6 +171,10 @@ impl fmt::Display for ExecError {
             Self::LedgerLock(ref cause) => write!(out, "exec ledger lock: {cause}"),
             Self::Sql(ref cause) => write!(out, "exec ledger statement: {cause}"),
             Self::Reap(ref cause) => write!(out, "exec process group: {cause}"),
+            Self::LedgerLockTimeout { waited } => write!(
+                out,
+                "exec ledger lock held by another executor for {waited:?}; retry later"
+            ),
             Self::Spawn {
                 ref argv0,
                 ref source,
@@ -233,7 +244,8 @@ impl std::error::Error for ExecError {
             | Self::Git { .. }
             | Self::NotARepo { .. }
             | Self::BadBase { .. }
-            | Self::GroupSurvived { .. } => None,
+            | Self::GroupSurvived { .. }
+            | Self::LedgerLockTimeout { .. } => None,
         }
     }
 }
