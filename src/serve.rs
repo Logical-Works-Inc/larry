@@ -1,40 +1,43 @@
 //! `larry serve`: the HTTP host on lgwks_bot's app edge (larry#88, ADR 0021),
-//! with a bearer key per service tenant (larry#89, ADR 0022).
+//! with a bearer key per service tenant (larry#89, ADR 0022), a revoke that
+//! lands on SIGHUP, a plaintext bind refused unless opted in, and a key cap
+//! (larry#210, ADR 0040).
 //!
 //! Larry builds one [`App`] and serves it with `App::serve`, so the estate's
-//! edge owns the framing, the `/t/{tenant}/...` prefix, the 1 MiB body
-//! ceiling, the bounded per-worker mailboxes and their `400`, `413` and `503`
-//! refusals; Larry owns the routes, the keys, the address and the stop. Each
-//! route is a transition on its tenant's own cell, so no tenant reads another's
-//! state.
-//!
-//! Every tenant request is judged at the edge by [`App::authenticate`] before
-//! its verb, body or mailbox: its `Authorization: Bearer` key must hash to the
-//! digest stored for the tenant in its path, or it is `401`. `larry serve key
-//! <tenant>` draws a key from OS entropy, prints it once and stores only its
-//! BLAKE3 digest in the state directory's owner-only store; issuing again
-//! rotates it. The digests are read once at start, so a new key takes effect on
-//! the next start (SIGTERM drains first). `GET /healthz` names no tenant and
-//! the edge answers it itself, unauthenticated, as liveness.
+//! edge owns the framing, the `/t/{tenant}/...` prefix, the body ceiling, the
+//! mailboxes and their refusals; Larry owns the routes, the keys, the address and
+//! the stop. The authenticator does no I/O, so it reads a snapshot of the
+//! digests; the signal watcher re-reads the store on SIGHUP and swaps it. The
+//! edge has no TLS, so a non-loopback bind needs `LARRY_SERVE_PLAINTEXT=1`.
 
-use std::collections::HashMap;
-use std::fmt;
-use std::io;
-use std::net::{AddrParseError, SocketAddr, TcpListener};
-use std::sync::Arc;
+mod error;
 
-use lgwks_bot::app::{App, AppError, Effect, Method, Principal, RequestHeaders};
+use std::any::Any;
+use std::collections::BTreeMap;
+use std::io::{self, Write as _};
+use std::net::{SocketAddr, TcpListener};
+use std::sync::{Arc, RwLock};
+
+use lgwks_bot::app::{App, Effect, Method, Principal, RequestHeaders};
 use lgwks_bot::rt::edge::EdgeStop;
 use lgwks_bot::rt::sync::CancellationToken;
-use lgwks_std::hash::{Digest, DigestParseError};
+use lgwks_std::hash::Digest;
 
 use crate::executor::{ExecError, state_ledger};
+
+pub use error::ServeError;
 
 /// The variable naming the address `larry serve` binds.
 const ADDR_VAR: &str = "LARRY_SERVE_ADDR";
 
-/// The address bound when [`ADDR_VAR`] is unset: loopback only, so a first run
-/// exposes nothing to the network.
+/// The variable that opts a non-loopback bind into plaintext HTTP; it must be
+/// exactly [`PLAINTEXT_OPT_IN`] when set.
+const PLAINTEXT_VAR: &str = "LARRY_SERVE_PLAINTEXT";
+
+/// The one value of [`PLAINTEXT_VAR`] that opts in.
+const PLAINTEXT_OPT_IN: &str = "1";
+
+/// The address bound when [`ADDR_VAR`] is unset: loopback only.
 const DEFAULT_ADDR: &str = "127.0.0.1:8787";
 
 /// The probe's path below the tenant prefix.
@@ -66,115 +69,30 @@ const HEALTH_BODY: &str = concat!(
     "\"}"
 );
 
-/// Why `larry serve` stopped other than by its signal; each variant keeps its
-/// cause.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum ServeError {
-    /// [`ADDR_VAR`] is not an IP address and port.
-    Address {
-        /// The value as it was set.
-        value: String,
-        /// Why it does not parse.
-        cause: AddrParseError,
-    },
-    /// The state directory's store, which holds the key digests, failed.
-    Store(ExecError),
-    /// A tenant name outside 1..=64 bytes of `[A-Za-z0-9_-]`.
-    BadTenant {
-        /// The name that was refused.
-        value: String,
-    },
-    /// The OS refused entropy for a new key; there is no weaker fallback.
-    Entropy(lgwks_std::random::EntropyError),
-    /// A stored digest is not 64 hex characters.
-    Digest {
-        /// The tenant whose row is damaged.
-        tenant: String,
-        /// Why it does not parse.
-        cause: DigestParseError,
-    },
-    /// The address could not be bound or read back.
-    Bind {
-        /// The address asked for.
-        addr: SocketAddr,
-        /// The operating system's refusal.
-        cause: io::Error,
-    },
-    /// The serving line could not be written to standard output.
-    Announce(io::Error),
-    /// The stop signals could not be registered.
-    Signal(io::Error),
-    /// The app edge refused the app or failed while serving.
-    Host(AppError),
-}
-
-impl fmt::Display for ServeError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Address {
-                ref value,
-                ref cause,
-            } => write!(
-                out,
-                "serve: {ADDR_VAR}={value:?} is not an IP address and port such as {DEFAULT_ADDR}: {cause}"
-            ),
-            Self::Store(ref cause) => write!(out, "serve: key store: {cause}"),
-            Self::BadTenant { ref value } => write!(
-                out,
-                "serve: {value:?} is not a tenant name: 1 to 64 of A-Z a-z 0-9 _ -"
-            ),
-            Self::Entropy(ref cause) => write!(out, "serve: key entropy: {cause}"),
-            Self::Digest {
-                ref tenant,
-                ref cause,
-            } => write!(
-                out,
-                "serve: the stored key digest of {tenant:?} is damaged: {cause}"
-            ),
-            Self::Bind { addr, ref cause } => write!(out, "serve: cannot bind {addr}: {cause}"),
-            Self::Announce(ref cause) => write!(out, "serve: stdout unwritable: {cause}"),
-            Self::Signal(ref cause) => write!(out, "serve: cannot watch for SIGTERM: {cause}"),
-            Self::Host(ref cause) => write!(out, "serve: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for ServeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Address { ref cause, .. } => Some(cause),
-            Self::Store(ref cause) => Some(cause),
-            Self::Entropy(ref cause) => Some(cause),
-            Self::Digest { ref cause, .. } => Some(cause),
-            Self::Bind { ref cause, .. } | Self::Announce(ref cause) | Self::Signal(ref cause) => {
-                Some(cause)
-            }
-            Self::Host(ref cause) => Some(cause),
-            Self::BadTenant { .. } => None,
-        }
-    }
-}
-
-/// Where `larry serve` listens, and the key digests it admits.
+/// Where `larry serve` listens, the key digests it admits and the state
+/// directory it reloads them from.
 #[derive(Debug)]
 pub struct Settings {
     /// The address to bind; port 0 asks the system for a free one.
     addr: SocketAddr,
-    /// Each keyed tenant's key digest, read once at start.
+    /// Each keyed tenant's key digest, read at start and on each SIGHUP.
     keys: Keys,
+    /// `LARRY_STATE_DIR`, the directory a reload reads the store from.
+    state: String,
 }
 
 impl Settings {
     /// Settings from `read` (the process environment in the binary): [`ADDR_VAR`]
-    /// when it is set and [`DEFAULT_ADDR`] when it is not, then the key digests in
+    /// when set, else [`DEFAULT_ADDR`]; a non-loopback address only with
+    /// [`PLAINTEXT_VAR`] exactly [`PLAINTEXT_OPT_IN`]; then the key digests in
     /// `LARRY_STATE_DIR`'s store.
     ///
     /// # Errors
     ///
-    /// [`ServeError::Address`] when the value is not an IP address and port,
-    /// [`ServeError::Store`] when the state directory is unset or its store
-    /// fails, and [`ServeError::Digest`] for a damaged row.
+    /// [`ServeError::Address`], [`ServeError::PlaintextFlag`],
+    /// [`ServeError::Plaintext`], [`ServeError::Store`] (unset or failed state
+    /// directory), [`ServeError::KeyCap`] past the cap, and [`ServeError::Digest`]
+    /// for a damaged row.
     pub fn from_env(read: impl Fn(&str) -> Option<String>) -> Result<Self, ServeError> {
         let value = match read(ADDR_VAR) {
             Some(set) => set,
@@ -184,37 +102,92 @@ impl Settings {
             Ok(addr) => addr,
             Err(cause) => return Err(ServeError::Address { value, cause }),
         };
-        let keys = Keys::load(&read)?;
-        Ok(Self { addr, keys })
+        match read(PLAINTEXT_VAR) {
+            Some(flag) if flag == PLAINTEXT_OPT_IN => {}
+            Some(flag) => return Err(ServeError::PlaintextFlag { value: flag }),
+            None if addr.ip().is_loopback() => {}
+            None => return Err(ServeError::Plaintext { addr }),
+        }
+        let state = read("LARRY_STATE_DIR")
+            .filter(|value| !value.is_empty())
+            .ok_or(ServeError::Store(ExecError::StateDirUnset))?;
+        let keys = Keys::load(&store_env(&state))?;
+        Ok(Self { addr, keys, state })
     }
 }
 
-/// Each keyed tenant's key digest.
-#[derive(Debug, Default)]
-struct Keys(HashMap<Box<str>, Digest>);
+/// A reader that answers only `LARRY_STATE_DIR`, with `state`, so the store opens
+/// the same directory at start and on every reload.
+fn store_env(state: &str) -> impl Fn(&str) -> Option<String> + '_ {
+    move |name: &str| (name == "LARRY_STATE_DIR").then(|| String::from(state))
+}
+
+/// Each keyed tenant's key digest, and the fixed digest an unknown tenant is
+/// compared with.
+#[derive(Debug)]
+struct Keys {
+    /// Each keyed tenant's digest, in name order.
+    digests: BTreeMap<Box<str>, Digest>,
+    /// The digest of a fixed token no key holds: an unknown tenant pays the same
+    /// one compare as a known tenant with a wrong key.
+    dummy: Digest,
+}
 
 impl Keys {
-    /// The digests in the state directory's store, at most [`MAX_TENANT_KEYS`].
+    /// The keys over `digests`, with the fixed dummy digest.
+    fn from_digests(digests: BTreeMap<Box<str>, Digest>) -> Self {
+        Self {
+            digests,
+            dummy: lgwks_std::hash::blake3(b"larry serve: no tenant holds this key"),
+        }
+    }
+
+    /// The digests in the store, at most [`MAX_TENANT_KEYS`]. A store past the cap
+    /// is refused with its count, never truncated; a count that cannot be read as
+    /// `usize` is treated as past the cap.
     fn load(read: &impl Fn(&str) -> Option<String>) -> Result<Self, ServeError> {
-        let rows = state_ledger(read)
-            .and_then(|ledger| ledger.tenant_keys(MAX_TENANT_KEYS))
+        let ledger = state_ledger(read).map_err(ServeError::Store)?;
+        let rows = ledger
+            .tenant_keys(MAX_TENANT_KEYS.saturating_add(1))
             .map_err(ServeError::Store)?;
-        let mut keys = HashMap::with_capacity(rows.len());
+        let over_cap = match u64::try_from(rows.len()) {
+            Ok(seen) => seen > u64::from(MAX_TENANT_KEYS),
+            Err(_) => true,
+        };
+        if over_cap {
+            let count = ledger.tenant_key_count().map_err(ServeError::Store)?;
+            return Err(ServeError::KeyCap {
+                count,
+                cap: MAX_TENANT_KEYS,
+            });
+        }
+        let mut digests = BTreeMap::new();
         for (tenant, hex) in rows {
             let digest = Digest::from_hex(&hex).map_err(|cause| ServeError::Digest {
                 tenant: tenant.clone(),
                 cause,
             })?;
-            keys.insert(tenant.into_boxed_str(), digest);
+            digests.insert(tenant.into_boxed_str(), digest);
         }
-        Ok(Self(keys))
+        Ok(Self::from_digests(digests))
+    }
+
+    /// The digest `tenant` is compared with: its own, or the dummy when it holds
+    /// no key. Every tenant gets one, so the compare always runs.
+    fn stored(&self, tenant: &str) -> &Digest {
+        match self.digests.get(tenant) {
+            Some(digest) => digest,
+            None => &self.dummy,
+        }
     }
 
     /// The principal `token` names for `tenant`: the tenant, when the token hashes
-    /// to its stored digest, compared in constant time.
+    /// to [`Keys::stored`] in constant time and the tenant holds a key. The compare
+    /// runs for an unknown tenant too, so the answer does not show which names hold
+    /// keys.
     fn admit(&self, tenant: &str, token: &str) -> Option<Principal> {
-        let stored = self.0.get(tenant)?;
-        if lgwks_std::hash::blake3(token.as_bytes()).ct_eq(stored) {
+        let matched = lgwks_std::hash::blake3(token.as_bytes()).ct_eq(self.stored(tenant));
+        if matched && self.digests.contains_key(tenant) {
             Principal::new(tenant)
         } else {
             None
@@ -222,12 +195,41 @@ impl Keys {
     }
 }
 
-/// Whether `name` is a tenant name the edge accepts: 1..=64 of `[A-Za-z0-9_-]`.
-fn valid_tenant(name: &str) -> bool {
-    (1..=MAX_TENANT_BYTES).contains(&name.len())
+/// The edge's judgement of one request against the snapshot. A poisoned snapshot
+/// admits no one, so a panicked writer fails closed.
+fn judge(snapshot: &RwLock<Keys>, tenant: &str, token: &str) -> Option<Principal> {
+    snapshot.read().ok()?.admit(tenant, token)
+}
+
+/// Re-reads the store and swaps the snapshot, returning how many tenants hold a
+/// key now. A store that cannot be read, or is past the cap, swaps in no keys and
+/// returns its cause: the reload fails closed.
+fn reload(snapshot: &RwLock<Keys>, state: &str) -> Result<usize, ServeError> {
+    let (keys, outcome) = match Keys::load(&store_env(state)) {
+        Ok(keys) => (keys, Ok(())),
+        Err(cause) => (Keys::from_digests(BTreeMap::new()), Err(cause)),
+    };
+    let count = keys.digests.len();
+    let mut current = snapshot.write().map_err(|poisoned| ServeError::Snapshot {
+        cause: poisoned.to_string(),
+    })?;
+    *current = keys;
+    outcome.map(|()| count)
+}
+
+/// Refuses a tenant name the edge would refuse, before any store is touched.
+fn check_tenant(name: &str) -> Result<(), ServeError> {
+    let valid = (1..=MAX_TENANT_BYTES).contains(&name.len())
         && name
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(ServeError::BadTenant {
+            value: String::from(name),
+        })
+    }
 }
 
 /// `larry serve key <tenant>`: draw a key for `tenant`, store its digest in the
@@ -242,11 +244,7 @@ pub fn issue_key(
     read: impl Fn(&str) -> Option<String>,
     tenant: &str,
 ) -> Result<String, ServeError> {
-    if !valid_tenant(tenant) {
-        return Err(ServeError::BadTenant {
-            value: String::from(tenant),
-        });
-    }
+    check_tenant(tenant)?;
     let secret = lgwks_std::random::bytes::<KEY_BYTES>().map_err(ServeError::Entropy)?;
     let key = format!("{KEY_PREFIX}{}", lgwks_std::hex::encode(secret));
     let digest = lgwks_std::hash::blake3(key.as_bytes()).to_hex();
@@ -256,13 +254,35 @@ pub fn issue_key(
     Ok(key)
 }
 
+/// `larry serve revoke <tenant>`: delete the tenant's key digest from the state
+/// directory's store. A running host refuses the key from its next SIGHUP, and a
+/// stopped one at its next start.
+///
+/// # Errors
+///
+/// [`ServeError::BadTenant`] for a name the edge would refuse,
+/// [`ServeError::NoKey`] when the tenant holds no key, and [`ServeError::Store`]
+/// when the store fails.
+pub fn revoke_key(read: impl Fn(&str) -> Option<String>, tenant: &str) -> Result<(), ServeError> {
+    check_tenant(tenant)?;
+    let removed = state_ledger(&read)
+        .and_then(|ledger| ledger.remove_tenant_key(tenant))
+        .map_err(ServeError::Store)?;
+    if removed {
+        Ok(())
+    } else {
+        Err(ServeError::NoKey {
+            tenant: String::from(tenant),
+        })
+    }
+}
+
 /// The routes Larry serves, each a transition on its tenant's cell, behind the
 /// key check.
-fn app(keys: Keys) -> App<()> {
-    let keys = Arc::new(keys);
+fn app(snapshot: Arc<RwLock<Keys>>) -> App<()> {
     App::new(APP_NAME)
         .authenticate(move |tenant: &str, headers: &RequestHeaders<'_>| {
-            keys.admit(tenant, headers.bearer()?)
+            judge(&snapshot, tenant, headers.bearer()?)
         })
         .route(Method::GET, HEALTH_PATH, |_: &mut (), (): ()| {
             vec![Effect::reply(200, HEALTH_BODY.as_bytes().to_vec())]
@@ -277,47 +297,84 @@ fn app(keys: Keys) -> App<()> {
         )
 }
 
-/// Bind `addr`.
-fn bind(addr: SocketAddr) -> Result<TcpListener, ServeError> {
-    TcpListener::bind(addr).map_err(|cause| ServeError::Bind { addr, cause })
+/// The one line a reload prints on standard output: how many tenants hold a key
+/// now, or why none do.
+fn announce_reload(outcome: &Result<usize, ServeError>) -> io::Result<()> {
+    let line = match *outcome {
+        Ok(count) => lgwks_std::json::json!({ "reloaded": true, "keyed_tenants": count }),
+        Err(ref cause) => lgwks_std::json::json!({
+            "reloaded": false,
+            "keyed_tenants": 0,
+            "refused": cause.to_string(),
+        }),
+    };
+    let mut out = io::stdout().lock();
+    writeln!(out, "{line}").and_then(|()| out.flush())
 }
 
-/// The signals that stop `larry serve`, registered before the serving line is
+/// The text of a panic payload, when it carries one.
+fn panic_text(payload: &(dyn Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return String::from(*text);
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    String::from("a panic without text")
+}
+
+/// The signals `larry serve` watches, registered before the serving line is
 /// written, so a stop sent as soon as it is read is never the default action.
+/// SIGHUP re-reads the key store.
 #[cfg(unix)]
 struct Signals {
     /// SIGTERM: the orchestrator's stop.
     terminate: lgwks_bot::rt::signal::unix::Signal,
     /// SIGINT: an operator's Ctrl-C.
     interrupt: lgwks_bot::rt::signal::unix::Signal,
+    /// SIGHUP: the operator's reload after `larry serve revoke`.
+    hangup: lgwks_bot::rt::signal::unix::Signal,
 }
 
 #[cfg(unix)]
 impl Signals {
-    /// Register both handlers on the process driver.
+    /// Register the three handlers on the process driver.
     fn register() -> Result<Self, ServeError> {
         use lgwks_bot::rt::signal::unix::{SignalKind, signal};
         lgwks_bot::block_on(async {
             Ok(Self {
                 terminate: signal(SignalKind::terminate()).map_err(ServeError::Signal)?,
                 interrupt: signal(SignalKind::interrupt()).map_err(ServeError::Signal)?,
+                hangup: signal(SignalKind::hangup()).map_err(ServeError::Signal)?,
             })
         })
     }
 
-    /// Wait for either signal, or for `done` once the edge stopped by itself.
-    fn wait(mut self, done: &CancellationToken) {
+    /// Run `on_reload` on each SIGHUP until SIGTERM, SIGINT or `done`, which the
+    /// edge cancels once it stopped by itself.
+    fn wait(
+        mut self,
+        done: &CancellationToken,
+        mut on_reload: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
         lgwks_bot::block_on(async move {
-            lgwks_bot::select! {
-                _ = self.terminate.recv() => {}
-                _ = self.interrupt.recv() => {}
-                () = done.cancelled() => {}
+            let mut serving = true;
+            while serving {
+                lgwks_bot::select! {
+                    _ = self.terminate.recv() => serving = false,
+                    _ = self.interrupt.recv() => serving = false,
+                    // A closed SIGHUP stream yields None: the pattern then disables this arm, so no reload loops.
+                    Some(()) = self.hangup.recv() => on_reload()?,
+                    () = done.cancelled() => serving = false,
+                }
             }
-        });
+            Ok(())
+        })
     }
 }
 
-/// Ctrl-C, the one stop signal outside unix.
+/// Ctrl-C, the one stop signal outside unix. A reload needs SIGHUP, so off unix a
+/// revoke takes effect at the next start.
 #[cfg(not(unix))]
 struct Signals;
 
@@ -329,70 +386,94 @@ impl Signals {
     }
 
     /// Wait for Ctrl-C, or for `done` once the edge stopped by itself.
-    fn wait(self, done: &CancellationToken) {
+    fn wait(
+        self,
+        done: &CancellationToken,
+        _on_reload: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
         lgwks_bot::block_on(async move {
             lgwks_bot::select! {
                 _ = lgwks_bot::rt::signal::ctrl_c() => {}
                 () = done.cancelled() => {}
             }
         });
+        Ok(())
     }
 }
 
-/// `larry serve`: bind, register the stop signals, `announce` the bound address
-/// and how many tenants hold a key, then serve until SIGTERM or SIGINT and drain.
+/// `larry serve`: bind, register the stop and reload signals, `announce` the bound
+/// address and how many tenants hold a key, then serve until SIGTERM or SIGINT and
+/// drain. Each SIGHUP re-reads the key store and prints one reload line.
 ///
-/// The signal watcher is a scoped thread the scope joins before this returns,
-/// so no task outlives the serve.
+/// The signal watcher is a scoped thread the scope joins before this returns, so
+/// no task outlives the serve.
 ///
 /// # Errors
 ///
 /// [`ServeError::Bind`], [`ServeError::Signal`], [`ServeError::Announce`] from
-/// `announce`, or [`ServeError::Host`] from the edge.
+/// `announce` or a reload line, [`ServeError::Watcher`] when the watcher panicked,
+/// or [`ServeError::Host`] from the edge.
 pub fn run(
     settings: Settings,
     announce: impl FnOnce(SocketAddr, usize) -> io::Result<()>,
 ) -> Result<(), ServeError> {
-    let listener = bind(settings.addr)?;
-    let local = listener.local_addr().map_err(|cause| ServeError::Bind {
+    let bind_error = |cause| ServeError::Bind {
         addr: settings.addr,
         cause,
-    })?;
+    };
+    let listener = TcpListener::bind(settings.addr).map_err(bind_error)?;
+    let local = listener.local_addr().map_err(bind_error)?;
     let signals = Signals::register()?;
-    announce(local, settings.keys.0.len()).map_err(ServeError::Announce)?;
-    let app = app(settings.keys);
+    announce(local, settings.keys.digests.len()).map_err(ServeError::Announce)?;
+    let state = settings.state;
+    let snapshot = Arc::new(RwLock::new(settings.keys));
+    let app = app(Arc::clone(&snapshot));
     let stop = EdgeStop::new();
     let done = CancellationToken::new();
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            signals.wait(&done);
+        let watcher = scope.spawn(|| {
+            let outcome = signals.wait(&done, || announce_reload(&reload(&snapshot, &state)));
             stop.stop();
+            outcome
         });
         let served = app.serve(listener, &stop).map_err(ServeError::Host);
         done.cancel();
-        served
+        let watched = watcher.join().map_err(|panic| ServeError::Watcher {
+            cause: panic_text(&*panic),
+        })?;
+        served.and(watched.map_err(ServeError::Announce))
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
+    use std::error::Error;
+    use std::hint::black_box;
+    use std::sync::{Arc, RwLock};
+
+    use lgwks_std::seeded::Seeded;
 
     use super::{
-        ADDR_VAR, DEFAULT_ADDR, HEALTH_BODY, Keys, ServeError, Settings, app, valid_tenant,
+        ADDR_VAR, DEFAULT_ADDR, HEALTH_BODY, Keys, ServeError, Settings, app, check_tenant, judge,
     };
 
-    /// A fresh state directory for one test.
-    fn state_dir(name: &str) -> String {
-        std::env::temp_dir()
-            .join(format!("larry-serve-unit-{}-{name}", std::process::id()))
-            .display()
-            .to_string()
+    /// Keys for each of `names`, each holding `lk_<name>`.
+    fn keys_for(names: &[&str]) -> Keys {
+        let mut digests = BTreeMap::new();
+        for name in names {
+            let key = format!("lk_{name}");
+            digests.insert(Box::from(*name), lgwks_std::hash::blake3(key.as_bytes()));
+        }
+        Keys::from_digests(digests)
     }
 
     #[test]
     fn an_unset_address_binds_loopback_only() -> Result<(), ServeError> {
-        let dir = state_dir("loopback");
+        let dir = std::env::temp_dir()
+            .join(format!("larry-serve-unit-{}-loopback", std::process::id()))
+            .display()
+            .to_string();
         let settings = Settings::from_env(|name| (name == "LARRY_STATE_DIR").then(|| dir.clone()))?;
         assert_eq!(
             settings.addr.to_string(),
@@ -403,7 +484,11 @@ mod tests {
             settings.addr.ip().is_loopback(),
             "a first run exposes nothing"
         );
-        assert!(settings.keys.0.is_empty(), "a fresh store admits no one");
+        assert_eq!(
+            settings.keys.digests.len(),
+            0,
+            "a fresh store admits no one"
+        );
         Ok(())
     }
 
@@ -449,16 +534,14 @@ mod tests {
             ("a b", false),
             ("ü", false),
         ] {
-            assert_eq!(valid_tenant(name), valid, "{name:?}");
+            assert_eq!(check_tenant(name).is_ok(), valid, "{name:?}");
         }
     }
 
     #[test]
     fn a_key_admits_only_its_own_tenant() {
         let key = "lk_alpha";
-        let mut digests = HashMap::new();
-        digests.insert(Box::from("alpha"), lgwks_std::hash::blake3(key.as_bytes()));
-        let keys = Keys(digests);
+        let keys = keys_for(&["alpha"]);
         assert_eq!(
             keys.admit("alpha", key)
                 .map(|who| String::from(who.as_str())),
@@ -477,8 +560,69 @@ mod tests {
     }
 
     #[test]
+    fn sim_unknown_tenant_takes_the_compare_path_for_every_seed() -> Result<(), Box<dyn Error>> {
+        let keys = keys_for(&["alpha", "beta", "gamma"]);
+        for seed in [1_u64, 2, 0x5EED_0089] {
+            let mut rng = Seeded::from_seed(seed);
+            for _ in 0..64 {
+                let len = rng.index(64)?.saturating_add(1);
+                let mut stranger = String::with_capacity(len);
+                for _ in 0..len {
+                    stranger.push(char::from(
+                        b'a'.saturating_add(u8::try_from(rng.index(26)?)?),
+                    ));
+                }
+                if keys.digests.contains_key(stranger.as_str()) {
+                    continue;
+                }
+                assert!(
+                    std::ptr::eq(keys.stored(&stranger), &raw const keys.dummy),
+                    "seed {seed:#x}: an unknown tenant is compared with the dummy"
+                );
+                assert!(
+                    keys.admit(&stranger, "lk_alpha").is_none(),
+                    "seed {seed:#x}: an unknown tenant is refused"
+                );
+            }
+            for known in ["alpha", "beta", "gamma"] {
+                let stored = keys
+                    .digests
+                    .get(known)
+                    .ok_or("a keyed tenant has a digest")?;
+                assert!(
+                    std::ptr::eq(keys.stored(known), stored),
+                    "seed {seed:#x}: a known tenant is compared with its own digest"
+                );
+                assert!(
+                    keys.admit(known, "lk_wrong").is_none(),
+                    "seed {seed:#x}: a known tenant with a wrong key is refused"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_poisoned_key_lock_admits_no_one() {
+        let snapshot = RwLock::new(keys_for(&["alpha"]));
+        std::thread::scope(|scope| {
+            let crashed = scope
+                .spawn(|| {
+                    let _held = snapshot.write();
+                    assert!(black_box(false), "the writer dies holding the lock");
+                })
+                .join();
+            assert!(crashed.is_err(), "the writer panicked holding the lock");
+        });
+        assert!(
+            judge(&snapshot, "alpha", "lk_alpha").is_none(),
+            "a poisoned snapshot admits even the right key"
+        );
+    }
+
+    #[test]
     fn the_app_passes_its_own_check() -> Result<(), lgwks_bot::app::AppError> {
-        app(Keys::default()).check()
+        app(Arc::new(RwLock::new(keys_for(&[])))).check()
     }
 
     #[test]

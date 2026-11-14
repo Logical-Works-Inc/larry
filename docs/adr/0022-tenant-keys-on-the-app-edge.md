@@ -43,6 +43,7 @@ Rejected:
 ## Consequences
 
 - A newly issued key takes effect at the next start; SIGTERM drains first, so a restart loses no request.
+  Superseded for revoke by ADR 0040: a revoke takes effect at the next SIGHUP, and the store is re-read then.
 - #89 stays open for approver sign-in, its human half. That will be Larry's first Loco use, behind a feature
   so the default cold build stays under 60 s (Loco measured 87.5 s in cargo-sweep); its own PR measures it.
 - #90's runtime API routes are `route_as`, so every run is keyed by the authenticated tenant.
