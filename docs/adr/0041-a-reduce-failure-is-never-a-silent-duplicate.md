@@ -61,5 +61,7 @@ Rejected:
   is retried first. It is the journal's backpressure; a restore with a larger ceiling clears it. Another
   tenant's append fails for the same cause, so nothing else is held that was not already.
 - `report.duplicates` never names a command that is journaled and held nowhere.
-- Covered by `runtime::admission::tests::reduce` (`sim_a_reduce_failure_then_retry_is_never_a_silent_duplicate`,
-  `sim_a_reduce_failure_survives_restore_and_reduces_once`), the first red on main on its assertion.
+- Covered by `runtime::admission::tests::sim_reduce` (`sim_a_reduce_failure_then_retry_is_never_a_silent_duplicate`,
+  `sim_a_reduce_failure_survives_restore_and_reduces_once`,
+  `sim_a_reduce_failure_interleaved_with_a_second_tenants_retries_never_crosses_tenants`), the first red on main
+  on its assertion.

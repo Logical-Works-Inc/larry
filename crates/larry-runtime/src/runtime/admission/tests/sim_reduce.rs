@@ -6,9 +6,11 @@
 
 use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::iter;
 use std::path::Path;
 
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
+use larry_contracts::event::EventKind;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::state::RunState;
 
@@ -17,8 +19,9 @@ use super::{
     offer, pending, settings, work_body,
 };
 use crate::error::RuntimeError;
-use crate::journal::Journal;
+use crate::journal::{Journal, JournalEntry};
 use crate::owner::fixture::ScriptedOwner;
+use crate::payload::CommandAcceptedPayload;
 use crate::projection::ProjectionBackend;
 use crate::runtime::{Runtime, restore};
 
@@ -309,5 +312,213 @@ fn sim_a_reduce_failure_survives_restore_and_reduces_once() -> Outcome {
         seen.insert(first);
     }
     assert_eq!(seen.len(), 16, "every seed leaves its own trace");
+    Ok(())
+}
+
+/// Where `journal` records the acceptance of `id`.
+fn acceptance_index(journal: &Journal, id: CommandId) -> Result<usize, Box<dyn std::error::Error>> {
+    for (index, entry) in journal.entries().iter().enumerate() {
+        if let JournalEntry::Event(ref event) = *entry
+            && event.kind() == EventKind::CommandAccepted
+        {
+            let payload: CommandAcceptedPayload = lgwks_std::json::from_slice(event.payload())?;
+            if payload.command == id {
+                return Ok(index);
+            }
+        }
+    }
+    Err("the command was never accepted".into())
+}
+
+/// The pending line: B's commands ahead of A's, A's, and B's behind it.
+struct Line {
+    before: Vec<Command>,
+    before_runs: Vec<RunId>,
+    first: Command,
+    first_run: RunId,
+    after: Vec<Command>,
+}
+
+impl Line {
+    /// One to three of B's commands ahead of A's and none to two behind it.
+    fn of(seed: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        let ahead = u8::try_from(seed % 3)?.saturating_add(1);
+        let behind = u8::try_from((seed >> 2) % 3)?;
+        let (mut before, mut before_runs, mut after) = (Vec::new(), Vec::new(), Vec::new());
+        for index in 0..ahead {
+            let (item, run) = work(seed, 1, index)?;
+            before.push(item);
+            before_runs.push(run);
+        }
+        for index in 0..behind {
+            after.push(work(seed, 1, ahead.saturating_add(index))?.0);
+        }
+        let (first, first_run) = work(seed, 0, 0)?;
+        Ok(Self {
+            before,
+            before_runs,
+            first,
+            first_run,
+            after,
+        })
+    }
+
+    /// Every command in the order it is admitted.
+    fn in_order(&self) -> Vec<Command> {
+        let ahead = self.before.iter().cloned();
+        ahead
+            .chain(iter::once(self.first.clone()))
+            .chain(self.after.iter().cloned())
+            .collect()
+    }
+}
+
+/// The ids of `items`, in order.
+fn ids_of(items: &[Command]) -> Vec<CommandId> {
+    items.iter().map(Command::id).collect()
+}
+
+/// One seed of the interleaving: A's acceptance record fails with B's commands
+/// ahead of and behind it, and a seeded monkey then retries any of them, floods
+/// A's retry and hijacks A's command id as B, before a restore with room.
+fn interleaved(seed: u64) -> Result<u64, Box<dyn std::error::Error>> {
+    let line = Line::of(seed)?;
+    let order = line.in_order();
+    let first_id = line.first.id();
+    let before_ids = ids_of(&line.before);
+    let mut want_pending = vec![first_id];
+    want_pending.extend(ids_of(&line.after));
+
+    // The reference run, with room for everything, says where A's acceptance
+    // lands; a journal that ends exactly there has no room for it.
+    let mut probe = memory(ScriptedOwner::new())?;
+    for item in &order {
+        probe.ack(item.clone())?;
+    }
+    probe.tick()?;
+    let capacity = acceptance_index(probe.journal(), first_id)?;
+    let mut limited = settings()?;
+    limited.journal_capacity = capacity;
+    let mut runtime: Rt = Runtime::new(limited, ScriptedOwner::new(), clock())?;
+    for item in &order {
+        runtime.ack(item.clone())?;
+    }
+    let failed = runtime.tick();
+    assert!(
+        matches!(failed, Err(RuntimeError::JournalFull { capacity: held }) if held == capacity),
+        "seed {seed}: A's acceptance has no room: {failed:?}"
+    );
+    let unreduced: Vec<CommandId> = super::super::recover(runtime.journal())?
+        .iter()
+        .map(|held| held.command.id())
+        .collect();
+    assert_eq!(unreduced, want_pending, "seed {seed}: the journal's fold");
+
+    let candidates: Vec<&Command> = line
+        .before
+        .iter()
+        .chain(iter::once(&line.first))
+        .chain(line.after.iter())
+        .collect();
+    let mut state = seed ^ 0x9e37_79b9_7f4a_7c15;
+    for step in 0..12_u32 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let slot = usize::try_from(state >> 40)?.checked_rem(candidates.len());
+        let chosen = slot
+            .and_then(|slot| candidates.get(slot))
+            .ok_or("no command to retry")?;
+        match (state >> 33) % 3 {
+            0 => {
+                let (acceptance, _) =
+                    runtime.submit_protocol(&offer(chosen.tenant()), (*chosen).clone(), None)?;
+                assert_eq!(
+                    acceptance,
+                    CommandAcceptance::DuplicateReplay,
+                    "seed {seed} step {step}: reduced or held, so the retry is a duplicate"
+                );
+            }
+            1 => {
+                runtime.submit(line.first.clone())?;
+                let retry = runtime.tick();
+                assert!(
+                    matches!(retry, Err(RuntimeError::JournalFull { .. })),
+                    "seed {seed} step {step}: A's retry is refused typed: {retry:?}"
+                );
+            }
+            _ => {
+                let body = work_body(
+                    line.first_run,
+                    chosen.tenant(),
+                    OperationId::from_bytes(ids(0x30, seed)),
+                );
+                let hijack = command(first_id, CommandKind::Submit, &body)?;
+                let refused = runtime.submit_protocol(&offer(chosen.tenant()), hijack, None);
+                let own = chosen.tenant() == line.first.tenant();
+                assert!(
+                    own || matches!(refused, Err(RuntimeError::Command(_))),
+                    "seed {seed} step {step}: another tenant cannot take A's id: {refused:?}"
+                );
+            }
+        }
+        assert_eq!(pending(&runtime), want_pending, "seed {seed} step {step}");
+        assert_eq!(runtime.journal().len(), capacity, "seed {seed}: no growth");
+        assert_eq!(accepted(runtime.journal())?, before_ids, "seed {seed}");
+    }
+
+    let mut restored: Rt = restore(
+        settings()?,
+        ScriptedOwner::new(),
+        clock(),
+        runtime.into_journal(),
+    )?;
+    assert_eq!(pending(&restored), want_pending, "seed {seed}: restored");
+    assert_eq!(
+        restored.tick()?.admitted(),
+        want_pending.as_slice(),
+        "seed {seed}: A, then B's behind it, each reduced"
+    );
+    assert!(restored.tick()?.admitted().is_empty(), "seed {seed}: once");
+    let mut want_accepted = before_ids;
+    want_accepted.extend(&want_pending);
+    assert_eq!(accepted(restored.journal())?, want_accepted, "seed {seed}");
+    let tenant_b = line.before.first().ok_or("B ran nothing")?.tenant();
+    for run in &line.before_runs {
+        let owner = restored.projection().run_tenant(*run);
+        assert_eq!(owner, Some(tenant_b), "seed {seed}: B's run stays B's");
+    }
+    let owner = restored.projection().run_tenant(line.first_run);
+    assert_eq!(owner, Some(line.first.tenant()), "seed {seed}: A's run");
+    for item in &order {
+        restored.submit(item.clone())?;
+    }
+    assert_eq!(
+        restored.tick()?.duplicates(),
+        ids_of(&order).as_slice(),
+        "seed {seed}: every retry is now a duplicate"
+    );
+    Ok(trace_hash(restored.journal()))
+}
+
+/// larry#219, the neighbour and the double-clicker: tenant A's reduce fails
+/// with B's commands pending ahead of and behind it; B and A retry in a seeded
+/// order, a second tenant hijacks A's command id, and A's queued retry is
+/// refused typed. Nothing is dropped, doubled or crossed, the pending order is
+/// the journal's, and one seed gives one trace hash.
+#[test]
+fn sim_a_reduce_failure_interleaved_with_a_second_tenants_retries_never_crosses_tenants() -> Outcome
+{
+    let mut seen = BTreeSet::new();
+    for seed in 0..24_u64 {
+        let first = interleaved(seed)?;
+        assert_eq!(
+            first,
+            interleaved(seed)?,
+            "seed {seed}: same seed, same trace"
+        );
+        seen.insert(first);
+    }
+    assert_eq!(seen.len(), 24, "every seed leaves its own trace");
     Ok(())
 }

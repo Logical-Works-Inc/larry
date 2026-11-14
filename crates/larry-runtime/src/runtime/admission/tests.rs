@@ -28,7 +28,7 @@ use crate::protocol::{
 };
 use crate::runtime::{Runtime, RuntimeSettings, restore};
 
-mod reduce;
+mod sim_reduce;
 
 type Outcome = Result<(), Box<dyn std::error::Error>>;
 type Rt = Runtime<FoldProjection, ScriptedOwner>;
