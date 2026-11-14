@@ -2,7 +2,7 @@
 //! after its client's offer negotiates a version and the capabilities the
 //! command needs, so a refusal mutates neither the queue nor the journal.
 
-use larry_contracts::command::{Command, CommandKind};
+use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 
 use super::DisplayedEffect;
 use super::Runtime;
@@ -25,7 +25,10 @@ where
     /// The command, with its displayed effect when present, is durably
     /// admitted before this returns (E28, ADR 0025).
     ///
-    /// Returns the negotiated protocol version: the acknowledgement.
+    /// Returns the negotiated protocol version and how the command was accepted:
+    /// a retry under one identity and one content is
+    /// [`CommandAcceptance::DuplicateReplay`], which the caller can see instead of
+    /// an acknowledgement that hides it (larry#182 defect 3).
     ///
     /// # Errors
     ///
@@ -39,7 +42,7 @@ where
         offer: &ProtocolOffer,
         command: Command,
         display: Option<DisplayedEffect>,
-    ) -> Result<u16, RuntimeError> {
+    ) -> Result<(CommandAcceptance, u16), RuntimeError> {
         let negotiated = negotiate(offer)?;
         if matches!(
             command.content().kind(),
@@ -65,8 +68,10 @@ where
             }
             .into());
         }
-        // The command is acknowledged only once it is durable (E28): the
-        // version returned is the acknowledgement.
-        self.admit(command, display).map(|_| negotiated.version)
+        // The command is acknowledged only once it is durable (E28): the version
+        // returned is the acknowledgement, and the acceptance says whether this
+        // request was already recorded (larry#182 defect 3).
+        let acceptance = self.admit(command, display)?;
+        Ok((acceptance, negotiated.version))
     }
 }

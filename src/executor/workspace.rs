@@ -17,6 +17,9 @@ use super::ExecError;
 /// Largest diff kept for one task, in bytes.
 const DIFF_LIMIT: usize = 1_048_576;
 
+/// The prefix `larry eval` names its origins by: `origin-<pid>-<index>`.
+const EVAL_ORIGIN_PREFIX: &str = "origin-";
+
 /// Git under the executor's environment: PATH only, HOME at the state directory, no system config.
 struct Git<'a> {
     /// The state directory, which is also HOME for git.
@@ -206,13 +209,34 @@ pub(crate) fn seed_origin(state: &Path, path_env: &str, dir: &Path) -> Result<()
     Ok(())
 }
 
-/// Whether the executor that named `task_id` (`<digest>-<pid>-<counter>`) may still be running:
-/// its pid is this process or a live one. A name that carries no pid is not a run's.
-/// The workspace sweep and the journal recovery (larry#75) both ask it.
-pub(crate) fn owner_alive(task_id: &str) -> Result<bool, ExecError> {
-    let Some(pid) = task_id
-        .split('-')
-        .nth(1)
+/// Removes every `<state>/ws/*` directory that no live ledger row names and whose
+/// run is not live: a concurrent run's workspace is kept between its clone and its
+/// first command.
+///
+/// `live` is the caller's liveness proof, because a run id carries no process id
+/// any more (larry#182 defect 3): the executor asks its journals' locks, and
+/// `larry eval`'s origins have no journal at all.
+pub(crate) fn sweep(
+    state: &Path,
+    live: &[String],
+    owner_live: impl Fn(&str) -> Result<bool, ExecError>,
+) -> Result<(), ExecError> {
+    sweep_dir(&state.join("ws"), live, owner_live)
+}
+
+/// Removes every `<state>/eval/origin-<pid>-<n>` directory whose `larry eval` is gone: a kill -9
+/// runs no destructor, so its origins outlive it (larry#87). An origin's own name carries
+/// the eval process's pid, so it keeps its own liveness rule.
+pub(crate) fn sweep_origins(state: &Path) -> Result<(), ExecError> {
+    sweep_dir(&state.join("eval"), &[], eval_alive)
+}
+
+/// Whether the `larry eval` that named `origin` (`origin-<pid>-<n>`) may still be
+/// running: its pid is this process or a live one.
+fn eval_alive(origin: &str) -> Result<bool, ExecError> {
+    let Some(pid) = origin
+        .strip_prefix(EVAL_ORIGIN_PREFIX)
+        .and_then(|rest| rest.split('-').next())
         .and_then(|text| text.parse::<i32>().ok())
         .filter(|pid| *pid > 0)
     else {
@@ -224,20 +248,12 @@ pub(crate) fn owner_alive(task_id: &str) -> Result<bool, ExecError> {
     process_exists(pid).map_err(ExecError::Reap)
 }
 
-/// Removes every `<state>/ws/*` directory that no live ledger row names and whose executor
-/// is gone: a concurrent run's workspace is kept between its clone and its first command.
-pub(crate) fn sweep(state: &Path, live: &[String]) -> Result<(), ExecError> {
-    sweep_dir(&state.join("ws"), live)
-}
-
-/// Removes every `<state>/eval/origin-<pid>-<n>` directory whose `larry eval` is gone: a kill -9
-/// runs no destructor, so its origins outlive it (larry#87).
-pub(crate) fn sweep_origins(state: &Path) -> Result<(), ExecError> {
-    sweep_dir(&state.join("eval"), &[])
-}
-
 /// Removes every directory under `root` that `live` does not name and whose owner is gone.
-fn sweep_dir(root: &Path, live: &[String]) -> Result<(), ExecError> {
+fn sweep_dir(
+    root: &Path,
+    live: &[String],
+    owner_live: impl Fn(&str) -> Result<bool, ExecError>,
+) -> Result<(), ExecError> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -249,7 +265,7 @@ fn sweep_dir(root: &Path, live: &[String]) -> Result<(), ExecError> {
         let Some(text) = name.to_str() else {
             continue;
         };
-        if live.iter().any(|id| id.as_str() == text) || owner_alive(text)? {
+        if live.iter().any(|id| id.as_str() == text) || owner_live(text)? {
             continue;
         }
         if entry.file_type().map_err(ExecError::Workspace)?.is_dir() {
@@ -258,3 +274,8 @@ fn sweep_dir(root: &Path, live: &[String]) -> Result<(), ExecError> {
     }
     Ok(())
 }
+
+/// Seeded adversarial simulations of the sweep (larry#182 defect 3).
+#[cfg(test)]
+#[path = "sim_workspace.rs"]
+mod sim;

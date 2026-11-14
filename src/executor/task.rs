@@ -25,14 +25,18 @@ const MAX_BASE_BYTES: usize = 256;
 /// Maximum bytes in the repository path.
 const MAX_REPO_BYTES: usize = 4096;
 
+/// Maximum bytes in an idempotency key (larry#182 defect 3).
+const MAX_KEY_BYTES: usize = 256;
+
 /// Every key a task document may carry.
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 7] = [
     "repo",
     "base",
     "acceptance",
     "model_commands",
     "goal",
     "files",
+    "idempotency_key",
 ];
 
 /// One parsed `larry exec` task document.
@@ -49,6 +53,9 @@ pub struct Task {
     model_commands: bool,
     /// The goal and the files the model writes, when the document carries them.
     brief: Option<Brief>,
+    /// The client's idempotency key: its statement that a retry of this document is
+    /// the same request (larry#182 defect 3).
+    idempotency_key: Option<String>,
     /// The document bytes it was parsed from, kept to name the run.
     bytes: Vec<u8>,
 }
@@ -82,6 +89,14 @@ impl Task {
     #[must_use]
     pub(crate) const fn brief(&self) -> Option<&Brief> {
         self.brief.as_ref()
+    }
+
+    /// The client's idempotency key, when it named one: the statement that a retry
+    /// of this document is the same request, so a retry maps to the same run id and
+    /// the runtime reports it as a duplicate (larry#182 defect 3).
+    #[must_use]
+    pub(crate) fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
     }
 
     /// The document bytes it was parsed from.
@@ -181,12 +196,17 @@ impl Task {
             }
         }
         let brief = Brief::parse(object)?;
+        let idempotency_key = match object.get("idempotency_key") {
+            None => None,
+            Some(entry) => Some(bounded_key(entry)?),
+        };
         Ok(Task {
             repo: PathBuf::from(repo_text),
             base: base_text.to_owned(),
             acceptance,
             model_commands: object.contains_key("model_commands"),
             brief,
+            idempotency_key,
             bytes: bytes.to_vec(),
         })
     }
@@ -214,6 +234,19 @@ impl Task {
         });
         Task::parse(document.to_string().as_bytes())
     }
+}
+
+/// The idempotency key `entry` holds: 1 to [`MAX_KEY_BYTES`] bytes with no control
+/// byte. Empty is refused because it names no request, and a control byte because a
+/// key is text a client reuses verbatim on its retry (larry#182 defect 3).
+fn bounded_key(entry: &lgwks_std::json::Value) -> Result<String, TaskError> {
+    let text = entry.as_str().ok_or(TaskError::WrongType {
+        key: "idempotency_key",
+    })?;
+    if text.is_empty() || text.len() > MAX_KEY_BYTES || text.chars().any(char::is_control) {
+        return Err(TaskError::BadIdempotencyKey);
+    }
+    Ok(text.to_owned())
 }
 
 /// Why a task document was refused.
@@ -293,6 +326,8 @@ pub enum TaskError {
         /// Index of the file.
         index: usize,
     },
+    /// The idempotency key was empty, oversize, or held a control byte.
+    BadIdempotencyKey,
 }
 
 impl fmt::Display for TaskError {
@@ -342,6 +377,10 @@ impl fmt::Display for TaskError {
             Self::BadFile { index } => write!(
                 out,
                 "task document file {index} is not a distinct repo-relative path outside .git"
+            ),
+            Self::BadIdempotencyKey => write!(
+                out,
+                "task document idempotency_key is empty, over {MAX_KEY_BYTES} bytes, or holds a control byte"
             ),
         }
     }
