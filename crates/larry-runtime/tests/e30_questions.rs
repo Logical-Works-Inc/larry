@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use larry_contracts::authority::Scope;
-use larry_contracts::command::{Command, CommandContent, CommandKind};
+use larry_contracts::command::{Command, CommandAcceptance, CommandContent, CommandKind};
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::{CommandId, ContentDigest, RunId, TenantId, WorkerId};
 use larry_contracts::replay::DenialReason;
@@ -176,7 +176,10 @@ fn approve_read() -> Decision {
     Decision::Approve([Scope::FileRead].into_iter().collect())
 }
 
-fn refused(result: Result<u16, RuntimeError>) -> Option<QuestionError> {
+/// The question refusal `result` carries, if any: a protocol submission answers
+/// the acceptance and the version, and only a refusal is interesting here
+/// (larry#182 defect 3).
+fn refused(result: Result<(CommandAcceptance, u16), RuntimeError>) -> Option<QuestionError> {
     match result {
         Err(RuntimeError::Question(error)) => Some(error),
         _ => None,

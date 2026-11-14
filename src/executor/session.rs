@@ -19,10 +19,17 @@ use std::path::Path;
 
 use lgwks_std::json::{self, Value, json};
 
+use super::ExecError;
+use super::Ledger;
+use super::Report;
+use super::Settings;
 use super::author::unfenced;
+use super::backoff;
+use super::digest_hex;
 use super::gate::{self, Subject};
+use super::identity::fresh_id;
+use super::prepare;
 use super::run::{CommandResult, run_command};
-use super::{ExecError, Ledger, Report, Settings, backoff, digest_hex, fresh_task_id, prepare};
 use crate::model::{Completion, Message, ModelClient, Role};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`.
@@ -266,7 +273,7 @@ pub(crate) fn run_session(
         "session": { "cwd": cwd.to_string_lossy(), "instruction": instruction }
     }))
     .map_err(|cause| ExecError::Gate(cause.into()))?;
-    let task_id = fresh_task_id(&document);
+    let task_id = fresh_id()?;
     let task_digest = digest_hex(&document);
     let mut stop = None;
     let subject = Subject {

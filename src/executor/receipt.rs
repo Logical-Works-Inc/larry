@@ -23,7 +23,7 @@ const TAG: &[u8] = b"larry.receipt.v1";
 const ALGORITHM: &str = "ed25519";
 
 /// The report member that carries the receipt.
-const RECEIPT: &str = "receipt";
+pub(crate) const RECEIPT: &str = "receipt";
 
 /// The report member that carries the verdict.
 const ACCEPTED: &str = "accepted";

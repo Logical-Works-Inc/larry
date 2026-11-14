@@ -9,7 +9,7 @@ mod atomic;
 use std::time::Duration;
 
 use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope};
-use larry_contracts::command::{Command, CommandContent, CommandKind};
+use larry_contracts::command::{Command, CommandAcceptance, CommandContent, CommandKind};
 use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::ContentDigest;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
@@ -161,7 +161,8 @@ fn e47_refusals_are_actionable_scoped_and_non_mutating() -> Result<(), Box<dyn s
     assert_eq!(rt.journal().len(), 0);
     assert_eq!(rt.tick_count(), 0);
 
-    let negotiated_version = rt.submit_protocol(&valid, command, None)?;
+    let (acceptance, negotiated_version) = rt.submit_protocol(&valid, command, None)?;
+    assert_eq!(acceptance, CommandAcceptance::Initial);
     assert_eq!(negotiated_version, MAX_PROTOCOL_VERSION);
     // The acknowledgement follows the durable write (E28, ADR 0025): the
     // command is journaled, and accepted only when the tick reduces it.
@@ -268,7 +269,8 @@ fn e47_overload_backoff_is_bounded_deterministic_and_does_not_append()
         ReconciliationStrategy::Queryable,
     );
     let recovered = submit(command_id(10), &recovered_body)?;
-    let negotiated_version = rt.submit_protocol(&valid, recovered, None)?;
+    let (acceptance, negotiated_version) = rt.submit_protocol(&valid, recovered, None)?;
+    assert_eq!(acceptance, CommandAcceptance::Initial);
     assert_eq!(negotiated_version, MAX_PROTOCOL_VERSION);
     assert_eq!(rt.tick()?.admitted(), &[command_id(10)]);
     Ok(())
@@ -319,6 +321,53 @@ fn e47_seeded_negotiation_replays_the_same_trace_for_one_thousand_seeds()
     Ok(())
 }
 
+/// The ingress reports a repeated submission as a duplicate the caller can see:
+/// the same command identity and content through `submit_protocol` twice is
+/// `Initial` then `DuplicateReplay`, the journal grows by one entry, and the
+/// tick reduces the command once (larry#182 defect 3, E47 meets E28).
+#[test]
+fn e47_a_duplicate_submission_is_reported_as_a_duplicate() -> Result<(), Box<dyn std::error::Error>>
+{
+    let tenant_a = tenant(6);
+    let mut rt = runtime_with(
+        ScriptedOwner::scripted([succeeded(operation(1))]),
+        &[Scope::FileRead],
+        &[Scope::FileRead],
+        100,
+    )?;
+    let offer = offer(
+        tenant_a,
+        ProtocolVersionRange::new(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION),
+        &[ProtocolCapability::SubmitCommand],
+        false,
+        false,
+    );
+    let command = command_for(tenant_a, command_id(1), run(1))?;
+    let (first, version) = rt.submit_protocol(&offer, command.clone(), None)?;
+    assert_eq!(
+        first,
+        CommandAcceptance::Initial,
+        "the first submission is a new request"
+    );
+    assert_eq!(version, MAX_PROTOCOL_VERSION);
+    let (second, retried) = rt.submit_protocol(&offer, command, None)?;
+    assert_eq!(
+        second,
+        CommandAcceptance::DuplicateReplay,
+        "the same request through the ingress is reported as a duplicate"
+    );
+    assert_eq!(retried, version, "a duplicate negotiates the same version");
+    assert_eq!(
+        rt.journal().len(),
+        1,
+        "a duplicate is journaled once, not twice"
+    );
+    let accepted = rt.tick()?;
+    assert_eq!(accepted.admitted(), &[command_id(1)]);
+    assert_state(rt.projection(), run(1), RunState::Completed)?;
+    Ok(())
+}
+
 /// A displayed command submitted through the protocol ingress dispatches its
 /// bound effect exactly once, and an offer scoped to another tenant is
 /// refused with the queue and the journal unchanged (E47 meets E65).
@@ -361,7 +410,7 @@ fn e47_a_displayed_command_through_protocol_ingress_dispatches_its_bound_effect(
     assert_eq!(rt.journal().len(), 0);
     assert_eq!(rt.tick_count(), 0);
 
-    let negotiated_version = rt.submit_protocol(
+    let (acceptance, negotiated_version) = rt.submit_protocol(
         &offer(
             tenant_a,
             ProtocolVersionRange::new(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION),
@@ -372,6 +421,7 @@ fn e47_a_displayed_command_through_protocol_ingress_dispatches_its_bound_effect(
         command,
         Some(display),
     )?;
+    assert_eq!(acceptance, CommandAcceptance::Initial);
     assert_eq!(negotiated_version, MAX_PROTOCOL_VERSION);
     let accepted = rt.tick()?;
     // Exactly one command was queued across the whole journey: the refused
