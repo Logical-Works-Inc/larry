@@ -124,6 +124,50 @@ fn a_normal_completion_returns_the_mock_reply() -> TestResult {
     Ok(())
 }
 
+/// monkey and liar-upstream: whatever the seed, a mock that refuses any request without
+/// exactly one `User-Agent` header equal to `larry/<version>` (larry#230) serves the
+/// client's first attempt and its retry after a 429; a mock expecting any other name
+/// refuses the same client with a 400, so the check is not vacuous. Catches a client
+/// that keeps the HTTP library's name, adds a second header beside it, or names itself
+/// only on the first attempt.
+#[test]
+fn the_client_names_itself_larry_in_user_agent() -> TestResult {
+    let wanted = format!("larry/{}", env!("CARGO_PKG_VERSION"));
+    for seed in 0..SEEDS {
+        let limited = Some(Fault::RateLimit {
+            retry_after_secs: 1,
+        });
+        let strict = Config {
+            user_agent: Some(wanted.clone()),
+            ..scripted(seed, vec![limited, None])
+        };
+        mock_model::run(strict, |handle| {
+            let reply = client_from(settings(&base_of(handle.addr()), "test-key"))?
+                .complete(&[user("who are you")])?;
+            assert!(
+                !reply.content().is_empty(),
+                "seed {seed}: the retry after the 429 is served"
+            );
+            assert_eq!(handle.served(), 2, "seed {seed}: the 429 and the retry");
+            Ok::<_, Box<dyn Error>>(())
+        })?;
+        let other = Config {
+            user_agent: Some(String::from("lgwks-std/0")),
+            ..Config::seeded(seed)
+        };
+        mock_model::run(other, |handle| {
+            let refused = client_from(settings(&base_of(handle.addr()), "test-key"))?
+                .complete(&[user("who are you")]);
+            assert!(
+                matches!(refused, Err(ModelError::Client { status: 400, .. })),
+                "seed {seed}: a mock expecting another name refuses Larry: {refused:?}"
+            );
+            Ok::<_, Box<dyn Error>>(())
+        })?;
+    }
+    Ok(())
+}
+
 #[test]
 fn the_body_sent_carries_the_pinned_model_and_temperature() -> TestResult {
     for seed in 0..SEEDS {

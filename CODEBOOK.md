@@ -66,7 +66,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; a retry answered from its evidence (ADR 0019, 0037) |
 | `executor::recovery`, `executor::sim_*` | The task journals a killed executor left: their path, liveness by the journal's own lock, and the recovery that sets each aside as `<task>.recovered` or `<task>.refused` without reaching the world; the seeded simulations of the identity, the recovery, the report rows and the sweep: `executor::sim_ledger` the sealed-report rows and the live-group rows, `executor::sim_workspace` the workspace and origin sweeps (larry#75, larry#182 defect 3, larry#214, ADR 0023, ADR 0037) |
 | `executor::task` | The bounded task document, its optional `idempotency_key`, and its typed refusals |
-| `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance (ADR 0008) |
+| `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance, every prompt on one byte-stable prefix per brief (ADR 0008, ADR 0043) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill, the observed clip |
 | `executor::session` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035) |
 | `executor::ledger`, `executor::ledger_routes`, `executor::routes` | The SQLite record of live groups, the reap after a kill -9, the receipt key and the per-tenant route table (`ledger_routes`: at most 256 routes a tenant, one default, every statement names the tenant); `larry route` and the route a task resolves to (larry#201, ADR 0039) |
@@ -78,7 +78,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `model` | The blocking chat-completions client, built per task over its route; no gateway or model is compiled in (ADR 0003, 0039) |
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
 | `model::config`, `model::route` | Key read from the route's variable (never shown; a stored route's is `LARRY_KEY_*` only), timeout, retry, the `env` route; the route (id, URL, model, key variable, residency), its checks and the resolver (larry#201) |
-| `model::wire` | The request body and the reply parser |
+| `model::wire`, `model::wire::sim` (`sim_wire.rs`) | The request body and the reply parser, cached and written tokens in every provider shape; the seeded usage round trips (larry#230, ADR 0043) |
 | `native` | The native AppCUI view: session state, commands and saturating geometry |
 | `native::render` | Painting the forge chrome: transcript, panels, dashboard, input, status hub |
 | `native::input` | Key routing and the paint entry point of the session view |
@@ -107,7 +107,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
-| `eval/matched-v1.json` | The shipped matched task set, 12 POSIX sh tasks |
+| `eval/matched-v1.json`, `eval/errands-v1.json` | The shipped matched task set, 12 POSIX sh tasks; 12 Rust errands with hidden tests, the cache benchmark's set (larry#230) |
 
 ## Invariants the module map carries
 

@@ -385,11 +385,13 @@ struct Run {
     took: Duration,
 }
 
-/// One accepted submitted task on a fresh origin under seed `seed`.
-fn accepted_run(seed: u64) -> TestResult<Run> {
-    let (state, origin) = origin::fixture()?;
+/// One accepted submitted task on a fresh origin under seed `seed`, in the state
+/// directory `state`: that directory is the tenant, and the prompt names its cache
+/// partition (larry#230), so two runs that must replay one model trace share it.
+fn accepted_run(seed: u64, state: &Path) -> TestResult<Run> {
+    let (_, origin) = origin::fixture()?;
     mock_model::run(Config::seeded(seed), |handle: &Handle| -> TestResult<Run> {
-        let mut session = connected(&operator(state.path(), handle.addr(), &[]))?;
+        let mut session = connected(&operator(state, handle.addr(), &[]))?;
         let task = briefed(
             origin.path(),
             &["README", "src/new.rs"],
@@ -447,9 +449,10 @@ fn accepted_run(seed: u64) -> TestResult<Run> {
             .ok_or("a user turn")?;
         assert!(
             turn.contains("replace the readme")
-                && turn.contains("File: README")
-                && turn.contains("origin readme"),
-            "seed {seed}: the goal, the path and the current content reached the model: {turn}"
+                && turn.contains("=== README ===")
+                && turn.contains("origin readme")
+                && turn.ends_with("Write this file now: README"),
+            "seed {seed}: the goal, the files and the file to write reached the model: {turn}"
         );
         assert!(
             handle
@@ -458,7 +461,7 @@ fn accepted_run(seed: u64) -> TestResult<Run> {
                 .all(|sent| sent.as_deref() == Some("Bearer mcp-key")),
             "seed {seed}: the operator's key, and only it, reached the gateway"
         );
-        let (code, verdict) = verify_offline(state.path(), report)?;
+        let (code, verdict) = verify_offline(state, report)?;
         assert_eq!(
             code,
             Some(0),
@@ -483,8 +486,9 @@ fn accepted_run(seed: u64) -> TestResult<Run> {
 fn a_submitted_task_runs_against_the_mock_model_and_its_receipt_verifies() -> TestResult<()> {
     let mut samples: Vec<Duration> = Vec::new();
     for seed in 0..TASK_SEEDS {
-        let first = accepted_run(seed)?;
-        let again = accepted_run(seed)?;
+        let state = origin::TempDir::new()?;
+        let first = accepted_run(seed, state.path())?;
+        let again = accepted_run(seed, state.path())?;
         assert_eq!(
             first.trace, again.trace,
             "seed {seed}: one seed, one model trace"

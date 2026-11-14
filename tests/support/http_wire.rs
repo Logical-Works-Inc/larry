@@ -16,6 +16,8 @@ pub(crate) struct Request {
     pub(crate) path: String,
     /// The `Authorization` header value, when one was sent.
     pub(crate) authorization: Option<String>,
+    /// The value of every `User-Agent` header sent, in order: a client names itself once.
+    pub(crate) user_agents: Vec<String>,
     /// The body, at most the configured cap.
     pub(crate) body: Vec<u8>,
 }
@@ -67,12 +69,16 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
     }
     let mut declared: Option<usize> = None;
     let mut authorization: Option<String> = None;
+    let mut user_agents: Vec<String> = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         if name.trim().eq_ignore_ascii_case("authorization") {
             authorization = Some(String::from(value.trim()));
+        }
+        if name.trim().eq_ignore_ascii_case("user-agent") {
+            user_agents.push(String::from(value.trim()));
         }
         if name.trim().eq_ignore_ascii_case("transfer-encoding") {
             return Err(Refusal::LengthRequired);
@@ -95,6 +101,7 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
         method,
         path,
         authorization,
+        user_agents,
         body,
     })
 }

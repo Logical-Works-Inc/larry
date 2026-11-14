@@ -24,8 +24,10 @@ const MAX_FILES: usize = 64;
 const MAX_PATH_BYTES: usize = 1024;
 /// Largest current content of one file sent to the model, in bytes.
 const MAX_SOURCE_BYTES: u64 = 262_144;
+/// Most bytes of brief context one prompt carries; past it each prompt carries only its own file (larry#230).
+const MAX_CONTEXT_BYTES: usize = 524_288;
 /// The standing instruction of every completion.
-const SYSTEM: &str = "You are Larry's executor. Reply with the complete new content of the one file named below and nothing else: no explanation and no surrounding code fence. Your reply replaces the file.";
+const SYSTEM: &str = "You are Larry's executor. The brief's files follow as they were before any change, then the goal. Reply with the complete new content of the one file the last line names and nothing else: no explanation and no surrounding code fence. Your reply replaces that file.";
 
 /// What the model is asked to do: the goal and the files it may write, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,40 +142,164 @@ fn refused(path: &str, fault: AuthorFault) -> ExecError {
     }
 }
 
+/// One file of the brief as it was before the model wrote anything.
+struct Source<'brief> {
+    /// The repo-relative path the brief names.
+    path: &'brief str,
+    /// The file inside the workspace, checked against symlinks.
+    target: PathBuf,
+    /// The text it held, `None` when it did not exist yet.
+    before: Option<String>,
+}
+
 /// Writes each file the brief names with the model's reply, in order, inside
 /// `tree`, and returns one record per file for the sealed report.
+///
+/// Every file is read before any is written, so all the brief's prompts show the
+/// files as they were, and each prompt of the brief begins with the same bytes
+/// (larry#230): a provider's prefix cache reads the context once and every later
+/// file's prompt hits it. `partition` names the tenant, so no two tenants share a
+/// prefix. The snapshot holds at most 64 files of 256 KiB; past
+/// [`MAX_CONTEXT_BYTES`] of context, or when any request carrying it would pass
+/// the route's request bound, each prompt carries only its own file.
 pub(crate) fn author(
     brief: &Brief,
     tree: &Path,
     client: &ModelClient,
+    partition: &str,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut authored = Vec::with_capacity(brief.files.len());
+    let mut sources: Vec<Source<'_>> = Vec::with_capacity(brief.files.len());
     for path in &brief.files {
         let target = checked_target(tree, path)?;
-        let current = current_content(&target, path)?;
+        let before = current_content(&target, path)?;
+        sources.push(Source {
+            path: path.as_str(),
+            target,
+            before,
+        });
+    }
+    let views: Vec<(&str, Option<&str>)> = sources
+        .iter()
+        .map(|source| (source.path, source.before.as_deref()))
+        .collect();
+    let system = system_line(partition);
+    let paths: Vec<&str> = sources.iter().map(|source| source.path).collect();
+    let shared = fitting_context(
+        shared_context(&brief.goal, &views),
+        &system,
+        &paths,
+        |messages| client.fits(messages),
+    );
+    let prefix = prefix_label(shared.as_deref());
+    let mut authored = Vec::with_capacity(sources.len());
+    for source in &sources {
+        let path = source.path;
+        let turn = user_turn(
+            shared.as_deref(),
+            &brief.goal,
+            path,
+            source.before.as_deref(),
+        );
         let messages = [
-            Message::new(Role::System, SYSTEM),
-            Message::new(Role::User, prompt(&brief.goal, path, current.as_deref())),
+            Message::new(Role::System, system.as_str()),
+            Message::new(Role::User, turn),
         ];
         let completion: Completion = client
             .complete(&messages)
             .map_err(|cause| refused(path, AuthorFault::Model(cause)))?;
         let content = file_text(completion.content());
-        if let Some(parent) = target.parent() {
+        if let Some(parent) = source.target.parent() {
             fs::create_dir_all(parent).map_err(|cause| refused(path, AuthorFault::Io(cause)))?;
         }
-        fs::write(&target, content.as_bytes())
+        fs::write(&source.target, content.as_bytes())
             .map_err(|cause| refused(path, AuthorFault::Io(cause)))?;
         let usage = completion.usage();
         authored.push(json!({
             "path": path,
             "bytes": content.len(),
-            "existed": current.is_some(),
+            "existed": source.before.is_some(),
             "prompt_tokens": usage.map(|spent| spent.prompt_tokens),
             "completion_tokens": usage.map(|spent| spent.completion_tokens),
+            "cached_tokens": usage.and_then(|spent| spent.cached_tokens),
+            "cache_write_tokens": usage.and_then(|spent| spent.cache_write_tokens),
+            "prefix": prefix,
         }));
     }
     Ok(authored)
+}
+
+/// The system turn: the standing instruction, then the tenant's partition, so two
+/// tenants' prompts differ from the first byte after the instruction and a
+/// provider's prefix cache never serves one tenant's context to another.
+fn system_line(partition: &str) -> String {
+    format!("{SYSTEM}\nCache partition: {partition}")
+}
+
+/// The context every prompt of one brief begins with: the brief's files as they
+/// were, sorted by path bytes so the brief's own order never changes a byte, then
+/// the goal. `None` when it would be longer than [`MAX_CONTEXT_BYTES`]; it is cut
+/// off as soon as it is.
+fn shared_context(goal: &str, files: &[(&str, Option<&str>)]) -> Option<String> {
+    let mut ordered: Vec<(&str, Option<&str>)> = files.to_vec();
+    ordered.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    let mut text = String::from("Files of the brief, before any change:\n");
+    for (path, content) in ordered {
+        text.push_str("\n=== ");
+        text.push_str(path);
+        match content {
+            Some(body) => {
+                text.push_str(" ===\n");
+                text.push_str(body);
+                if !body.ends_with('\n') {
+                    text.push('\n');
+                }
+            }
+            None => text.push_str(" (does not exist yet) ===\n"),
+        }
+        if text.len() > MAX_CONTEXT_BYTES {
+            return None;
+        }
+    }
+    text.push_str("\nGoal:\n");
+    text.push_str(goal);
+    text.push('\n');
+    (text.len() <= MAX_CONTEXT_BYTES).then_some(text)
+}
+
+/// What a record says about its prompt: `shared` when the brief's prompts begin with
+/// one context, `own` when each carries only its own file.
+fn prefix_label(shared: Option<&str>) -> &'static str {
+    if shared.is_some() { "shared" } else { "own" }
+}
+
+/// `shared` when every request of the brief that carries it fits the route, as
+/// `fits` (the client's own pre-send check) says; otherwise `None`, so the brief
+/// falls back to one-file prompts instead of failing. The context is bounded in
+/// raw bytes, but JSON escaping can grow a control byte sixfold, and a route may
+/// name a bound below the default, so only the encoded request decides.
+fn fitting_context(
+    shared: Option<String>,
+    system: &str,
+    paths: &[&str],
+    fits: impl Fn(&[Message]) -> bool,
+) -> Option<String> {
+    shared.filter(|context| {
+        paths.iter().all(|path| {
+            fits(&[
+                Message::new(Role::System, system),
+                Message::new(Role::User, user_turn(Some(context), "", path, None)),
+            ])
+        })
+    })
+}
+
+/// The user turn: the shared context and the file to write now, or, when the
+/// context was too large to share, the prompt that carries only this file.
+fn user_turn(shared: Option<&str>, goal: &str, path: &str, current: Option<&str>) -> String {
+    match shared {
+        Some(context) => format!("{context}\nWrite this file now: {path}"),
+        None => prompt(goal, path, current),
+    }
 }
 
 /// `tree` joined with `path`, refused when any component that already exists is a symlink:

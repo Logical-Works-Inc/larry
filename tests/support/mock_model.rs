@@ -102,6 +102,9 @@ pub(crate) struct Config {
     /// Reply content for request index `n` (larry#93: a terminal session's
     /// scripted commands); indexes past the end compose words from the seed.
     pub(crate) contents: Vec<String>,
+    /// When set, a request must carry exactly one `User-Agent` header with this
+    /// value or it is refused with a 400 (larry#230).
+    pub(crate) user_agent: Option<String>,
 }
 
 impl Config {
@@ -114,6 +117,7 @@ impl Config {
             script: Vec::new(),
             fault_per_mille: 0,
             contents: Vec::new(),
+            user_agent: None,
         }
     }
 }
@@ -235,11 +239,10 @@ fn locked<Item>(mutex: &Mutex<Item>) -> MutexGuard<'_, Item> {
     }
 }
 
-/// Drop the outcome of a best-effort socket operation.
+/// Drop the outcome of a best-effort socket operation. A peer that hung up is the
+/// fault the mock simulates, so no caller has anything further to do with a refusal.
 fn settle<Done, Fail>(outcome: Result<Done, Fail>) {
-    match outcome {
-        Ok(_) | Err(_) => {}
-    }
+    drop(outcome);
 }
 
 /// An OpenAI-shaped error body.
@@ -338,6 +341,11 @@ impl State {
         if !request.method.eq_ignore_ascii_case("POST") {
             return reject(405, "POST only");
         }
+        if let Some(wanted) = self.config.user_agent.as_deref()
+            && request.user_agents.iter().map(String::as_str).ne([wanted])
+        {
+            return reject(400, "exactly one user-agent, as configured, is required");
+        }
         let Ok(body) = json::from_slice::<Value>(&request.body) else {
             return reject(400, "request body is not JSON");
         };
@@ -381,11 +389,11 @@ impl State {
         Ok(planned)
     }
 
-    /// Block until the test releases a delayed reply or the server stops.
-    fn wait_gate(&self) {
-        match locked(&self.gate_rx).recv() {
-            Ok(()) | Err(_) => {}
-        }
+    /// Block until the test releases a delayed reply or the server stops; true
+    /// when it was released. A closed gate means the server is stopping, and the
+    /// reply is sent regardless.
+    fn wait_gate(&self) -> bool {
+        locked(&self.gate_rx).recv().is_ok()
     }
 }
 

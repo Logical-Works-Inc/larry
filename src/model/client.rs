@@ -9,6 +9,10 @@ use super::config::ModelConfig;
 use super::wire;
 use super::{Completion, MAX_MESSAGES, MAX_REPLY_BYTES, Message, ModelError};
 
+/// The `User-Agent` every request names itself with (larry#230): a gateway that
+/// meters or routes by client sees Larry and its version, not the HTTP library's.
+const USER_AGENT: &str = concat!("larry/", env!("CARGO_PKG_VERSION"));
+
 /// A blocking OpenAI-compatible chat-completions client.
 ///
 /// Built per task from the route the task resolved to (larry#201). It holds no
@@ -54,14 +58,27 @@ impl ModelClient {
     /// the last attempt. A config without a key cannot be built, so a client
     /// always has one.
     pub fn complete(&self, messages: &[Message]) -> Result<Completion, ModelError> {
-        if messages.len() > MAX_MESSAGES {
+        let Some(body) = self.bounded_body(messages) else {
             return Err(ModelError::BodyTooLarge);
+        };
+        self.with_retry(&body)
+    }
+
+    /// Whether `messages` pass the bounds [`ModelClient::complete`] checks before
+    /// any send, asked without sending: the executor shares one prompt prefix
+    /// across a brief only when every request of it fits the route (larry#230).
+    pub(crate) fn fits(&self, messages: &[Message]) -> bool {
+        self.bounded_body(messages).is_some()
+    }
+
+    /// The encoded request for `messages`, `None` past the message count or the
+    /// route's request body bound.
+    fn bounded_body(&self, messages: &[Message]) -> Option<Vec<u8>> {
+        if messages.len() > MAX_MESSAGES {
+            return None;
         }
         let body = wire::request_body(self.config.model(), self.config.temperature(), messages);
-        if body.len() > self.config.request_bytes() {
-            return Err(ModelError::BodyTooLarge);
-        }
-        self.with_retry(&body)
+        (body.len() <= self.config.request_bytes()).then_some(body)
     }
 
     /// Attempt the exchange until it succeeds, fails terminally, or the retry
@@ -112,6 +129,9 @@ impl ModelClient {
             .deadline(self.config.timeout())
             .max_body_bytes(MAX_REPLY_BYTES)
             .body_policy(BodyPolicy::Whole)
+            // `Options` already sends a `User-Agent` of its own; the setter replaces it,
+            // where a `header` would add a second one.
+            .user_agent(USER_AGENT)
             .header("Authorization", format!("Bearer {}", self.config.api_key()));
         let url = format!("{}/chat/completions", self.config.base_url());
         let response =

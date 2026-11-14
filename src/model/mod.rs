@@ -21,6 +21,8 @@ use std::str::Utf8Error;
 pub use client::ModelClient;
 pub use config::ModelConfig;
 pub(crate) use config::env_route;
+#[cfg(test)]
+pub(crate) use config::sim_config;
 pub use route::RouteError;
 pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve};
 
@@ -207,6 +209,10 @@ pub(crate) struct Usage {
     pub(crate) prompt_tokens: u64,
     /// Tokens the reply carried.
     pub(crate) completion_tokens: u64,
+    /// Prompt tokens the provider read from its prefix cache, when it reported them (larry#230).
+    pub(crate) cached_tokens: Option<u64>,
+    /// Prompt tokens the provider wrote to its prefix cache, when it reported them (larry#230).
+    pub(crate) cache_write_tokens: Option<u64>,
 }
 
 /// The assistant's reply to one completion request.

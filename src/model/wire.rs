@@ -43,13 +43,46 @@ pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
 
 /// The OpenAI `usage` block: both token counts as whole numbers, or `None`. A
 /// gateway that reports one count, a negative or a fraction reported nothing
-/// a cost can be built on, so nothing is invented (larry#87).
+/// a cost can be built on, so nothing is invented (larry#87). The cache counts
+/// ride along when a gateway reports them (larry#230): cached tokens from
+/// `prompt_tokens_details.cached_tokens` (OpenAI), `prompt_cache_hit_tokens`
+/// (DeepSeek) or `cache_read_input_tokens` (Anthropic), written tokens from
+/// `prompt_tokens_details.cache_write_tokens` or `cache_creation_input_tokens`.
+/// Counts that together exceed the prompt are an impossible report and are
+/// dropped, so a cost is never built on them.
 fn usage_of(document: &Value) -> Option<Usage> {
     let usage = &document["usage"];
+    let prompt_tokens = usage["prompt_tokens"].as_u64()?;
+    let completion_tokens = usage["completion_tokens"].as_u64()?;
+    let details = &usage["prompt_tokens_details"];
+    let cached = first_count(&[
+        &details["cached_tokens"],
+        &usage["prompt_cache_hit_tokens"],
+        &usage["cache_read_input_tokens"],
+    ]);
+    let written = first_count(&[
+        &details["cache_write_tokens"],
+        &usage["cache_creation_input_tokens"],
+    ]);
+    let together = cached
+        .into_iter()
+        .chain(written)
+        .try_fold(0_u64, u64::checked_add);
+    let (cached_tokens, cache_write_tokens) = match together {
+        Some(sum) if sum <= prompt_tokens => (cached, written),
+        Some(_) | None => (None, None),
+    };
     Some(Usage {
-        prompt_tokens: usage["prompt_tokens"].as_u64()?,
-        completion_tokens: usage["completion_tokens"].as_u64()?,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
+        cache_write_tokens,
     })
+}
+
+/// The first of `candidates` that is a whole non-negative number.
+fn first_count(candidates: &[&Value]) -> Option<u64> {
+    candidates.iter().find_map(|candidate| candidate.as_u64())
 }
 
 /// The one JSON document a reply carries.
@@ -58,13 +91,15 @@ fn usage_of(document: &Value) -> Option<Usage> {
 /// bare document, that document with `data: [DONE]` appended, or a full SSE
 /// stream of `chat.completion.chunk` events. The first parses directly. The
 /// others reassemble from their `data:` payloads, so the framing never reaches
-/// the caller.
+/// the caller. A stream reports its token counts as the `usage` object of its
+/// last chunk that carries one; that object is kept (larry#230), a `null` is not.
 fn leading_document(text: &str) -> Result<Value, ModelError> {
     if let Ok(document) = json::from_str::<Value>(without_done_marker(text)) {
         return Ok(document);
     }
     let mut assembled = String::new();
     let mut chunks = 0_usize;
+    let mut usage = Value::Null;
     for line in text.lines() {
         let Some(payload) = line.trim_start().strip_prefix("data:") else {
             continue;
@@ -73,9 +108,13 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
-        if let Ok(chunk) = json::from_str::<Value>(payload)
-            && let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str()
-        {
+        let Ok(chunk) = json::from_str::<Value>(payload) else {
+            continue;
+        };
+        if chunk["usage"].as_object().is_some() {
+            usage = chunk["usage"].clone();
+        }
+        if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
             assembled.push_str(delta);
             chunks = chunks.saturating_add(1);
         }
@@ -85,7 +124,7 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
             "the reply is not a completion document",
         ));
     }
-    Ok(json!({ "choices": [{ "message": { "content": assembled } }] }))
+    Ok(json!({ "choices": [{ "message": { "content": assembled } }], "usage": usage }))
 }
 
 /// The text without surrounding whitespace and without one trailing
@@ -102,6 +141,10 @@ fn without_done_marker(text: &str) -> &str {
         None => trimmed,
     }
 }
+
+#[cfg(test)]
+#[path = "sim_wire.rs"]
+mod sim;
 
 /// Most characters of a gateway's own refusal message an error carries.
 const MAX_DETAIL_CHARS: usize = 512;

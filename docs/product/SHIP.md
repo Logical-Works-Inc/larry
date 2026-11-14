@@ -79,6 +79,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #93 Terminal-Bench 2.0 Harbor adapter: `larry acp`, an ACP agent Harbor's generic `acp` agent drives (ADR 0035). Proof: a Harbor task through the shipped binary on the mock endpoint, rewarded by its verifier: PR #186.
 - [ ] #94 Harness-Bench runner, model held constant across five harnesses. Proof: pass rate, cost per accepted task, p50/p95/p99, peak RSS per harness.
 - [ ] #95 scored runs and the published comparison (spends model money).
+- [x] #230 one prompt prefix per brief, cached tokens priced (ADR 0043): PR #231, 930 tests; errands-v1 over 9router, 8 OpenCode Go models, cache reads 570 ‰ kimi, 475 ‰ mimo, 183 ‰ minimax ([bench-cache](/docs/product/bench-cache.md)).
 
 ## 6. Track 4: learning, against Harness² (#60)
 - [ ] #61 harness as a versioned, content-hashed journal value.

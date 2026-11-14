@@ -46,6 +46,7 @@ expiry is never consent.
   - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
     calls go, which `LARRY_KEY_*` variable holds the key, and the country where the provider processes the data (ADR 0039).
   - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
+    Set `LARRY_EVAL_PRICE_IN` and `_OUT`, and `_CACHED` and `_CACHE_WRITE` for cache rates (ADR 0043).
   - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`) over `LARRY_STATE_DIR`;
     `larry serve key <tenant>` prints a tenant's bearer key once, `GET /healthz` is open liveness,
     `GET /t/{tenant}/healthz` the keyed tenant probe, and SIGTERM drains it. A non-loopback bind is refused

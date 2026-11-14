@@ -21,7 +21,7 @@ use std::time::Instant;
 use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
-use score::{Ending, Outcome, card};
+use score::{Ending, Outcome, Spent, card};
 pub use score::{PriceError, PriceFault, Prices, Scorecard};
 use set::{EvalTask, TaskSet};
 pub use set::{MAX_SET_BYTES, SetError};
@@ -154,18 +154,35 @@ impl Drop for Origin {
     }
 }
 
-/// The prompt and completion tokens a sealed report's model step spent, when every
-/// completion reported both.
-fn tokens(report: &Report) -> Option<(u64, u64)> {
+/// The tokens a sealed report's model step spent, when every completion reported its
+/// prompt and completion counts. The cached and written counts sum the records that
+/// reported them, and `cache_reported` says whether every record reported its cached
+/// count (larry#230).
+fn tokens(report: &Report) -> Option<Spent> {
     let records = report.json()["authored"].as_array()?;
-    records
-        .iter()
-        .try_fold((0_u64, 0_u64), |(spent_in, spent_out), record| {
-            Some((
-                spent_in.saturating_add(record["prompt_tokens"].as_u64()?),
-                spent_out.saturating_add(record["completion_tokens"].as_u64()?),
-            ))
-        })
+    let mut spent = Spent {
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        written: 0,
+        cache_reported: true,
+    };
+    for record in records {
+        spent.prompt = spent
+            .prompt
+            .saturating_add(record["prompt_tokens"].as_u64()?);
+        spent.completion = spent
+            .completion
+            .saturating_add(record["completion_tokens"].as_u64()?);
+        match record["cached_tokens"].as_u64() {
+            Some(count) => spent.cached = spent.cached.saturating_add(count),
+            None => spent.cache_reported = false,
+        }
+        if let Some(count) = record["cache_write_tokens"].as_u64() {
+            spent.written = spent.written.saturating_add(count);
+        }
+    }
+    Some(spent)
 }
 
 /// Runs task `index` of the set and records how it ended.

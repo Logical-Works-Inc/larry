@@ -592,7 +592,10 @@ fn run_task(
             brief,
             client,
         }) => {
-            let mut records = author::author(brief, workspace.path(), &client)?;
+            // The tenant's digest, the same text a route row is keyed by, names the
+            // cache partition so no two tenants share a prompt prefix (larry#230).
+            let partition = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+            let mut records = author::author(brief, workspace.path(), &client, &partition)?;
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
                     object.insert(String::from("route"), route.seal());

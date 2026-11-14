@@ -251,3 +251,24 @@ impl fmt::Debug for ModelConfig {
             .finish()
     }
 }
+
+/// The config of a route the simulations never send on: its request bound is
+/// `bound` bytes (the default when `None`) and its key is read from `LARRY_KEY_SIM`.
+#[cfg(test)]
+pub(crate) fn sim_config(bound: Option<usize>) -> Result<ModelConfig, ModelError> {
+    let route = Route::new(&Draft {
+        id: "sim",
+        kind: Kind::OpenAiChat,
+        base_url: "http://127.0.0.1:9",
+        model: "sim-model",
+        key_env: "LARRY_KEY_SIM",
+        temperature: None,
+        request_bytes: bound,
+        residency: None,
+        describe: "a route the simulation never sends on",
+    })
+    .map_err(ModelError::BadRoute)?;
+    ModelConfig::for_route(&route, &|name: &str| {
+        (name == "LARRY_KEY_SIM").then(|| String::from("sim-key"))
+    })
+}
