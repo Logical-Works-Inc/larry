@@ -363,7 +363,8 @@ impl Signals {
                 lgwks_bot::select! {
                     _ = self.terminate.recv() => serving = false,
                     _ = self.interrupt.recv() => serving = false,
-                    _ = self.hangup.recv() => on_reload()?,
+                    // A closed SIGHUP stream yields None: the pattern then disables this arm, so no reload loops.
+                    Some(()) = self.hangup.recv() => on_reload()?,
                     () = done.cancelled() => serving = false,
                 }
             }
