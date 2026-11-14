@@ -9,13 +9,16 @@
 //! tool errors, so no success is ever reported for work that did not pass.
 
 use crate::executor::{ExecError, Report, Settings, Task, execute};
+use crate::model::{RouteError, is_route_id};
 use lgwks_std::json::{Map, Value, json};
 use std::path::{Component, Path};
 
 /// Name of the only tool.
 const SUBMIT_TASK: &str = "larry_submit_task";
 /// Arguments the tool accepts; anything else is refused.
-const ARGUMENTS: [&str; 4] = ["goal", "repo", "files", "acceptance"];
+const ARGUMENTS: [&str; 5] = ["goal", "repo", "files", "acceptance", "route"];
+/// Longest route id in bytes: the route table's bound.
+const MAX_ROUTE_BYTES: usize = 64;
 /// Longest goal in bytes.
 const MAX_GOAL_BYTES: usize = 8192;
 /// Longest repository reference in bytes.
@@ -43,7 +46,9 @@ pub(super) enum Executor {
 
 impl Executor {
     /// Reads the executor's settings through `read` once, when the server starts.
-    pub(super) fn from_env(read: impl Fn(&str) -> Option<String>) -> Executor {
+    pub(super) fn from_env(
+        read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Executor {
         match Settings::from_env(read) {
             Ok(settings) => Executor::Connected(Box::new(settings)),
             Err(error) => Executor::Absent(error.to_string()),
@@ -96,7 +101,8 @@ fn declared() -> Vec<Value> {
                     "items": { "type": "string", "minLength": 1, "maxLength": MAX_COMMAND_BYTES },
                     "minItems": 1,
                     "maxItems": MAX_ACCEPTANCE
-                }
+                },
+                "route": { "type": "string", "minLength": 1, "maxLength": MAX_ROUTE_BYTES }
             },
             "required": ["goal", "repo", "files", "acceptance"],
             "additionalProperties": false
@@ -122,18 +128,19 @@ fn submit_task(arguments: &Map, executor: &Executor) -> Value {
         Executor::Absent(ref reason) => return tool_error(NOT_CONNECTED, reason),
         Executor::Connected(ref settings) => settings,
     };
-    let task: Task = match Task::shell(
+    let task: Task = match Task::shell_via(
         checked.repo,
         checked.goal,
         &checked.files,
         &checked.acceptance,
+        checked.route,
     ) {
         Ok(task) => task,
         Err(error) => return tool_error("invalid_arguments", &error.to_string()),
     };
     let report: Report = match execute(&task, settings) {
         Ok(report) => report,
-        Err(error @ (ExecError::StateDirUnset | ExecError::ModelUnconfigured)) => {
+        Err(error @ (ExecError::StateDirUnset | ExecError::Route(RouteError::NoRoute))) => {
             return tool_error(NOT_CONNECTED, &error.to_string());
         }
         Err(error) => return tool_error("task_refused", &error.to_string()),
@@ -190,6 +197,8 @@ enum TaskError {
     Count(&'static str, usize, usize),
     /// A file path escapes the repository.
     NotRepoRelative,
+    /// The route is not a route id.
+    BadRoute,
 }
 
 impl std::fmt::Display for TaskError {
@@ -198,7 +207,7 @@ impl std::fmt::Display for TaskError {
             Self::UnknownArgument => {
                 write!(
                     out,
-                    "unknown argument; allowed: goal, repo, files, acceptance"
+                    "unknown argument; allowed: goal, repo, files, acceptance, route"
                 )
             }
             Self::Missing(key) => write!(out, "`{key}` is required"),
@@ -212,6 +221,10 @@ impl std::fmt::Display for TaskError {
             Self::NotRepoRelative => {
                 write!(out, "files must be repo-relative paths without `..`")
             }
+            Self::BadRoute => write!(
+                out,
+                "`route` must be a route id: 1 to {MAX_ROUTE_BYTES} bytes of a-z, 0-9, _ and -"
+            ),
         }
     }
 }
@@ -226,6 +239,8 @@ struct Checked<'args> {
     files: Vec<&'args str>,
     /// The shell acceptance commands.
     acceptance: Vec<&'args str>,
+    /// The route the model step uses, when the task names one.
+    route: Option<&'args str>,
 }
 
 /// Checks the typed task against the schema `list` advertises.
@@ -246,11 +261,22 @@ fn validate_task(arguments: &Map) -> Result<Checked<'_>, TaskError> {
         MAX_ACCEPTANCE,
         MAX_COMMAND_BYTES,
     )?;
+    let route = match arguments.get("route") {
+        None => None,
+        Some(value) => {
+            let named = value.as_str().ok_or(TaskError::WrongType("route"))?;
+            if !is_route_id(named) {
+                return Err(TaskError::BadRoute);
+            }
+            Some(named)
+        }
+    };
     Ok(Checked {
         goal,
         repo,
         files,
         acceptance,
+        route,
     })
 }
 

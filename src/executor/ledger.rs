@@ -1,5 +1,6 @@
-//! The ledger of process groups a run has started and not yet settled, and the
-//! receipt signing key, in `<state>/executor.db` (larry#85, larry#86).
+//! The ledger of process groups a run has started and not yet settled, the
+//! receipt signing key and the tenant's model routes, in `<state>/executor.db`
+//! (larry#85, larry#86, larry#201).
 
 use std::fs::File;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -37,6 +38,15 @@ const OWNER_ONLY: u32 = 0o600;
 /// a later run of the same id.
 const REPORT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS reports(task_id TEXT PRIMARY KEY, \
     task_digest TEXT NOT NULL, report BLOB NOT NULL);";
+
+/// Schema of the route table, version 5 (larry#201): the routes a tenant owns, at
+/// most 256 each, with one default per tenant. A route holds the NAME of the
+/// variable its key is read from, never the key. `temperature` and `residency`
+/// are NULL when the route pins none.
+const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant TEXT NOT NULL, id TEXT NOT NULL, \
+    kind TEXT NOT NULL, base_url TEXT NOT NULL, key_env TEXT NOT NULL, model TEXT NOT NULL, \
+    temperature REAL, request_bytes INTEGER NOT NULL, residency TEXT, describe TEXT NOT NULL, \
+    is_default INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tenant, id));";
 
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
@@ -84,8 +94,14 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            4,
-            &[SCHEMA, KEY_SCHEMA, TENANT_KEY_SCHEMA, REPORT_SCHEMA],
+            5,
+            &[
+                SCHEMA,
+                KEY_SCHEMA,
+                TENANT_KEY_SCHEMA,
+                REPORT_SCHEMA,
+                ROUTE_SCHEMA,
+            ],
         )
         .map_err(ExecError::Ledger)?;
         for name in STORE_FILES {
@@ -325,6 +341,11 @@ impl Ledger {
         Ok(())
     }
 }
+
+/// The route table's reads and writes (larry#201), a child module so the
+/// connection stays private to the ledger.
+#[path = "ledger_routes.rs"]
+mod routes;
 
 /// Seeded adversarial simulations of the report rows a keyed retry answers from
 /// (larry#182 defect 3).

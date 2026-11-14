@@ -170,6 +170,7 @@ fn operator(state: &Path, mock: &Handle, policy: Option<&str>) -> Vec<(&'static 
             "LARRY_MODEL_URL",
             OsString::from(format!("http://{}/v1", mock.addr())),
         ),
+        ("LARRY_MODEL", OsString::from("mock-model")),
         ("LARRY_MODEL_KEY", OsString::from("acp-key")),
         ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
     ];

@@ -50,6 +50,7 @@ fn larry_model(env: &[(&str, String)], prompt: &[u8]) -> Result<Output, Box<dyn 
 fn operator(addr: std::net::SocketAddr) -> Vec<(&'static str, String)> {
     vec![
         ("LARRY_MODEL_URL", format!("http://{addr}/v1")),
+        ("LARRY_MODEL", String::from("mock-model")),
         ("LARRY_MODEL_KEY", String::from("cli-key")),
         ("LARRY_MODEL_BACKOFF_MS", String::from("0")),
     ]

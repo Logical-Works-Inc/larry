@@ -267,8 +267,9 @@ pub(crate) fn run_session(
     observer: &mut dyn Observer,
 ) -> Result<Ended, ExecError> {
     check(instruction, cwd).map_err(ExecError::Session)?;
-    let config = settings.model.clone().ok_or(ExecError::ModelUnconfigured)?;
     let (ledger, key) = prepare(settings)?;
+    let route = settings.route(&ledger, None)?;
+    let config = settings.model_config(&route)?;
     let document = json::to_vec(&json!({
         "session": { "cwd": cwd.to_string_lossy(), "instruction": instruction }
     }))
@@ -298,7 +299,7 @@ pub(crate) fn run_session(
             "diff": null,
             "results": steps,
             "denied": [],
-            "session": { "stop": ended.name(), "commands": steps.len() },
+            "session": { "stop": ended.name(), "commands": steps.len(), "route": route.seal() },
         });
         stop = Some(ended);
         Ok(Report::sealed(body, &key))

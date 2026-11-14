@@ -39,6 +39,8 @@ expiry is never consent.
   - `larry exec`: runs one task document in a fresh clone.
   - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
   - `larry model`: sends one completion through the configured gateway.
+  - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
+    calls go, which `LARRY_KEY_*` variable holds the key, and the country where the provider processes the data (ADR 0039).
   - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
   - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`) over `LARRY_STATE_DIR`;
     `larry serve key <tenant>` prints a tenant's bearer key once, `GET /healthz` is open liveness,
@@ -51,8 +53,14 @@ expiry is never consent.
 ```sh
 cargo install --git https://github.com/Logical-Works-Inc/larry --tag v0.1.0 --locked
 ```
-`larry mcp` reads `LARRY_STATE_DIR` and `LARRY_MODEL_KEY`. `LARRY_MODEL_URL` defaults to a local 9router
-gateway; without these variables, every task is refused as `executor_not_connected`.
+`larry mcp` reads `LARRY_STATE_DIR` and a route: add one per tenant, for example a local 9router gateway:
+
+```sh
+larry route add local --url http://127.0.0.1:20128/v1 --model my-model --key-env LARRY_KEY_ROUTER --residency CA --default
+```
+A route names its key's variable, which must start with `LARRY_KEY_`; export the key there and it is never stored.
+Or export `LARRY_MODEL_URL`, `LARRY_MODEL` and `LARRY_MODEL_KEY` together as the route `env`. With neither, a task
+with a goal is refused as `executor_not_connected`.
 
 Start with the [product plan](/docs/product/README.md), the [specification index](index.md), the
 [visual specification](specification.md) and the [source review](research-ledger.md). Working rules are in
