@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::author::Brief;
+use crate::model::is_route_id;
 
 /// Maximum bytes accepted for one task document.
 pub(crate) const MAX_TASK_BYTES: usize = 65_536;
@@ -29,7 +30,7 @@ const MAX_REPO_BYTES: usize = 4096;
 const MAX_KEY_BYTES: usize = 256;
 
 /// Every key a task document may carry.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "repo",
     "base",
     "acceptance",
@@ -37,6 +38,7 @@ const KEYS: [&str; 7] = [
     "goal",
     "files",
     "idempotency_key",
+    "route",
 ];
 
 /// One parsed `larry exec` task document.
@@ -56,6 +58,9 @@ pub struct Task {
     /// The client's idempotency key: its statement that a retry of this document is
     /// the same request (larry#182 defect 3).
     idempotency_key: Option<String>,
+    /// The id of the route the model step uses, when the document names one
+    /// (larry#201); otherwise the tenant's default, else the environment's.
+    route: Option<String>,
     /// The document bytes it was parsed from, kept to name the run.
     bytes: Vec<u8>,
 }
@@ -97,6 +102,12 @@ impl Task {
     #[must_use]
     pub(crate) fn idempotency_key(&self) -> Option<&str> {
         self.idempotency_key.as_deref()
+    }
+
+    /// The id of the route the document names, when it names one.
+    #[must_use]
+    pub(crate) fn route(&self) -> Option<&str> {
+        self.route.as_deref()
     }
 
     /// The document bytes it was parsed from.
@@ -200,6 +211,10 @@ impl Task {
             None => None,
             Some(entry) => Some(bounded_key(entry)?),
         };
+        let route = match object.get("route") {
+            None => None,
+            Some(entry) => Some(route_id(entry)?),
+        };
         Ok(Task {
             repo: PathBuf::from(repo_text),
             base: base_text.to_owned(),
@@ -207,6 +222,7 @@ impl Task {
             model_commands: object.contains_key("model_commands"),
             brief,
             idempotency_key,
+            route,
             bytes: bytes.to_vec(),
         })
     }
@@ -221,19 +237,52 @@ impl Task {
         files: &[&str],
         acceptance: &[&str],
     ) -> Result<Task, TaskError> {
+        Task::shell_via(repo, goal, files, acceptance, None)
+    }
+
+    /// [`Task::shell`] over the route `route` names, when it names one: the planner
+    /// picks the route by id, and the document carries it under the run's digest.
+    pub(crate) fn shell_via(
+        repo: &str,
+        goal: &str,
+        files: &[&str],
+        acceptance: &[&str],
+        route: Option<&str>,
+    ) -> Result<Task, TaskError> {
         let commands: Vec<lgwks_std::json::Value> = acceptance
             .iter()
             .map(|command| lgwks_std::json::json!(["sh", "-c", command]))
             .collect();
-        let document = lgwks_std::json::json!({
+        let mut document = lgwks_std::json::json!({
             "repo": repo,
             "base": "HEAD",
             "goal": goal,
             "files": files,
             "acceptance": commands,
         });
+        if let Some(named) = route
+            && let Some(object) = document.as_object_mut()
+        {
+            object.insert(
+                String::from("route"),
+                lgwks_std::json::Value::String(named.to_owned().into()),
+            );
+        }
         Task::parse(document.to_string().as_bytes())
     }
+}
+
+/// The route id `entry` holds: a string of 1 to 64 bytes of `a-z`, `0-9`, `_`
+/// and `-`. Anything else is refused at the door, so a hostile name never
+/// reaches the store or an error message (larry#201).
+fn route_id(entry: &lgwks_std::json::Value) -> Result<String, TaskError> {
+    let text = entry
+        .as_str()
+        .ok_or(TaskError::WrongType { key: "route" })?;
+    if !is_route_id(text) {
+        return Err(TaskError::BadRoute);
+    }
+    Ok(text.to_owned())
 }
 
 /// The idempotency key `entry` holds: 1 to [`MAX_KEY_BYTES`] bytes with no control
@@ -328,6 +377,8 @@ pub enum TaskError {
     },
     /// The idempotency key was empty, oversize, or held a control byte.
     BadIdempotencyKey,
+    /// The route was not 1 to 64 bytes of `a-z`, `0-9`, `_` and `-`.
+    BadRoute,
 }
 
 impl fmt::Display for TaskError {
@@ -381,6 +432,9 @@ impl fmt::Display for TaskError {
             Self::BadIdempotencyKey => write!(
                 out,
                 "task document idempotency_key is empty, over {MAX_KEY_BYTES} bytes, or holds a control byte"
+            ),
+            Self::BadRoute => out.write_str(
+                "task document route is not a route id: 1 to 64 bytes of a-z, 0-9, _ and -",
             ),
         }
     }

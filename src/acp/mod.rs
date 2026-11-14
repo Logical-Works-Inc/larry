@@ -382,7 +382,7 @@ impl Agent<'_> {
             Err(ExecError::Session(cause)) => {
                 updates.close(wire::error(id, wire::INVALID_PARAMS, &cause.to_string()))
             }
-            Err(cause @ ExecError::ModelUnconfigured) => {
+            Err(cause @ ExecError::Route(_)) => {
                 updates.message(&cause.to_string());
                 updates.close(stopped(id, "refusal", None))
             }

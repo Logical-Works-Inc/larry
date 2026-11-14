@@ -109,9 +109,10 @@ fn run_case(
 ) -> Result<String, Box<dyn Error>> {
     let policy_text = policy.join(",");
     let task = document(origin, brief);
-    let env: [(&str, &OsStr); 4] = [
+    let env: [(&str, &OsStr); 5] = [
         ("LARRY_STATE_DIR", state.as_os_str()),
         ("LARRY_POLICY", OsStr::new(policy_text.as_str())),
+        ("LARRY_MODEL", OsStr::new("mock-model")),
         ("LARRY_MODEL_KEY", OsStr::new("mock-key")),
         ("LARRY_MODEL_URL", OsStr::new(url)),
     ];
