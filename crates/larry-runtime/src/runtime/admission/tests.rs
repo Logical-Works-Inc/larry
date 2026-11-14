@@ -194,7 +194,7 @@ fn sim_an_acknowledged_admission_survives_a_crash_and_is_reduced_once() -> Outco
         );
         assert!(pending(&restored).is_empty());
 
-        let mut changed = body.clone();
+        let mut changed = body;
         changed.cost = 2;
         let before = restored.journal().len();
         let conflict = restored.ack(command(id, CommandKind::Submit, &changed)?);
