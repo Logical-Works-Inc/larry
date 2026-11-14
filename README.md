@@ -36,7 +36,11 @@ expiry is never consent.
     executor and reports success only when the sealed run is accepted (ADR 0008).
   - `larry acp`: an Agent Client Protocol agent, the way Harbor runs Terminal-Bench 2.0. Each prompt is a terminal
     session, which runs only under `LARRY_POLICY` naming `model.command` (ADR 0035).
-  - `larry exec`: runs one task document in a fresh clone.
+  - `larry exec`: runs one task document in a fresh clone. `acceptance` is a list of argv lists. First run:
+    1. Set `LARRY_STATE_DIR` to a directory you own.
+    2. Pipe a task to `larry exec > report.json`, where the task is
+       `{"repo":"<path>","base":"HEAD","acceptance":[["cargo","test"]]}`.
+    3. Run `larry verify < report.json`.
   - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
   - `larry model`: sends one completion through the configured gateway.
   - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
@@ -44,7 +48,9 @@ expiry is never consent.
   - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
   - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`) over `LARRY_STATE_DIR`;
     `larry serve key <tenant>` prints a tenant's bearer key once, `GET /healthz` is open liveness,
-    `GET /t/{tenant}/healthz` the keyed tenant probe, and SIGTERM drains it (ADR 0021, ADR 0022).
+    `GET /t/{tenant}/healthz` the keyed tenant probe, and SIGTERM drains it. A non-loopback bind is refused
+    unless `LARRY_SERVE_PLAINTEXT=1`, `larry serve revoke <tenant>` revokes a key, and startup refuses past
+    65,536 keys (ADR 0021, ADR 0022, ADR 0040).
   - `larry governance`, `larry tracker` and `larry mascot`: the repository's own document, tracker and
     mascot checks (ADR 0010, ADR 0014).
 

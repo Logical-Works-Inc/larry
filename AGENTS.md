@@ -68,7 +68,7 @@ cargo nextest run --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 target/debug/larry governance && target/debug/larry tracker --check && target/debug/larry mascot --check
-lgwks-deps check .   # cargo install lgwks_deps --version 6.1.0 --locked --bin lgwks-deps; not in CI
+lgwks-deps check .   # cargo install lgwks_deps --version 7.2.0 --locked --bin lgwks-deps; not in CI
 git diff --check
 ```
 The checker, tracker, PTY journeys, reranker and mascot are Rust (ADR 0010, 0011, 0013, 0014), so CI runs no
