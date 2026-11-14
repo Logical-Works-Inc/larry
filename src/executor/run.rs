@@ -29,9 +29,14 @@ const ESRCH: i32 = 3;
 /// The kernel's error number for "operation not permitted", the same on Linux and Darwin.
 const EPERM: i32 = 1;
 
-/// Probes of a process group before it counts as surviving; killed members are
-/// briefly zombies, so the probes yield between checks.
+/// Probes of a process group before it counts as surviving: a second cap behind
+/// [`GROUP_PROBE_DEADLINE`], so a fast loop cannot spin past the deadline's intent.
 const GROUP_PROBES: u32 = 10_000;
+
+/// Time a process group is probed before it counts as surviving (larry#214). Killed
+/// members are briefly zombies, so the probes yield between checks; the bound is the
+/// elapsed time, which a count of yields never measured.
+const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// One captured stream: its first bytes, its last bytes, and how many bytes fell between them.
 #[derive(Default)]
@@ -352,20 +357,22 @@ fn abandon(child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
 /// macOS refuses a signal to a group whose remaining members are zombies with
 /// `EPERM` (openvax/mhctools#620), and BSD `kill(2)` sends nothing to any member
 /// when one target fails the check, so one refusal can leave live members
-/// unsignalled. The kill is therefore repeated while `EPERM` persists, up to
-/// [`GROUP_PROBES`] yields, so it lands once the zombie is reaped; refusing at the
+/// unsignalled. The kill is therefore repeated while `EPERM` persists, until
+/// [`GROUP_PROBE_DEADLINE`] has passed or [`GROUP_PROBES`] yields, so it lands once
+/// the zombie is reaped; refusing at the
 /// first `EPERM` failed 7 of 24 parallel runs of the timeout journey (MEASURED,
 /// larry#131). A refusal that outlasts the probes is handed to
 /// [`await_group_gone`], which never presumes the group gone and ends a member
 /// that really refuses in [`ExecError::GroupSurvived`].
 fn settle_group(pgid: i32) -> Result<(), ExecError> {
+    let started = Instant::now();
     let mut refusals = 0_u32;
     loop {
         match kill_process_group(pgid) {
             Ok(()) => return Ok(()),
             Err(error) if error.raw_os_error() == Some(ESRCH) => return Ok(()),
             Err(error) if error.raw_os_error() == Some(EPERM) => {
-                if refusals >= GROUP_PROBES {
+                if refusals >= GROUP_PROBES || started.elapsed() >= GROUP_PROBE_DEADLINE {
                     return Ok(());
                 }
                 refusals = refusals.saturating_add(1);
@@ -376,11 +383,13 @@ fn settle_group(pgid: i32) -> Result<(), ExecError> {
     }
 }
 
-/// Probes the group until it is gone, yielding between probes; fails once it outlives them all.
-fn await_group_gone(pgid: i32) -> Result<(), ExecError> {
+/// Probes the group until it is gone, yielding between probes; fails once
+/// [`GROUP_PROBE_DEADLINE`] or [`GROUP_PROBES`] runs out first.
+pub(super) fn await_group_gone(pgid: i32) -> Result<(), ExecError> {
+    let started = Instant::now();
     let mut probes = 0_u32;
     while process_group_exists(pgid).map_err(ExecError::Reap)? {
-        if probes >= GROUP_PROBES {
+        if probes >= GROUP_PROBES || started.elapsed() >= GROUP_PROBE_DEADLINE {
             return Err(ExecError::GroupSurvived { pgid });
         }
         probes = probes.saturating_add(1);

@@ -1,10 +1,10 @@
 //! Seeded adversarial simulations of the two sweeps (larry#87, larry#182 defect
-//! 3): a workspace survives exactly when the caller's live list names it, an
-//! origin survives exactly when the pid its name carries is a live eval, a file
-//! is nobody's, and a second sweep removes nothing more.
+//! 3, larry#214): a workspace survives exactly when the caller's live list names
+//! it, an origin survives exactly when a live eval holds its lock, a file is
+//! nobody's, and a second sweep removes nothing more.
 //!
 //! The oracle is a reference model, never this code's output: the live list for
-//! the workspaces, and the pid a name carries for the origins. One seed drives
+//! the workspaces, and the lock each origin carries. One seed drives
 //! every draw, so a failing seed replays exactly.
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_std::seeded::Seeded;
 
-use super::{sweep, sweep_origins};
+use super::{hold_origin, sweep, sweep_origins};
 
 /// What every simulation here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -55,19 +55,21 @@ fn drawn_live(
     Ok(live)
 }
 
-/// The clock-fool: this process's own eval keeps its origin, and a dead eval's
-/// origin is removed, because the sweep reads the pid an origin's name carries.
+/// The clock-fool: an origin whose eval holds its lock is kept, and an origin nobody
+/// holds is removed, whatever pid its name carries (larry#214: the lock, not the pid).
 #[test]
 fn sim_sweep_keeps_this_eval_and_removes_a_dead_ones_origin() -> TestResult {
     let state = scratch_directory();
     let eval = state.join("eval");
-    let mine = eval.join(format!("origin-{}-0", std::process::id()));
+    let mine_name = format!("origin-{}-0", std::process::id());
+    let mine = eval.join(&mine_name);
     let dead = eval.join(format!("origin-{DEAD_PID}-0"));
     std::fs::create_dir_all(&mine)?;
     std::fs::create_dir_all(&dead)?;
+    let _held = hold_origin(&eval, &mine_name)?;
     sweep_origins(&state)?;
-    assert!(mine.is_dir(), "a running eval keeps its origin");
-    assert!(!dead.exists(), "a dead eval's origin is removed");
+    assert!(mine.is_dir(), "a running eval keeps its locked origin");
+    assert!(!dead.exists(), "an origin nobody holds is removed");
     drop(std::fs::remove_dir_all(&state));
     Ok(())
 }
@@ -120,11 +122,11 @@ fn sim_the_sweep_keeps_exactly_the_named_live_runs_for_every_seed() -> TestResul
     Ok(())
 }
 
-/// The monkey: an origin whose name carries no usable pid is nobody's, so the
-/// sweep removes it, and one whose pid is a live process other than this one is
-/// kept, for every seed's own drawn pid.
+/// The monkey: an origin nobody holds the lock of is removed whatever its name
+/// carries, and the one a live eval holds is kept, for every seed's own drawn pid
+/// (larry#214: a pid in a name proves nothing).
 #[test]
-fn sim_an_origin_name_without_a_live_pid_is_removed_for_every_seed() -> TestResult {
+fn sim_an_origin_without_a_held_lock_is_removed_for_every_seed() -> TestResult {
     let names: [&str; 7] = [
         "origin-",
         "origin-0-0",
@@ -144,27 +146,24 @@ fn sim_an_origin_name_without_a_live_pid_is_removed_for_every_seed() -> TestResu
         }
         let own = format!("origin-{}-{}", std::process::id(), seeded.index(9)?);
         std::fs::create_dir_all(eval.join(&own))?;
+        let _held = hold_origin(&eval, &own)?;
         let pid = i32::try_from(seeded.below(2_147_483_646)?)?;
         let foreign = format!("origin-{pid}-0");
         std::fs::create_dir_all(eval.join(&foreign))?;
-        let foreign_live = pid > 0
-            && i64::from(pid) != i64::from(std::process::id())
-            && lgwks_std::process::process_exists(pid)?;
         sweep_origins(&state)?;
         for name in names {
             assert!(
                 !eval.join(name).exists(),
-                "seed {seed}: {name} carries no live pid and is removed"
+                "seed {seed}: {name} is held by nobody and is removed"
             );
         }
         assert!(
             eval.join(&own).is_dir(),
-            "seed {seed}: this process's own origin is kept"
+            "seed {seed}: the origin under a held lock is kept"
         );
-        assert_eq!(
-            eval.join(&foreign).is_dir(),
-            foreign_live,
-            "seed {seed}: {foreign} is kept exactly when its pid is live"
+        assert!(
+            !eval.join(&foreign).exists(),
+            "seed {seed}: {foreign} with no lock is removed whatever its pid"
         );
         drop(std::fs::remove_dir_all(&state));
     }

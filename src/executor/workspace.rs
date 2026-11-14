@@ -6,11 +6,10 @@
 //! at another repository (the origin's, say) never redirects them.
 
 use std::ffi::{OsStr, OsString};
+use std::fs::{File, TryLockError};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-
-use lgwks_std::process::process_exists;
 
 use super::ExecError;
 
@@ -23,8 +22,8 @@ const STREAM_CHUNK: usize = 8_192;
 /// Bytes of git's stderr kept for an error message; the rest is drained.
 const STDERR_LIMIT: u64 = 65_536;
 
-/// The prefix `larry eval` names its origins by: `origin-<pid>-<index>`.
-const EVAL_ORIGIN_PREFIX: &str = "origin-";
+/// The suffix of an origin's lock file, a sibling of the origin directory (larry#214).
+const ORIGIN_LOCK_SUFFIX: &str = ".lock";
 
 /// Git under the executor's environment: PATH only, HOME at the state directory, no system config.
 struct Git<'a> {
@@ -397,40 +396,109 @@ pub(crate) fn sweep(
     sweep_dir(&state.join("ws"), live, owner_live)
 }
 
-/// Removes every `<state>/eval/origin-<pid>-<n>` directory whose `larry eval` is gone: a kill -9
-/// runs no destructor, so its origins outlive it (larry#87). An origin's own name carries
-/// the eval process's pid, so it keeps its own liveness rule.
+/// Removes every `<state>/eval/origin-<pid>-<n>` directory whose `larry eval` holds no
+/// lock: a kill -9 runs no destructor, so its origins outlive it (larry#87). The lock
+/// is the proof of a live eval, never the pid in the name (larry#214), and the stale
+/// lock files of removed origins go with them.
 pub(crate) fn sweep_origins(state: &Path) -> Result<(), ExecError> {
-    sweep_dir(&state.join("eval"), &[], eval_alive)
+    let eval = state.join("eval");
+    sweep_dir(&eval, &[], |origin| origin_held(&eval, origin))?;
+    remove_unheld_locks(&eval)
 }
 
-/// Whether the `larry eval` that named `origin` (`origin-<pid>-<n>`) may still be
-/// running: its pid is this process or a live one.
-fn eval_alive(origin: &str) -> Result<bool, ExecError> {
-    let Some(pid) = origin
-        .strip_prefix(EVAL_ORIGIN_PREFIX)
-        .and_then(|rest| rest.split('-').next())
-        .and_then(|text| text.parse::<i32>().ok())
-        .filter(|pid| *pid > 0)
-    else {
-        return Ok(false);
-    };
-    if i64::from(pid) == i64::from(std::process::id()) {
-        return Ok(true);
+/// The lock file of origin `name` under `eval`: a sibling of the origin directory, so
+/// the lock is never part of the origin's tree.
+pub(crate) fn origin_lock_path(eval: &Path, name: &str) -> PathBuf {
+    eval.join(format!("{name}{ORIGIN_LOCK_SUFFIX}"))
+}
+
+/// Takes the exclusive lock of origin `name`, which the `larry eval` that owns it holds
+/// until it removes the origin. The kernel releases the lock when that process dies.
+///
+/// # Errors
+///
+/// [`ExecError::Workspace`] when the lock file cannot be opened, or the lock is already
+/// held by another live holder (`WouldBlock`).
+pub(crate) fn hold_origin(eval: &Path, name: &str) -> Result<File, ExecError> {
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(origin_lock_path(eval, name))
+        .map_err(ExecError::Workspace)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(ExecError::Workspace(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the origin is already held by a live eval",
+        ))),
+        Err(TryLockError::Error(cause)) => Err(ExecError::Workspace(cause)),
     }
-    process_exists(pid).map_err(ExecError::Reap)
+}
+
+/// Whether a live holder keeps origin `name`'s lock. A lock file that is absent, or
+/// that this probe can take, reads as dead; the probe releases what it takes.
+///
+/// # Errors
+///
+/// [`ExecError::Workspace`] when the lock file cannot be read or locked for any reason
+/// other than a live holder.
+fn origin_held(eval: &Path, name: &str) -> Result<bool, ExecError> {
+    let file = match File::open(origin_lock_path(eval, name)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(ExecError::Workspace(error)),
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            file.unlock().map_err(ExecError::Workspace)?;
+            Ok(false)
+        }
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(cause)) => Err(ExecError::Workspace(cause)),
+    }
+}
+
+/// Removes every origin lock file under `eval` that no live holder keeps.
+fn remove_unheld_locks(eval: &Path) -> Result<(), ExecError> {
+    let Some(entries) = listing(eval)? else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(ExecError::Workspace)?;
+        let name = entry.file_name();
+        let Some(origin) = name
+            .to_str()
+            .and_then(|text| text.strip_suffix(ORIGIN_LOCK_SUFFIX))
+        else {
+            continue;
+        };
+        if !origin_held(eval, origin)? {
+            std::fs::remove_file(entry.path()).map_err(ExecError::Workspace)?;
+        }
+    }
+    Ok(())
+}
+
+/// The entries of `root`, or `None` when it does not exist: a state directory that has
+/// never run anything holds nothing to sweep.
+fn listing(root: &Path) -> Result<Option<std::fs::ReadDir>, ExecError> {
+    match std::fs::read_dir(root) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ExecError::Workspace(error)),
+    }
 }
 
 /// Removes every directory under `root` that `live` does not name and whose owner is gone.
+/// Only directories are candidates; a file under `root` is nobody's.
 fn sweep_dir(
     root: &Path,
     live: &[String],
     owner_live: impl Fn(&str) -> Result<bool, ExecError>,
 ) -> Result<(), ExecError> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(ExecError::Workspace(error)),
+    let Some(entries) = listing(root)? else {
+        return Ok(());
     };
     for entry in entries {
         let entry = entry.map_err(ExecError::Workspace)?;
@@ -438,12 +506,13 @@ fn sweep_dir(
         let Some(text) = name.to_str() else {
             continue;
         };
+        if !entry.file_type().map_err(ExecError::Workspace)?.is_dir() {
+            continue;
+        }
         if live.iter().any(|id| id.as_str() == text) || owner_live(text)? {
             continue;
         }
-        if entry.file_type().map_err(ExecError::Workspace)?.is_dir() {
-            std::fs::remove_dir_all(entry.path()).map_err(ExecError::Workspace)?;
-        }
+        std::fs::remove_dir_all(entry.path()).map_err(ExecError::Workspace)?;
     }
     Ok(())
 }
@@ -452,3 +521,49 @@ fn sweep_dir(
 #[cfg(test)]
 #[path = "sim_workspace.rs"]
 mod sim;
+
+/// Unit tests of the origin lock (larry#214).
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{hold_origin, origin_held, sweep_origins};
+
+    /// A pid no live process holds: the largest positive `i32` less one.
+    const DEAD_PID: i32 = 2_147_483_646;
+
+    /// An origin whose pid is dead but whose lock a live eval holds is kept, and removed
+    /// with its lock file once the lock is released (larry#214).
+    #[test]
+    fn an_eval_origin_is_live_while_its_lock_is_held() -> Result<(), Box<dyn std::error::Error>> {
+        let state: PathBuf =
+            std::env::temp_dir().join(format!("larry-origin-lock-{}", std::process::id()));
+        let eval = state.join("eval");
+        let name = format!("origin-{DEAD_PID}-0");
+        let origin = eval.join(&name);
+        std::fs::create_dir_all(&origin)?;
+        let held = hold_origin(&eval, &name)?;
+        assert!(
+            origin_held(&eval, &name)?,
+            "a held lock reads as live, whatever pid the name carries"
+        );
+        sweep_origins(&state)?;
+        assert!(
+            origin.is_dir(),
+            "the sweep keeps an origin whose lock is held"
+        );
+        drop(held);
+        assert!(!origin_held(&eval, &name)?, "a released lock reads as dead");
+        sweep_origins(&state)?;
+        assert!(
+            !origin.exists(),
+            "the sweep removes an origin once its lock is released"
+        );
+        assert!(
+            !eval.join(format!("{name}.lock")).exists(),
+            "the sweep removes the stale lock file"
+        );
+        drop(std::fs::remove_dir_all(&state));
+        Ok(())
+    }
+}

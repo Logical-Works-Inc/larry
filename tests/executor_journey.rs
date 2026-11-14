@@ -18,6 +18,8 @@
 
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
+#[path = "support/held_group.rs"]
+mod held_group;
 
 use std::error::Error;
 use std::ffi::OsStr;
@@ -29,18 +31,66 @@ use std::process::Command;
 use std::time::Instant;
 
 use exec_cli::{
-    POLL_LIMIT, TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of,
-    live_group_pid, make_fifo, millis, number_of, percentile, report_of, result_at, run_exec,
-    spawn_exec, spawn_larry, task_json, text_of,
+    POLL_LIMIT, TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, make_fifo,
+    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry,
+    task_json, text_of,
 };
-use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
+use held_group::{group_exits, ledger_rows, spawn_held_command};
 use lgwks_std::json::{self, Value};
+use lgwks_std::seeded::Seeded;
 
 /// Runs the latency case samples.
 const SAMPLES: usize = 32;
 
 /// The stdout cap the executor applies to each command, in bytes.
 const STDOUT_CAP: usize = 1_048_576;
+
+/// Seeds the kill simulation replays; each draws one kill point (larry#214).
+const KILL_SEEDS: [u64; 4] = [
+    0x5EED_0000_0000_0214,
+    0x5EED_0000_0000_0215,
+    0x5EED_0000_FFFF_0214,
+    0xDEAD_BEEF_CAFE_0214,
+];
+
+/// Most yields a seeded kill point waits after the group is recorded.
+const MAX_KILL_YIELDS: usize = 64;
+
+/// For every seed, a kill -9 of the shipped executor at the seeded point, while its command's
+/// group runs, leaves no live group after the next start and no ledger row once it has
+/// reaped. Honest limit (ADR 0042): the window between spawn and the ledger insert lasts
+/// milliseconds and cannot be stopped from outside the process, so the kill points are seeded
+/// yield counts after the group is recorded. They prove the reap at varied points, not a hit
+/// inside that window.
+#[test]
+fn sim_a_kill_at_every_point_between_spawn_and_insert_leaves_no_group_after_restart() -> TestResult
+{
+    for seed in KILL_SEEDS {
+        let mut seeded = Seeded::from_seed(seed);
+        let yields = seeded.index(MAX_KILL_YIELDS)?;
+        let (state, origin) = fixture()?;
+        let scratch = TempDir::new()?;
+        let (mut child, pid, _ready_open) =
+            spawn_held_command(state.path(), origin.path(), scratch.path())?;
+        for _ in 0..yields {
+            std::thread::yield_now();
+        }
+        child.kill()?;
+        child.wait()?;
+        let next = task_json(origin.path(), "HEAD", "[]");
+        report_of(&run_exec(state.path(), &next, None)?)?;
+        assert!(
+            group_exits(pid)?,
+            "seed {seed:#x}: no live group {pid} after a kill at yield {yields}"
+        );
+        let rows = ledger_rows(&state.path().join("executor.db"))?;
+        assert_eq!(
+            rows, 0,
+            "seed {seed:#x}: the ledger holds no row after the reap"
+        );
+    }
+    Ok(())
+}
 
 /// Collects every file and symlink under `dir` as (path relative to `root`, bytes).
 fn collect(
@@ -286,21 +336,8 @@ fn a_kill_9_of_the_executor_is_reaped_by_the_next_start() -> TestResult {
     // SIGKILL the executor while its command runs; the next start reaps the orphaned group.
     let (state, origin) = fixture()?;
     let scratch = TempDir::new()?;
-    let ready = scratch.path().join("ready");
-    let hold = scratch.path().join("hold");
-    make_fifo(&ready)?;
-    make_fifo(&hold)?;
-    let acceptance = format!(
-        r#"[["sh","-c","echo up > {}; cat < {}"]]"#,
-        ready.display(),
-        hold.display()
-    );
-    let task = task_json(origin.path(), "HEAD", &acceptance);
-    let mut child = spawn_exec(Some(state.path()), None, &task)?;
-    // This open blocks until the acceptance command opens the fifo, so the command is running.
-    let _ready_open = fs::File::open(&ready)?;
-    let db = state.path().join("executor.db");
-    let pid = live_group_pid(&db)?;
+    let (mut child, pid, _ready_open) =
+        spawn_held_command(state.path(), origin.path(), scratch.path())?;
     child.kill()?;
     child.wait()?;
     assert!(
@@ -314,9 +351,7 @@ fn a_kill_9_of_the_executor_is_reaped_by_the_next_start() -> TestResult {
         wait_for_group_exit(pid)?,
         "the next start must reap process group {pid}"
     );
-    let connection = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let rows: i64 =
-        connection.query_row("SELECT COUNT(*) FROM live_groups", [], |row| row.get(0))?;
+    let rows = ledger_rows(&state.path().join("executor.db"))?;
     assert_eq!(
         rows, 0,
         "the live_groups table must be empty after the reap"
