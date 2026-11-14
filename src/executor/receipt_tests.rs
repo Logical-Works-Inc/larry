@@ -11,7 +11,11 @@ use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 use lgwks_std::sign::{self, SecretKey};
 
-use super::{ACCEPTED, MAX_REPORT_BYTES, RECEIPT, ReceiptError, TAG, acceptance, seal, verify};
+use super::{
+    ACCEPTED, DIFF_TRUNCATED, MAX_REPORT_BYTES, RECEIPT, ReceiptError, TAG, acceptance, seal,
+    verify,
+};
+use crate::executor::workspace::{DIFF_LIMIT, Diff, DiffSink, report_members};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -371,6 +375,222 @@ fn a_malleated_signature_is_refused() -> TestResult {
     Ok(())
 }
 
+/// Seeds of the truncated-diff simulation; each takes one of the four diff sizes in turn.
+const DIFF_SEEDS: u64 = 8;
+
+/// Diff sizes the simulation cycles through: one byte under the limit, at it, one over, and twice it.
+const DIFF_SIZES: [usize; 4] = [
+    DIFF_LIMIT.saturating_sub(1),
+    DIFF_LIMIT,
+    DIFF_LIMIT.saturating_add(1),
+    DIFF_LIMIT.saturating_mul(2),
+];
+
+/// The piece size a diff stream is fed to its sink in.
+const CHUNK: usize = 8_192;
+
+/// BLAKE3 of `bytes` through the estate hasher, as 64 hex characters.
+fn blake3_hex(bytes: &[u8]) -> String {
+    let mut hasher = lgwks_std::hash::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize().to_hex()
+}
+
+/// Streams `full` through a sink in [`CHUNK`]-byte pieces, as the diff reader does.
+fn sunk(full: &[u8]) -> Result<Diff, Box<dyn std::error::Error>> {
+    let mut sink = DiffSink::new();
+    for piece in full.chunks(CHUNK) {
+        sink.push(piece)?;
+    }
+    Ok(sink.finish())
+}
+
+/// A report body in the family `larry exec` prints, with a diff of `size` bytes of `letter`.
+fn diffed_body(size: usize, letter: u8) -> Result<(Value, bool), Box<dyn std::error::Error>> {
+    let diff = sunk(&vec![letter; size])?;
+    let truncated = diff.truncated;
+    let mut body = json::json!({
+        "task_id": "t",
+        "task_digest": "d",
+        "results": [],
+        "denied": [],
+    });
+    for (name, member) in report_members(Some(diff)) {
+        set(&mut body, name, member)?;
+    }
+    Ok((body, truncated))
+}
+
+/// Seals `claimed` under `signer` exactly as written, so a signer that lies about its verdict can be simulated.
+fn sign_claim(signer: &SecretKey, claimed: Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let signature = sign::sign(signer, TAG, claimed.to_string().as_bytes());
+    let mut report = claimed;
+    set(
+        &mut report,
+        RECEIPT,
+        json::json!({
+            "alg": "ed25519",
+            "key": lgwks_std::hex::encode(signer.public_key().to_bytes()),
+            "signature": lgwks_std::hex::encode(signature.to_bytes()),
+        }),
+    )?;
+    Ok(report)
+}
+
+/// A diff over the limit is cut: it is never accepted, verify agrees, and every edit of the cut is refused.
+#[test]
+fn sim_a_truncated_diff_is_never_accepted_and_verify_agrees() -> TestResult {
+    for (seed, &size) in (0..DIFF_SEEDS).zip(DIFF_SIZES.iter().cycle()) {
+        let mut stream = Seeded::from_seed(seed);
+        let letter = b'a'.saturating_add(u8::try_from(stream.index(26)?)?);
+        let (original, truncated) = diffed_body(size, letter)?;
+        assert_eq!(
+            truncated,
+            size > DIFF_LIMIT,
+            "seed {seed}: a diff is cut only past the limit"
+        );
+        let signer = key(&mut stream);
+        let trusted = signer.public_key();
+        let (sealed, accepted) = seal(original, &signer);
+        assert_eq!(
+            accepted, !truncated,
+            "seed {seed}: a cut diff is never accepted"
+        );
+        let verdict = verify_value(&sealed, &trusted)?;
+        assert_eq!(
+            verdict.accepted(),
+            accepted,
+            "seed {seed}: verify agrees with the seal"
+        );
+
+        let mut flipped = sealed.clone();
+        set(&mut flipped, DIFF_TRUNCATED, Value::Bool(!truncated))?;
+        assert!(
+            matches!(
+                verify_value(&flipped, &trusted),
+                Err(ReceiptError::Mismatch(_))
+            ),
+            "seed {seed}: a flipped diff_truncated is refused"
+        );
+
+        let stranger = key(&mut stream);
+        assert!(
+            matches!(
+                verify_value(&sealed, &stranger.public_key()),
+                Err(ReceiptError::UntrustedKey)
+            ),
+            "seed {seed}: another tenant's key refuses the report"
+        );
+
+        if truncated {
+            let mut claimed = sealed;
+            claimed
+                .as_object_mut()
+                .ok_or("the report is an object")?
+                .remove(RECEIPT);
+            set(&mut claimed, ACCEPTED, Value::Bool(true))?;
+            let forged = sign_claim(&signer, claimed)?;
+            assert!(
+                matches!(
+                    verify_value(&forged, &trusted),
+                    Err(ReceiptError::TruncatedDiffAccepted)
+                ),
+                "seed {seed}: a signed accepted claim over a cut diff is refused"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The digest is the estate's BLAKE3 of the whole diff, however the stream is cut into pieces.
+#[test]
+fn the_diff_digest_is_the_estate_blake3_of_the_full_diff() -> TestResult {
+    for (seed, &size) in (0..DIFF_SEEDS).zip(DIFF_SIZES.iter().cycle()) {
+        let letter = b'a'.saturating_add(u8::try_from(Seeded::from_seed(seed).index(26)?)?);
+        let full = vec![letter; size];
+        let diff = sunk(&full)?;
+        assert_eq!(
+            diff.digest,
+            blake3_hex(&full),
+            "seed {seed}: the digest covers the full diff"
+        );
+        assert_eq!(
+            diff.bytes,
+            u64::try_from(size)?,
+            "seed {seed}: the byte count is the full length"
+        );
+        assert_eq!(
+            diff.text.len(),
+            size.min(DIFF_LIMIT),
+            "seed {seed}: only the head is kept"
+        );
+        let mut whole = DiffSink::new();
+        whole.push(&full)?;
+        assert_eq!(
+            whole.finish().digest,
+            diff.digest,
+            "seed {seed}: the digest does not depend on the piece size"
+        );
+    }
+    Ok(())
+}
+
+/// A report sealed before the member existed keeps its verdict: accepted under the limit,
+/// refused at the limit, and refused when the member is not a boolean.
+#[test]
+fn a_legacy_receipt_without_the_new_fields_keeps_its_verdict() -> TestResult {
+    let signer = key(&mut Seeded::from_seed(21));
+    let trusted = signer.public_key();
+    let legacy = |diff: String| {
+        json::json!({
+            "task_id": "t",
+            "task_digest": "d",
+            "diff": diff,
+            "results": [],
+            "denied": [],
+        })
+    };
+    let (under, accepted) = seal(legacy("x".to_owned()), &signer);
+    assert!(
+        accepted && verify_value(&under, &trusted)?.accepted(),
+        "a legacy diff under the limit keeps its accepted verdict"
+    );
+    let (at_limit, accepted) = seal(legacy("x".repeat(DIFF_LIMIT)), &signer);
+    assert!(
+        !accepted && !verify_value(&at_limit, &trusted)?.accepted(),
+        "a legacy diff at the limit may be cut, so it is refused"
+    );
+    let mut odd = legacy("x".to_owned());
+    set(&mut odd, DIFF_TRUNCATED, json::json!("no"))?;
+    let (_, accepted) = seal(odd, &signer);
+    assert!(!accepted, "a non-boolean diff_truncated is refused as cut");
+    Ok(())
+}
+
+/// A signer that seals `accepted: true` over a cut diff is refused with its own variant.
+#[test]
+fn a_signed_accepted_claim_over_a_truncated_diff_is_refused() -> TestResult {
+    let signer = key(&mut Seeded::from_seed(23));
+    let claimed = json::json!({
+        "task_id": "t",
+        "task_digest": "d",
+        "diff": "x",
+        "diff_truncated": true,
+        "results": [],
+        "denied": [],
+        "accepted": true,
+    });
+    let forged = sign_claim(&signer, claimed)?;
+    assert!(
+        matches!(
+            verify_value(&forged, &signer.public_key()),
+            Err(ReceiptError::TruncatedDiffAccepted)
+        ),
+        "a signed accepted claim over a cut diff is refused"
+    );
+    Ok(())
+}
+
 /// Oversize, non-UTF-8, malformed and non-object reports each get their exact
 /// error before any key is consulted.
 #[test]
@@ -415,6 +635,7 @@ fn oversize_and_malformed_reports_get_their_exact_error() -> TestResult {
         ReceiptError::MissingSignature,
         ReceiptError::Mismatch(sign::VerifyError::Mismatch),
         ReceiptError::Inconsistent,
+        ReceiptError::TruncatedDiffAccepted,
     ] {
         let message = refusal.to_string();
         assert!(

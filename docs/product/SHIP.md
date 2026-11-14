@@ -96,9 +96,9 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 
 ## 7. 15-axis sweep (#200)
 
-- [x] #201 Model routing 1: a route table per tenant replaces the hardcoded 9router gateway and model (ADR 0039): PR #222, 879 tests.
+- [x] #201 Model routing 1: a route table per tenant replaces the hardcoded 9router gateway and model (ADR 0039): PR #222, 888 tests.
 - [x] #209 Runtime: a command whose sync was refused never runs in that process (regression from #199): PR #220.
-- [ ] #206 Executor: a truncated diff is sealed as accepted.
+- [x] #206 Executor: a truncated diff is sealed as accepted: PR #221.
 - [ ] #207 Executor: repo path allowlist and per-tenant policy, default-deny for remote doors.
 - [ ] #208 Runtime: tenants share one budget, and INVARIANTS says they do not.
 - [ ] #203 Model routing 3: residency and transport checked before any byte leaves the host.
