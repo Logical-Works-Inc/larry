@@ -193,6 +193,18 @@ impl Scorecard {
     pub const fn json(&self) -> &Value {
         &self.json
     }
+
+    /// The card with the id of the route the arm ran on (larry#201), so two
+    /// cards of one model on two gateways are told apart.
+    pub(crate) fn with_route(mut self, route: &str) -> Scorecard {
+        if let Some(object) = self.json.as_object_mut() {
+            object.insert(
+                String::from("route"),
+                Value::String(route.to_owned().into()),
+            );
+        }
+        self
+    }
 }
 
 /// Scores `outcomes` of model `model` over set `set` at `prices`. Cost per accepted

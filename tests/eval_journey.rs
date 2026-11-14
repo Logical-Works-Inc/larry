@@ -255,13 +255,26 @@ fn timeless(card: &Value) -> TestResult<Value> {
     Ok(stripped)
 }
 
-/// How many entries `<state>/eval` holds: every run removes its own origins.
-fn origins_left(state: &Path) -> TestResult<usize> {
+/// The entries of `<state>/eval`, origins and their sibling lock files alike, and
+/// whether each is a directory: a finished run leaves none (larry#87, larry#214).
+fn eval_listing(state: &Path) -> TestResult<Vec<bool>> {
     match fs::read_dir(state.join("eval")) {
-        Ok(entries) => Ok(entries.count()),
-        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(0),
+        Ok(entries) => entries
+            .map(|entry| Ok(entry?.file_type()?.is_dir()))
+            .collect(),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(cause) => Err(cause.into()),
     }
+}
+
+/// How many entries `<state>/eval` holds, lock files included.
+fn eval_entries(state: &Path) -> TestResult<usize> {
+    Ok(eval_listing(state)?.len())
+}
+
+/// How many origin directories `<state>/eval` holds; a lock file is not an origin.
+fn origins_left(state: &Path) -> TestResult<usize> {
+    Ok(eval_listing(state)?.into_iter().filter(|dir| *dir).count())
 }
 
 /// Writes one card's line to the run log: acceptance, cost, latency and RSS.
@@ -611,7 +624,11 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
             Ok::<_, Box<dyn std::error::Error>>((ran, handle.trace_hash()))
         })?;
         check_lies(&ran)?;
-        assert_eq!(origins_left(&state.path)?, 0, "every origin removed");
+        assert_eq!(
+            eval_entries(&state.path)?,
+            0,
+            "every origin and its lock removed"
+        );
         replays.push((trace, timeless(ran.card()?)?));
     }
     assert_eq!(
@@ -665,9 +682,9 @@ fn a_killed_eval_leaves_nothing_the_next_run_does_not_collect() -> TestResult {
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
     assert_eq!(
-        origins_left(&state.path)?,
+        eval_entries(&state.path)?,
         0,
-        "the dead run's origin was collected"
+        "the dead run's origin and its lock file were collected"
     );
     Ok(())
 }

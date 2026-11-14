@@ -271,6 +271,17 @@ enum GroupSimError {
         /// The damaged rows written.
         expected: usize,
     },
+    /// One state directory's reap settled or removed a row another directory recorded.
+    Crossed {
+        /// The seed that drew the scenario.
+        seed: u64,
+        /// What the foreign reap settled.
+        foreign: usize,
+        /// The rows left in the directory that recorded them.
+        left: usize,
+        /// The rows that directory recorded.
+        rows: usize,
+    },
     /// The owned or stranger row settled other than once.
     Final {
         /// The seed that drew the scenario.
@@ -319,6 +330,15 @@ impl fmt::Display for GroupSimError {
                 out,
                 "seed {seed:#x}: {first} settled, expected the {expected} damaged rows"
             ),
+            Self::Crossed {
+                seed,
+                foreign,
+                left,
+                rows,
+            } => write!(
+                out,
+                "seed {seed:#x}: a foreign reap settled {foreign}, and {left} of {rows} rows stayed with their own directory"
+            ),
             Self::Final {
                 seed,
                 second,
@@ -346,6 +366,7 @@ impl std::error::Error for GroupSimError {
             | Self::Unsettled { .. }
             | Self::Stranger { .. }
             | Self::Settled { .. }
+            | Self::Crossed { .. }
             | Self::Final { .. } => None,
         }
     }
@@ -455,6 +476,84 @@ fn sim_racing_starts_settle_every_dead_row_and_leave_none_for_every_seed() -> Te
     for seed in SEEDS {
         let first = trace_hash(&racing_trace(seed)?);
         let second = trace_hash(&racing_trace(seed)?);
+        assert_eq!(
+            first, second,
+            "seed {seed:#x}: one seed gives one trace hash"
+        );
+    }
+    Ok(())
+}
+
+/// Two tenants, two state directories, one host: tenant A records seeded dead rows, then tenant
+/// B's start reaps its own ledger, racing A's reopen. B settles nothing of A's and A keeps every
+/// row until A's own start reaps them all. Returns the trace of what the oracle observed.
+fn two_tenant_trace(seed: u64) -> Result<String, GroupSimError> {
+    let tenant_a = scratch_directory();
+    let tenant_b = scratch_directory();
+    let mut seeded = Seeded::from_seed(seed);
+    let rows = 1_usize.saturating_add(seeded.index(16)?);
+    let b_rows = seeded.index(4)?;
+    {
+        let ledger = Ledger::open(&tenant_a)?;
+        for index in 0..rows {
+            let pid = DEAD_PID.saturating_sub(i32::try_from(index)?);
+            ledger.insert(
+                &format!("tenant-a-{index}"),
+                &ProcessIdentity::new(pid, DEAD_START)?,
+            )?;
+        }
+    }
+    {
+        let ledger = Ledger::open(&tenant_b)?;
+        for index in 0..b_rows {
+            let pid = DEAD_PID.saturating_sub(i32::try_from(index.saturating_add(rows))?);
+            ledger.insert(
+                &format!("tenant-b-{index}"),
+                &ProcessIdentity::new(pid, DEAD_START)?,
+            )?;
+        }
+    }
+    let (foreign, left) = std::thread::scope(|scope| {
+        let b_dir = tenant_b.as_path();
+        let a_dir = tenant_a.as_path();
+        let b_start = scope.spawn(move || racing_start(b_dir));
+        let a_open =
+            scope.spawn(move || Ledger::open(a_dir).and_then(|ledger| ledger.live_tasks()));
+        let foreign = match b_start.join() {
+            Ok(outcome) => outcome,
+            Err(_panicked) => Err(GroupSimError::Racer),
+        }?;
+        let left = match a_open.join() {
+            Ok(outcome) => outcome.map_err(GroupSimError::Exec),
+            Err(_panicked) => Err(GroupSimError::Racer),
+        }?;
+        Ok::<(usize, usize), GroupSimError>((foreign, left.len()))
+    })?;
+    let own = racing_start(&tenant_a)?;
+    let after = Ledger::open(&tenant_a)?.live_tasks()?.len();
+    drop(std::fs::remove_dir_all(&tenant_a));
+    drop(std::fs::remove_dir_all(&tenant_b));
+    if foreign != b_rows || left != rows || own != rows || after != 0 {
+        return Err(GroupSimError::Crossed {
+            seed,
+            foreign,
+            left,
+            rows,
+        });
+    }
+    Ok(format!(
+        "a_rows={rows} b_rows={b_rows} b_settled={foreign} a_left={left} a_settled={own} a_after=0"
+    ))
+}
+
+/// Two tenants on one host: for every seed, one state directory's reap never settles a row
+/// another directory recorded, the owner's own start settles each of its rows, and the seed
+/// replays the same trace hash (larry#214).
+#[test]
+fn sim_two_tenants_reap_only_their_own_rows_for_every_seed() -> TestResult {
+    for seed in SEEDS {
+        let first = trace_hash(&two_tenant_trace(seed)?);
+        let second = trace_hash(&two_tenant_trace(seed)?);
         assert_eq!(
             first, second,
             "seed {seed:#x}: one seed gives one trace hash"

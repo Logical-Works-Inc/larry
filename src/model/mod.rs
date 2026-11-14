@@ -1,15 +1,17 @@
 //! The model client (#83): one blocking OpenAI-compatible chat-completions
 //! client that the executor (#85) calls to run a task on a cheap model through
-//! the estate's 9router gateway.
+//! the route the task resolves to (#201): a gateway and a model the tenant owns
+//! as data, never one compiled into the binary.
 //!
 //! Ported from forge-harness `sdk/forge-providers` (`openai_compatible.rs`,
 //! `completion_body.rs`) onto `lgwks_std::http`, `retry` and `json`. Every
-//! request is non-streaming and carries the pinned model and temperature. Every
-//! bound refuses with a typed error: 256 messages, a 1 MiB request body and a
-//! 4 MiB reply.
+//! request is non-streaming and carries the route's model and temperature. Every
+//! bound refuses with a typed error: 256 messages, the route's request body
+//! bound (1 MiB unless the route names another, 16 MiB at most) and a 4 MiB reply.
 
 mod client;
 mod config;
+mod route;
 mod wire;
 
 use std::fmt;
@@ -18,11 +20,12 @@ use std::str::Utf8Error;
 
 pub use client::ModelClient;
 pub use config::ModelConfig;
+pub(crate) use config::env_route;
+pub use route::RouteError;
+pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve};
 
 /// Most messages one completion request carries.
 const MAX_MESSAGES: usize = 256;
-/// Largest request body the client sends, in bytes.
-const MAX_REQUEST_BYTES: usize = 1_048_576;
 /// Largest reply body the client reads, in bytes.
 const MAX_REPLY_BYTES: usize = 4_194_304;
 
@@ -60,6 +63,16 @@ pub enum ModelError {
     Transport,
     /// No API key is configured, so nothing was sent.
     MissingKey,
+    /// The variable a route names for its key is unset or empty, so nothing was
+    /// sent. The name is the variable's, never the key's value.
+    KeyUnset {
+        /// The variable the route reads its key from.
+        variable: String,
+    },
+    /// A `LARRY_MODEL_*` variable the environment route needs is unset.
+    Unset(&'static str),
+    /// The environment route fails its field checks.
+    BadRoute(RouteError),
     /// A `LARRY_MODEL_*` whole-number setting does not parse.
     BadInteger {
         /// The variable that was set.
@@ -105,6 +118,11 @@ impl fmt::Display for ModelError {
             Self::NotUtf8(ref cause) => write!(out, "the model reply is not UTF-8: {cause}"),
             Self::Transport => out.write_str("the model gateway could not be reached"),
             Self::MissingKey => out.write_str("no model API key is configured (LARRY_MODEL_KEY)"),
+            Self::KeyUnset { ref variable } => {
+                write!(out, "the route's key variable {variable} is unset or empty")
+            }
+            Self::Unset(variable) => write!(out, "{variable} is unset"),
+            Self::BadRoute(ref cause) => write!(out, "the environment route: {cause}"),
             Self::BadInteger {
                 variable,
                 ref cause,
@@ -133,6 +151,7 @@ impl std::error::Error for ModelError {
             Self::NotUtf8(ref cause) => Some(cause),
             Self::BadInteger { ref cause, .. } => Some(cause),
             Self::BadFloat { ref cause, .. } => Some(cause),
+            Self::BadRoute(ref cause) => Some(cause),
             _ => None,
         }
     }

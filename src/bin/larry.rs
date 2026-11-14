@@ -3,6 +3,7 @@
 //! `larry model`, one completion through the configured gateway (larry#83),
 //! `larry exec`, the task-document executor (larry#85), and `larry verify` and
 //! `larry key`, the receipt check and the key it trusts (larry#86), and
+//! `larry route`, the tenant's model routes in the state directory (larry#201), and
 //! `larry eval`, one priced arm over the matched task set (larry#87), and
 //! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010), and
 //! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014), and
@@ -17,6 +18,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use larry_demo::eval::{EvalError, MAX_SET_BYTES, PriceError, Prices, Scorecard};
+use larry_demo::executor::routes::{RouteCliError, run as route_run};
 use larry_demo::executor::{
     ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, state_public_key,
     trusted_key, verify,
@@ -24,8 +26,9 @@ use larry_demo::executor::{
 use larry_demo::governance;
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
 
-/// Arguments read from the command line; no subcommand takes more than four.
-const MAX_ARGUMENTS: usize = 8;
+/// Arguments read from the command line; `larry route add` takes the most: a
+/// subcommand, an id and eight flags with their values.
+const MAX_ARGUMENTS: usize = 32;
 
 /// Exit status of a report that was produced and sealed but not accepted: a
 /// failed, timed-out or denied run. 0 means accepted; 1 means refused, no report.
@@ -170,6 +173,18 @@ fn verify_once() -> Result<bool, ExecError> {
         "task_id": verdict.task_id(),
     }))?;
     Ok(verdict.accepted())
+}
+
+/// `larry route add|list|remove|default|resolve`: the tenant's model routes in the
+/// state directory (larry#201). Every argument must be UTF-8 text.
+fn route_once(rest: &[OsString]) -> Result<(), RouteCliError> {
+    let words: Option<Vec<&str>> = rest.iter().map(|word| word.to_str()).collect();
+    let words = words.ok_or(RouteCliError::NotUtf8)?;
+    route_run(
+        |name| std::env::var(name).ok(),
+        &words,
+        &mut io::stdout().lock(),
+    )
 }
 
 /// `larry key`: print the state directory's receipt public key as 64 hex characters,
@@ -420,6 +435,9 @@ fn main() -> ExitCode {
         [ref command] if command == "key" => key_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
+        [ref command, ref rest @ ..] if command == "route" => route_once(rest)
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(|error| error.to_string()),
         [ref command] if command == "eval" => eval_once()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| error.to_string()),
@@ -448,7 +466,7 @@ fn main() -> ExitCode {
                 .map_err(|error| error.to_string())
         }
         _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
+            "DEMO: no arguments supported except `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `route`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
         )),
     };
     match outcome {

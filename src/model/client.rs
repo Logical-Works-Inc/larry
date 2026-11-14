@@ -7,12 +7,12 @@ use lgwks_std::http::{self, BodyPolicy, Error as HttpError, FailureKind, Options
 
 use super::config::ModelConfig;
 use super::wire;
-use super::{Completion, MAX_MESSAGES, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, Message, ModelError};
+use super::{Completion, MAX_MESSAGES, MAX_REPLY_BYTES, Message, ModelError};
 
 /// A blocking OpenAI-compatible chat-completions client.
 ///
-/// Built once per gateway and key. It holds no connection; each attempt opens
-/// its own exchange through `lgwks_std::http`.
+/// Built per task from the route the task resolved to (larry#201). It holds no
+/// connection; each attempt opens its own exchange through `lgwks_std::http`.
 pub struct ModelClient {
     /// Everything one completion needs, fixed at construction.
     config: ModelConfig,
@@ -58,7 +58,7 @@ impl ModelClient {
             return Err(ModelError::BodyTooLarge);
         }
         let body = wire::request_body(self.config.model(), self.config.temperature(), messages);
-        if body.len() > MAX_REQUEST_BYTES {
+        if body.len() > self.config.request_bytes() {
             return Err(ModelError::BodyTooLarge);
         }
         self.with_retry(&body)

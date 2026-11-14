@@ -46,6 +46,7 @@ const PER_TENANT: u32 = 4;
 fn settings(base: &str, key: &str) -> Settings {
     vec![
         ("LARRY_MODEL_URL", base.to_owned()),
+        ("LARRY_MODEL", String::from("mock-model")),
         ("LARRY_MODEL_KEY", key.to_owned()),
         ("LARRY_MODEL_TIMEOUT_MS", String::from("5000")),
         ("LARRY_MODEL_ATTEMPTS", String::from("3")),
@@ -136,8 +137,8 @@ fn the_body_sent_carries_the_pinned_model_and_temperature() -> TestResult {
             let recorded = handle.requests();
             let sent: Value = json::from_slice(recorded.first().ok_or("no recorded request")?)?;
             assert_eq!(
-                sent["model"], "ocg/deepseek-v4.1-flash",
-                "seed {seed}: the default pinned model reached the gateway"
+                sent["model"], "mock-model",
+                "seed {seed}: the configured model reached the gateway (no default model is compiled in)"
             );
             assert_eq!(
                 sent["temperature"],
