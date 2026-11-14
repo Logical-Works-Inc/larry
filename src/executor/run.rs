@@ -13,8 +13,15 @@ use lgwks_std::process::{identify_process, kill_process_group, process_group_exi
 use super::ExecError;
 use super::ledger::Ledger;
 
-/// Bytes of each output stream kept in the report; the rest is read and discarded.
-const CAPTURE_LIMIT: u64 = 1_048_576;
+/// Bytes of each output stream kept from its start in the report (larry#206).
+const HEAD_BYTES: usize = 524_288;
+
+/// Bytes of each output stream kept from its end in the report (larry#206): the end of a
+/// failing log holds its error.
+const TAIL_BYTES: usize = 524_288;
+
+/// Bytes read from a pipe per piece.
+const CAPTURE_CHUNK: usize = 8_192;
 
 /// The kernel's error number for "no such process".
 const ESRCH: i32 = 3;
@@ -26,8 +33,55 @@ const EPERM: i32 = 1;
 /// briefly zombies, so the probes yield between checks.
 const GROUP_PROBES: u32 = 10_000;
 
-/// One captured stream: its kept bytes and whether more followed them.
-type Captured = (Vec<u8>, bool);
+/// One captured stream: its first bytes, its last bytes, and how many bytes fell between them.
+#[derive(Default)]
+struct Captured {
+    /// The first `HEAD_BYTES` of the stream.
+    head: Vec<u8>,
+    /// The last `TAIL_BYTES` of the stream, after the head.
+    tail: Vec<u8>,
+    /// The bytes between the head and the tail: counted, never kept.
+    dropped: u64,
+}
+
+impl Captured {
+    /// Adds the next bytes of the stream. The head fills first; the tail keeps the most recent
+    /// `TAIL_BYTES`, and what it pushes out is counted as dropped.
+    fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let room = HEAD_BYTES.saturating_sub(self.head.len());
+        let kept = room.min(bytes.len());
+        self.head.extend_from_slice(&bytes[..kept]);
+        self.tail.extend_from_slice(&bytes[kept..]);
+        if self.tail.len() > TAIL_BYTES.saturating_mul(2) {
+            self.trim()?;
+        }
+        Ok(())
+    }
+
+    /// Drops the tail's oldest bytes until it holds `TAIL_BYTES`, counting every one.
+    fn trim(&mut self) -> io::Result<()> {
+        let cut = self.tail.len().saturating_sub(TAIL_BYTES);
+        self.tail.drain(..cut);
+        let counted = u64::try_from(cut).map_err(io::Error::other)?;
+        self.dropped = self
+            .dropped
+            .checked_add(counted)
+            .ok_or_else(|| io::Error::other("the dropped byte count overflowed"))?;
+        Ok(())
+    }
+
+    /// The kept bytes as text: the head, a marker line when bytes were dropped, then the tail.
+    /// Returns the text and the dropped count.
+    fn into_text(self) -> (String, u64) {
+        let mut bytes = self.head;
+        if self.dropped > 0 {
+            let marker = format!("\n[larry: {} bytes dropped]\n", self.dropped);
+            bytes.extend_from_slice(marker.as_bytes());
+        }
+        bytes.extend_from_slice(&self.tail);
+        (String::from_utf8_lossy(&bytes).into_owned(), self.dropped)
+    }
+}
 
 /// What one acceptance command did, as the report records it.
 #[derive(Debug)]
@@ -41,11 +95,15 @@ pub(crate) struct CommandResult {
     exit_code: Option<i32>,
     /// Whether the timeout fired and the group was killed.
     timed_out: bool,
-    /// The first megabyte of standard output, lossily decoded.
+    /// Standard output: its head and its tail, joined by a marker line, lossily decoded.
     stdout: String,
-    /// The first megabyte of standard error, lossily decoded.
+    /// Standard error: its head and its tail, joined by a marker line, lossily decoded.
     stderr: String,
-    /// Whether either stream held more than the captured megabyte.
+    /// Bytes of standard output dropped between its head and its tail.
+    stdout_dropped: u64,
+    /// Bytes of standard error dropped between its head and its tail.
+    stderr_dropped: u64,
+    /// Whether either stream dropped bytes.
     truncated: bool,
     /// Wall-clock duration in milliseconds; measured, never used to control the run.
     duration_ms: u64,
@@ -97,6 +155,8 @@ impl CommandResult {
             "timed_out": self.timed_out,
             "stdout": self.stdout,
             "stderr": self.stderr,
+            "stdout_dropped": self.stdout_dropped,
+            "stderr_dropped": self.stderr_dropped,
             "truncated": self.truncated,
             "duration_ms": self.duration_ms,
         })
@@ -196,8 +256,8 @@ pub(crate) fn run_command(
     let status = status.map_err(|source| spawn_failure(program, source))?;
     await_group_gone(pgid)?;
     ledger.remove(&identity)?;
-    let (stdout_bytes, stdout_spilled) = stdout;
-    let (stderr_bytes, stderr_spilled) = stderr;
+    let (stdout_text, stdout_dropped) = stdout.into_text();
+    let (stderr_text, stderr_dropped) = stderr.into_text();
     let elapsed = started_at.elapsed();
     let duration_ms = elapsed
         .as_secs()
@@ -208,9 +268,11 @@ pub(crate) fn run_command(
         pgid,
         exit_code: status.code(),
         timed_out,
-        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
-        truncated: stdout_spilled || stderr_spilled,
+        stdout: stdout_text,
+        stderr: stderr_text,
+        stdout_dropped,
+        stderr_dropped,
+        truncated: stdout_dropped > 0 || stderr_dropped > 0,
         duration_ms,
     })
 }
@@ -228,14 +290,23 @@ pub(crate) fn clip(text: &mut String, bytes: usize) -> bool {
     true
 }
 
-/// Keeps the first `CAPTURE_LIMIT` bytes of a pipe and reports whether more followed.
-fn capture(pipe: impl Read) -> io::Result<Captured> {
-    let mut kept = Vec::new();
-    let mut limited = pipe.take(CAPTURE_LIMIT);
-    limited.read_to_end(&mut kept)?;
-    let mut rest = limited.into_inner();
-    let spilled = io::copy(&mut rest, &mut io::sink())?;
-    Ok((kept, spilled > 0))
+/// Keeps the first `HEAD_BYTES` and the last `TAIL_BYTES` of a pipe, and counts the bytes
+/// between them. The pipe is read to its end in pieces, so memory is bounded by the two bounds.
+fn capture(mut pipe: impl Read) -> io::Result<Captured> {
+    let mut captured = Captured::default();
+    let mut chunk = [0_u8; CAPTURE_CHUNK];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => captured.push(&chunk[..read])?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if captured.tail.len() > TAIL_BYTES {
+        captured.trim()?;
+    }
+    Ok(captured)
 }
 
 /// Waits for one reader thread and turns its failure into a typed error.
@@ -317,3 +388,8 @@ fn await_group_gone(pgid: i32) -> Result<(), ExecError> {
     }
     Ok(())
 }
+
+/// Seeded simulations of the bounded capture (larry#206).
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;

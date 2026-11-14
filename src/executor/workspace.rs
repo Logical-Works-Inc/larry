@@ -6,7 +6,7 @@
 //! at another repository (the origin's, say) never redirects them.
 
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -14,8 +14,14 @@ use lgwks_std::process::process_exists;
 
 use super::ExecError;
 
-/// Largest diff kept for one task, in bytes.
-const DIFF_LIMIT: usize = 1_048_576;
+/// Largest diff kept for one task, in bytes; a longer diff is cut and sealed as truncated (larry#206).
+pub(crate) const DIFF_LIMIT: usize = 1_048_576;
+
+/// Bytes read from git's diff stream per piece.
+const STREAM_CHUNK: usize = 8_192;
+
+/// Bytes of git's stderr kept for an error message; the rest is drained.
+const STDERR_LIMIT: u64 = 65_536;
 
 /// The prefix `larry eval` names its origins by: `origin-<pid>-<index>`.
 const EVAL_ORIGIN_PREFIX: &str = "origin-";
@@ -29,8 +35,8 @@ struct Git<'a> {
 }
 
 impl Git<'_> {
-    /// Runs git with `arguments`, inside `directory` when given, and returns its output.
-    fn output(&self, directory: Option<&Path>, arguments: &[&OsStr]) -> Result<Output, ExecError> {
+    /// The git command under the executor's environment, inside `directory` when given.
+    fn command(&self, directory: Option<&Path>, arguments: &[&OsStr]) -> Command {
         let mut command = Command::new("git");
         command
             .args(arguments)
@@ -42,10 +48,22 @@ impl Git<'_> {
         if let Some(path) = directory {
             command.current_dir(path);
         }
-        command.output().map_err(|source| ExecError::Spawn {
-            argv0: "git".to_owned(),
-            source,
-        })
+        command
+    }
+
+    /// Runs git with `arguments`, inside `directory` when given, and returns its output.
+    fn output(&self, directory: Option<&Path>, arguments: &[&OsStr]) -> Result<Output, ExecError> {
+        self.command(directory, arguments)
+            .output()
+            .map_err(spawn_error)
+    }
+}
+
+/// The typed failure of a git process that could not be started.
+fn spawn_error(source: io::Error) -> ExecError {
+    ExecError::Spawn {
+        argv0: "git".to_owned(),
+        source,
     }
 }
 
@@ -142,33 +160,72 @@ impl Workspace {
         self.tree.as_path()
     }
 
-    /// Stages everything in the work tree and returns the staged diff against `base`, capped
-    /// at 1 MiB. `None` when the commands destroyed the work tree itself.
-    pub(crate) fn diff(&self, base: &str) -> Result<Option<String>, ExecError> {
+    /// Stages everything in the work tree and returns the staged diff against `base`, streamed
+    /// through the BLAKE3 hasher with its head kept (larry#206). `None` when the commands destroyed
+    /// the work tree itself.
+    pub(crate) fn diff(&self, base: &str) -> Result<Option<Diff>, ExecError> {
         if !self.tree.is_dir() {
             return Ok(None);
         }
         require(self.bound(&[OsStr::new("add"), OsStr::new("-A")])?, "add")?;
-        let staged = self.bound(&[
+        self.stream_diff(base).map(Some)
+    }
+
+    /// Streams git's staged diff against `base` into a sink. The diff is never buffered whole,
+    /// and git's stderr is kept to `STDERR_LIMIT` bytes and drained past it.
+    fn stream_diff(&self, base: &str) -> Result<Diff, ExecError> {
+        let mut command = self.bound_command(&[
             OsStr::new("diff"),
             OsStr::new("--cached"),
             OsStr::new("--no-color"),
             OsStr::new("--no-ext-diff"),
             OsStr::new(base),
-        ])?;
-        let mut bytes = require(staged, "diff")?;
-        bytes.truncate(DIFF_LIMIT);
-        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+        ]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(spawn_error)?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            drop(child.kill());
+            drop(child.wait());
+            return Err(diff_failed("the diff pipes were not opened"));
+        };
+        let (sunk, errors) = std::thread::scope(|scope| {
+            let errors = scope.spawn(move || read_capped(stderr));
+            let sunk = pump(stdout);
+            if sunk.is_err() {
+                drop(child.kill());
+            }
+            (sunk, errors.join())
+        });
+        let sink = sunk?;
+        let detail = match errors {
+            Ok(Ok(kept)) => String::from_utf8_lossy(&kept).trim().to_owned(),
+            Ok(Err(source)) => return Err(ExecError::Workspace(source)),
+            Err(_) => {
+                return Err(ExecError::Workspace(io::Error::other(
+                    "the diff stderr reader panicked",
+                )));
+            }
+        };
+        let status = child.wait().map_err(spawn_error)?;
+        if !status.success() {
+            return Err(diff_failed(&detail));
+        }
+        Ok(sink.finish())
     }
 
     /// Runs git against this workspace's own git directory and work tree, named explicitly,
     /// so nothing the commands left in the work tree can redirect it.
     fn bound(&self, arguments: &[&OsStr]) -> Result<Output, ExecError> {
+        self.bound_command(arguments).output().map_err(spawn_error)
+    }
+
+    /// The git command bound to this workspace's git directory and work tree.
+    fn bound_command(&self, arguments: &[&OsStr]) -> Command {
         let git_dir = flag("git-dir", &self.git_dir);
         let work_tree = flag("work-tree", &self.tree);
         let mut full: Vec<&OsStr> = vec![git_dir.as_os_str(), work_tree.as_os_str()];
         full.extend_from_slice(arguments);
-        self.git().output(Some(&self.root), &full)
+        self.git().command(Some(&self.root), &full)
     }
 
     /// Git bound to this workspace's environment.
@@ -184,6 +241,122 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         // A removal that fails leaves a directory the next start's sweep collects.
         drop(std::fs::remove_dir_all(&self.root));
+    }
+}
+
+/// The diff a report records (larry#206): its first `DIFF_LIMIT` bytes, whether anything was cut
+/// past them, and the full diff's byte count and BLAKE3 digest.
+pub(crate) struct Diff {
+    /// The kept bytes, lossily decoded.
+    pub(crate) text: String,
+    /// Whether the full diff is longer than the kept bytes.
+    pub(crate) truncated: bool,
+    /// The full diff's length in bytes.
+    pub(crate) bytes: u64,
+    /// The BLAKE3 digest of the full diff, as 64 hex characters.
+    pub(crate) digest: String,
+}
+
+/// A diff streamed through the BLAKE3 hasher: it keeps the head and counts every byte, so
+/// memory holds at most `DIFF_LIMIT` bytes however large the change is (larry#206).
+pub(crate) struct DiffSink {
+    /// The first `DIFF_LIMIT` bytes.
+    head: Vec<u8>,
+    /// Whether any byte came past the head.
+    truncated: bool,
+    /// Every byte pushed so far.
+    bytes: u64,
+    /// The hash of every byte pushed so far.
+    hasher: lgwks_std::hash::Hasher,
+}
+
+impl DiffSink {
+    /// An empty sink.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            head: Vec::new(),
+            truncated: false,
+            bytes: 0,
+            hasher: lgwks_std::hash::Hasher::new(),
+        }
+    }
+
+    /// Adds the next piece of the diff, in the order git wrote it.
+    pub(crate) fn push(&mut self, piece: &[u8]) -> io::Result<()> {
+        let length = u64::try_from(piece.len()).map_err(io::Error::other)?;
+        self.bytes = self
+            .bytes
+            .checked_add(length)
+            .ok_or_else(|| io::Error::other("the diff is longer than u64 bytes"))?;
+        self.hasher.update(piece);
+        let kept = DIFF_LIMIT.saturating_sub(self.head.len()).min(piece.len());
+        self.head.extend_from_slice(&piece[..kept]);
+        self.truncated = self.truncated || kept < piece.len();
+        Ok(())
+    }
+
+    /// The diff as the report records it.
+    #[must_use]
+    pub(crate) fn finish(self) -> Diff {
+        Diff {
+            text: String::from_utf8_lossy(&self.head).into_owned(),
+            truncated: self.truncated,
+            bytes: self.bytes,
+            digest: self.hasher.finalize().to_hex(),
+        }
+    }
+}
+
+/// The four report members a staged diff contributes. `None`, when the commands destroyed the
+/// work tree, records no diff, which acceptance already refuses (larry#206).
+#[must_use]
+pub(crate) fn report_members(diff: Option<Diff>) -> [(&'static str, lgwks_std::json::Value); 4] {
+    match diff {
+        Some(diff) => [
+            ("diff", lgwks_std::json::json!(diff.text)),
+            ("diff_truncated", lgwks_std::json::json!(diff.truncated)),
+            ("diff_bytes", lgwks_std::json::json!(diff.bytes)),
+            ("diff_digest", lgwks_std::json::json!(diff.digest)),
+        ],
+        None => [
+            ("diff", lgwks_std::json::Value::Null),
+            ("diff_truncated", lgwks_std::json::json!(false)),
+            ("diff_bytes", lgwks_std::json::Value::Null),
+            ("diff_digest", lgwks_std::json::Value::Null),
+        ],
+    }
+}
+
+/// Feeds every piece of git's diff stream to a sink until the stream ends.
+fn pump(mut stdout: impl Read) -> Result<DiffSink, ExecError> {
+    let mut sink = DiffSink::new();
+    let mut chunk = [0_u8; STREAM_CHUNK];
+    loop {
+        match stdout.read(&mut chunk) {
+            Ok(0) => return Ok(sink),
+            Ok(read) => sink.push(&chunk[..read]).map_err(ExecError::Workspace)?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(ExecError::Workspace(error)),
+        }
+    }
+}
+
+/// Keeps the first `STDERR_LIMIT` bytes of a pipe and drains the rest, so git never blocks on it.
+fn read_capped(pipe: impl Read) -> io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut limited = pipe.take(STDERR_LIMIT);
+    limited.read_to_end(&mut kept)?;
+    let mut rest = limited.into_inner();
+    io::copy(&mut rest, &mut io::sink())?;
+    Ok(kept)
+}
+
+/// A failed `git diff`, named by its step and carrying git's stderr.
+fn diff_failed(detail: &str) -> ExecError {
+    ExecError::Git {
+        step: "diff",
+        detail: detail.to_owned(),
     }
 }
 
