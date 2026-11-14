@@ -30,7 +30,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #117 public-alpha warning, SECURITY.md, CONTRIBUTING.md, licence clause: PR #118, 4ff17c5
 - [x] #119 cancellation waits for reconciliation, runtime split: PR #120, 1f46189, 544 tests in 2.03 s
 - [x] #121 `target/` ignored at any depth: PR #122, a65507a. Repository public 2026-11-06: runner deleted, interaction limits, fork-PR approval, private reporting
-- [x] #201 model routing 1: a route table per tenant replaces the hardcoded 9router gateway and model (ADR 0039): PR #222, 889 tests.
+- [x] #201 model routing 1: a route table per tenant replaces the hardcoded 9router gateway and model (ADR 0039): PR #222, 910 tests.
 
 ## 1. Weekend ship: Larry v0.1, the executor (#114, umbrella #71)
 
