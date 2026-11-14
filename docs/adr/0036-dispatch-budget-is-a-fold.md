@@ -61,6 +61,10 @@ Rejected:
 
 - A retry-safe effect spends its `MAX_EFFECT_ATTEMPTS` dispatches once, across
   any number of restarts, and every attempt names one `EffectKey`.
+- Larry#209: a refused sync latches the journal. The lgwks_bot store latches its
+  own handle on any failed append (`owner/store.rs:856-867`), so a later sync
+  never writes the unwritten bytes. Larry does not retry them in process: a
+  retry is refused with `RuntimeError::Durable` until a restore replays the file.
 - An acknowledged command is in memory only after its entry is durable, so a
   caller that got `Err` from the sync never has the command run for it.
 - Covered by `tests/sim_budget_restore.rs` (`sim_a_restart_spends_the_recorded_dispatch_budget`)
