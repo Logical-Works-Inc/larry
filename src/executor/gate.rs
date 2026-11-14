@@ -495,7 +495,7 @@ fn finish(path: &Path, outcome: Result<Report, ExecError>) -> Result<Report, Exe
                 | RuntimeError::DurableRepeat { .. }
                 | RuntimeError::DurabilityShort { .. }
                 | RuntimeError::Codec(_)
-        ))
+        )) | Err(ExecError::Unsealed(_))
     );
     if kept {
         return outcome;
@@ -568,7 +568,23 @@ fn drive<O: EffectOwner>(
             other => Err(ExecError::Gate(other)),
         };
     }
-    let tick = runtime.tick().map_err(ExecError::Gate)?;
+    let tick = match runtime.tick() {
+        Ok(tick) => tick,
+        Err(error) => {
+            // The body may already have run and its report be sealed. A tick
+            // whose sync refuses would otherwise throw that report away, so the
+            // caller is told the run finished and its record could not be made
+            // durable (larry#182). A body that failed keeps its own failure,
+            // which is the more specific one.
+            if let Some(finished) = slot.borrow_mut().take() {
+                return match finished {
+                    Ok(_) => Err(ExecError::Unsealed(error)),
+                    Err(failure) => Err(failure),
+                };
+            }
+            return Err(ExecError::Gate(error));
+        }
+    };
 
     // The body ran inside the bound reach; its outcome is the run's outcome.
     if let Some(finished) = slot.borrow_mut().take() {

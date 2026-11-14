@@ -65,6 +65,10 @@ pub struct Journal {
     capacity: usize,
     /// The file every entry reaches before the index, when opened durable.
     durable: Option<durable::Backing>,
+    /// Whether the next [`Journal::sync`] appends and then refuses as a lost
+    /// acknowledgment (larry#182), for the in-crate admission falsifier.
+    #[cfg(test)]
+    lose_sync: bool,
 }
 
 impl Clone for Journal {
@@ -78,6 +82,8 @@ impl Clone for Journal {
             consumer_index: self.consumer_index.clone(),
             capacity: self.capacity,
             durable: None,
+            #[cfg(test)]
+            lose_sync: self.lose_sync,
         }
     }
 }
@@ -143,11 +149,42 @@ impl Journal {
     /// [`RuntimeError::Durable`] when the store refuses or cannot say whether
     /// the bytes landed, after which every later sync refuses too, and
     /// [`RuntimeError::DurabilityShort`] when its promise is under a crash.
+    /// A journal built by [`Journal::lost_acknowledgement`] appends its staged
+    /// records and then reports the lost acknowledgment a real store produces
+    /// (larry#182), so a caller can prove what it does when a sync refuses.
     pub(crate) fn sync(&mut self) -> Result<(), RuntimeError> {
         match self.durable.as_mut() {
-            Some(backing) => backing.sync(),
+            Some(backing) => {
+                backing.sync()?;
+                #[cfg(test)]
+                if self.lose_sync {
+                    self.lose_sync = false;
+                    return Err(RuntimeError::Durable(
+                        lgwks_bot::journal::JournalError::OutcomeUnknown {
+                            cause: std::io::Error::other(
+                                "injected: the append's acknowledgment was lost",
+                            ),
+                        },
+                    ));
+                }
+                Ok(())
+            }
             None => Ok(()),
         }
+    }
+
+    /// A journal over the same file that reports the next sync as a lost
+    /// acknowledgment, after appending what it staged (larry#182).
+    ///
+    /// The refusal a real store produces when bytes reach the disk and the
+    /// confirmation does not reach the caller. Test-only: it exists so the
+    /// admission ordering can be falsified against the exact error a store
+    /// gives, never a made-up one.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn lost_acknowledgement(mut self) -> Self {
+        self.lose_sync = true;
+        self
     }
 
     /// Whether opening took back an append a killed writer never finished
@@ -178,6 +215,8 @@ impl Journal {
             last_sequence: BTreeMap::new(),
             capacity,
             durable: None,
+            #[cfg(test)]
+            lose_sync: false,
         })
     }
 

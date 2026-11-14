@@ -93,6 +93,15 @@ pub trait ProjectionBackend {
     /// Where `operation` stands.
     fn effect_phase(&self, operation: OperationId) -> Option<EffectPhase>;
 
+    /// How many dispatches the journal records for `operation`, or the whole
+    /// budget when a record cannot prove a lower count (larry#182).
+    ///
+    /// This is the count `restore` spends, so a restart continues the budget
+    /// the journal recorded rather than resetting it. An operation the journal
+    /// never recorded an outcome for proves nothing, so the answer is the
+    /// whole budget.
+    fn dispatches(&self, operation: OperationId) -> u8;
+
     /// How many effects the view tracks for `run`.
     fn effect_count(&self, run: RunId) -> usize;
 
@@ -125,6 +134,9 @@ pub struct RunView {
     last_sequence: Option<larry_contracts::event::EventSequence>,
     /// Effect phases keyed in deterministic operation order.
     effects: BTreeMap<OperationId, EffectPhase>,
+    /// How many dispatches each effect's recorded outcomes prove, keyed like
+    /// `effects` (larry#182).
+    dispatches: BTreeMap<OperationId, u8>,
     /// Count of accepted commands folded for this run.
     commands: usize,
 }
@@ -136,6 +148,7 @@ impl Default for RunView {
             tenant: None,
             last_sequence: None,
             effects: BTreeMap::new(),
+            dispatches: BTreeMap::new(),
             commands: 0,
         }
     }
@@ -170,6 +183,12 @@ impl RunView {
     #[must_use]
     pub fn effects(&self) -> &BTreeMap<OperationId, EffectPhase> {
         &self.effects
+    }
+
+    /// The dispatch count the run's recorded outcomes prove for `operation`.
+    #[must_use]
+    pub fn dispatches(&self, operation: OperationId) -> Option<u8> {
+        self.dispatches.get(&operation).copied()
     }
 }
 
@@ -260,6 +279,12 @@ impl FoldProjection {
         let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
         let operation = payload.outcome.operation();
         let view = self.entry(event.run(), event)?;
+        // The attempt number travels with the outcome, so the count a restart
+        // spends is a fold over recorded facts, never live state (larry#182).
+        view.dispatches
+            .entry(operation)
+            .and_modify(|spent| *spent = (*spent).max(payload.dispatches))
+            .or_insert(payload.dispatches);
         view.effects.insert(
             operation,
             EffectPhase::Observed {
@@ -343,6 +368,19 @@ impl ProjectionBackend for FoldProjection {
         self.runs
             .values()
             .find_map(|view| view.effects.get(&operation).copied())
+    }
+
+    fn dispatches(&self, operation: OperationId) -> u8 {
+        match self
+            .runs
+            .values()
+            .find_map(|view| view.dispatches(operation))
+        {
+            Some(spent) => spent,
+            // The journal proves no dispatch, so it cannot prove fewer than the
+            // whole budget was spent (larry#182): fail closed, never recharge.
+            None => larry_contracts::effect::MAX_EFFECT_ATTEMPTS,
+        }
     }
 
     fn effect_count(&self, run: RunId) -> usize {

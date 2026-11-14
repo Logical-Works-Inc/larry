@@ -586,7 +586,14 @@ where
         sent: bool,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
-        self.record_outcome(run, intent, outcome)?;
+        // The dispatch count the reach leaves in the live table is recorded with
+        // the outcome, so the budget a restart spends is a fold over the journal
+        // rather than live state (larry#182).
+        let dispatches = match self.live.get(&intent.operation) {
+            Some(live) => live.dispatches,
+            None => 0,
+        };
+        self.record_outcome(run, intent, outcome, dispatches)?;
         if !sent {
             return Ok(());
         }
@@ -727,13 +734,18 @@ where
             None => crate::gate::Proof::lapsed(),
         };
         let phase = projection.effect_phase(intent.operation);
-        // A reservation with no recorded outcome may already have reached the
-        // endpoint, and the journal cannot prove otherwise, so restoration
-        // spends the *dispatch* budget rather than resetting it. Reconciliation
-        // budget is untouched: asking what happened is not retrying.
+        // The dispatch budget is a fold over the journal (larry#182): a
+        // recorded outcome carries the attempt number it was observed at, so a
+        // restart continues the count instead of recharging it. An effect the
+        // journal leaves `Reserved` has no outcome record, and the journal
+        // cannot prove it was never dispatched, so it restores with the whole
+        // budget spent; one the journal never mentions at all also restores
+        // with the whole budget spent, because nothing proves a lower count.
         let dispatches = match phase {
-            Some(EffectPhase::Reserved) => larry_contracts::effect::MAX_EFFECT_ATTEMPTS,
-            Some(EffectPhase::Observed { .. } | EffectPhase::Reconciled { .. }) | None => 0,
+            Some(EffectPhase::Observed { .. } | EffectPhase::Reconciled { .. }) => {
+                projection.dispatches(intent.operation)
+            }
+            Some(EffectPhase::Reserved) | None => larry_contracts::effect::MAX_EFFECT_ATTEMPTS,
         };
         live.insert(
             intent.operation,

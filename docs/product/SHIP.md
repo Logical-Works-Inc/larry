@@ -71,12 +71,10 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
 
 - [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds).
-- [x] #75 journal on RecordJournal, group-committed, a dead task recovered unrerun (ADR 0023): PR #172, 775 tests;
-  `larry exec` p50 70.0/78.1 ms, p99 96.3/98.3 ms (32 runs, debug), peak RSS 12.5/13.2 MiB.
+- [x] #75 journal on RecordJournal, group-committed, a dead task recovered unrerun (ADR 0023): PR #172, 775 tests; `larry exec` p50 70.0/78.1 ms, p99 96.3/98.3 ms (32 runs, debug), peak RSS 12.5/13.2 MiB.
 - [x] #76 fence on broker (ADR 0024): PR #173, 780 tests; `larry exec` p50 75.1/75.4 ms, p99 79.8/80.9 ms, 13.2/13.1 MiB.
 - [x] #77 gate on GrantSet and cap::Auth: PR #163, 729 tests; replay p50 49.9/49.7 us, p99 94.5/86.8 us (ADR 0018).
-- [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay
-  p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
+- [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
 - [ ] #80 tick and consumer on app scope and tenant_store. Proof: `sim_lifecycle`, `sim_consumer`, `sim_cancel`.
 - [x] #68 step 4 (#164): every executor task passes the runtime gate, `LARRY_POLICY` (ADR 0019): PR #165, 734 tests;
@@ -85,6 +83,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #100 E28 durable admission before the acknowledgement, corrections at a safe boundary (ADR 0025): PR #174, 785 tests.
 - [x] #99 E71 a restart recharges no offline authority, old settings revive nothing (ADR 0026): PR #175, 790 tests.
 - [x] #98 E30 durable scoped questions, expiry never consent (ADR 0027), PR #25 ported: PR #176, 797 tests.
+- [x] #182 defects 2 and 7: a restart spends the dispatch budget the journal recorded, and nothing in memory moves before the sync (ADR 0017, ADR 0036): PR #199, 831 tests.
 
 ## 4. Track 2: the operator agent, the Copilot answer (#70)
 

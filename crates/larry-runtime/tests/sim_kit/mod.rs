@@ -7,6 +7,7 @@
 
 use std::fmt::Debug;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use larry_contracts::authority::Scope;
 use larry_contracts::effect::ReconciliationStrategy;
@@ -63,6 +64,34 @@ pub fn trace(journal: &Journal) -> ContentDigest {
             _ => digest,
         },
     )
+}
+
+/// A journal file for `name` and `seed` in the OS temporary directory, absent
+/// when the drive starts so both replays of a seed start from nothing.
+///
+/// # Errors
+///
+/// Propagates a refusal to remove a file the previous run left.
+pub fn fresh_journal(name: &str, seed: u64) -> Sim<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "larry-sim-{}-{name}-{seed}.journal",
+        std::process::id()
+    ));
+    remove(&path)?;
+    Ok(path)
+}
+
+/// Removes `path` if it exists.
+///
+/// # Errors
+///
+/// Propagates any removal refusal other than an absent file.
+pub fn remove(path: &Path) -> Sim<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// A runtime whose policy and worker both allow `FileRead` only.
@@ -236,5 +265,11 @@ fn sim_kit_replay_and_trace_contract() -> Sim<()> {
         diverged.is_err(),
         "a drive that differs between runs is refused"
     );
+    // A fresh file starts absent, and removing one that is already gone is not
+    // a refusal: the durable suites depend on both halves of this.
+    let path = fresh_journal("kit", 0)?;
+    assert!(!path.exists(), "a fresh journal path names no file yet");
+    remove(&path)?;
+    remove(&path)?;
     Ok(())
 }

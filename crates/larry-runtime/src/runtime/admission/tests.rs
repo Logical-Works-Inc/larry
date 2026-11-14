@@ -148,20 +148,35 @@ fn pending(runtime: &Rt) -> Vec<CommandId> {
         .collect()
 }
 
+/// A seeded submit: its journal file, the `Submit` command's identity, and the
+/// command itself, so the seeded admission cases share one fixture.
+fn seeded_submit(
+    seed: u64,
+    name: &str,
+) -> Result<(PathBuf, CommandId, Command), Box<dyn std::error::Error>> {
+    let path = journal_file(name, seed)?;
+    let (run, tenant) = (
+        RunId::from_bytes(ids(1, seed)),
+        TenantId::from_bytes(ids(2, seed)),
+    );
+    let body = work_body(run, tenant, OperationId::from_bytes(ids(3, seed)));
+    let id = CommandId::from_bytes(ids(4, seed));
+    let command = command(id, CommandKind::Submit, &body)?;
+    Ok((path, id, command))
+}
+
 /// R44/E28: for every seed, an acknowledged admission survives the runtime's
 /// death before any tick, is reduced exactly once after restore, a retry is a
 /// duplicate, and a conflicting retry is refused with nothing written.
 #[test]
 fn sim_an_acknowledged_admission_survives_a_crash_and_is_reduced_once() -> Outcome {
     for seed in 0..32_u64 {
-        let path = journal_file("ack", seed)?;
-        let (run, tenant) = (
+        let (path, id, first) = seeded_submit(seed, "ack")?;
+        let body = work_body(
             RunId::from_bytes(ids(1, seed)),
             TenantId::from_bytes(ids(2, seed)),
+            OperationId::from_bytes(ids(3, seed)),
         );
-        let body = work_body(run, tenant, OperationId::from_bytes(ids(3, seed)));
-        let id = CommandId::from_bytes(ids(4, seed));
-        let first = command(id, CommandKind::Submit, &body)?;
         let mut runtime = durable(ScriptedOwner::new(), &path)?;
         assert_eq!(runtime.ack(first.clone())?, CommandAcceptance::Initial);
         let len = runtime.journal().len();
@@ -444,6 +459,57 @@ fn a_held_queued_correction_lets_the_next_run_pass() -> Outcome {
         "the next run passes"
     );
     assert_eq!(pending(&runtime), [held.id()], "the correction is pending");
+    Ok(())
+}
+
+/// The pending set holds nothing until the journal's sync returns: an admission
+/// whose sync refuses writes its entry but leaves the queue and the question
+/// book untouched, so the following tick runs nothing and the owner is never
+/// reached, and a restore over the same file admits the command once (larry#182
+/// defect 7, ADR 0036).
+#[test]
+fn sim_a_sync_refusal_admits_nothing_and_a_restore_admits_once() -> Outcome {
+    for seed in 0..8_u64 {
+        let (path, id, command) = seeded_submit(seed, "admitsync")?;
+        // The journal refuses the acknowledgment of its own append, as a store
+        // whose confirmation was lost does: the bytes landed, the caller was
+        // told nothing was durable.
+        let settings = settings()?;
+        let journal = Journal::open(&path, settings.journal_capacity)?.lost_acknowledgement();
+        let mut runtime: Rt = restore(settings, ScriptedOwner::new(), clock(), journal)?;
+        let refused = runtime.ack(command);
+        assert!(
+            matches!(refused, Err(RuntimeError::Durable(_))),
+            "seed {seed}: the admission returns the sync refusal: {refused:?}"
+        );
+        // Nothing in memory moved: the following tick runs nothing and the owner
+        // is never reached.
+        let after = runtime.tick()?;
+        assert!(
+            after.admitted().is_empty(),
+            "seed {seed}: the refused admission executes nothing"
+        );
+        assert!(
+            runtime.owner().dispatched().is_empty(),
+            "seed {seed}: the owner is never reached by the refused admission"
+        );
+        drop(runtime);
+
+        // The entry the refused sync left on disk is admitted by a restore, in
+        // journal order, and reduced exactly once.
+        let mut restored = durable(ScriptedOwner::new(), &path)?;
+        assert_eq!(
+            restored.tick()?.admitted(),
+            &[id],
+            "seed {seed}: the restore admits the journaled command exactly once"
+        );
+        assert!(
+            restored.tick()?.admitted().is_empty(),
+            "seed {seed}: the command is never admitted twice"
+        );
+        drop(restored);
+        std::fs::remove_file(&path)?;
+    }
     Ok(())
 }
 

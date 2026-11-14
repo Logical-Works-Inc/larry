@@ -167,6 +167,13 @@ pub struct IntentPayload {
 
 /// The body of an [`EventKind::EffectOutcomeRecorded`](larry_contracts::event::EventKind::EffectOutcomeRecorded)
 /// record: what the owner reported.
+///
+/// `dispatches` is how many times the owner had been asked to perform the
+/// effect when it reported this outcome, and it is what makes the dispatch
+/// budget a fold over the journal rather than live state a restart recharges
+/// (larry#182). A record that does not carry it — one written before larry#182
+/// — restores as if the whole budget were spent, because the journal cannot
+/// prove the effect was dispatched fewer times than allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "lgwks_std::json::serde")]
 #[non_exhaustive]
@@ -176,6 +183,17 @@ pub struct OutcomePayload {
     pub intent: EffectIntent,
     /// The observed outcome.
     pub outcome: EffectOutcome,
+    /// How many dispatches this runtime had made when the outcome was recorded.
+    #[serde(default = "spent_budget")]
+    pub dispatches: u8,
+}
+
+/// The dispatch count an old record with no attempt number restores as: the
+/// whole budget spent. The journal cannot prove the effect was dispatched
+/// fewer times, so the fail-closed answer is that it may have used every
+/// attempt (larry#182).
+const fn spent_budget() -> u8 {
+    larry_contracts::effect::MAX_EFFECT_ATTEMPTS
 }
 
 /// The body of an [`EventKind::TerminalReceiptPublished`](larry_contracts::event::EventKind::TerminalReceiptPublished)
@@ -216,10 +234,15 @@ impl IntentPayload {
 }
 
 impl OutcomePayload {
-    /// Records an owner's observation for the reserved intent.
+    /// Records an owner's observation for the reserved intent, made after
+    /// `dispatches` reaches.
     #[must_use]
-    pub const fn new(intent: EffectIntent, outcome: EffectOutcome) -> Self {
-        Self { intent, outcome }
+    pub const fn new(intent: EffectIntent, outcome: EffectOutcome, dispatches: u8) -> Self {
+        Self {
+            intent,
+            outcome,
+            dispatches,
+        }
     }
 }
 
