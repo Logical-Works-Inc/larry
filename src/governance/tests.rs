@@ -271,17 +271,19 @@ fn the_cargo_sweep_names_every_locked_estate_release() -> Result<(), Box<dyn std
             );
         }
     }
-    // larry#189: the ship checklist's `#189` line names the three estate releases that pin moved.
+    // larry#189, #191: every locked estate release was moved by a shipped PR, so a ticked ship
+    // checklist line names it. Any ticked line counts, so the next bump adds its own line.
     let ship = std::fs::read_to_string(root().join("docs").join("product").join("SHIP.md"))?;
-    let Some(ticked) = ship.lines().find(|line| line.contains("#189")) else {
-        return Err("docs/product/SHIP.md has no `#189` line".into());
-    };
+    let ticked: Vec<&str> = ship
+        .lines()
+        .filter(|line| line.starts_with("- [x]"))
+        .collect();
     for name in ["lgwks_std", "lgwks_bot", "lgwks_deps"] {
         for version in locked_versions(&lock, name) {
             let pin = format!("{name} {version}");
             assert!(
-                ticked.contains(&pin),
-                "the ship checklist's `#189` line must name the locked `{pin}`"
+                ticked.iter().any(|line| line.contains(&pin)),
+                "a ticked ship checklist line must name the locked `{pin}`"
             );
         }
     }
