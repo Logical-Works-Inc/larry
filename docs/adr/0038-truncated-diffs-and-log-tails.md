@@ -47,7 +47,9 @@ The end of a log is the part a reader needs first: `tail(1)` prints the last lin
   `receipt::verify`, so the truncation rule holds for a retried report too (ADR 0037).
 - A report gains four members for the diff and two per command. Existing readers that name members by
   key keep working; no member is renamed or removed.
-- Memory per diff and per command stream is bounded: at most 1 MiB of diff text, and at most 1 MiB
-  plus one 8 KiB piece per stream while it reads.
+- Memory is bounded per diff and per command stream. The diff keeps at most 1 MiB of text. A command
+  stream holds its 512 KiB head, and its tail grows to twice its 512 KiB size before it trims back to
+  512 KiB, so the drain runs once per 512 KiB of output rather than once per piece. The peak per
+  stream is 512 KiB + 1 MiB + one 8 KiB piece, which is 1.5 MiB + 8 KiB.
 - Acceptance now refuses a change over 1 MiB. Such a change needs a smaller task, not a larger cut.
 - Cold build, dependency count and binary size are NOT RUN in this change; the Oracle gate records them.

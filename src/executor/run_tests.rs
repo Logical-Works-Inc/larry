@@ -9,7 +9,7 @@ use std::io::{self, Read};
 
 use lgwks_std::seeded::Seeded;
 
-use super::{HEAD_BYTES, TAIL_BYTES, capture};
+use super::{CAPTURE_CHUNK, Captured, HEAD_BYTES, TAIL_BYTES, capture};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -133,6 +133,24 @@ fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult
             blake3_hex(replay.as_bytes()),
             "seed {seed}: the same seed gives the same trace hash"
         );
+
+        // The bound holds after every push, whatever the piece sizes: the tail trims only past
+        // twice its size, so head plus tail never exceeds that plus one piece (larry#206 review).
+        let mut direct = Captured::default();
+        let mut offset = 0_usize;
+        while offset < total {
+            let piece = usize::try_from(stream.below(8_192)?)?.saturating_add(1);
+            let end = offset.saturating_add(piece).min(total);
+            direct.push(&expected[offset..end])?;
+            offset = end;
+            assert!(
+                direct.head.len().saturating_add(direct.tail.len())
+                    <= HEAD_BYTES
+                        .saturating_add(TAIL_BYTES.saturating_mul(2))
+                        .saturating_add(CAPTURE_CHUNK),
+                "seed {seed}: head and tail stay within the bound after every push"
+            );
+        }
     }
     Ok(())
 }
