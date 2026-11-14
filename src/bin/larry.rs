@@ -368,6 +368,21 @@ fn serve_key_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> {
         .map_err(larry_demo::serve::ServeError::Announce)
 }
 
+/// `larry serve revoke <tenant>`: delete the tenant's key digest from `LARRY_STATE_DIR`, so a
+/// running serve refuses it from its next SIGHUP and a stopped one at its next start.
+fn serve_revoke_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> {
+    larry_demo::serve::revoke_key(|name| std::env::var(name).ok(), tenant)?;
+    let line = lgwks_std::json::json!({
+        "tenant": tenant,
+        "revoked": true,
+        "takes_effect": "a running serve on SIGHUP; a stopped one at its next start",
+    });
+    let mut out = io::stdout().lock();
+    writeln!(out, "{line}")
+        .and_then(|()| out.flush())
+        .map_err(larry_demo::serve::ServeError::Announce)
+}
+
 /// The exit status of a sealed verdict.
 fn verdict_status(accepted: bool) -> ExitCode {
     if accepted {
@@ -424,6 +439,11 @@ fn main() -> ExitCode {
             .map_err(|error| error.to_string()),
         [ref command, ref sub, ref tenant] if command == "serve" && sub == "key" => {
             serve_key_once(&tenant.to_string_lossy())
+                .map(|()| ExitCode::SUCCESS)
+                .map_err(|error| error.to_string())
+        }
+        [ref command, ref sub, ref tenant] if command == "serve" && sub == "revoke" => {
+            serve_revoke_once(&tenant.to_string_lossy())
                 .map(|()| ExitCode::SUCCESS)
                 .map_err(|error| error.to_string())
         }

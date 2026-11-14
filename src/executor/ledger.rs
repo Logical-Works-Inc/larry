@@ -154,6 +154,28 @@ impl Ledger {
             .map_err(ExecError::Sql)
     }
 
+    /// How many tenant keys the store holds.
+    pub(crate) fn tenant_key_count(&self) -> Result<i64, ExecError> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM tenant_keys", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(ExecError::Sql)
+    }
+
+    /// Deletes `tenant`'s key digest, so its key is refused from the next reload;
+    /// `false` when the tenant held no key.
+    pub(crate) fn remove_tenant_key(&self, tenant: &str) -> Result<bool, ExecError> {
+        let removed = self
+            .conn
+            .execute(
+                "DELETE FROM tenant_keys WHERE tenant = ?1",
+                rusqlite::params![tenant],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(removed > 0)
+    }
+
     /// Records a group that a task has started.
     pub(crate) fn insert(
         &self,
