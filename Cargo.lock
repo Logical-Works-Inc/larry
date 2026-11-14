@@ -1763,9 +1763,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "8.3.1"
+version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c488cfa9d9514bb695952447f5f920505863d397b9b72a371079515b6c25878b"
+checksum = "1f07844cd1ac4d2fc387157318b658d90f953ee16999693798cc4128cbe3d9cb"
 dependencies = [
  "lgwks_ast",
  "lgwks_deps",
@@ -1806,9 +1806,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "4.1.2"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef803b2c0801c13077c64c5d62831b36886669b1a48ce7325ccb71966ef37117"
+checksum = "d9f652d90fa8feb41d0a0a83e3a8471b0baea65034b7c5df91911c6078291a0b"
 dependencies = [
  "blake3",
  "ed25519-dalek",
