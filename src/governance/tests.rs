@@ -223,6 +223,54 @@ fn the_docs_tree_names_every_documents_directory() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// Each root-relative Markdown link target (`](/path)`) in `text`, without its `#anchor`, in
+/// text order.
+fn document_links(text: &str) -> Vec<&str> {
+    text.split("](/")
+        .skip(1)
+        .filter_map(|rest| rest.split_once(')'))
+        .map(|(target, _)| match target.split_once('#') {
+            Some((path, _)) => path,
+            None => target,
+        })
+        .collect()
+}
+
+#[test]
+fn every_product_document_link_names_a_tracked_file() -> Result<(), Box<dyn std::error::Error>> {
+    // larry#232: the ship checklist and each benchmark link the document that holds their numbers,
+    // and a link to a file that was renamed or never committed sends the reader nowhere.
+    let documents = super::documents::load(root())?;
+    let broken: Vec<String> = documents
+        .iter()
+        .filter(|&(name, _)| name.starts_with("docs/product/"))
+        .flat_map(|(name, text)| {
+            document_links(text)
+                .into_iter()
+                .filter(|target| !root().join(target).exists())
+                .map(move |target| format!("{name} -> /{target}"))
+        })
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "these product document links name no file: {broken:?}"
+    );
+    assert_eq!(
+        document_links("see [a](/docs/a.md) and [b](/docs/b.md#part)"),
+        ["docs/a.md", "docs/b.md"],
+        "every root-relative link, anchor dropped"
+    );
+    assert!(
+        document_links("[web](https://x.example) and (/docs/a.md)").is_empty(),
+        "a web link or a bare path is not a document link"
+    );
+    assert!(
+        document_links("[open](/docs/a.md").is_empty(),
+        "an unclosed link names nothing"
+    );
+    Ok(())
+}
+
 /// The estate crates the cargo sweep names "at their newest release", in its order.
 const SWEEP_ESTATE: [&str; 4] = ["lgwks_std", "lgwks_bot", "lgwks_ast", "lgwks_deps"];
 

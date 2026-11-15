@@ -80,6 +80,8 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [ ] #94 Harness-Bench runner, model held constant across five harnesses. Proof: pass rate, cost per accepted task, p50/p95/p99, peak RSS per harness.
 - [ ] #95 scored runs and the published comparison (spends model money).
 - [x] #230 one prompt prefix per brief, cached tokens priced (ADR 0043): PR #231, 930 tests; errands-v1 over 9router, 8 OpenCode Go models, cache reads 570 ‰ kimi, 475 ‰ mimo, 183 ‰ minimax ([bench-cache](/docs/product/bench-cache.md)).
+- [x] #232 the #209 leaf replayed on Claude Code Haiku and OpenCode DeepSeek V4.1 Flash: 8.75 M and 9.03 M prompt tokens, 983 ‰ and 965 ‰ cached, 0.579 USD and about 0.101 USD (ESTIMATE); DeepSeek's fix passes both falsifiers, Haiku's misses the submit path ([bench-harness](/docs/product/bench-harness.md)).
+- [ ] #233 an Opus lead session replayed on both harnesses, 3 runs per arm, live prices. Proof: per-arm tokens, wall p50/p95, cost and the cross-check, printed in bench-harness.
 
 ## 6. Track 4: learning, against Harness² (#60)
 - [ ] #61 harness as a versioned, content-hashed journal value.
