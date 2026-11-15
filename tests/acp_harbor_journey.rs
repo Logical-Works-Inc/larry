@@ -149,9 +149,17 @@ impl Agent {
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        // Best effort: a journey that already ended its agent leaves nothing to kill.
-        self.child.kill().ok();
-        self.child.wait().ok();
+        // A journey that already ended its agent leaves nothing to kill. A child
+        // that cannot be reaped fails the test, unless it is already failing.
+        let reaped = match self.child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => self.child.kill().and_then(|()| self.child.wait()).map(drop),
+            Err(cause) => Err(cause),
+        };
+        assert!(
+            reaped.is_ok() || std::thread::panicking(),
+            "the larry acp child is killed and reaped: {reaped:?}"
+        );
     }
 }
 
@@ -391,27 +399,63 @@ fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
     })
 }
 
-/// 48 commands is the bound: the session ends `max_turn_requests` with 48 records.
+/// 256 commands is the bound: the session ends `max_turn_requests` with 256
+/// records, folding old steps on the way so no request passes the client's
+/// 256-message bound (larry#235).
 #[test]
 fn a_session_past_its_step_bound_ends_max_turn_requests() -> TestResult {
     let (state, work) = fixture()?;
-    let replies = [r#"{"command":"true"}"#; 49];
+    let replies = [r#"{"command":"true"}"#; 257];
     mock_model::run(scripted(11, &replies), |mock| -> TestResult {
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "loop"))?;
-        assert_eq!(
-            reply["result"]["stopReason"], "max_turn_requests",
-            "{reply}"
-        );
-        assert_eq!(
-            mock.served(),
-            48,
-            "one model call per command, none past the bound"
-        );
-        assert_eq!(notes.len(), 96, "a call and its result per command");
+        let stop = &reply["result"]["stopReason"];
+        assert_eq!(stop, "max_turn_requests", "{reply}");
+        assert_eq!(mock.served(), 256, "one call per command, none past");
+        assert_eq!(notes.len(), 512, "a call and its result per command");
         let report = &reply["result"]["_meta"]["larry"]["report"];
-        assert_eq!(report["session"]["commands"], 48, "48 records");
+        assert_eq!(report["session"]["commands"], 256, "256 records");
+        let folded = report["session"]["compaction"]["folded"].as_u64();
+        assert!(folded > Some(0), "old steps folded: {report}");
+        Ok(())
+    })
+}
+
+/// The mock's body cap: a model window smaller than the route's 1 MiB bound.
+const SMALL_WINDOW: usize = 32_768;
+
+/// Output that outgrows the model's window: the gateway's 413 (RFC 9110
+/// 15.5.14) shrinks the window, the session clears old output and sends again
+/// with no operator, ends `end_turn`, and keeps its cache prefix byte-identical.
+#[test]
+fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> TestResult {
+    let (state, work) = fixture()?;
+    let mut replies = vec![r#"{"command":"yes larry | head -c 4000"}"#; 12];
+    replies.push(r#"{"done":"read every chunk"}"#);
+    let config = Config {
+        max_body_bytes: SMALL_WINDOW,
+        ..scripted(43, &replies)
+    };
+    mock_model::run(config, |mock| -> TestResult {
+        let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
+        let session = acp.open(work.path())?;
+        let (_, reply) = acp.call(&prompt(2, &session, "read twelve chunks"))?;
+        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+        let report = &reply["result"]["_meta"]["larry"]["report"];
+        assert_eq!(report["session"]["commands"], 12, "every command ran");
+        let compaction = &report["session"]["compaction"];
+        assert!(compaction["shrinks"].as_u64() >= Some(1), "{compaction}");
+        assert!(compaction["cleared"].as_u64() >= Some(1), "{compaction}");
+        assert_eq!(mock.served(), 13, "each reply served once");
+        let requests = mock.requests();
+        let first = json::from_slice::<Value>(requests.first().ok_or("a request")?)?;
+        let last = json::from_slice::<Value>(requests.last().ok_or("a request")?)?;
+        assert_eq!(last["messages"][0], first["messages"][0], "system stable");
+        assert_eq!(last["messages"][1], first["messages"][1], "task stable");
+        let text = last.to_string();
+        let compacted = text.contains("Auto-compaction record") || text.contains("cleared by auto");
+        assert!(compacted, "the last request is compacted: {text}");
         Ok(())
     })
 }

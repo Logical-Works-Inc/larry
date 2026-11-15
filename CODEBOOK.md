@@ -68,7 +68,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::task` | The bounded task document, its optional `idempotency_key`, and its typed refusals |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance, every prompt on one byte-stable prefix per brief (ADR 0008, ADR 0043) |
 | `executor::run` | One command in its own process group: capture, timeout, group kill, the observed clip |
-| `executor::session` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035) |
+| `executor::session`, `executor::compact` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035); its auto-compaction: old output cleared, old steps folded into a record, the window learned from a gateway refusal (ADR 0044) |
 | `executor::ledger`, `executor::ledger_routes`, `executor::routes` | The SQLite record of live groups, the reap after a kill -9, the receipt key and the per-tenant route table (`ledger_routes`: at most 256 routes a tenant, one default, every statement names the tenant); `larry route` and the route a task resolves to (larry#201, ADR 0039) |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
 | `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |

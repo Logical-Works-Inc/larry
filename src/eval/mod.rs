@@ -21,6 +21,8 @@ use std::time::Instant;
 use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
+#[cfg(test)]
+pub(crate) use score::percentile;
 use score::{Ending, Outcome, Spent, card};
 pub use score::{PriceError, PriceFault, Prices, Scorecard};
 use set::{EvalTask, TaskSet};
