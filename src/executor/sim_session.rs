@@ -25,8 +25,8 @@ const SEEDS: u64 = 2048;
 /// newline, two-, three- and four-byte UTF-8.
 const ALPHABET: [&str; 10] = ["a", "Z", "0", " ", "'", "\\", "\n", "é", "→", "🦝"];
 
-/// A generated text of `len` characters.
-fn text(rng: &mut Seeded, len: usize) -> Result<String, SimError> {
+/// A generated text of `len` characters; the compaction simulations draw theirs here too.
+pub(in crate::executor) fn text(rng: &mut Seeded, len: usize) -> Result<String, SimError> {
     let mut out = String::new();
     for _ in 0..len {
         let pick = ALPHABET

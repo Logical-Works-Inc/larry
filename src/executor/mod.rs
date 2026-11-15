@@ -2,6 +2,7 @@
 //! and the model step that writes a brief's files before acceptance (larry#123).
 
 mod author;
+mod compact;
 mod gate;
 mod identity;
 mod ledger;

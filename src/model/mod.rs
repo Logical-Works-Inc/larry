@@ -19,6 +19,7 @@ use std::num::{ParseFloatError, ParseIntError};
 use std::str::Utf8Error;
 
 pub use client::ModelClient;
+pub(crate) use client::Request;
 pub use config::ModelConfig;
 pub(crate) use config::env_route;
 #[cfg(test)]
@@ -27,7 +28,18 @@ pub use route::RouteError;
 pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve};
 
 /// Most messages one completion request carries.
-const MAX_MESSAGES: usize = 256;
+pub(crate) const MAX_MESSAGES: usize = 256;
+/// Phrases a gateway's 400 uses, lowercased, when a request is past the model's
+/// context window (larry#235): OpenAI and vLLM ("maximum context length"), the
+/// `context_length_exceeded` code some gateways copy into the message, Anthropic
+/// ("prompt is too long") and Gemini ("exceeds the maximum number of tokens").
+const CONTEXT_OVERFLOW: [&str; 5] = [
+    "context length",
+    "context_length",
+    "context window",
+    "prompt is too long",
+    "maximum number of tokens",
+];
 /// Largest reply body the client reads, in bytes.
 const MAX_REPLY_BYTES: usize = 4_194_304;
 
@@ -135,6 +147,27 @@ impl fmt::Display for ModelError {
             } => write!(out, "{variable} is not a number: {cause}"),
             Self::OutOfRange(variable) => write!(out, "{variable} is out of range"),
             Self::BodyTooLarge => out.write_str("a model request or reply exceeded its size bound"),
+        }
+    }
+}
+
+impl ModelError {
+    /// Whether the gateway refused the request as too large for the model: a 413,
+    /// or a 400 whose reason names the context window (larry#235). A terminal
+    /// session compacts and sends again; nothing else retries on it.
+    pub(crate) fn is_context_overflow(&self) -> bool {
+        match *self {
+            Self::Client { status: 413, .. } => true,
+            Self::Client {
+                status: 400,
+                ref detail,
+            } => {
+                let reason = detail.to_ascii_lowercase();
+                CONTEXT_OVERFLOW
+                    .iter()
+                    .any(|phrase| reason.contains(phrase))
+            }
+            _ => false,
         }
     }
 }

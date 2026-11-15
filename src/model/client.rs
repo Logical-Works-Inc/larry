@@ -13,6 +13,36 @@ use super::{Completion, MAX_MESSAGES, MAX_REPLY_BYTES, Message, ModelError};
 /// meters or routes by client sees Larry and its version, not the HTTP library's.
 const USER_AGENT: &str = concat!("larry/", env!("CARGO_PKG_VERSION"));
 
+/// One encoded completion request: its body and how many messages it carries.
+/// Only [`ModelClient::encode`] builds one, and [`ModelClient::send`] checks its
+/// bounds before any byte leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Request {
+    /// The encoded body.
+    body: Vec<u8>,
+    /// The messages it carries.
+    messages: usize,
+}
+
+impl Request {
+    /// The encoded body's length in bytes: what the route's request bound reads.
+    pub(crate) const fn bytes(&self) -> usize {
+        self.body.len()
+    }
+
+    /// The encoded body, for a simulation's trace hash.
+    #[cfg(test)]
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The messages it carries.
+    #[cfg(test)]
+    pub(crate) const fn messages(&self) -> usize {
+        self.messages
+    }
+}
+
 /// A blocking OpenAI-compatible chat-completions client.
 ///
 /// Built per task from the route the task resolved to (larry#201). It holds no
@@ -58,27 +88,46 @@ impl ModelClient {
     /// the last attempt. A config without a key cannot be built, so a client
     /// always has one.
     pub fn complete(&self, messages: &[Message]) -> Result<Completion, ModelError> {
-        let Some(body) = self.bounded_body(messages) else {
-            return Err(ModelError::BodyTooLarge);
-        };
-        self.with_retry(&body)
+        self.send(&self.encode(messages))
     }
 
     /// Whether `messages` pass the bounds [`ModelClient::complete`] checks before
     /// any send, asked without sending: the executor shares one prompt prefix
     /// across a brief only when every request of it fits the route (larry#230).
     pub(crate) fn fits(&self, messages: &[Message]) -> bool {
-        self.bounded_body(messages).is_some()
+        self.within_bounds(&self.encode(messages))
     }
 
-    /// The encoded request for `messages`, `None` past the message count or the
-    /// route's request body bound.
-    fn bounded_body(&self, messages: &[Message]) -> Option<Vec<u8>> {
-        if messages.len() > MAX_MESSAGES {
-            return None;
+    /// The request for `messages`, encoded once: a terminal session measures the
+    /// bytes it would send and then sends exactly those (larry#235).
+    pub(crate) fn encode(&self, messages: &[Message]) -> Request {
+        Request {
+            body: wire::request_body(self.config.model(), self.config.temperature(), messages),
+            messages: messages.len(),
         }
-        let body = wire::request_body(self.config.model(), self.config.temperature(), messages);
-        (body.len() <= self.config.request_bytes()).then_some(body)
+    }
+
+    /// Send an encoded `request`, retrying 429 and 5xx within the retry budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`ModelClient::complete`]: [`ModelError::BodyTooLarge`] before any send
+    /// past the message count or the route's request bound.
+    pub(crate) fn send(&self, request: &Request) -> Result<Completion, ModelError> {
+        if !self.within_bounds(request) {
+            return Err(ModelError::BodyTooLarge);
+        }
+        self.with_retry(&request.body)
+    }
+
+    /// The route's request body bound, in bytes.
+    pub(crate) const fn request_bound(&self) -> usize {
+        self.config.request_bytes()
+    }
+
+    /// Whether `request` is within the message count and the route's body bound.
+    const fn within_bounds(&self, request: &Request) -> bool {
+        request.messages <= MAX_MESSAGES && request.body.len() <= self.request_bound()
     }
 
     /// Attempt the exchange until it succeeds, fails terminally, or the retry

@@ -9,10 +9,13 @@
 //! Each reply is exactly one JSON object, `{"command": "<sh -c text>"}` or
 //! `{"done": "<summary>"}`; each command runs in its own process group under the
 //! executor's timeout, tracked in the ledger so a kill -9 is reaped by the next
-//! start; the model sees the exit status and the first 8 KiB of each stream. The
-//! loop stops at the model's `done`, at 48 steps, at three refused replies in a
+//! start; the model sees the exit status and the first 4 KiB of each stream.
+//! Auto-compaction (`super::compact`, larry#235) keeps every request inside the
+//! model's window, so the length of the conversation never stops a session. The
+//! loop stops at the model's `done`, at 256 steps, at three refused replies in a
 //! row, at a model refusal, or at a cancellation checked before every model call
-//! and every command. The sealed report records every command as the model saw it.
+//! and every command. The sealed report records every command as the model saw it,
+//! and what compaction did.
 
 use std::fmt;
 use std::path::Path;
@@ -25,15 +28,18 @@ use super::Report;
 use super::Settings;
 use super::author::unfenced;
 use super::backoff;
+use super::compact::{Answer, Conversation};
 use super::digest_hex;
 use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::prepare;
 use super::run::{CommandResult, run_command};
-use crate::model::{Completion, Message, ModelClient, Role};
+use crate::model::{Completion, ModelClient};
 
-/// Most commands one session runs before it stops with `MaxTurnRequests`.
-pub(crate) const MAX_STEPS: usize = 48;
+/// Most commands one session runs before it stops with `MaxTurnRequests`. The
+/// conversation is bounded by compaction, not by this; it bounds the report, whose
+/// records are at most 256 times 12 KiB.
+pub(crate) const MAX_STEPS: usize = 256;
 /// Most replies in a row the session refuses before it stops.
 const MAX_REFUSED: usize = 3;
 /// Largest instruction a session takes, in bytes.
@@ -46,16 +52,6 @@ const MAX_COMMAND_BYTES: usize = 4096;
 pub(crate) const OBSERVED_BYTES: usize = 4096;
 /// The standing instruction of every session.
 const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below by running shell commands. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"done\": \"<one-line summary>\"} ends the task. Run one command per reply.";
-
-/// The request bound the model client refuses past, checked against the most a
-/// session can send in raw text: the instruction, then per step a reply and an
-/// observation. Output heavy in control bytes grows when JSON-escaped; past the
-/// bound the client refuses with `BodyTooLarge`, and the session stops as a refusal.
-const _: () = assert!(
-    MAX_INSTRUCTION_BYTES + MAX_STEPS * (MAX_REPLY_BYTES + 2 * OBSERVED_BYTES + 512) + 4096
-        <= 1_048_576,
-    "a session's longest conversation fits the model client's 1 MiB request bound"
-);
 
 /// Why a session was refused before anything ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,23 +198,23 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
     }
 }
 
-/// The text the model is shown for one clipped command result.
-pub(crate) fn observation(result: &CommandResult) -> String {
-    let status = match (result.timed_out(), result.exit_code()) {
+/// The status line the model is shown for one clipped command result.
+fn status(result: &CommandResult) -> String {
+    let ended = match (result.timed_out(), result.exit_code()) {
         (true, _) => String::from("timed out; its process group was killed"),
         (false, Some(code)) => format!("exit status {code}"),
         (false, None) => String::from("ended by a signal"),
     };
-    let cut = if result.truncated() {
-        format!(" (output past {OBSERVED_BYTES} bytes of a stream was cut)")
+    if result.truncated() {
+        format!("{ended} (output past {OBSERVED_BYTES} bytes of a stream was cut)")
     } else {
-        String::new()
-    };
-    format!(
-        "{status}{cut}\nstdout:\n{}\nstderr:\n{}",
-        result.stdout(),
-        result.stderr()
-    )
+        ended
+    }
+}
+
+/// The streams the model is shown for one clipped command result, under its status.
+fn streams(result: &CommandResult) -> String {
+    format!("stdout:\n{}\nstderr:\n{}", result.stdout(), result.stderr())
 }
 
 /// Checks a session's instruction and directory before anything runs.
@@ -292,14 +288,19 @@ pub(crate) fn run_session(
             cwd,
             observer: &mut *observer,
         };
-        let (ended, steps) = turn.run(instruction)?;
+        let (ended, steps, compaction) = turn.run(instruction)?;
         let body = json!({
             "task_id": task_id,
             "task_digest": task_digest,
             "diff": null,
             "results": steps,
             "denied": [],
-            "session": { "stop": ended.name(), "commands": steps.len(), "route": route.seal() },
+            "session": {
+                "stop": ended.name(),
+                "commands": steps.len(),
+                "route": route.seal(),
+                "compaction": compaction,
+            },
         });
         stop = Some(ended);
         Ok(Report::sealed(body, &key))
@@ -332,34 +333,26 @@ struct Turn<'a> {
 }
 
 impl Turn<'_> {
-    /// Asks, runs and observes until a stop, and returns it with each command's record.
-    fn run(&mut self, instruction: &str) -> Result<(Stop, Vec<Value>), ExecError> {
-        let mut messages = vec![
-            Message::new(Role::System, SYSTEM),
-            Message::new(
-                Role::User,
-                format!(
-                    "Working directory: {}\n\nTask:\n{instruction}",
-                    self.cwd.display()
-                ),
-            ),
-        ];
+    /// Asks, runs and observes until a stop, and returns it with each command's
+    /// record and what compaction did.
+    fn run(&mut self, instruction: &str) -> Result<(Stop, Vec<Value>, Value), ExecError> {
+        let task = format!(
+            "Working directory: {}\n\nTask:\n{instruction}",
+            self.cwd.display()
+        );
+        let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut refused = 0_usize;
-        while steps.len() < MAX_STEPS {
-            if self.observer.cancelled() {
-                return Ok((Stop::Cancelled, steps));
+        let stop = loop {
+            if steps.len() >= MAX_STEPS {
+                break Stop::MaxTurnRequests;
             }
-            let completion: Completion = match self.client.complete(&messages) {
+            let completion = match self.ask(&mut conversation) {
                 Ok(completion) => completion,
-                Err(cause) => {
-                    let line = format!("model: {cause}");
-                    self.observer.message(&line);
-                    return Ok((Stop::Refusal(line), steps));
-                }
+                Err(stop) => break stop,
             };
             if self.observer.cancelled() {
-                return Ok((Stop::Cancelled, steps));
+                break Stop::Cancelled;
             }
             let reply = completion.content();
             // A reply past the bound is refused below; only its length enters the
@@ -372,17 +365,16 @@ impl Turn<'_> {
             } else {
                 reply.to_owned()
             };
-            messages.push(Message::new(Role::Assistant, kept));
             match parse_reply(reply) {
                 Ok(Reply::Done(summary)) => {
                     self.observer.message(&summary);
-                    return Ok((Stop::EndTurn, steps));
+                    break Stop::EndTurn;
                 }
                 Ok(Reply::Command(command)) => {
                     refused = 0;
                     let step = steps.len();
                     self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command];
+                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
                     let result = run_command(
                         &argv,
                         self.cwd,
@@ -392,31 +384,62 @@ impl Turn<'_> {
                         self.task_id,
                     )?
                     .clipped(OBSERVED_BYTES);
-                    let text = observation(&result);
+                    let answer = Answer::Observed {
+                        step,
+                        command,
+                        status: status(&result),
+                        output: Some(streams(&result)),
+                    };
                     let passed = result.exit_code() == Some(0) && !result.timed_out();
-                    self.observer.finished(step, &text, passed);
-                    messages.push(Message::new(Role::User, text));
+                    self.observer.finished(step, &answer.text(), passed);
+                    conversation.push(kept, answer);
                     steps.push(result.into_json());
                 }
                 Err(fault) => {
                     refused = refused.saturating_add(1);
                     if refused >= MAX_REFUSED {
-                        let line =
-                            format!("model: {MAX_REFUSED} replies in a row refused: {fault}");
-                        self.observer.message(&line);
-                        return Ok((Stop::Refusal(line), steps));
+                        break self.refuse(format!(
+                            "model: {MAX_REFUSED} replies in a row refused: {fault}"
+                        ));
                     }
-                    messages.push(Message::new(
-                        Role::User,
-                        format!("Your reply was refused: {fault}. Reply with exactly one JSON object: {{\"command\": \"...\"}} or {{\"done\": \"...\"}}."),
-                    ));
+                    let fault = fault.to_string();
+                    conversation.push(kept, Answer::Refused { fault });
                 }
             }
+        };
+        Ok((stop, steps, conversation.json()))
+    }
+
+    /// One completion over `conversation`, compacted first when it needs it and
+    /// again each time the gateway answers that the request is past the model's
+    /// window; the stop, said to the person, when there is none.
+    fn ask(&mut self, conversation: &mut Conversation) -> Result<Completion, Stop> {
+        loop {
+            if self.observer.cancelled() {
+                return Err(Stop::Cancelled);
+            }
+            let request = conversation
+                .prepare(self.client)
+                .map_err(|overflow| self.refuse(format!("model: {overflow}")))?;
+            match self.client.send(&request) {
+                Ok(completion) => return Ok(completion),
+                Err(cause) if cause.is_context_overflow() => {
+                    conversation
+                        .shrink(request.bytes())
+                        .map_err(|overflow| self.refuse(format!("model: {cause}; {overflow}")))?
+                }
+                Err(cause) => return Err(self.refuse(format!("model: {cause}"))),
+            }
         }
-        Ok((Stop::MaxTurnRequests, steps))
+    }
+
+    /// Says `line` to the person and returns it as the session's refusal.
+    fn refuse(&mut self, line: String) -> Stop {
+        self.observer.message(&line);
+        Stop::Refusal(line)
     }
 }
 
 #[cfg(test)]
 #[path = "sim_session.rs"]
-mod sim;
+pub(super) mod sim;
