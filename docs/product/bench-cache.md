@@ -62,6 +62,7 @@ Prompt tokens count only the tasks whose every completion reported usage, so a r
    or a second run on the same prefixes was NOT RUN.
 3. Through 9router, claude-haiku's stream carries no cache details, so its card says `cache_complete: false`.
 4. Prompt tokens rose 1.5 to 1.9 times, because each call of a multi-file brief now carries every file.
+   An agent harness on one leaf sends about 9 M ([bench-harness](/docs/product/bench-harness.md)).
 5. Cost per accepted task fell for glm (29 % lower) and mimo (21 % lower), was flat for qwen, and rose for
    deepseek (54 % higher) and kimi (25 % higher).
 6. Acceptance moved by at most one task per model. The 120 s timeout refused 16 old and 17 new tasks,
