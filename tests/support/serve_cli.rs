@@ -2,14 +2,18 @@
 //! `serve revoke` runner, a bulk key-store filler, and one HTTP/1.1 exchange
 //! against it. Shared by `tests/serve_journey.rs` and `tests/sim_serve.rs`
 //! (larry#88, larry#89, larry#210), so the host is started, keyed, revoked, read
-//! and stopped one way.
+//! and stopped one way. Its standard output is read by one thread with a
+//! deadline, so a host that never prints a line fails the test instead of
+//! hanging it (larry#269).
 
 use std::error::Error;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lgwks_deps::storefront::rusqlite;
@@ -20,8 +24,14 @@ mod temp_dir;
 pub use temp_dir::TempDir;
 
 /// How long one exchange may take before the host is called broken: a bound on
-/// a hung host, never the pace of a working one.
+/// a hung host, never the pace of a working one. A serving line and every later
+/// line share it.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Lines the reader may hold before it waits for the test: the host prints a
+/// serving line and one acknowledgement per SIGHUP, so this bound is never met
+/// by a working host.
+const LINE_BACKLOG: usize = 64;
 
 /// A fresh, empty state directory under the system temp dir, removed when its
 /// guard drops (larry#267).
@@ -91,10 +101,64 @@ pub struct Serving {
     child: Option<Child>,
     /// The child's process id, for sending it a signal.
     pid: u32,
-    /// The child's standard output, kept open so later lines can be read.
-    stdout: BufReader<ChildStdout>,
+    /// The child's standard output, read one line at a time by `reader`.
+    lines: Option<Receiver<io::Result<String>>>,
+    /// The reader thread, joined with the host.
+    reader: Option<JoinHandle<()>>,
     /// The address from the serving line.
     addr: SocketAddr,
+}
+
+/// Reads `stdout` one line at a time on a thread the [`Serving`] owns, so the
+/// test waits on the channel with a deadline instead of blocking in
+/// `read_line` (larry#269). Killing the child closes the pipe and ends the
+/// thread; an empty line means the output ended, and a read error is its only
+/// error.
+fn forward_lines(
+    mut stdout: BufReader<ChildStdout>,
+) -> io::Result<(Receiver<io::Result<String>>, JoinHandle<()>)> {
+    let (sender, lines): (SyncSender<io::Result<String>>, _) = mpsc::sync_channel(LINE_BACKLOG);
+    let reader = std::thread::Builder::new()
+        .name(String::from("serve-lines"))
+        .spawn(move || {
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => {
+                        drop(sender.send(Ok(line)));
+                        return;
+                    }
+                    Ok(_) => {
+                        if sender.send(Ok(line)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(cause) => {
+                        drop(sender.send(Err(cause)));
+                        return;
+                    }
+                }
+            }
+        })?;
+    Ok((lines, reader))
+}
+
+/// The next line `lines` carries within `within`, or a typed failure naming the
+/// bound: a host that never prints fails instead of hanging the test (larry#269).
+fn await_line(
+    lines: &Receiver<io::Result<String>>,
+    within: Duration,
+) -> Result<String, Box<dyn Error>> {
+    match lines.recv_timeout(within) {
+        Ok(Ok(line)) => Ok(line),
+        Ok(Err(cause)) => Err(format!("the host's stdout could not be read: {cause}").into()),
+        Err(RecvTimeoutError::Timeout) => {
+            Err(format!("the host printed no line within {within:?}").into())
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            Err("the host's stdout closed without a line".into())
+        }
+    }
 }
 
 /// The child's stderr, read whole after it exited.
@@ -113,7 +177,8 @@ fn stderr_text(stderr: Option<ChildStderr>) -> String {
 
 impl Serving {
     /// Start `larry serve` with only PATH and `env` set, from the system temp
-    /// directory, and read its serving line.
+    /// directory, and read its serving line within [`EXCHANGE_TIMEOUT`]: a host
+    /// that never prints fails typed instead of hanging the test (larry#269).
     pub fn start(env: &[(&str, &str)]) -> Result<Self, Box<dyn Error>> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
             .arg("serve")
@@ -129,12 +194,22 @@ impl Serving {
             .stdout
             .take()
             .ok_or("the child's stdout was not piped")?;
-        let mut stdout = BufReader::new(stdout);
-        let mut line = String::new();
-        stdout.read_line(&mut line)?;
+        let (lines, reader) = forward_lines(BufReader::new(stdout))?;
+        let line = match await_line(&lines, EXCHANGE_TIMEOUT) {
+            Ok(line) => line,
+            Err(cause) => {
+                // The host never printed: kill and reap it, then return the refusal.
+                drop(child.kill());
+                drop(child.wait());
+                drop(lines);
+                drop(reader.join());
+                return Err(cause);
+            }
+        };
         if line.is_empty() {
             let status = child.wait()?;
             let stderr = stderr_text(child.stderr.take());
+            drop(reader.join());
             return Err(format!("larry serve printed no serving line: {status}, {stderr}").into());
         }
         let printed: Value = json::from_str(&line)?;
@@ -149,7 +224,8 @@ impl Serving {
         Ok(Self {
             pid: child.id(),
             child: Some(child),
-            stdout,
+            lines: Some(lines),
+            reader: Some(reader),
             addr,
         })
     }
@@ -159,10 +235,11 @@ impl Serving {
         self.addr
     }
 
-    /// The next line the host prints on standard output, without its newline.
+    /// The next line the host prints on standard output, without its newline,
+    /// within [`EXCHANGE_TIMEOUT`].
     pub fn next_line(&mut self) -> Result<String, Box<dyn Error>> {
-        let mut line = String::new();
-        self.stdout.read_line(&mut line)?;
+        let lines = self.lines.as_ref().ok_or("the host's output is closed")?;
+        let line = await_line(lines, EXCHANGE_TIMEOUT)?;
         if line.is_empty() {
             return Err("the host printed no further line".into());
         }
@@ -201,7 +278,45 @@ impl Drop for Serving {
             drop(child.kill());
             drop(child.wait());
         }
+        // Drop the receiver before joining: a reader waiting on a full channel returns, and the
+        // killed host's closed pipe ends the read.
+        drop(self.lines.take());
+        if let Some(reader) = self.reader.take() {
+            drop(reader.join());
+        }
     }
+}
+
+/// A host that never prints its serving line fails the start with a typed
+/// message inside the bound, never a hang (larry#269): `sh` blocked on a pipe
+/// that stays open is that host, with no wall-clock sleep anywhere.
+#[test]
+fn a_host_that_never_prints_its_line_fails_within_the_bound() -> Result<(), Box<dyn Error>> {
+    let mut silent = Command::new("sh")
+        .args(["-c", "read line"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = silent
+        .stdout
+        .take()
+        .ok_or("the silent host's stdout was not piped")?;
+    let (lines, reader) = forward_lines(BufReader::new(stdout))?;
+    let bound = Duration::from_millis(150);
+    let message = match await_line(&lines, bound) {
+        Ok(line) => return Err(format!("the silent host printed {line:?}").into()),
+        Err(cause) => cause.to_string(),
+    };
+    drop(silent.kill());
+    drop(silent.wait());
+    drop(lines);
+    drop(reader.join());
+    assert!(
+        message.contains("printed no line within"),
+        "the failure names the bound: {message}"
+    );
+    Ok(())
 }
 
 /// One request on a fresh connection, with `key` as its bearer token when
