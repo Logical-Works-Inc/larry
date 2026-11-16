@@ -109,10 +109,10 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 
 ## 8. Human frontend (#241; Director 2026-11-16: "in tui, then Mac app then iOS and android apps")
 - [x] #238, #239 bare `larry` is a split terminal that asks before every command (ADR 0045): PR #240, 923 tests; first paint 32.6 ms, keystroke p99 4.3 ms, idle 0 bytes, peak RSS 11.7 MiB (debug, 120x32). Director: "lock it in for now".
-- [ ] #242 Esc ends a running command. Proof: Esc during an approved `sleep 30` leaves no process group after 500 ms; the report says interrupted.
-- [ ] #243 commands run isolated, so a person needs no host-wide `model.command` (with #71). Proof: an approved write outside the workspace leaves the origin byte-identical.
-- [ ] #245 the PTY journeys on macOS in CI. Proof: `e2e/journey (macos-latest)` green with the probe's numbers.
-- [ ] #244 the artifact pane shows the task's diff, output and receipt. Proof: sims at every size; a 150-column journey shows the written file's diff.
+- [x] #242 Esc ends a running command: PR #250, Esc to "Interrupted" 103 ms (one sample). #243 commands run isolated, Seatbelt or Landlock, no `model.command` (ADR 0046): PR #251, origin byte-identical after an approved write outside; per command p50 3 ms open, 8 ms confined (30 samples, macOS debug).
+- [x] #245 the PTY journeys on macOS in CI (ADR 0048): PR #254, `e2e/journey (macos-latest)` green in 2m21s; probe input p50 1.9 ms, p95 2.5 ms, p99 5.3 ms (20 samples), RSS 8,208 KiB.
+- [x] #244 the artifact pane shows the task's diff, output and receipt (ADR 0047): PR #253, 13 pane sims (256 hostile seeds), journey at 120x32 (the pane opens at 108 columns) shows the diff before the folder changes.
+- [ ] #252 the pane streams a running command's output. Proof: a PTY journey shows a command's first line before its second exists.
 - [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
 - iOS and Android: #115 in section 4, after #90 and #247.
 

@@ -108,8 +108,8 @@ never claim enforcement GitHub does not apply.
 - Gap larry#177: the `rust` job in ci.yml runs `actions/checkout@v4`, `dtolnay/rust-toolchain@stable` and
   `Swatinem/rust-cache@v2` by mutable tag; every other action is SHA-pinned. Director 2026-11-09: not pinned
   yet, marked as a gap.
-- Human frontend (larry#241): the TUI PTY journeys run on Linux only; macOS is NOT RUN until larry#245.
-  The workspace suite takes 188 s on Oracle, over the 90 s budget (larry#246).
+- Human frontend (larry#241): the TUI PTY journeys run on Linux and macOS (larry#245, ADR 0048). The pane
+  shows output only once a command ends (larry#252). The suite is over its 90 s budget (larry#246).
 
 Every runtime acceptance claim still needs full behaviour and failure coverage, declared resource limits,
 retained failures, physical baselines, cross-tenant tests and the real delivery endpoint. Until then those
