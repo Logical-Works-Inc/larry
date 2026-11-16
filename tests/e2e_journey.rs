@@ -1,504 +1,348 @@
-//! The shipped `larry` binary driven through its user journeys on a real PTY.
+//! The shipped `larry` binary driven through its user journeys on a real PTY (larry#239).
 //!
-//! `script(1)` supplies the terminal, 32x120, `TERM=xterm-256color`. The first journey types
-//! every slash command a user does and checks the transcript in order; the others port
-//! `tools/test_native_cli.py` and `tools/probe_workspace.py` (larry#53 step 2, #147) onto a
-//! screen model of the same rules: CUP moves the cursor, ED clears, OSC is skipped, printable
-//! text lands at the cursor. Source: ECMA-48 (CSI, OSC), xterm SGR mouse reporting, POSIX
-//! `kill(2)`. Requirement: the view paints, takes keys and the mouse, survives kill -9 with a
-//! clean next start, stays quiet while idle, and exits 0 on quit.
+//! A person types a task, Larry shows the command the model chose and waits; `y` runs it and
+//! `n` declines it. The seeded mock model stands in for the gateway, so no test makes a paid
+//! call. Source: ECMA-48 (CSI, OSC), the DEC 2026 synchronized-output spec, POSIX `kill(2)`.
+//! Requirement: the frame paints, asks before every command, never runs a declined one,
+//! survives kill -9 with a clean next start, writes nothing while idle, and exits 0 on Ctrl+C.
 
+#[path = "support/http_wire.rs"]
+mod http_wire;
+#[path = "support/mock_model.rs"]
+mod mock_model;
+#[path = "support/origin.rs"]
+mod origin;
+#[path = "support/pty.rs"]
+mod pty;
+
+use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::thread::{Scope, ScopedJoinHandle};
+use std::io::Write as _;
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-/// Failures propagate instead of panicking.
-type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use mock_model::{Config, Fault, Handle};
+use origin::{TempDir, fixture};
+use pty::{Journey, Pty, Screen, replied};
 
-/// Upper bound on each wait; it only bounds a failure, never orders events.
-const PATIENCE: Duration = Duration::from_secs(30);
-/// Terminal rows.
-const ROWS: usize = 32;
-/// Terminal columns.
-const COLUMNS: usize = 120;
-/// Runaway-output bound: a 2026-09-19 8 fps frame-loop trial crossed it in under 30 seconds on
-/// the same PTY. A crash closes the PTY and fails distinctly rather than reading as quiet.
-const OUTPUT_BOUND: usize = 1_048_576;
-/// The idle window the probe watches, the Python probe's minimum.
+/// The idle window the probe watches.
 const IDLE: Duration = Duration::from_secs(5);
 /// Input round trips the probe times.
 const ROUND_TRIPS: usize = 20;
+/// Every scope a session needs, `model.command` among them.
+const SESSION_POLICY: &str = "file.read,file.write,process.spawn,model.invoke,model.command";
+/// The composer's placeholder: the frame is up and takes a task.
+const READY: &str = "Ask Larry to do something";
+/// The question Larry asks before a command.
+const ASK: &str = "Run this command?";
+/// What the model's command writes.
+const COMMAND: &str = r#"{"command":"printf 'hello\n' > hello.txt"}"#;
+/// What Larry tells the model about a declined command (`executor::session::DECLINED`).
+const DECLINED: &str = "not run: the person declined this command";
+/// Ctrl+C: quits from an empty composer.
+const QUIT: &str = "\x03";
+/// Ctrl+U: clears the composer.
+const CLEAR: &str = "\x15";
 
-/// The commands typed once the workspace is open, in order.
-const STEPS: [&str; 13] = [
-    "/folders",
-    "/agents",
-    "/changes",
-    "/next",
-    "/inspect",
-    "/feedback keep bounded",
-    "/next",
-    "/next",
-    "/continue",
-    "/fixture-continue",
-    "/next",
-    "/scenario empty",
-    "/quit",
-];
-
-/// The boot screen's text; nothing is typed before it shows.
-const BOOT_TEXT: &str = "Everything else stays quiet";
-/// The workspace's text.
-const WORKSPACE_TEXT: &str = "Awaiting Moo";
-/// The boot screen's marker in the normalized transcript.
-const BOOT: &str = "everythingelsestaysquiet";
-/// The workspace's marker in the normalized transcript.
-const WORKSPACE: &str = "awaitingmoo";
-
-/// Markers over the normalized transcript, in journey order. Two pin rendering facts, not
-/// typos: the CHANGES header emits no N byte on this path (stale-cell retention paints it), so
-/// the stream reads "chagesfixture"; the fixture-03 step selects src/retry.rs:18, so its
-/// marker is the file line rather than the fixture id.
-const MARKERS: [&str; 13] = [
-    BOOT,
-    WORKSPACE,
-    "filesfixture",
-    "agentsfixture",
-    "chagesfixture",
-    "srcretryrs12",
-    "tracefixture0",
-    "heldclone1",
-    "testsretryrs8",
-    "heldwork",
-    "nobackendactionexecuted",
-    "srcretryrs18",
-    "nochangesyet",
-];
-
-/// The screen the terminal shows, kept by the rules the Python suite used.
-struct Screen {
-    /// Each row's cells.
-    cells: Vec<Vec<char>>,
-    /// Cursor column.
-    column: usize,
-    /// Cursor row.
-    row: usize,
-    /// Bytes of an escape or character not yet complete.
-    pending: Vec<u8>,
+/// The operator's settings for a terminal session against `mock` in `state`.
+fn operator(state: &Path, mock: &Handle) -> Vec<(&'static str, OsString)> {
+    vec![
+        ("LARRY_STATE_DIR", state.as_os_str().to_owned()),
+        (
+            "LARRY_MODEL_URL",
+            format!("http://{}/v1", mock.addr()).into(),
+        ),
+        ("LARRY_MODEL", OsString::from("mock-model")),
+        ("LARRY_MODEL_KEY", OsString::from("tui-key")),
+        ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
+        ("LARRY_POLICY", OsString::from(SESSION_POLICY)),
+    ]
 }
 
-impl Screen {
-    /// A blank 32x120 screen.
-    fn new() -> Self {
-        Self {
-            cells: vec![vec![' '; COLUMNS]; ROWS],
-            column: 0,
-            row: 0,
-            pending: Vec::new(),
-        }
-    }
-
-    /// The visible text, rows joined by newlines.
-    fn text(&self) -> String {
-        let rows: Vec<String> = self.cells.iter().map(|row| row.iter().collect()).collect();
-        rows.join("\n")
-    }
-
-    /// CUP: `row;column`, 1-based, each defaulting to 1, clamped to the screen.
-    fn move_cursor(&mut self, params: &[u8]) {
-        let mut fields = params.split(|&byte| byte == b';');
-        let number = |field: Option<&[u8]>| -> usize {
-            let parsed = field
-                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                .and_then(|text| text.parse::<usize>().ok());
-            match parsed {
-                Some(value) if value > 0 => value,
-                Some(_) | None => 1,
-            }
-        };
-        let row = number(fields.next());
-        let column = number(fields.next());
-        self.row = row.saturating_sub(1).min(ROWS.saturating_sub(1));
-        self.column = column.saturating_sub(1).min(COLUMNS.saturating_sub(1));
-    }
-
-    /// Writes one printable character at the cursor and advances it, wrapping at the edge.
-    fn put(&mut self, character: char) {
-        if !character.is_control()
-            && let Some(cell) = self
-                .cells
-                .get_mut(self.row)
-                .and_then(|row| row.get_mut(self.column))
-        {
-            *cell = character;
-        }
-        self.column = self.column.saturating_add(1);
-        if self.column >= COLUMNS {
-            self.column = 0;
-            self.row = self.row.saturating_add(1).min(ROWS.saturating_sub(1));
-        }
-    }
-
-    /// The index just past the CSI or OSC sequence at `at`, after applying a CSI; `None` when
-    /// the sequence is not complete yet.
-    fn escape(&mut self, at: usize) -> Option<usize> {
-        let start = at.checked_add(2)?;
-        match *self.pending.get(at.checked_add(1)?)? {
-            b'[' => {
-                let rest = self.pending.get(start..)?;
-                let offset = rest.iter().position(|byte| (0x40..=0x7e).contains(byte))?;
-                let end = start.checked_add(offset)?;
-                let params = self.pending.get(start..end)?.to_vec();
-                match self.pending.get(end).copied() {
-                    Some(b'H' | b'f') => self.move_cursor(&params),
-                    Some(b'J') => self.cells = vec![vec![' '; COLUMNS]; ROWS],
-                    Some(_) | None => {}
-                }
-                end.checked_add(1)
-            }
-            b']' => {
-                let rest = self.pending.get(start..)?;
-                let bell = rest.iter().position(|&byte| byte == 0x07);
-                let terminator = rest.windows(2).position(|pair| pair == b"\x1b\\");
-                let skipped = match (bell, terminator) {
-                    (Some(bel), Some(st)) if st < bel => st.checked_add(2)?,
-                    (Some(bel), _) => bel.checked_add(1)?,
-                    (None, Some(st)) => st.checked_add(2)?,
-                    (None, None) => rest.len(),
-                };
-                start.checked_add(skipped)
-            }
-            _ => at.checked_add(1),
-        }
-    }
-
-    /// Applies `chunk` to the screen; an incomplete sequence waits for the next chunk.
-    fn ingest(&mut self, chunk: &[u8]) {
-        self.pending.extend_from_slice(chunk);
-        let mut index = 0_usize;
-        while let Some(&current) = self.pending.get(index) {
-            if current == 0x1b {
-                if self.pending.get(index.saturating_add(1)).is_none() {
-                    break;
-                }
-                match self.escape(index) {
-                    Some(next) => index = next,
-                    None => break,
-                }
-                continue;
-            }
-            if current < 0x80 {
-                match current {
-                    b'\r' => self.column = 0,
-                    b'\n' => self.row = self.row.saturating_add(1).min(ROWS.saturating_sub(1)),
-                    0x20.. => self.put(char::from(current)),
-                    _ => {}
-                }
-                index = index.saturating_add(1);
-                continue;
-            }
-            let width = match current {
-                0xc0..=0xdf => 2,
-                0xe0..=0xef => 3,
-                _ => 4,
-            };
-            let end = index.saturating_add(width);
-            let Some(bytes) = self.pending.get(index..end) else {
-                break;
-            };
-            let decoded = String::from_utf8_lossy(bytes).chars().next();
-            if let Some(character) = decoded {
-                self.put(character);
-            }
-            index = end;
-        }
-        self.pending.drain(..index);
+/// A mock whose replies are `contents`, in order.
+fn scripted(seed: u64, contents: &[&str]) -> Config {
+    Config {
+        contents: contents.iter().map(|text| (*text).to_owned()).collect(),
+        ..Config::seeded(seed)
     }
 }
 
-/// The shipped binary under `script(1)`, its output read by one thread the test's scope owns.
-struct Pty<'scope> {
-    /// The `script` process; the binary is its child, exec'd from the shell.
-    child: Child,
-    /// The terminal's input.
-    stdin: Option<ChildStdin>,
-    /// Output chunks from the reader thread.
-    chunks: Receiver<Vec<u8>>,
-    /// The reader thread, joined on finish, on drop, or by its scope.
-    reader: Option<ScopedJoinHandle<'scope, std::io::Result<()>>>,
-    /// Every byte the terminal wrote.
-    raw: Vec<u8>,
-    /// The screen those bytes paint.
-    screen: Screen,
-    /// Whether output arrived since the last keys were typed: a match only counts once the
-    /// view has answered, so text left on screen from before a key never passes for its reply.
-    answered: bool,
-    /// The screen when the last keys were typed, until a wait consumes it.
-    before: Option<String>,
+/// Types a task and waits for Larry's question about the model's first command.
+fn ask(pty: &mut Pty<'_>) -> Journey {
+    pty.wait_for(READY)?;
+    pty.send("write hello.txt\r")?;
+    pty.wait_for(ASK)
 }
 
-/// Whether `now` shows `text` as the reply to keys typed over `before`. Text already on the
-/// screen before the keys is refused, because the first chunk of a late paint would pass for
-/// the reply: on hosted ubuntu the board's card title "Workspace handoff" did, the next Esc
-/// went out mid-paint and merged with the following key (larry#148 run 42366888296).
-fn replied(before: Option<&str>, now: &str, text: &str) -> Result<bool, String> {
-    if before.is_some_and(|screen| screen.contains(text)) {
-        return Err(format!(
-            "{text:?} was on screen before the keys; wait for text only the reply paints"
-        ));
-    }
-    Ok(now.contains(text))
+/// What one frame left once Ctrl+C closed it.
+struct Ran {
+    /// The binary's exit status.
+    status: ExitStatus,
+    /// Every byte it wrote to the terminal.
+    wire: String,
+    /// The folder the session ran in.
+    work: TempDir,
 }
 
-impl<'scope> Pty<'scope> {
-    /// Starts the shipped binary in a fresh 32x120 terminal. The shell prints its own PID
-    /// before it execs the binary, so the PID is the binary's.
-    fn open<'env>(owner: &'scope Scope<'scope, 'env>) -> Journey<Self> {
-        let inner = format!(
-            "stty rows {ROWS} cols {COLUMNS}; printf 'LARRYPID:%s:END' $$; exec '{}'",
-            env!("CARGO_BIN_EXE_larry")
-        );
-        let mut command = Command::new("script");
-        if cfg!(target_os = "linux") {
-            command.args(["-qec", &inner, "/dev/null"]);
-        } else {
-            command.args(["-q", "/dev/null", "sh", "-c", &inner]);
-        }
-        let mut child = command
-            .env("TERM", "xterm-256color")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdin = child.stdin.take().ok_or("terminal has no stdin")?;
-        let stdout = child.stdout.take().ok_or("terminal has no stdout")?;
-        let (sender, chunks) = mpsc::sync_channel(64);
-        let reader = owner.spawn(move || forward(stdout, &sender));
-        Ok(Self {
-            child,
-            stdin: Some(stdin),
-            chunks,
-            reader: Some(reader),
-            raw: Vec::new(),
-            screen: Screen::new(),
-            answered: false,
-            before: None,
+/// The driver of one frame: types keys, waits for text, reads the mock.
+type Body<'body> = Box<dyn FnOnce(&mut Pty<'_>, &Handle, &Path) -> Journey + 'body>;
+
+/// One frame against a mock gateway in fresh folders.
+fn frame<'body>(
+    config: Config,
+    body: impl FnOnce(&mut Pty<'_>, &Handle, &Path) -> Journey + 'body,
+) -> Journey<Ran> {
+    let (state, work) = fixture()?;
+    frame_in(&state, work, config, Box::new(body))
+}
+
+/// One frame in `state` and `work`: `body` drives it, then Ctrl+C closes it and it is reaped.
+fn frame_in(state: &TempDir, work: TempDir, config: Config, body: Body<'_>) -> Journey<Ran> {
+    let (status, raw) = mock_model::run(config, |mock| -> Journey<(ExitStatus, Vec<u8>)> {
+        std::thread::scope(|owner| {
+            let mut pty = Pty::open(owner, work.path(), &operator(state.path(), mock))?;
+            body(&mut pty, mock, work.path())?;
+            pty.send(QUIT)?;
+            pty.finish()
         })
-    }
-
-    /// Takes one chunk within `wait`: `Ok(false)` when none came, an error once the terminal
-    /// closed or the output bound is crossed.
-    fn take(&mut self, wait: Duration) -> Journey<bool> {
-        match self.chunks.recv_timeout(wait) {
-            Ok(chunk) => {
-                self.screen.ingest(&chunk);
-                self.raw.extend_from_slice(&chunk);
-                self.answered = true;
-                if self.raw.len() > OUTPUT_BOUND {
-                    return Err("terminal output exceeded 1 MiB".into());
-                }
-                Ok(true)
-            }
-            Err(RecvTimeoutError::Timeout) => Ok(false),
-            Err(RecvTimeoutError::Disconnected) => Err("terminal closed".into()),
-        }
-    }
-
-    /// Reads until the view has answered the last keys and the screen shows `text`, which must
-    /// not have been on screen when those keys were typed.
-    fn wait_for(&mut self, text: &str) -> Journey {
-        let deadline = Instant::now()
-            .checked_add(PATIENCE)
-            .ok_or("deadline overflows")?;
-        let before = self.before.take();
-        while !(self.answered && replied(before.as_deref(), &self.screen.text(), text)?) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || !self.take(left)? {
-                return Err(format!("missing {text:?}; screen={:?}", self.screen.text()).into());
-            }
-        }
-        Ok(())
-    }
-
-    /// Reads whatever arrives for `window` and returns its byte count.
-    fn drain(&mut self, window: Duration) -> Journey<usize> {
-        let before = self.raw.len();
-        let deadline = Instant::now()
-            .checked_add(window)
-            .ok_or("deadline overflows")?;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Ok(self.raw.len().saturating_sub(before));
-            }
-            self.take(left)?;
-        }
-    }
-
-    /// Types `keys`.
-    fn send(&mut self, keys: &str) -> Journey {
-        let stdin = self.stdin.as_mut().ok_or("terminal input closed")?;
-        self.answered = false;
-        self.before = Some(self.screen.text());
-        stdin.write_all(keys.as_bytes())?;
-        Ok(stdin.flush()?)
-    }
-
-    /// The binary's PID, as the shell printed it.
-    fn pid(&self) -> Journey<String> {
-        let text = String::from_utf8_lossy(&self.raw);
-        let digits = text
-            .split_once("LARRYPID:")
-            .and_then(|(_, rest)| rest.split_once(":END"))
-            .map(|(pid, _)| pid)
-            .ok_or("the shell printed no PID")?;
-        Ok(digits.parse::<u32>()?.to_string())
-    }
-
-    /// Reads to the end of the output, then reaps the terminal and its reader; returns the
-    /// exit status and the whole transcript.
-    fn finish(mut self) -> Journey<(ExitStatus, Vec<u8>)> {
-        let deadline = Instant::now()
-            .checked_add(PATIENCE)
-            .ok_or("deadline overflows")?;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.chunks.recv_timeout(left) {
-                Ok(chunk) => self.raw.extend_from_slice(&chunk),
-                Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => return Err("the terminal did not close".into()),
-            }
-        }
-        self.stdin = None;
-        let status = self.child.wait()?;
-        if let Some(reader) = self.reader.take() {
-            reader
-                .join()
-                .map_err(|_| "terminal reader thread panicked")??;
-        }
-        Ok((status, std::mem::take(&mut self.raw)))
-    }
+    })?;
+    let wire = String::from_utf8_lossy(&raw).into_owned();
+    Ok(Ran { status, wire, work })
 }
 
-impl Drop for Pty<'_> {
-    fn drop(&mut self) {
-        // Best effort on an early return: kill and reap so no terminal outlives the test.
-        self.stdin = None;
-        drop(self.child.kill());
-        drop(self.child.wait());
-        if let Some(reader) = self.reader.take() {
-            drop(reader.join());
-        }
-    }
+/// Whether the model's command wrote its file in `ran`'s folder.
+fn wrote(ran: &Ran) -> bool {
+    ran.work.path().join("hello.txt").exists()
 }
 
-/// Forwards the terminal's output in chunks until it closes or the receiver is gone.
-fn forward(mut stdout: ChildStdout, sender: &SyncSender<Vec<u8>>) -> std::io::Result<()> {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = stdout.read(&mut buffer)?;
-        let Some(chunk) = buffer.get(..read).filter(|bytes| !bytes.is_empty()) else {
-            return Ok(());
-        };
-        if sender.send(chunk.to_vec()).is_err() {
-            return Ok(());
-        }
-    }
-}
-
-/// Lowercased ASCII alphanumerics of `raw`, with escape sequences removed.
-fn normalize(raw: &[u8]) -> String {
-    let mut out = String::new();
-    let mut at = 0_usize;
-    while let Some(&byte) = raw.get(at) {
-        at = at.saturating_add(1);
-        if byte == 0x1b {
-            at = escape_end(raw, at);
-        } else if byte.is_ascii_alphanumeric() {
-            out.push(char::from(byte.to_ascii_lowercase()));
-        }
-    }
-    out
-}
-
-/// Index just past the escape sequence whose introducer byte is at `start`: OSC to BEL, CSI
-/// parameters to a final letter, a charset designation, or one byte. A truncated sequence ends
-/// where the input does.
-fn escape_end(raw: &[u8], start: usize) -> usize {
-    let after = start.saturating_add(1);
-    let Some(rest) = raw.get(after..) else {
-        return start;
-    };
-    match raw.get(start).copied() {
-        Some(b']') => match rest.iter().position(|&byte| byte == 0x07) {
-            Some(bell) => after.saturating_add(bell).saturating_add(1),
-            None => after,
-        },
-        Some(b'[') => {
-            let params = rest
-                .iter()
-                .take_while(|&&byte| byte.is_ascii_digit() || byte == b';' || byte == b'?')
-                .count();
-            let end = after.saturating_add(params);
-            if raw.get(end).is_some_and(u8::is_ascii_alphabetic) {
-                end.saturating_add(1)
-            } else {
-                after
-            }
-        }
-        Some(b'(' | b')')
-            if rest
-                .first()
-                .is_some_and(|&byte| byte.is_ascii_digit() || byte == b'A' || byte == b'B') =>
-        {
-            after.saturating_add(1)
-        }
-        Some(_) => after,
-        None => start,
-    }
-}
-
-/// The whole journey through the shipped binary on a real PTY.
+/// The journey: a task typed into the frame, the model's command shown and approved with `y`,
+/// the file written in the working directory, the model's summary painted, Ctrl+C exits 0.
 #[test]
-fn e2e_journey_through_the_shipped_binary() -> Journey {
-    std::thread::scope(|owner| -> Journey {
-        let mut pty = Pty::open(owner)?;
-        pty.wait_for(BOOT_TEXT)?;
-        pty.send("\r")?;
-        pty.wait_for(WORKSPACE_TEXT)?;
-        let typed: String = STEPS.iter().map(|step| format!("{step}\r")).collect();
-        pty.send(&typed)?;
-        let (status, raw) = pty.finish()?;
+fn tui_journey_runs_task_with_mock_gateway() -> Journey {
+    let replies = [COMMAND, r#"{"done":"wrote hello.txt"}"#];
+    let ran = frame(scripted(7, &replies), |pty, mock, work| {
+        ask(pty)?;
         assert!(
-            status.success(),
-            "the binary exits 0 after /quit, got {status}"
+            !work.join("hello.txt").exists(),
+            "nothing runs before the person answers"
         );
-        let clean = normalize(&raw);
-        let mut from = 0_usize;
-        for marker in MARKERS {
-            let found = clean
-                .get(from..)
-                .and_then(|rest| rest.find(marker))
-                .ok_or_else(|| format!("marker missing in journey order: {marker}"))?;
-            from = from.saturating_add(found).saturating_add(marker.len());
-        }
+        pty.send("y")?;
+        pty.wait_for("wrote hello.txt")?;
+        assert_eq!(mock.served(), 2, "the command, then the summary");
         Ok(())
+    })?;
+    assert!(
+        ran.status.success(),
+        "Ctrl+C on an empty box exits 0: {}",
+        ran.status
+    );
+    assert_eq!(
+        std::fs::read_to_string(ran.work.path().join("hello.txt"))?,
+        "hello\n"
+    );
+    assert!(ran.wire.contains("\x1b[?2026h"), "frames are synchronized");
+    assert!(
+        ran.wire.contains("\x1b[?1049l"),
+        "the main screen is restored"
+    );
+    Ok(())
+}
+
+/// A declined command never runs: `n` at the question, the model is told, the file never
+/// appears, and the model's next request carries the decline.
+#[test]
+fn sim_session_declined_command_never_runs() -> Journey {
+    for seed in 0..4 {
+        let replies = [COMMAND, r#"{"done":"left it alone"}"#];
+        let ran = frame(scripted(seed, &replies), |pty, mock, _| {
+            ask(pty)?;
+            pty.send("n")?;
+            pty.wait_for("left it alone")?;
+            let requests = mock.requests();
+            let told = requests.get(1).ok_or("the model was asked again")?;
+            assert!(
+                String::from_utf8_lossy(told).contains(DECLINED),
+                "seed {seed}: the model is told the command was declined"
+            );
+            Ok(())
+        })?;
+        assert!(ran.status.success(), "seed {seed}: exits 0: {}", ran.status);
+        assert!(!wrote(&ran), "seed {seed}: a declined command ran");
+    }
+    Ok(())
+}
+
+/// A gateway that answers 401 with escapes, a bell and 4 KiB of text (`Fault::HostileRefusal`,
+/// larry#128): the frame shows a notice, no byte of the hostile text reaches the terminal as an
+/// escape or a bell, nothing runs, and the operator's key went as its bearer token.
+#[test]
+fn sim_tui_gateway_refusal_shows_typed_notice() -> Journey {
+    let config = Config {
+        script: vec![Some(Fault::HostileRefusal { status: 401 })],
+        ..scripted(5, &[COMMAND])
+    };
+    let ran = frame(config, |pty, mock, _| {
+        pty.wait_for(READY)?;
+        pty.send("write hello.txt\r")?;
+        pty.wait_for("expired")?;
+        let first = mock.authorizations().into_iter().next().flatten();
+        assert_eq!(first.as_deref(), Some("Bearer tui-key"), "the route's key");
+        Ok(())
+    })?;
+    assert!(
+        ran.status.success(),
+        "a refusal leaves the frame usable: {}",
+        ran.status
+    );
+    assert!(
+        !ran.wire.contains("\x1b[31m"),
+        "the gateway's colour never reaches the wire"
+    );
+    assert!(
+        !ran.wire.contains('\u{7}'),
+        "the gateway's bell never reaches the wire"
+    );
+    assert!(!wrote(&ran), "a refused session runs nothing");
+    Ok(())
+}
+
+/// Esc while the model call is held (`Fault::Delay`) stops the session: the reply that then
+/// arrives is never run, the frame says so, and Ctrl+C exits 0 with the worker joined.
+#[test]
+fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
+    let config = Config {
+        script: vec![Some(Fault::Delay)],
+        ..scripted(9, &[COMMAND])
+    };
+    let ran = frame(config, |pty, mock, _| {
+        pty.wait_for(READY)?;
+        pty.send("write hello.txt\r")?;
+        pty.wait_for("Working")?;
+        pty.send("\x1b")?;
+        pty.wait_for("Stopping")?;
+        mock.release_delayed();
+        pty.wait_for("Interrupted")
+    })?;
+    assert!(
+        ran.status.success(),
+        "the worker is joined and the frame exits 0: {}",
+        ran.status
+    );
+    assert!(!wrote(&ran), "an interrupted reply never runs");
+    Ok(())
+}
+
+/// One seed, one conversation: the approve journey run twice in the same folders against an
+/// OpenRouter-style padded reply (`Fault::PaddedDone`) gives the gateway the same requests in
+/// the same order.
+#[test]
+fn sim_tui_same_seed_same_trace_hash_through_the_binary() -> Journey {
+    let mut hashes = Vec::new();
+    let (state, mut work) = fixture()?;
+    for _ in 0..2 {
+        let config = Config {
+            script: vec![Some(Fault::PaddedDone)],
+            ..scripted(21, &[COMMAND, r#"{"done":"wrote hello.txt"}"#])
+        };
+        let ran = frame_in(
+            &state,
+            work,
+            config,
+            Box::new(|pty, mock, _| {
+                ask(pty)?;
+                pty.send("y")?;
+                pty.wait_for("wrote hello.txt")?;
+                hashes.push(mock.trace_hash());
+                Ok(())
+            }),
+        )?;
+        assert!(ran.status.success() && wrote(&ran));
+        std::fs::remove_file(ran.work.path().join("hello.txt"))?;
+        work = ran.work;
+    }
+    assert_eq!(hashes.first(), hashes.get(1), "same seed, same trace");
+    Ok(())
+}
+
+/// A kill -9 while Larry waits on the person leaves nothing run, and a fresh terminal starts
+/// clean and quits 0.
+#[test]
+fn tui_journey_kill9_then_fresh_start_restores() -> Journey {
+    let (state, work) = fixture()?;
+    mock_model::run(scripted(3, &[COMMAND]), |mock| -> Journey {
+        std::thread::scope(|owner| -> Journey {
+            let env = operator(state.path(), mock);
+            let mut pty = Pty::open(owner, work.path(), &env)?;
+            ask(&mut pty)?;
+            let pid = pty.pid()?;
+            let killed = Command::new("kill").args(["-9", &pid]).status()?;
+            assert!(killed.success(), "kill -9 {pid} was delivered");
+            let (status, _) = pty.finish()?;
+            assert!(
+                !status.success(),
+                "a killed binary does not report success: {status}"
+            );
+            let probe = Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(Stdio::null())
+                .status()?;
+            assert!(!probe.success(), "the killed binary {pid} was reaped");
+            assert!(
+                !work.path().join("hello.txt").exists(),
+                "a killed ask runs nothing"
+            );
+            let mut fresh = Pty::open(owner, work.path(), &env)?;
+            fresh.wait_for(READY)?;
+            fresh.send(QUIT)?;
+            let (status, _) = fresh.finish()?;
+            assert!(
+                status.success(),
+                "a fresh terminal starts clean and quits 0: {status}"
+            );
+            Ok(())
+        })
     })
 }
 
-/// The stripper removes OSC, CSI, charset and single-byte escapes, keeps the text between
-/// them, and survives a truncated sequence at the end.
+/// Two terminals at once, each with its own state directory, gateway and folder: each runs
+/// its own command and seals its own report, and neither sees the other's.
 #[test]
-fn e2e_journey_normalize_strips_escapes() {
-    assert_eq!(
-        normalize(b"\x1b]0;title\x07Ab\x1b[1;31mC\x1b(Bd\x1b=e-f\x1b["),
-        "abcdef",
-        "escapes are removed and the text between them kept"
-    );
-    assert_eq!(normalize(b"\x1b"), "", "a lone escape yields nothing");
+fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
+    let (state_a, work_a) = fixture()?;
+    let (state_b, work_b) = fixture()?;
+    let replies = [COMMAND, r#"{"done":"wrote hello.txt"}"#];
+    mock_model::run(scripted(11, &replies), |mock_a| -> Journey {
+        mock_model::run(scripted(12, &replies), |mock_b| -> Journey {
+            std::thread::scope(|owner| -> Journey {
+                let mut first = Pty::open(owner, work_a.path(), &operator(state_a.path(), mock_a))?;
+                let mut second =
+                    Pty::open(owner, work_b.path(), &operator(state_b.path(), mock_b))?;
+                ask(&mut first)?;
+                ask(&mut second)?;
+                first.send("y")?;
+                second.send("y")?;
+                first.wait_for("wrote hello.txt")?;
+                second.wait_for("wrote hello.txt")?;
+                first.send(QUIT)?;
+                second.send(QUIT)?;
+                assert!(first.finish()?.0.success() && second.finish()?.0.success());
+                assert_eq!(
+                    (mock_a.served(), mock_b.served()),
+                    (2, 2),
+                    "one gateway each"
+                );
+                for (state, other) in [(&state_a, &state_b), (&state_b, &state_a)] {
+                    let mine = std::fs::read_dir(state.path())?.count();
+                    assert!(mine > 0, "each state directory holds its own records");
+                    assert_ne!(state.path(), other.path());
+                }
+                assert!(work_a.path().join("hello.txt").exists());
+                assert!(work_b.path().join("hello.txt").exists());
+                Ok(())
+            })
+        })
+    })
 }
 
 /// A reply is text the keys brought: text already on screen before them is refused, whatever
@@ -509,28 +353,15 @@ fn a_wait_refuses_text_that_was_on_screen_before_the_keys() {
     let opened = "HOME  /  MOO  /  Workspace handoff";
     assert_eq!(
         replied(Some(board), opened, "MOO  /  Workspace handoff"),
-        Ok(true),
-        "the breadcrumb is new: the reply"
+        Ok(true)
     );
     assert_eq!(
         replied(Some(board), board, "MOO  /  Workspace handoff"),
-        Ok(false),
-        "not painted yet: keep reading"
+        Ok(false)
     );
-    assert!(
-        replied(Some(board), opened, "Workspace handoff").is_err(),
-        "a title the board already showed can never pass for the reply"
-    );
-    assert_eq!(
-        replied(None, board, "Workspace handoff"),
-        Ok(true),
-        "no keys typed: presence answers"
-    );
-    assert_eq!(
-        replied(None, board, "remember this"),
-        Ok(false),
-        "absent text is not a reply"
-    );
+    assert!(replied(Some(board), opened, "Workspace handoff").is_err());
+    assert_eq!(replied(None, board, "Workspace handoff"), Ok(true));
+    assert_eq!(replied(None, board, "remember this"), Ok(false));
 }
 
 /// The screen model places text by CUP, clears on ED, skips OSC by BEL or ST, decodes UTF-8
@@ -549,78 +380,6 @@ fn the_screen_model_follows_the_terminal_rules() {
     assert_eq!(first, Some("x"), "x at the edge: {wrapped:?}");
     let next = wrapped.lines().nth(1).map(str::trim);
     assert_eq!(next, Some("y"), "y wraps: {wrapped:?}");
-}
-
-#[test]
-fn native_crash_and_fresh_terminal_recovery() -> Journey {
-    std::thread::scope(|owner| -> Journey {
-        let mut pty = Pty::open(owner)?;
-        pty.wait_for(BOOT_TEXT)?;
-        pty.send("\r")?;
-        pty.wait_for(WORKSPACE_TEXT)?;
-        // `/changes` only moves focus, and its header is painted with the workspace, so no text
-        // proves that reply alone; waiting for the header raced the paint (larry#158). Both
-        // commands go together, as the main journey types its steps, and the wait is for the
-        // line only the `/next` reply paints.
-        pty.send("/changes\r/next\r")?;
-        pty.wait_for("src/retry.rs:12")?;
-        let pid = pty.pid()?;
-        let killed = Command::new("kill").args(["-9", &pid]).status()?;
-        assert!(killed.success(), "kill -9 {pid} was delivered");
-        let (status, _) = pty.finish()?;
-        assert!(
-            !status.success(),
-            "a killed binary does not report success: {status}"
-        );
-        let probe = Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(Stdio::null())
-            .status()?;
-        assert!(!probe.success(), "the killed binary {pid} was reaped");
-        let mut fresh = Pty::open(owner)?;
-        fresh.wait_for(BOOT_TEXT)?;
-        fresh.send("q")?;
-        let (status, _) = fresh.finish()?;
-        assert!(
-            status.success(),
-            "a fresh terminal boots clean and quits 0: {status}"
-        );
-        Ok(())
-    })
-}
-
-#[test]
-fn board_truth_mouse_and_draft_recovery() -> Journey {
-    let steps: [(&str, &str); 9] = [
-        ("t", "SYNTHETIC DATA"),
-        ("t", BOOT_TEXT),
-        // Real xterm SGR mouse input, 1-based coordinates inside rail row 3.
-        ("\x1b[<0;8;17M\x1b[<0;8;17m", WORKSPACE_TEXT),
-        ("", "Calmer project home"),
-        ("remember this", "remember this"),
-        ("\x1b", BOOT_TEXT),
-        // The breadcrumb, not the title: the board paints every card's title.
-        ("2", "MOO  /  Workspace handoff"),
-        ("\x1b", BOOT_TEXT),
-        ("3", "remember this"),
-    ];
-    std::thread::scope(|owner| -> Journey {
-        let mut pty = Pty::open(owner)?;
-        pty.wait_for(BOOT_TEXT)?;
-        for (keys, shows) in steps {
-            if !keys.is_empty() {
-                pty.send(keys)?;
-            }
-            pty.wait_for(shows)?;
-        }
-        pty.send("\x15/quit\r")?;
-        let (status, _) = pty.finish()?;
-        assert!(
-            status.success(),
-            "the draft is cleared and /quit exits 0: {status}"
-        );
-        Ok(())
-    })
 }
 
 /// CPU seconds and RSS KiB of `pid`, from `ps -o time=,rss=`.
@@ -650,24 +409,27 @@ fn nearest_rank(sorted: &[Duration], rank: usize) -> Journey<f64> {
     Ok(value.as_secs_f64() * 1000.0)
 }
 
+/// First paint, key-to-paint p50/p95/p99 over typed text, an idle window that writes nothing,
+/// peak RSS, and Ctrl+C to exit.
 #[test]
-fn workspace_probe_paints_answers_input_and_stays_quiet_idle() -> Journey {
+fn tui_journey_probe_reports_p50_p95_p99_and_rss() -> Journey {
+    let (state, work) = fixture()?;
+    let env = [("LARRY_STATE_DIR", state.path().as_os_str().to_owned())];
     std::thread::scope(|owner| -> Journey {
         let started = Instant::now();
-        let mut pty = Pty::open(owner)?;
-        pty.wait_for(BOOT_TEXT)?;
+        let mut pty = Pty::open(owner, work.path(), &env)?;
+        pty.wait_for(READY)?;
         let first_paint = started.elapsed().as_secs_f64() * 1000.0;
         pty.drain(Duration::from_millis(100))?;
         let mut latencies = Vec::with_capacity(ROUND_TRIPS);
-        for _ in 0..ROUND_TRIPS {
+        for round in 0..ROUND_TRIPS {
             let sent = Instant::now();
-            pty.send("\r")?;
-            pty.wait_for(WORKSPACE_TEXT)?;
+            let token = format!("zq{round}x");
+            pty.send(&token)?;
+            pty.wait_for(&token)?;
             latencies.push(sent.elapsed());
-            pty.drain(Duration::from_millis(50))?;
-            pty.send("\x1b")?;
-            pty.wait_for(BOOT_TEXT)?;
-            pty.drain(Duration::from_millis(50))?;
+            pty.send(CLEAR)?;
+            pty.wait_for(READY)?;
         }
         latencies.sort();
         let pid = pty.pid()?;
@@ -677,18 +439,18 @@ fn workspace_probe_paints_answers_input_and_stays_quiet_idle() -> Journey {
         let idle_seconds = idle_started.elapsed().as_secs_f64();
         let (cpu_after, rss_after) = sample(&pid)?;
         let quit = Instant::now();
-        pty.send("q")?;
+        pty.send(QUIT)?;
         let (status, _) = pty.finish()?;
         let quit_ms = quit.elapsed().as_secs_f64() * 1000.0;
-        assert!(status.success(), "q exits 0: {status}");
-        assert!(
-            idle_bytes < OUTPUT_BOUND,
-            "idle output stays under 1 MiB: {idle_bytes}"
+        assert!(status.success(), "Ctrl+C exits 0: {status}");
+        assert_eq!(
+            idle_bytes, 0,
+            "an unchanged frame writes nothing while idle"
         );
         let mut figures = String::new();
         writeln!(
             figures,
-            "{{\"scope\":\"debug binary, 120x32 PTY, synthetic data, disconnected Moo/model\",\
+            "{{\"scope\":\"debug binary, 120x32 PTY, no model route\",\
              \"first_paint_ms\":{first_paint:.1},\"input_samples\":{ROUND_TRIPS},\
              \"input_p50_ms\":{:.1},\"input_p95_ms\":{:.1},\"input_p99_ms\":{:.1},\
              \"idle_seconds\":{idle_seconds:.2},\"idle_cpu_percent\":{:.2},\

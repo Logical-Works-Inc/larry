@@ -1,4 +1,4 @@
-//! Native AppCUI launcher, `larry mcp`, the MCP stdio server (larry#84), `larry acp`,
+//! The terminal frontend (larry#239), `larry mcp`, the MCP stdio server (larry#84), `larry acp`,
 //! the Agent Client Protocol agent Harbor runs Terminal-Bench through (larry#93),
 //! `larry model`, one completion through the configured gateway (larry#83),
 //! `larry exec`, the task-document executor (larry#85), and `larry verify` and
@@ -8,8 +8,8 @@
 //! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010), and
 //! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014), and
 //! `larry serve`, the HTTP host on lgwks_bot's app edge (larry#88, ADR 0021).
-//! The launcher paints the fixture surface and exits when the operator
-//! quits; it performs no backend or workspace effect.
+//! The frontend runs real terminal sessions and asks before every command; it
+//! exits 0 when the person quits.
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -20,8 +20,8 @@ use std::time::Duration;
 use larry_demo::eval::{EvalError, MAX_SET_BYTES, PriceError, Prices, Scorecard};
 use larry_demo::executor::routes::{RouteCliError, run as route_run};
 use larry_demo::executor::{
-    ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, state_public_key,
-    trusted_key, verify,
+    ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, process_env,
+    state_public_key, trusted_key, verify,
 };
 use larry_demo::governance;
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
@@ -76,6 +76,8 @@ enum ModelCheck {
     Prompt(io::Error),
     /// The prompt on standard input was empty.
     EmptyPrompt,
+    /// A variable Larry reads is not UTF-8.
+    Env(ExecError),
     /// A `LARRY_MODEL_*` setting is missing or unusable.
     Config(ModelError),
     /// The gateway refused or the exchange failed.
@@ -89,6 +91,7 @@ impl fmt::Display for ModelCheck {
         match *self {
             Self::Prompt(ref cause) => write!(out, "model prompt unreadable: {cause}"),
             Self::EmptyPrompt => out.write_str("model: the prompt on stdin is empty"),
+            Self::Env(ref cause) => write!(out, "model: {cause}"),
             Self::Config(ref cause) => write!(out, "model config: {cause}"),
             Self::Exchange(ref cause) => write!(out, "model failed: {cause}"),
             Self::Reply(ref cause) => write!(out, "model reply unwritable: {cause}"),
@@ -110,8 +113,8 @@ fn model_once() -> Result<(), ModelCheck> {
     if prompt.is_empty() {
         return Err(ModelCheck::EmptyPrompt);
     }
-    let config =
-        ModelConfig::from_env(|name| std::env::var(name).ok()).map_err(ModelCheck::Config)?;
+    let config = ModelConfig::from_env(process_env().map_err(ModelCheck::Env)?)
+        .map_err(ModelCheck::Config)?;
     let client = ModelClient::new(config, pause);
     let completion: Completion = client
         .complete(&[Message::new(Role::User, prompt)])
@@ -152,7 +155,7 @@ fn print_line(line: &dyn fmt::Display) -> Result<(), ExecError> {
 /// and print the sealed JSON report. Returns whether the run was accepted; a task asking
 /// for model commands is denied until Nova isolation lands, and never accepted.
 fn exec_once() -> Result<bool, ExecError> {
-    let settings = Settings::from_env(|name| std::env::var(name).ok())?;
+    let settings = Settings::from_env(process_env()?)?;
     let bytes = read_stdin(TASK_LIMIT)?;
     let task = Task::parse(&bytes).map_err(ExecError::Task)?;
     let report: Report = execute(&task, &settings)?;
@@ -164,7 +167,7 @@ fn exec_once() -> Result<bool, ExecError> {
 /// (`LARRY_RECEIPT_KEY`, else the state directory's) and print its verdict.
 /// Returns whether the verified run was accepted.
 fn verify_once() -> Result<bool, ExecError> {
-    let trusted = trusted_key(|name| std::env::var(name).ok())?;
+    let trusted = trusted_key(process_env()?)?;
     let bytes = read_stdin(REPORT_LIMIT)?;
     let verdict: Verdict = verify(&bytes, &trusted).map_err(ExecError::Receipt)?;
     print_line(&lgwks_std::json::json!({
@@ -177,20 +180,35 @@ fn verify_once() -> Result<bool, ExecError> {
 
 /// `larry route add|list|remove|default|resolve`: the tenant's model routes in the
 /// state directory (larry#201). Every argument must be UTF-8 text.
-fn route_once(rest: &[OsString]) -> Result<(), RouteCliError> {
+fn route_once(rest: &[OsString]) -> Result<(), Failed<RouteCliError>> {
     let words: Option<Vec<&str>> = rest.iter().map(|word| word.to_str()).collect();
-    let words = words.ok_or(RouteCliError::NotUtf8)?;
-    route_run(
-        |name| std::env::var(name).ok(),
-        &words,
-        &mut io::stdout().lock(),
-    )
+    let words = words.ok_or(Failed::Run(RouteCliError::NotUtf8))?;
+    let read = process_env().map_err(Failed::Env)?;
+    route_run(read, &words, &mut io::stdout().lock()).map_err(Failed::Run)
+}
+
+/// A subcommand that failed reading the environment, or failed itself.
+#[derive(Debug)]
+enum Failed<E> {
+    /// A variable Larry reads is not UTF-8.
+    Env(ExecError),
+    /// The subcommand's own failure.
+    Run(E),
+}
+
+impl<E: fmt::Display> fmt::Display for Failed<E> {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Env(ref cause) => write!(out, "{cause}"),
+            Self::Run(ref cause) => write!(out, "{cause}"),
+        }
+    }
 }
 
 /// `larry key`: print the state directory's receipt public key as 64 hex characters,
 /// the value an offline verifier sets as `LARRY_RECEIPT_KEY`.
 fn key_once() -> Result<(), ExecError> {
-    let public = state_public_key(|name| std::env::var(name).ok())?;
+    let public = state_public_key(process_env()?)?;
     print_line(&lgwks_std::hex::encode(public.to_bytes()))
 }
 
@@ -219,8 +237,9 @@ impl fmt::Display for EvalRun {
 /// model `LARRY_MODEL_*` pins, priced by `LARRY_EVAL_PRICE_IN`/`_OUT`) and print its
 /// scorecard. Prices and the set are checked before the first model call (larry#87).
 fn eval_once() -> Result<(), EvalRun> {
-    let settings = Settings::from_env(|name| std::env::var(name).ok()).map_err(EvalRun::Exec)?;
-    let prices = Prices::from_env(|name| std::env::var(name).ok()).map_err(EvalRun::Price)?;
+    let settings =
+        Settings::from_env(process_env().map_err(EvalRun::Exec)?).map_err(EvalRun::Exec)?;
+    let prices = Prices::from_env(process_env().map_err(EvalRun::Exec)?).map_err(EvalRun::Price)?;
     let bytes = read_stdin(SET_LIMIT).map_err(EvalRun::Exec)?;
     let card: Scorecard =
         larry_demo::eval::run(&bytes, &settings, prices).map_err(EvalRun::Eval)?;
@@ -353,8 +372,9 @@ fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
 /// `larry serve`: bind `LARRY_SERVE_ADDR` (loopback by default), print one JSON line naming
 /// the bound address, the edge's liveness path, the tenant probe and how many tenants hold a
 /// key in `LARRY_STATE_DIR`, then serve until SIGTERM or SIGINT and exit 0.
-fn serve_once() -> Result<(), larry_demo::serve::ServeError> {
-    let settings = larry_demo::serve::Settings::from_env(|name| std::env::var(name).ok())?;
+fn serve_once() -> Result<(), Failed<larry_demo::serve::ServeError>> {
+    let read = process_env().map_err(Failed::Env)?;
+    let settings = larry_demo::serve::Settings::from_env(read).map_err(Failed::Run)?;
     larry_demo::serve::run(settings, |addr, keyed| {
         let path = larry_demo::serve::HEALTH_PATH;
         let line = lgwks_std::json::json!({
@@ -366,12 +386,14 @@ fn serve_once() -> Result<(), larry_demo::serve::ServeError> {
         let mut out = io::stdout().lock();
         writeln!(out, "{line}").and_then(|()| out.flush())
     })
+    .map_err(Failed::Run)
 }
 
 /// `larry serve key <tenant>`: issue (or rotate) the tenant's bearer key and print it once,
 /// as JSON; only its digest is kept in `LARRY_STATE_DIR`.
-fn serve_key_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> {
-    let key = larry_demo::serve::issue_key(|name| std::env::var(name).ok(), tenant)?;
+fn serve_key_once(tenant: &str) -> Result<(), Failed<larry_demo::serve::ServeError>> {
+    let read = process_env().map_err(Failed::Env)?;
+    let key = larry_demo::serve::issue_key(read, tenant).map_err(Failed::Run)?;
     let line = lgwks_std::json::json!({
         "tenant": tenant,
         "key": key,
@@ -380,13 +402,14 @@ fn serve_key_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> {
     let mut out = io::stdout().lock();
     writeln!(out, "{line}")
         .and_then(|()| out.flush())
-        .map_err(larry_demo::serve::ServeError::Announce)
+        .map_err(|cause| Failed::Run(larry_demo::serve::ServeError::Announce(cause)))
 }
 
 /// `larry serve revoke <tenant>`: delete the tenant's key digest from `LARRY_STATE_DIR`, so a
 /// running serve refuses it from its next SIGHUP and a stopped one at its next start.
-fn serve_revoke_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> {
-    larry_demo::serve::revoke_key(|name| std::env::var(name).ok(), tenant)?;
+fn serve_revoke_once(tenant: &str) -> Result<(), Failed<larry_demo::serve::ServeError>> {
+    let read = process_env().map_err(Failed::Env)?;
+    larry_demo::serve::revoke_key(read, tenant).map_err(Failed::Run)?;
     let line = lgwks_std::json::json!({
         "tenant": tenant,
         "revoked": true,
@@ -395,7 +418,7 @@ fn serve_revoke_once(tenant: &str) -> Result<(), larry_demo::serve::ServeError> 
     let mut out = io::stdout().lock();
     writeln!(out, "{line}")
         .and_then(|()| out.flush())
-        .map_err(larry_demo::serve::ServeError::Announce)
+        .map_err(|cause| Failed::Run(larry_demo::serve::ServeError::Announce(cause)))
 }
 
 /// The exit status of a sealed verdict.
@@ -410,9 +433,9 @@ fn verdict_status(accepted: bool) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).take(MAX_ARGUMENTS).collect();
     let outcome = match *args.as_slice() {
-        [] => larry_demo::native::run()
+        [] => larry_demo::tui::run()
             .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| format!("DEMO terminal failed: {error}")),
+            .map_err(|error| format!("larry: {error}")),
         [ref command] if command == "mcp" => {
             larry_demo::mcp::serve(io::stdin().lock(), io::stdout().lock())
                 .map(|()| ExitCode::SUCCESS)

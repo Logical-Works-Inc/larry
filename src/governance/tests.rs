@@ -104,28 +104,18 @@ fn locked_versions_reads_only_whole_package_entries() {
     assert!(locked_versions("name = \"a\"", "a").is_empty(), "truncated");
 }
 
-/// The macro release each locked appcui release was built with. appcui's own
-/// requirement (`^0.3.9`) admits newer macros that emit traits only newer appcui
-/// defines, so a plain `cargo update` breaks the build (logicalworks-crates#841,
-/// larry#170); the lock holds the pair until lgwks_deps pins it upstream.
-const APPCUI_MACRO_PAIRS: [(&str, &str); 1] = [("0.5.8", "0.3.9")];
-
+/// The frontend's dependency budget (larry#239, ADR 0045): AppCUI and its
+/// macro are gone from the lock, and the two frame crates sit at their pins.
 #[test]
-fn the_lock_holds_appcui_proc_macro_at_the_release_appcui_was_built_with()
--> Result<(), Box<dyn std::error::Error>> {
+fn tui_dep_budget_lock_drops_appcui() -> Result<(), Box<dyn std::error::Error>> {
     let lock = std::fs::read_to_string(root().join("Cargo.lock"))?;
-    let macros = locked_versions(&lock, "appcui_proc_macro");
-    for appcui in locked_versions(&lock, "appcui") {
-        let Some(&(_, wanted)) = APPCUI_MACRO_PAIRS.iter().find(|pair| pair.0 == appcui) else {
-            continue;
-        };
-        assert_eq!(
-            macros,
-            [wanted],
-            "appcui {appcui} needs appcui_proc_macro {wanted} (logicalworks-crates#841): \
-             run `cargo update -p appcui_proc_macro --precise {wanted}`"
-        );
-    }
+    assert!(
+        locked_versions(&lock, "appcui").is_empty(),
+        "AppCUI is back in the lock"
+    );
+    assert!(locked_versions(&lock, "appcui_proc_macro").is_empty());
+    assert_eq!(locked_versions(&lock, "crossterm"), ["0.29.0"]);
+    assert_eq!(locked_versions(&lock, "unicode-width"), ["0.2.3"]);
     Ok(())
 }
 

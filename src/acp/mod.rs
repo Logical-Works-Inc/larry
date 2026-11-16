@@ -28,7 +28,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use lgwks_std::json::{Map, Value, json};
 
-use crate::executor::{ExecError, Observer, Settings, run_session};
+use crate::executor::{Approval, ExecError, Observer, Settings, run_session};
 use crate::mcp::wire::{self, Envelope, Frame};
 
 /// The one protocol version Larry speaks; any other request is answered with it.
@@ -68,8 +68,9 @@ fn locked(book: &Book) -> MutexGuard<'_, BTreeMap<String, Entry>> {
 ///
 /// The reader or the writer failed; a malformed or oversized frame is answered, never an error.
 pub fn serve<R: BufRead + Send, W: Write>(reader: R, writer: W) -> io::Result<()> {
-    let settings =
-        Settings::from_env(|name| std::env::var(name).ok()).map_err(|error| error.to_string());
+    let settings = crate::executor::process_env()
+        .and_then(Settings::from_env)
+        .map_err(|error| error.to_string());
     serve_bounded(
         reader,
         writer,
@@ -495,6 +496,13 @@ impl<W: Write> Updates<'_, W> {
 }
 
 impl<W: Write> Observer for Updates<'_, W> {
+    /// Runs every command: `larry acp` runs only where the operator granted
+    /// `model.command`, inside a container that isolates the commands (larry#93),
+    /// and Harbor has no person to ask.
+    fn approve(&mut self, _step: usize, _command: &str) -> Approval {
+        Approval::Run
+    }
+
     fn started(&mut self, step: usize, command: &str) {
         let title: String = command
             .lines()

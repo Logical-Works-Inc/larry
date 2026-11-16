@@ -112,8 +112,30 @@ impl Stop {
     }
 }
 
+/// The person's answer to one command, before it runs (larry#239).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Approval {
+    /// Run it.
+    Run,
+    /// Do not run it; the model is told and may choose another.
+    Decline,
+}
+
+/// What the model is shown for a command the person declined.
+const DECLINED: &str = "not run: the person declined this command";
+
+/// Whether `settings` lets a session run commands at all: the policy holds
+/// every scope [`gate::session_scopes`] needs, `model.command` among them.
+pub(crate) fn admits(settings: &Settings) -> bool {
+    gate::session_scopes().is_subset(&settings.policy)
+}
+
 /// What a session reports while it runs, and how it learns it was cancelled.
 pub(crate) trait Observer {
+    /// The model asks to run `command` as step `step`; nothing runs unless this
+    /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
+    /// inside the operator's isolated container under the same gate and runs it.
+    fn approve(&mut self, step: usize, command: &str) -> Approval;
     /// Step `step` is about to run `command`.
     fn started(&mut self, step: usize, command: &str);
     /// Step `step` ended; `observation` is what the model is shown, `passed` its exit 0.
@@ -288,21 +310,22 @@ pub(crate) fn run_session(
             cwd,
             observer: &mut *observer,
         };
-        let (ended, steps, compaction) = turn.run(instruction)?;
+        let done = turn.run(instruction)?;
         let body = json!({
             "task_id": task_id,
             "task_digest": task_digest,
             "diff": null,
-            "results": steps,
+            "results": done.records,
             "denied": [],
             "session": {
-                "stop": ended.name(),
-                "commands": steps.len(),
+                "stop": done.stop.name(),
+                "commands": done.records.len(),
+                "declined": done.declined,
                 "route": route.seal(),
-                "compaction": compaction,
+                "compaction": done.compaction,
             },
         });
-        stop = Some(ended);
+        stop = Some(done.stop);
         Ok(Report::sealed(body, &key))
     })?;
     let stop = match stop {
@@ -314,6 +337,18 @@ pub(crate) fn run_session(
         }
     };
     Ok(Ended { stop, report })
+}
+
+/// What one session's loop did.
+struct Steps {
+    /// Why it stopped.
+    stop: Stop,
+    /// Each command's record, in order.
+    records: Vec<Value>,
+    /// What compaction did.
+    compaction: Value,
+    /// Commands the person declined; none of them ran.
+    declined: usize,
 }
 
 /// One session's loop state.
@@ -334,8 +369,8 @@ struct Turn<'a> {
 
 impl Turn<'_> {
     /// Asks, runs and observes until a stop, and returns it with each command's
-    /// record and what compaction did.
-    fn run(&mut self, instruction: &str) -> Result<(Stop, Vec<Value>, Value), ExecError> {
+    /// record, what compaction did and how many commands the person declined.
+    fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
         let task = format!(
             "Working directory: {}\n\nTask:\n{instruction}",
             self.cwd.display()
@@ -343,8 +378,9 @@ impl Turn<'_> {
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut refused = 0_usize;
+        let mut declined = 0_usize;
         let stop = loop {
-            if steps.len() >= MAX_STEPS {
+            if steps.len().saturating_add(declined) >= MAX_STEPS {
                 break Stop::MaxTurnRequests;
             }
             let completion = match self.ask(&mut conversation) {
@@ -373,6 +409,20 @@ impl Turn<'_> {
                 Ok(Reply::Command(command)) => {
                     refused = 0;
                     let step = steps.len();
+                    if self.observer.approve(step, &command) == Approval::Decline {
+                        declined = declined.saturating_add(1);
+                        let answer = Answer::Observed {
+                            step,
+                            command,
+                            status: String::from(DECLINED),
+                            output: Some(String::new()),
+                        };
+                        conversation.push(kept, answer);
+                        continue;
+                    }
+                    if self.observer.cancelled() {
+                        break Stop::Cancelled;
+                    }
                     self.observer.started(step, &command);
                     let argv = [String::from("sh"), String::from("-c"), command.clone()];
                     let result = run_command(
@@ -407,7 +457,12 @@ impl Turn<'_> {
                 }
             }
         };
-        Ok((stop, steps, conversation.json()))
+        Ok(Steps {
+            stop,
+            records: steps,
+            compaction: conversation.json(),
+            declined,
+        })
     }
 
     /// One completion over `conversation`, compacted first when it needs it and
