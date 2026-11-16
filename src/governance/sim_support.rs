@@ -2,6 +2,7 @@
 //! real tree loaded once per test, in-memory mutation, and scratch copies of the governed files
 //! that remove themselves when dropped.
 
+use std::cell::OnceCell;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -11,8 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lgwks_std::json;
 use lgwks_std::seeded::{DrawError, Seeded};
 
+use crate::sim_lanes::{LaneError, sweep};
+
 use super::documents::{self, DOCUMENTS, Documents};
 use super::error::GovernanceError;
+use super::patterns::Patterns;
+use super::tracker::TrackerError;
 
 /// Why a simulation helper could not build its case.
 #[derive(Debug)]
@@ -27,6 +32,12 @@ pub(crate) enum SimError {
     Json(json::Error),
     /// A text the case mutates is not in the tree.
     Absent(String),
+    /// A case text could not be formatted.
+    Format(fmt::Error),
+    /// A lane of the seed sweep failed outright.
+    Lane(LaneError),
+    /// The tracker could not be rendered or read.
+    Tracker(TrackerError),
 }
 
 impl fmt::Display for SimError {
@@ -37,11 +48,32 @@ impl fmt::Display for SimError {
             Self::Refused(ref cause) => write!(out, "checker refused: {cause}"),
             Self::Json(ref cause) => write!(out, "json refused: {cause}"),
             Self::Absent(ref what) => write!(out, "the tree lacks {what}"),
+            Self::Format(ref cause) => write!(out, "case text refused: {cause}"),
+            Self::Lane(ref cause) => write!(out, "seed sweep: {cause}"),
+            Self::Tracker(ref cause) => write!(out, "tracker: {cause}"),
         }
     }
 }
 
 impl std::error::Error for SimError {}
+
+impl From<TrackerError> for SimError {
+    fn from(cause: TrackerError) -> Self {
+        Self::Tracker(cause)
+    }
+}
+
+impl From<fmt::Error> for SimError {
+    fn from(cause: fmt::Error) -> Self {
+        Self::Format(cause)
+    }
+}
+
+impl From<LaneError> for SimError {
+    fn from(cause: LaneError) -> Self {
+        Self::Lane(cause)
+    }
+}
 
 impl From<DrawError> for SimError {
     fn from(cause: DrawError) -> Self {
@@ -74,10 +106,42 @@ pub(crate) fn loaded() -> Result<Documents, SimError> {
     Ok(documents::load(root())?)
 }
 
+thread_local! {
+    /// This thread's compiled patterns, built on first use and kept for every check it runs, so
+    /// a seed sweep compiles them once per lane and not once per seed.
+    static PATTERNS: OnceCell<Result<Patterns, String>> = const { OnceCell::new() };
+}
+
+/// Runs `body` with this thread's compiled patterns.
+pub(crate) fn with_patterns<T>(
+    body: impl FnOnce(&Patterns) -> Result<T, SimError>,
+) -> Result<T, SimError> {
+    PATTERNS.with(|cell| {
+        match *cell.get_or_init(|| Patterns::new().map_err(|cause| cause.to_string())) {
+            Ok(ref patterns) => body(patterns),
+            Err(ref cause) => Err(SimError::Absent(format!("compiled patterns: {cause}"))),
+        }
+    })
+}
+
+/// Runs `check` for every seed in `0..count` on the bounded lanes; the first failing seed's
+/// error is returned, in seed order.
+pub(crate) fn each_seed(
+    count: u64,
+    check: impl Fn(u64) -> Result<(), SimError> + Sync,
+) -> Result<(), SimError> {
+    for outcome in sweep(count, |_lane, seed| check(seed))? {
+        outcome?;
+    }
+    Ok(())
+}
+
 /// The errors `validate` reports for in-memory documents.
 pub(crate) fn errors_of(documents: &Documents) -> Result<Vec<String>, SimError> {
-    let (_body, errors) = super::validated(documents)?;
-    Ok(errors)
+    with_patterns(|patterns| {
+        let (_body, errors) = super::validated(documents, patterns)?;
+        Ok(errors)
+    })
 }
 
 /// Asserts one error contains `expected`.
@@ -90,7 +154,7 @@ pub(crate) fn assert_refused(errors: &[String], expected: &str, seed: u64) {
 
 /// The count `validate` reports for `label`.
 pub(crate) fn count_of(documents: &Documents, label: &str) -> Result<usize, SimError> {
-    let (body, _errors) = super::validated(documents)?;
+    let (body, _errors) = with_patterns(|patterns| Ok(super::validated(documents, patterns)?))?;
     let count = body
         .get("counts")
         .and_then(|counts| counts.get(label))

@@ -9,6 +9,7 @@ use std::hash::{Hash as _, Hasher as _};
 use std::time::Duration;
 
 use crate::executor::Isolation;
+use crate::sim_lanes::sweep;
 
 use super::app::{App, Input, Key, MAX_ENTRIES};
 use super::buffer::{Buffer, Frame, render};
@@ -174,8 +175,8 @@ fn layout_chat_column_keeps_phone_ratio_and_reserves_artifact_pane() {
 }
 
 #[test]
-fn sim_tui_any_size_any_input_paints_inside_bounds() {
-    for seed in 0..SEEDS {
+fn sim_tui_any_size_any_input_paints_inside_bounds() -> Result<(), Box<dyn std::error::Error>> {
+    sweep(SEEDS, |_lane, seed| {
         let (app, _) = drive(seed, 96);
         let frame = app.draw();
         let grid: &Buffer = &frame.buffer;
@@ -187,12 +188,13 @@ fn sim_tui_any_size_any_input_paints_inside_bounds() {
                 "seed {seed}: cursor off grid"
             );
         }
-    }
+    })?;
+    Ok(())
 }
 
 #[test]
-fn sim_tui_hostile_output_cannot_write_escapes() {
-    for seed in 0..SEEDS {
+fn sim_tui_hostile_output_cannot_write_escapes() -> Result<(), Box<dyn std::error::Error>> {
+    sweep(SEEDS, |_lane, seed| {
         let (_, wire) = drive(seed, 96);
         let text = String::from_utf8_lossy(&wire);
         for piece in text.split('\x1b').skip(1) {
@@ -219,13 +221,14 @@ fn sim_tui_hostile_output_cannot_write_escapes() {
                 "seed {seed}: {banned:?} reached the wire"
             );
         }
-    }
+    })?;
+    Ok(())
 }
 
 #[test]
-fn sim_tui_bold_cells_keep_colour_on_the_wire() {
-    let mut saw_bold_colour = false;
-    for seed in 0..SEEDS {
+fn sim_tui_bold_cells_keep_colour_on_the_wire() -> Result<(), Box<dyn std::error::Error>> {
+    let saw = sweep(SEEDS, |_lane, seed| {
+        let mut saw_bold_colour = false;
         let (_, wire) = drive(seed, 64);
         for (codes, _) in sgr_runs(&wire) {
             // Every style run starts from reset: nothing of the last run survives.
@@ -243,37 +246,43 @@ fn sim_tui_bold_cells_keep_colour_on_the_wire() {
                 saw_bold_colour = true;
             }
         }
-    }
+        saw_bold_colour
+    })?;
     let mut wire = Vec::new();
     Style::ACCENT.bold().sgr(&mut wire);
     assert_eq!(wire, b"\x1b[0;1;36m");
-    assert!(saw_bold_colour, "no seed painted a bold coloured cell");
+    assert!(
+        saw.into_iter().any(|bold| bold),
+        "no seed painted a bold coloured cell"
+    );
+    Ok(())
 }
 
 #[test]
-fn sim_tui_same_seed_same_frame_hash() {
+fn sim_tui_same_seed_same_frame_hash() -> Result<(), Box<dyn std::error::Error>> {
     let hash = |seed: u64| {
         let (_, wire) = drive(seed, 128);
         let mut hasher = DefaultHasher::new();
         wire.hash(&mut hasher);
         hasher.finish()
     };
-    let mut distinct = std::collections::BTreeSet::new();
-    for seed in 0..64 {
+    let hashes = sweep(64, |_lane, seed| {
         let first = hash(seed);
         assert_eq!(first, hash(seed), "seed {seed} replayed differently");
-        distinct.insert(first);
-    }
+        first
+    })?;
+    let distinct: std::collections::BTreeSet<u64> = hashes.into_iter().collect();
     assert!(
         distinct.len() > 32,
         "seeds collapse to {} traces",
         distinct.len()
     );
+    Ok(())
 }
 
 #[test]
-fn sim_tui_unchanged_frame_writes_nothing() {
-    for seed in 0..SEEDS {
+fn sim_tui_unchanged_frame_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    sweep(SEEDS, |_lane, seed| {
         let (app, _) = drive(seed, 48);
         let frame = app.draw();
         let mut wire = Vec::new();
@@ -286,7 +295,8 @@ fn sim_tui_unchanged_frame_writes_nothing() {
         render(None, &frame, &mut wire);
         assert!(wire.starts_with(b"\x1b[?2026h"));
         assert!(wire.ends_with(b"\x1b[?2026l"));
-    }
+    })?;
+    Ok(())
 }
 
 #[test]

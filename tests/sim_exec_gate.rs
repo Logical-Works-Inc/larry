@@ -18,9 +18,12 @@ mod larry_cli;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "../src/sim_lanes.rs"]
+mod sim_lanes;
 
 use std::error::Error;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::Path;
 
 use larry_cli::{denial_lines, flag_of, report_of, spawn_larry};
@@ -31,8 +34,13 @@ use origin::{TempDir, fixture};
 
 /// How many cases the simulation drives, each drawn from the one seeded
 /// stream on [`SIM_SEED`], and the whole matrix run twice so both passes must
-/// match. Two 256-case passes measured 7.5 s.
+/// match. Two 256-case passes ran serially in 7.5 s; they now run on bounded
+/// lanes, each with its own state directory and origin repository.
 const SEEDS: usize = 256;
+
+/// Most connections the mock admits at once: four per lane at the lane cap, so
+/// no concurrent case is turned away with a 503.
+const MOCK_CONNECTIONS: usize = 64;
 
 /// The seed every case draws from, identical in both passes.
 const SIM_SEED: u64 = 0x5EED_0001;
@@ -132,26 +140,74 @@ fn run_case(
     Ok(String::from(line))
 }
 
-/// One pass over the seeded case matrix: draws every case from a fresh stream
-/// on [`SIM_SEED`], drives the binary, asserts each verdict against the
-/// oracle, and folds the verdict sequence into `trace`.
-fn run_pass(state: &TempDir, origin: &TempDir, url: &str, trace: &mut Hasher) -> TestResult {
+/// One case: the policy subset and whether the task carries a brief.
+type Case = (Vec<&'static str>, bool);
+
+/// Why one case could not be driven to a verdict inside its lane.
+#[derive(Debug)]
+enum CaseFault {
+    /// The binary could not be spawned or its report not read; the cause as text, because a
+    /// boxed error cannot cross a lane.
+    Run(String),
+    /// A lane or case index does not fit its type, or names a fixture that is not there.
+    Index,
+}
+
+impl fmt::Display for CaseFault {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Run(ref cause) => write!(out, "case run: {cause}"),
+            Self::Index => out.write_str("case or lane index out of range"),
+        }
+    }
+}
+
+impl Error for CaseFault {}
+
+/// Every case, drawn in order from a fresh stream on [`SIM_SEED`]: the same sequence in both
+/// passes, whatever the lanes.
+fn draw_cases() -> Result<Vec<Case>, Box<dyn Error>> {
     let mut rng = Seeded::from_seed(SIM_SEED);
-    for index in 0..SEEDS {
+    let mut cases = Vec::with_capacity(SEEDS);
+    for _ in 0..SEEDS {
         let mut policy: Vec<&'static str> = Vec::new();
         for name in NAMES {
             if rng.below(2)? == 1 {
                 policy.push(name);
             }
         }
-        let brief = rng.below(2)? == 1;
-        let verdict = run_case(state.path(), origin.path(), url, &policy, brief)?;
-        let expected = oracle(&policy, brief);
+        cases.push((policy, rng.below(2)? == 1));
+    }
+    Ok(cases)
+}
+
+/// One pass over the seeded case matrix: every case is driven through the binary on a bounded
+/// lane (lane `n` owns `fixtures[n]`, one per `sim_lanes::lanes()`, the same lane for a case in
+/// both passes), each verdict is
+/// asserted against the oracle in case order, and the verdict sequence is folded into `trace`.
+fn run_pass(
+    fixtures: &[(TempDir, TempDir)],
+    cases: &[Case],
+    url: &str,
+    trace: &mut Hasher,
+) -> TestResult {
+    let count = u64::try_from(cases.len())?;
+    let verdicts = sim_lanes::sweep(count, |lane, index| {
+        let at = |position: u64| usize::try_from(position).map_err(|_| CaseFault::Index);
+        let fixture = fixtures.get(at(lane)?).ok_or(CaseFault::Index)?;
+        let case = cases.get(at(index)?).ok_or(CaseFault::Index)?;
+        run_case(fixture.0.path(), fixture.1.path(), url, &case.0, case.1)
+            .map_err(|cause| CaseFault::Run(cause.to_string()))
+    })?;
+    for (index, (verdict, case)) in verdicts.into_iter().zip(cases).enumerate() {
+        let verdict = verdict?;
+        let expected = oracle(&case.0, case.1);
         assert_eq!(
             verdict,
             expected,
-            "seed {SIM_SEED} case {index} (policy {:?}, brief {brief}): the binary must match the oracle",
-            policy.join(",")
+            "seed {SIM_SEED} case {index} (policy {:?}, brief {}): the binary must match the oracle",
+            case.0.join(","),
+            case.1
         );
         trace.write_framed(verdict.as_bytes());
     }
@@ -180,8 +236,16 @@ fn the_gate_simulation_schedules_no_fault() {
 
 #[test]
 fn sim_exec_gate_matches_the_scope_rule_for_every_seed() -> TestResult {
-    let (state, origin) = fixture()?;
-    let config = Config::seeded(SIM_SEED);
+    // One state directory and origin repository per lane, shared by both passes.
+    let lanes = sim_lanes::lanes();
+    let fixtures = (0..lanes)
+        .map(|_| fixture())
+        .collect::<Result<Vec<_>, _>>()?;
+    let cases = draw_cases()?;
+    let config = Config {
+        max_connections: MOCK_CONNECTIONS,
+        ..Config::seeded(SIM_SEED)
+    };
     mock_model::run(config, |mock| -> TestResult {
         let url = format!("http://127.0.0.1:{}/v1", mock.addr().port());
         let empty_chain = Hasher::new().finalize().to_hex();
@@ -191,12 +255,12 @@ fn sim_exec_gate_matches_the_scope_rule_for_every_seed() -> TestResult {
             "an endpoint that has served nothing carries the empty chain"
         );
         let mut verdicts = Hasher::new();
-        run_pass(&state, &origin, &url, &mut verdicts)?;
+        run_pass(&fixtures, &cases, &url, &mut verdicts)?;
         let served_first = mock.served();
-        let first_bodies = mock.requests();
-        let first_keys = mock.authorizations();
+        let mut first_bodies = mock.requests();
+        let mut first_keys = mock.authorizations();
         let mut replayed = Hasher::new();
-        run_pass(&state, &origin, &url, &mut replayed)?;
+        run_pass(&fixtures, &cases, &url, &mut replayed)?;
         assert_eq!(
             verdicts.finalize().to_hex(),
             replayed.finalize().to_hex(),
@@ -208,30 +272,36 @@ fn sim_exec_gate_matches_the_scope_rule_for_every_seed() -> TestResult {
             served_first.saturating_mul(2),
             "the second pass must make exactly the first pass's model requests"
         );
-        // The mock's reply is a pure function of its seed, the request index
-        // and the request body, so byte-identical request bodies at the same
-        // positions are the endpoint-side half of the replay proof.
+        // Cases now reach the endpoint from several lanes, so arrival order within
+        // a pass is the scheduler's; the request bodies of a pass are compared as
+        // sorted multisets, which still proves the second pass sent exactly the
+        // first pass's requests, byte for byte. The verdict trace above stays
+        // ordered by case.
         let both_bodies = mock.requests();
         assert_eq!(
             usize::try_from(served_both),
             Ok(both_bodies.len()),
             "every served request is recorded"
         );
-        let replayed_bodies = both_bodies
+        let mut replayed_bodies = both_bodies
             .get(first_bodies.len()..)
-            .ok_or("the second pass is recorded after the first")?;
+            .ok_or("the second pass is recorded after the first")?
+            .to_vec();
+        first_bodies.sort();
+        replayed_bodies.sort();
         assert_eq!(
-            replayed_bodies,
-            first_bodies.as_slice(),
+            replayed_bodies, first_bodies,
             "same seed, same trace: the second pass's request bodies replay the first pass byte for byte"
         );
         let both_keys = mock.authorizations();
-        let replayed_keys = both_keys
+        let mut replayed_keys = both_keys
             .get(first_keys.len()..)
-            .ok_or("the second pass is recorded after the first")?;
+            .ok_or("the second pass is recorded after the first")?
+            .to_vec();
+        first_keys.sort();
+        replayed_keys.sort();
         assert_eq!(
-            replayed_keys,
-            first_keys.as_slice(),
+            replayed_keys, first_keys,
             "same seed, same trace: the second pass's authorizations replay the first pass"
         );
         assert_eq!(

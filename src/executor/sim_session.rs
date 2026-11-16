@@ -26,6 +26,7 @@ use super::{
     check, parse_reply,
 };
 use crate::sim_error::SimError;
+use crate::sim_lanes::{self, LaneError};
 
 /// What every simulation returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -331,6 +332,14 @@ enum CancelSimError {
     WitnessPanicked,
     /// The command's record lacks a field the run needs.
     Missing(&'static str),
+    /// A lane of the seed sweep failed outright.
+    Lane(LaneError),
+}
+
+impl From<LaneError> for CancelSimError {
+    fn from(cause: LaneError) -> Self {
+        Self::Lane(cause)
+    }
 }
 
 impl fmt::Display for CancelSimError {
@@ -343,6 +352,7 @@ impl fmt::Display for CancelSimError {
             Self::Io(ref cause) => write!(out, "scratch or probe: {cause}"),
             Self::WitnessPanicked => out.write_str("the ledger witness thread panicked"),
             Self::Missing(what) => write!(out, "missing: {what}"),
+            Self::Lane(ref cause) => write!(out, "seed sweep: {cause}"),
         }
     }
 }
@@ -477,17 +487,21 @@ fn run_one(when: When, seed: u64, path_env: &str) -> Result<String, CancelSimErr
 
 /// Every seed's trace hash, in seed order.
 fn sweep(path_env: &str) -> Result<Vec<String>, CancelSimError> {
-    let mut hashes = Vec::with_capacity(usize::try_from(CANCEL_SEEDS)?);
-    for seed in 0..CANCEL_SEEDS {
-        let mut trace = String::new();
-        for when in When::ALL {
-            trace.push_str(&run_one(when, seed, path_env)?);
-        }
-        let mut hasher = lgwks_std::hash::Hasher::new();
-        hasher.update(trace.as_bytes());
-        hashes.push(hasher.finalize().to_hex());
-    }
-    Ok(hashes)
+    // Each seed owns its state directory and workspace, so the seeds run on bounded lanes and
+    // come back in seed order.
+    let hashes = sim_lanes::sweep(
+        CANCEL_SEEDS,
+        |_lane, seed| -> Result<String, CancelSimError> {
+            let mut trace = String::new();
+            for when in When::ALL {
+                trace.push_str(&run_one(when, seed, path_env)?);
+            }
+            let mut hasher = lgwks_std::hash::Hasher::new();
+            hasher.update(trace.as_bytes());
+            Ok(hasher.finalize().to_hex())
+        },
+    )?;
+    hashes.into_iter().collect()
 }
 
 /// The timeout the timeout run is given: short, so the deadline and not a cancel ends it.

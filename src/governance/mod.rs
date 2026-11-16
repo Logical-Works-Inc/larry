@@ -127,12 +127,14 @@ fn run(root: &Path) -> Result<Value, GovernanceError> {
 }
 
 /// `validate(documents)` for in-memory documents: the report body and every error, as the
-/// Python controls called it.
+/// Python controls called it. The patterns are the caller's, compiled once for many checks.
 #[cfg(test)]
-fn validated(documents: &Documents) -> Result<(Map, Vec<String>), GovernanceError> {
-    let patterns = Patterns::new()?;
+fn validated(
+    documents: &Documents,
+    patterns: &Patterns,
+) -> Result<(Map, Vec<String>), GovernanceError> {
     let mut errors = Vec::new();
-    let body = validate(documents, &patterns, &mut errors)?;
+    let body = validate(documents, patterns, &mut errors)?;
     Ok((body, errors))
 }
 

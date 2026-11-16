@@ -20,6 +20,10 @@ pub mod rerank;
 pub mod serve;
 #[cfg(test)]
 pub(crate) mod sim_error;
+#[cfg(test)]
+pub(crate) mod sim_lanes;
+#[cfg(test)]
+mod sim_lanes_tests;
 pub mod tui;
 
 /// Distinguishes the temporary files of concurrent replacements inside one process.

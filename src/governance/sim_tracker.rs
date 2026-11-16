@@ -12,8 +12,9 @@ use lgwks_std::json::{self, Map, Value, json};
 use lgwks_std::seeded::Seeded;
 
 use super::documents::{DOCUMENTS, MAX_DOCUMENT_BYTES, MAX_DOCUMENTS};
-use super::patterns::Patterns;
-use super::sim_support::{Scratch, SimError, SimResult, assert_refused, loaded, pick, root};
+use super::sim_support::{
+    Scratch, SimError, SimResult, assert_refused, each_seed, loaded, pick, root, with_patterns,
+};
 use super::{check, pyjson, receipts, tracker};
 
 /// Seeds the scratch-tree simulations run.
@@ -53,12 +54,14 @@ fn save(scratch: &Scratch, value: &Value) -> Result<(), SimError> {
 
 /// The drift errors of the scratch tracker.
 fn drift(scratch: &Scratch) -> Result<Vec<String>, SimError> {
-    let patterns = Patterns::new()?;
-    Ok(tracker::drift_errors(
-        scratch.path(),
-        &scratch.read("specification.md")?,
-        &patterns,
-    ))
+    let specification = scratch.read("specification.md")?;
+    with_patterns(|patterns| {
+        Ok(tracker::drift_errors(
+            scratch.path(),
+            &specification,
+            patterns,
+        ))
+    })
 }
 
 /// The array at `key` of the tracker data, to rewrite in place.
@@ -94,7 +97,7 @@ fn set_seeded_item(
 /// copy is current, and any edited percentage left unrendered is stale.
 #[test]
 fn sim_edited_data_without_regenerating_is_refused() -> SimResult {
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = tracker_scratch()?;
         assert!(
@@ -106,14 +109,15 @@ fn sim_edited_data_without_regenerating_is_refused() -> SimResult {
         set_seeded_item(&mut rng, &mut value, "cells", "pct", Value::from(pct))?;
         save(&scratch, &value)?;
         assert_refused(&drift(&scratch)?, "tools/tracker/index.html is stale", seed);
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
 /// Ports `test_cell_inventory_drift_is_refused`: a dropped, swapped, repeated or renamed cell.
 #[test]
 fn sim_cell_inventory_drift_is_refused() -> SimResult {
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = tracker_scratch()?;
         let mut value = data(&scratch)?;
@@ -149,14 +153,15 @@ fn sim_cell_inventory_drift_is_refused() -> SimResult {
             "progress tracker: cell inventory does not match specification.md",
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
 /// Ports `test_falsifier_not_in_specification_is_refused`: one undeclared id, named exactly.
 #[test]
 fn sim_falsifier_not_in_specification_is_named() -> SimResult {
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = tracker_scratch()?;
         let mut value = data(&scratch)?;
@@ -176,7 +181,8 @@ fn sim_falsifier_not_in_specification_is_named() -> SimResult {
             errors.contains(&expected),
             "seed {seed}: expected {expected:?} in {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -193,7 +199,7 @@ fn sim_falsifier_total_drift_is_shown_as_python_shows_it() -> SimResult {
         (None, Some("None")),
         (Some(json!(80.0)), None),
     ];
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let (total, shown) = pick(&mut rng, &cases)?.clone();
         let scratch = tracker_scratch()?;
@@ -226,14 +232,15 @@ fn sim_falsifier_total_drift_is_shown_as_python_shows_it() -> SimResult {
                 "seed {seed}: 80.0 equals 80: {errors:?}"
             ),
         }
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
 /// Ports `test_missing_render_is_refused`: a removed page, or a directory in its place.
 #[test]
 fn sim_missing_render_is_refused() -> SimResult {
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = tracker_scratch()?;
         let page = scratch.path().join("tools/tracker/index.html");
@@ -250,7 +257,8 @@ fn sim_missing_render_is_refused() -> SimResult {
         );
         let current: bool = tracker::is_current(scratch.path())?;
         assert!(!current, "seed {seed}: a missing page is never current");
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -447,7 +455,7 @@ fn reference_verdict(receipt: &Map) -> Option<&'static str> {
 /// the errors an independent reference of the Python rules gives.
 #[test]
 fn sim_receipts_match_the_python_rules() -> SimResult {
-    for seed in 0..256 {
+    each_seed(256, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = Scratch::new("receipts")?;
         let mut receipt = valid_receipt(&mut rng)?;
@@ -481,7 +489,8 @@ fn sim_receipts_match_the_python_rules() -> SimResult {
             expected,
             "seed {seed}: receipt {receipt:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -496,7 +505,7 @@ fn seeded_digest(rng: &mut Seeded) -> Result<String, SimError> {
 /// the other, is refused as a shape fault; a BLAKE3 pair alone is admitted.
 #[test]
 fn sim_a_receipt_with_both_digest_pairs_is_refused() -> SimResult {
-    for seed in 0..256 {
+    each_seed(256, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = Scratch::new("receipt-pairs")?;
         let mut pre = valid_receipt(&mut rng)?;
@@ -538,7 +547,8 @@ fn sim_a_receipt_with_both_digest_pairs_is_refused() -> SimResult {
             expected,
             "seed {seed}: case {case}, receipt {pre:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -549,7 +559,12 @@ fn check_errors(scratch: &Scratch) -> Vec<String> {
 }
 
 /// One load-time bound case of `variant`, built in `scratch` from `rng`.
-fn bound_case(variant: u64, rng: &mut Seeded, scratch: &Scratch, seed: u64) -> SimResult {
+fn bound_case(
+    variant: u64,
+    rng: &mut Seeded,
+    scratch: &Scratch,
+    seed: u64,
+) -> Result<(), SimError> {
     let over = rng.index(64)?.saturating_add(1);
     match variant {
         0 => {
@@ -623,21 +638,19 @@ fn bound_case(variant: u64, rng: &mut Seeded, scratch: &Scratch, seed: u64) -> S
 /// document stops the load with its exact error.
 #[test]
 fn sim_bounds_refuse_past_every_limit() -> SimResult {
-    for variant in 0..6_u64 {
-        for round in 0..2_u64 {
-            let seed = variant.saturating_mul(2).saturating_add(round);
-            let mut rng = Seeded::from_seed(seed);
-            let scratch = Scratch::governed("bounds")?;
-            bound_case(variant, &mut rng, &scratch, seed)?;
-        }
-    }
+    // Twelve cases: seed `n` is variant `n >> 1`, round `n & 1`, as the nested loops numbered them.
+    each_seed(12, |seed| {
+        let mut rng = Seeded::from_seed(seed);
+        let scratch = Scratch::governed("bounds")?;
+        bound_case(seed >> 1, &mut rng, &scratch, seed)
+    })?;
     Ok(())
 }
 
 /// More than 4096 documents is refused before any is read; 4096 is admitted.
 #[test]
 fn sim_document_count_bound_is_exact() -> SimResult {
-    for seed in 0..2 {
+    each_seed(2, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let scratch = Scratch::new("count")?;
         let room = MAX_DOCUMENTS.saturating_sub(DOCUMENTS.len());
@@ -658,7 +671,8 @@ fn sim_document_count_bound_is_exact() -> SimResult {
             ["document count exceeds 4096"],
             "seed {seed}: one more is refused"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
