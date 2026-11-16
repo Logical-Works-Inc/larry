@@ -736,21 +736,20 @@ fn tui_journey_probe_reports_p50_p95_p99_and_rss() -> Journey {
             idle_bytes, 0,
             "an unchanged frame writes nothing while idle"
         );
-        let mut figures = String::new();
-        writeln!(
-            figures,
-            "{{\"scope\":\"debug binary, 120x32 PTY, no model route\",\
+        let figures = format!(
+            "{{\"scope\":\"debug binary, 120x32 PTY, no model route\",\"os\":\"{}\",\
              \"first_paint_ms\":{first_paint:.1},\"input_samples\":{ROUND_TRIPS},\
              \"input_p50_ms\":{:.1},\"input_p95_ms\":{:.1},\"input_p99_ms\":{:.1},\
              \"idle_seconds\":{idle_seconds:.2},\"idle_cpu_percent\":{:.2},\
              \"idle_output_bytes\":{idle_bytes},\"sampled_max_rss_kib\":{},\
-             \"quit_to_exit_ms\":{quit_ms:.1}}}",
+             \"quit_to_exit_ms\":{quit_ms:.1}}}\n",
+            std::env::consts::OS,
             nearest_rank(&latencies, 50)?,
             nearest_rank(&latencies, 95)?,
             nearest_rank(&latencies, 99)?,
             (cpu_after - cpu_before) / idle_seconds * 100.0,
             rss_before.max(rss_after),
-        )?;
+        );
         std::io::stderr().lock().write_all(figures.as_bytes())?;
         Ok(())
     })
