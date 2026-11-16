@@ -7,9 +7,6 @@
 //! the workspaces, and the lock each origin carries. One seed drives
 //! every draw, so a failing seed replays exactly.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use lgwks_std::seeded::Seeded;
 
 use super::{hold_origin, sweep, sweep_origins};
@@ -28,16 +25,10 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE_0011,
 ];
 
-/// Per-process counter that gives each simulation its own state directory.
-static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A fresh scratch directory under the system temp dir.
-fn scratch_directory() -> PathBuf {
-    let index = DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "larry-workspace-sim-{}-{index}",
-        std::process::id()
-    ))
+/// A fresh state directory: empty when it is made and removed when its guard drops, so a
+/// process id the system reuses never lands a simulation in a stale tree (larry#267).
+fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_error::SimError> {
+    crate::executor::sim_tree::scratch("larry-workspace-sim")
 }
 
 /// The names `seeded` marks live: the caller's own statement, which is the oracle
@@ -59,7 +50,7 @@ fn drawn_live(
 /// holds is removed, whatever pid its name carries (larry#214: the lock, not the pid).
 #[test]
 fn sim_sweep_keeps_this_eval_and_removes_a_dead_ones_origin() -> TestResult {
-    let state = scratch_directory();
+    let state = scratch_directory()?;
     let eval = state.join("eval");
     let mine_name = format!("origin-{}-0", std::process::id());
     let mine = eval.join(&mine_name);
@@ -70,7 +61,6 @@ fn sim_sweep_keeps_this_eval_and_removes_a_dead_ones_origin() -> TestResult {
     sweep_origins(&state)?;
     assert!(mine.is_dir(), "a running eval keeps its locked origin");
     assert!(!dead.exists(), "an origin nobody holds is removed");
-    drop(std::fs::remove_dir_all(&state));
     Ok(())
 }
 
@@ -80,7 +70,7 @@ fn sim_sweep_keeps_this_eval_and_removes_a_dead_ones_origin() -> TestResult {
 #[test]
 fn sim_the_sweep_keeps_exactly_the_named_live_runs_for_every_seed() -> TestResult {
     for seed in SEEDS {
-        let state = scratch_directory();
+        let state = scratch_directory()?;
         let ws = state.join("ws");
         std::fs::create_dir_all(&ws)?;
         let mut seeded = Seeded::from_seed(seed);
@@ -117,7 +107,6 @@ fn sim_the_sweep_keeps_exactly_the_named_live_runs_for_every_seed() -> TestResul
             );
         }
         assert!(kept_file.is_file(), "seed {seed}: a file is never removed");
-        drop(std::fs::remove_dir_all(&state));
     }
     Ok(())
 }
@@ -137,7 +126,7 @@ fn sim_an_origin_without_a_held_lock_is_removed_for_every_seed() -> TestResult {
         "origin-99999999-0",
     ];
     for seed in SEEDS {
-        let state = scratch_directory();
+        let state = scratch_directory()?;
         let eval = state.join("eval");
         std::fs::create_dir_all(&eval)?;
         let mut seeded = Seeded::from_seed(seed);
@@ -165,7 +154,6 @@ fn sim_an_origin_without_a_held_lock_is_removed_for_every_seed() -> TestResult {
             !eval.join(&foreign).exists(),
             "seed {seed}: {foreign} with no lock is removed whatever its pid"
         );
-        drop(std::fs::remove_dir_all(&state));
     }
     Ok(())
 }
@@ -175,7 +163,7 @@ fn sim_an_origin_without_a_held_lock_is_removed_for_every_seed() -> TestResult {
 #[test]
 fn sim_a_second_sweep_removes_nothing_more_for_every_seed() -> TestResult {
     for seed in SEEDS {
-        let state = scratch_directory();
+        let state = scratch_directory()?;
         let ws = state.join("ws");
         std::fs::create_dir_all(&ws)?;
         let mut seeded = Seeded::from_seed(seed);
@@ -202,7 +190,6 @@ fn sim_a_second_sweep_removes_nothing_more_for_every_seed() -> TestResult {
                 "seed {seed}: {name} follows the live list"
             );
         }
-        drop(std::fs::remove_dir_all(&state));
     }
     Ok(())
 }

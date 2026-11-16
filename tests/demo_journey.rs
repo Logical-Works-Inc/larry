@@ -11,12 +11,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use larry_demo::Demo;
 use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
+
+#[path = "support/temp_dir.rs"]
+mod temp_dir;
+use temp_dir::TempDir;
 
 /// Failures propagate instead of panicking.
 type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -49,42 +52,13 @@ const VOCABULARY: [&str; 20] = [
     "nextx",
 ];
 
-/// Distinct scratch directories made by this test binary.
-static SCRATCHES: AtomicU64 = AtomicU64::new(0);
-
-/// An empty directory the driver runs in, removed when dropped.
-struct Scratch {
-    /// The directory.
-    path: PathBuf,
-}
-
-impl Scratch {
-    /// A fresh directory under the system temporary directory.
-    fn new() -> Journey<Self> {
-        let serial = SCRATCHES.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "larry-demo-journey-{}-{serial}",
-            std::process::id()
-        ));
-        fs::create_dir(&path)?;
-        Ok(Self { path })
+/// The names left in `dir`.
+fn entries(dir: &Path) -> Journey<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        names.push(entry?.file_name().to_string_lossy().into_owned());
     }
-
-    /// The names left in the directory.
-    fn entries(&self) -> Journey<Vec<String>> {
-        let mut names = Vec::new();
-        for entry in fs::read_dir(&self.path)? {
-            names.push(entry?.file_name().to_string_lossy().into_owned());
-        }
-        Ok(names)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // Best effort: a leftover scratch directory never fails a journey.
-        drop(fs::remove_dir_all(&self.path));
-    }
+    Ok(names)
 }
 
 /// The shipped driver, run in `dir` with arguments `args`.
@@ -150,9 +124,9 @@ fn workspace_digests() -> Journey<BTreeMap<PathBuf, String>> {
 
 #[test]
 fn inspect_feedback_independent_work_and_continue() -> Journey {
-    let scratch = Scratch::new()?;
+    let scratch = TempDir::new()?;
     let output = run(
-        &scratch.path,
+        &scratch,
         b"next\nfeedback bound retries\nnext\ninspect 2\nnext\ncontinue\nnext\nquit\n",
         &[],
     )?;
@@ -192,9 +166,9 @@ fn inspect_feedback_independent_work_and_continue() -> Journey {
 
 #[test]
 fn panes_empty_scenario_and_invalid_operation_recovery() -> Journey {
-    let scratch = Scratch::new()?;
+    let scratch = TempDir::new()?;
     let output = run(
-        &scratch.path,
+        &scratch,
         b"folders\nagents\nscenario empty\nnext\nexec touch larry-unwanted\nscenario change\nnext\nquit\n",
         &[],
     )?;
@@ -223,9 +197,9 @@ fn panes_empty_scenario_and_invalid_operation_recovery() -> Journey {
         "exec is not in the grammar"
     );
     assert!(
-        scratch.entries()?.is_empty(),
+        entries(&scratch)?.is_empty(),
         "nothing was written: {:?}",
-        scratch.entries()
+        entries(&scratch)
     );
     let last = views.last().ok_or("no frames")?;
     let events = last["events"].as_array().ok_or("no events")?;
@@ -239,13 +213,13 @@ fn panes_empty_scenario_and_invalid_operation_recovery() -> Journey {
 
 #[test]
 fn transport_bounds_utf8_eof_and_arguments() -> Journey {
-    let scratch = Scratch::new()?;
+    let scratch = TempDir::new()?;
     let mut oversize = vec![b'x'; 4097];
     oversize.push(b'\n');
     let refused: [(&[u8], &[&str]); 3] =
         [(&oversize, &[]), (b"\xff\n", &[]), (b"", &["--execute"])];
     for (input, args) in refused {
-        let output = run(&scratch.path, input, args)?;
+        let output = run(&scratch, input, args)?;
         assert_eq!(
             output.status.code(),
             Some(1),
@@ -258,7 +232,7 @@ fn transport_bounds_utf8_eof_and_arguments() -> Journey {
             input.len()
         );
     }
-    let output = run(&scratch.path, b"help\r\nstatus", &[])?;
+    let output = run(&scratch, b"help\r\nstatus", &[])?;
     assert!(
         output.status.success(),
         "CRLF and a final line without LF: {output:?}"
@@ -305,19 +279,15 @@ fn killed_after(dir: &Path, input: &[u8], count: usize) -> Journey<Vec<Value>> {
 
 #[test]
 fn actual_process_crash_resets_fixture_without_workspace_changes() -> Journey {
-    let scratch = Scratch::new()?;
+    let scratch = TempDir::new()?;
     let before = workspace_digests()?;
-    let seen = killed_after(
-        &scratch.path,
-        b"next\nfeedback preserve original anchor\n",
-        3,
-    )?;
+    let seen = killed_after(&scratch, b"next\nfeedback preserve original anchor\n", 3)?;
     assert_eq!(
         seen.last().ok_or("no frames")?["work"]["Held"]["anchor"],
         1,
         "held at 1"
     );
-    let restored = run(&scratch.path, b"status\nquit\n", &[])?;
+    let restored = run(&scratch, b"status\nquit\n", &[])?;
     assert!(
         restored.status.success(),
         "a fresh driver exits 0: {restored:?}"
@@ -338,7 +308,7 @@ fn actual_process_crash_resets_fixture_without_workspace_changes() -> Journey {
         workspace_digests()?,
         "the kill changed no source file"
     );
-    assert!(scratch.entries()?.is_empty(), "the driver wrote nothing");
+    assert!(entries(&scratch)?.is_empty(), "the driver wrote nothing");
     Ok(())
 }
 
@@ -379,13 +349,13 @@ fn expected(commands: &[&str]) -> Journey<(String, String)> {
 
 #[test]
 fn sim_driver_frames_match_the_library_for_every_seed() -> Journey {
-    let scratch = Scratch::new()?;
+    let scratch = TempDir::new()?;
     let mut first_trace = None;
     for seed in 0..SEEDS {
         let commands = stream(seed)?;
         let mut input = commands.join("\n");
         input.push_str("\nquit\n");
-        let output = run(&scratch.path, input.as_bytes(), &[])?;
+        let output = run(&scratch, input.as_bytes(), &[])?;
         let (frames, refusals) = expected(&commands)?;
         assert!(output.status.success(), "seed {seed}: {output:?}");
         assert_eq!(
@@ -399,7 +369,7 @@ fn sim_driver_frames_match_the_library_for_every_seed() -> Journey {
             "seed {seed}: refusals"
         );
         assert!(
-            scratch.entries()?.is_empty(),
+            entries(&scratch)?.is_empty(),
             "seed {seed}: the driver wrote nothing"
         );
         if seed == 0 {
@@ -407,7 +377,7 @@ fn sim_driver_frames_match_the_library_for_every_seed() -> Journey {
         }
     }
     let again = run(
-        &scratch.path,
+        &scratch,
         format!("{}\nquit\n", stream(0)?.join("\n")).as_bytes(),
         &[],
     )?;
@@ -421,7 +391,7 @@ fn sim_driver_frames_match_the_library_for_every_seed() -> Journey {
 
 #[test]
 fn sim_a_kill_at_any_seeded_point_leaves_the_next_session_ready() -> Journey {
-    let scratch = Scratch::new()?;
+    let scratch = TempDir::new()?;
     let before = workspace_digests()?;
     for seed in 0..SEEDS {
         let commands = stream(seed)?;
@@ -430,13 +400,13 @@ fn sim_a_kill_at_any_seeded_point_leaves_the_next_session_ready() -> Journey {
         let sent = commands.get(..cut).ok_or("cut past the stream")?;
         let input: String = sent.iter().map(|command| format!("{command}\n")).collect();
         let lines = cut.saturating_add(1);
-        let seen = killed_after(&scratch.path, input.as_bytes(), lines)?;
+        let seen = killed_after(&scratch, input.as_bytes(), lines)?;
         assert_eq!(
             seen.len(),
             lines,
             "seed {seed}: one frame per command before the kill"
         );
-        let fresh = run(&scratch.path, b"status\nquit\n", &[])?;
+        let fresh = run(&scratch, b"status\nquit\n", &[])?;
         assert!(fresh.status.success(), "seed {seed}: {fresh:?}");
         let views = frames(&fresh)?;
         assert_eq!(
@@ -445,7 +415,7 @@ fn sim_a_kill_at_any_seeded_point_leaves_the_next_session_ready() -> Journey {
             "seed {seed}: fresh session"
         );
         assert!(
-            scratch.entries()?.is_empty(),
+            entries(&scratch)?.is_empty(),
             "seed {seed}: the driver wrote nothing"
         );
     }

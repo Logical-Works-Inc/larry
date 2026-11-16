@@ -155,7 +155,7 @@ fn sim_a_non_loopback_bind_is_refused_before_binding_for_every_seed() -> TestRes
 /// One revoke pass: a seeded tenant is revoked, a SIGHUP reloads, and its key is
 /// refused while every other key still answers. Returns the trace hash.
 fn revoke_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let keyed = issue_all(&state)?;
     let victim = victim_of(&mut Seeded::from_seed(seed))?;
     let mut serving = start_pinned("127.0.0.1:0", &state)?;
@@ -194,7 +194,7 @@ fn sim_revoke_then_sighup_refuses_the_revoked_key_for_every_seed() -> TestResult
 /// The wrong order: a revoke written to the store is not live until the SIGHUP
 /// that reads it. Returns the trace hash of the answers after the signal.
 fn wrong_order_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let keyed = issue_all(&state)?;
     let victim = victim_of(&mut Seeded::from_seed(seed))?;
     let mut serving = start_pinned("127.0.0.1:0", &state)?;
@@ -233,7 +233,7 @@ fn sim_a_revoke_is_not_live_before_the_sighup_for_every_seed() -> TestResult {
 /// before any SIGHUP, and the restarted host must still refuse it. Returns the
 /// trace hash of the restarted host's answers.
 fn pulled_plug_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let keyed = issue_all(&state)?;
     let victim = victim_of(&mut Seeded::from_seed(seed))?;
     let mut first = start_pinned("127.0.0.1:0", &state)?;
@@ -273,7 +273,7 @@ fn sim_a_pulled_plug_after_a_revoke_keeps_the_revoke_for_every_seed() -> TestRes
 
 #[test]
 fn sim_key_cap_boundary_serves_at_cap_minus_one_and_cap_and_refuses_cap_plus_one() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let acme = issue_key(&state, "acme")?;
     fill_key_store(&state, 0, KEY_CAP_ROWS.saturating_sub(2))?;
     for (step, (rows, expect_serving)) in [("cap-1", true), ("cap", true), ("cap+1", false)]
@@ -305,7 +305,7 @@ fn sim_key_cap_boundary_serves_at_cap_minus_one_and_cap_and_refuses_cap_plus_one
 
 #[test]
 fn sim_a_store_grown_past_the_cap_under_a_running_host_reloads_closed() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let keyed = issue_all(&state)?;
     let mut serving = start_pinned("127.0.0.1:0", &state)?;
     let addr = serving.addr();
@@ -339,7 +339,7 @@ fn sim_a_store_grown_past_the_cap_under_a_running_host_reloads_closed() -> TestR
 
 #[test]
 fn sim_a_burst_on_one_tenant_neither_starves_nor_leaks_into_another() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let alpha = issue_key(&state, "alpha")?;
     let beta = issue_key(&state, "beta")?;
     let mut serving = start_pinned("127.0.0.1:0", &state)?;

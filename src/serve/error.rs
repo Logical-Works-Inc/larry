@@ -8,7 +8,7 @@ use std::net::{AddrParseError, SocketAddr};
 use lgwks_bot::app::AppError;
 use lgwks_std::hash::DigestParseError;
 
-use super::{ADDR_VAR, DEFAULT_ADDR, PLAINTEXT_OPT_IN, PLAINTEXT_VAR};
+use super::{ADDR_VAR, PLAINTEXT_OPT_IN, PLAINTEXT_VAR, default_addr};
 use crate::executor::ExecError;
 
 /// Why `larry serve` stopped other than by its signal; each variant keeps its
@@ -94,7 +94,8 @@ impl fmt::Display for ServeError {
                 ref cause,
             } => write!(
                 out,
-                "serve: {ADDR_VAR}={value:?} is not an IP address and port such as {DEFAULT_ADDR}: {cause}"
+                "serve: {ADDR_VAR}={value:?} is not an IP address and port such as {}: {cause}",
+                default_addr()
             ),
             Self::Plaintext { addr } => write!(
                 out,

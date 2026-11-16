@@ -405,8 +405,6 @@ mod sim;
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use lgwks_deps::storefront::rusqlite;
     use lgwks_std::process::ProcessIdentity;
@@ -416,13 +414,11 @@ mod tests {
     /// A pid no live process holds: the largest positive `i32` less one.
     const DEAD_PID: i32 = 2_147_483_646;
 
-    /// Per-process counter that gives each test its own state directory.
-    static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    /// A fresh scratch directory under the system temp dir.
-    fn scratch_directory() -> PathBuf {
-        let index = DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("larry-ledger-{}-{index}", std::process::id()))
+    /// A fresh state directory: empty when it is made and removed when its guard drops, so a
+    /// process id the system reuses never lands a test in a stale tree (larry#267).
+    fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_error::SimError>
+    {
+        crate::executor::sim_tree::scratch("larry-ledger")
     }
 
     /// The start-time string this platform's process identity reads: the kinfo form on macOS
@@ -437,7 +433,7 @@ mod tests {
     #[test]
     fn sim_ledger_reaps_a_dead_leader_and_a_damaged_row() -> Result<(), Box<dyn std::error::Error>>
     {
-        let directory = scratch_directory();
+        let directory = scratch_directory()?;
         let ledger = Ledger::open(&directory)?;
         let dead = ProcessIdentity::new(DEAD_PID, PLATFORM_START)?;
         ledger.insert("task-a", &dead)?;
@@ -462,7 +458,6 @@ mod tests {
             "the dead-leader row and the damaged row are both settled"
         );
         assert!(ledger.live_tasks()?.is_empty(), "reap leaves no row behind");
-        drop(std::fs::remove_dir_all(&directory));
         Ok(())
     }
 
@@ -472,7 +467,7 @@ mod tests {
     #[test]
     fn a_surviving_group_keeps_its_row() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::process::CommandExt;
-        let directory = scratch_directory();
+        let directory = scratch_directory()?;
         let ledger = Ledger::open(&directory)?;
         let mut survivor = std::process::Command::new("sleep")
             .arg("30")
@@ -485,7 +480,6 @@ mod tests {
         let group_up = lgwks_std::process::process_group_exists(pid);
         drop(survivor.kill());
         drop(survivor.wait());
-        drop(std::fs::remove_dir_all(&directory));
         assert_eq!(settled?, 0, "a surviving group settles no row");
         assert!(group_up?, "the group is still running after the reap");
         Ok(())
@@ -496,8 +490,7 @@ mod tests {
     #[test]
     fn a_held_ledger_lock_returns_the_typed_timeout() -> Result<(), Box<dyn std::error::Error>> {
         use std::time::Duration;
-        let directory = scratch_directory();
-        std::fs::create_dir_all(&directory)?;
+        let directory = scratch_directory()?;
         let holder = std::fs::File::options()
             .create(true)
             .truncate(false)
@@ -514,7 +507,6 @@ mod tests {
         );
         drop(holder);
         let reopened = Ledger::open_within(&directory, Duration::from_millis(30));
-        drop(std::fs::remove_dir_all(&directory));
         assert!(reopened.is_ok(), "a released lock opens the ledger");
         Ok(())
     }
@@ -525,7 +517,7 @@ mod tests {
     #[test]
     fn a_report_at_its_byte_bound_is_read_and_one_byte_past_is_refused()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = scratch_directory();
+        let directory = scratch_directory()?;
         let ledger = Ledger::open(&directory)?;
         let report = [7_u8; 16];
         ledger.keep_report("run-a", "digest-a", &report)?;
@@ -552,7 +544,6 @@ mod tests {
             Some(report.to_vec()),
             "the first record under one id is the run"
         );
-        drop(std::fs::remove_dir_all(&directory));
         Ok(())
     }
 
@@ -568,7 +559,7 @@ mod tests {
         /// Rounds, each on a fresh directory.
         const ROUNDS: usize = 8;
         for _round in 0..ROUNDS {
-            let directory = scratch_directory();
+            let directory = scratch_directory()?;
             let barrier = std::sync::Barrier::new(OPENERS);
             let refusals = std::thread::scope(|scope| {
                 let openers: Vec<_> = (0..OPENERS)
@@ -590,7 +581,6 @@ mod tests {
                     })
                     .collect::<Vec<String>>()
             });
-            drop(std::fs::remove_dir_all(&directory));
             assert_eq!(
                 refusals,
                 Vec::<String>::new(),
@@ -611,7 +601,7 @@ mod tests {
         const ROUNDS: usize = 8;
         let mut keys_per_round: Vec<[u8; 32]> = Vec::with_capacity(ROUNDS);
         for _round in 0..ROUNDS {
-            let directory = scratch_directory();
+            let directory = scratch_directory()?;
             let barrier = std::sync::Barrier::new(RACERS);
             let drawn = std::thread::scope(|scope| {
                 let racers: Vec<_> = (0..RACERS)
@@ -652,7 +642,6 @@ mod tests {
                 "the store holding the seed is owner-only"
             );
             keys_per_round.push(first);
-            drop(std::fs::remove_dir_all(&directory));
         }
         let mut distinct = keys_per_round.clone();
         distinct.sort_unstable();

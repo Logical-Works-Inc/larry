@@ -12,17 +12,19 @@
 
 #[path = "../src/governance/fixture.rs"]
 mod fixture;
+#[path = "support/temp_dir.rs"]
+mod temp_dir;
 
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
+use temp_dir::TempDir;
 
 /// What every journey returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -47,27 +49,21 @@ const COPIED: [&str; 3] = ["docs", "tools/receipts", "tools/tracker"];
 const RUNS: usize = 32;
 /// Kills of a tracker write the killed-write journey makes.
 const KILLS: usize = 16;
-/// Names the copies of one test process.
-static COPIES: AtomicU64 = AtomicU64::new(0);
 
-/// A temporary copy of the governed files, removed when dropped.
+/// A temporary copy of the governed files, removed when dropped: the guard is the one temp
+/// directory of the integration tests (larry#267).
 struct Tree {
     /// The copy's root.
-    path: PathBuf,
+    path: TempDir,
 }
 
 impl Tree {
-    /// A fresh copy of every file `larry governance` and `larry tracker` read. The directory
-    /// must not exist yet, so a copy never inherits another run's files.
+    /// A fresh copy of every file `larry governance` and `larry tracker` read. The guard makes the
+    /// directory empty, so a copy never inherits another run's files.
     fn governed() -> Result<Tree, Box<dyn Error>> {
-        let sequence = COPIES.fetch_add(1, Ordering::Relaxed);
         let tree = Tree {
-            path: std::env::temp_dir().join(format!(
-                "larry-governance-journey-{}-{sequence}",
-                std::process::id()
-            )),
+            path: TempDir::new()?,
         };
-        fs::create_dir(&tree.path)?;
         for name in DOCUMENTS {
             fs::copy(Path::new(ROOT).join(name), tree.at(name))?;
         }
@@ -80,16 +76,9 @@ impl Tree {
     /// A governed fixture tree the checker passes on its own terms, never a copy of the live
     /// checkout (larry#224, larry#270): the latency figures are measured on it.
     fn fixture() -> Result<Tree, Box<dyn Error>> {
-        let sequence = COPIES.fetch_add(1, Ordering::Relaxed);
         let tree = Tree {
-            path: std::env::temp_dir().join(format!(
-                "larry-governance-fixture-{}-{sequence}",
-                std::process::id()
-            )),
+            path: TempDir::new()?,
         };
-        // A directory left at this name by a dead run is gone before the fixture is written.
-        drop(fs::remove_dir_all(&tree.path));
-        fs::create_dir(&tree.path)?;
         fixture::governed(&tree.path, &Path::new(ROOT).join("tools").join("receipts"))?;
         let rendered = larry(&["tracker"], &tree.path)?;
         assert_eq!(
@@ -104,13 +93,6 @@ impl Tree {
     /// The path of `relative` inside the copy.
     fn at(&self, relative: &str) -> PathBuf {
         self.path.join(relative)
-    }
-}
-
-impl Drop for Tree {
-    fn drop(&mut self) {
-        // Best effort: a leftover temp dir never fails a journey.
-        drop(fs::remove_dir_all(&self.path));
     }
 }
 
@@ -399,7 +381,7 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     for _ in 0..KILLS {
         let mut child = Command::new(LARRY)
             .args(["tracker", "--root"])
-            .arg(&tree.path)
+            .arg(&*tree.path)
             .env_clear()
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -23,9 +23,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "support/temp_dir.rs"]
+mod temp_dir;
+use temp_dir::TempDir;
 
 /// What every journey returns.
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -35,35 +38,6 @@ const SHIPPED_SET: &str = include_str!("../eval/matched-v1.json");
 
 /// The key every arm sends; the mock records it.
 const KEY: &str = "eval-key";
-
-/// A fresh directory under the system temp dir, removed when dropped.
-struct Scratch {
-    /// Where it lives.
-    path: PathBuf,
-}
-
-impl Scratch {
-    /// An empty directory no other journey in this process uses.
-    fn new() -> io::Result<Scratch> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let run = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("larry-eval-{}-{run}", std::process::id()));
-        match fs::remove_dir_all(&path) {
-            Ok(()) => {}
-            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
-            Err(cause) => return Err(cause),
-        }
-        fs::create_dir_all(&path)?;
-        Ok(Scratch { path })
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // Best effort: a leftover temp dir never fails a journey.
-        drop(fs::remove_dir_all(&self.path));
-    }
-}
 
 /// One arm: the model it pins and its dollars per million tokens each way.
 struct Arm {
@@ -421,12 +395,12 @@ fn two_arms_score_one_set_and_a_rerun_replays_the_same_card() -> TestResult {
         let mut cards = Vec::new();
         // One state directory is one tenant: the prompt names its cache partition, so a
         // rerun that must replay the same gateway trace runs in the same directory.
-        let state = Scratch::new()?;
+        let state = TempDir::new()?;
         for arm in [&CLAUDE, &FLASH, &CLAUDE] {
-            let scored = arm_on_seed(seed, arm, &set, &state.path)?;
+            let scored = arm_on_seed(seed, arm, &set, &state)?;
             check_card(seed, arm, &scored)?;
             assert_eq!(
-                origins_left(&state.path)?,
+                origins_left(&state)?,
                 0,
                 "seed {seed}: every origin removed"
             );
@@ -486,9 +460,9 @@ fn a_fat_fingered_price_or_set_spends_nothing() -> TestResult {
         {"id": "two", "files": {"a": ""}, "goal": "g", "write": ["b"], "acceptance": []},
     ]})
     .to_string();
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     mock_model::run(Config::seeded(11), |handle: &Handle| {
-        let base = operator(&state.path, handle.addr(), &CLAUDE, "1");
+        let base = operator(&state, handle.addr(), &CLAUDE, "1");
         let cases: [Mistake; 7] = [
             (
                 with(&base, "LARRY_EVAL_PRICE_IN", Some("1e3")),
@@ -539,7 +513,7 @@ fn a_fat_fingered_price_or_set_spends_nothing() -> TestResult {
         assert_eq!(handle.served(), 0, "nothing reached the gateway");
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
-    assert_eq!(origins_left(&state.path)?, 0, "no origin was made");
+    assert_eq!(origins_left(&state)?, 0, "no origin was made");
     Ok(())
 }
 
@@ -613,7 +587,7 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
     let set = json!({"name": "liars", "tasks": tasks}).to_string();
     let mut replays = Vec::new();
     // The same tenant both times: the prompt names its cache partition (larry#230).
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     for _ in 0..2 {
         let config = Config {
             script: LIES.iter().map(|lie| lie.0).collect(),
@@ -622,7 +596,7 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
         let (ran, trace) = mock_model::run(config, |handle: &Handle| {
             handle.release_delayed();
             let ran = score_arm(
-                &operator(&state.path, handle.addr(), &FLASH, "1"),
+                &operator(&state, handle.addr(), &FLASH, "1"),
                 set.as_bytes(),
             )?;
             assert_eq!(handle.served(), 8, "one request per task at one attempt");
@@ -630,7 +604,7 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
         })?;
         check_lies(&ran)?;
         assert_eq!(
-            eval_entries(&state.path)?,
+            eval_entries(&state)?,
             0,
             "every origin and its lock removed"
         );
@@ -651,13 +625,13 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
 #[test]
 fn a_killed_eval_leaves_nothing_the_next_run_does_not_collect() -> TestResult {
     let set = json!({"name": "plug", "tasks": [task("held", 1, &[])]}).to_string();
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let config = Config {
         script: vec![Some(Fault::Delay)],
         ..Config::seeded(31)
     };
     mock_model::run(config, |handle: &Handle| {
-        let env = operator(&state.path, handle.addr(), &CLAUDE, "1");
+        let env = operator(&state, handle.addr(), &CLAUDE, "1");
         let mut child = spawn_arm(&env, false)?;
         let mut stdin = child.stdin.take().ok_or("child stdin was not piped")?;
         stdin.write_all(set.as_bytes())?;
@@ -668,15 +642,11 @@ fn a_killed_eval_leaves_nothing_the_next_run_does_not_collect() -> TestResult {
             }
             std::thread::yield_now();
         }
-        assert_eq!(
-            origins_left(&state.path)?,
-            1,
-            "the held task's origin exists"
-        );
+        assert_eq!(origins_left(&state)?, 1, "the held task's origin exists");
         child.kill()?;
         child.wait()?;
         handle.release_delayed();
-        assert_eq!(origins_left(&state.path)?, 1, "SIGKILL ran no destructor");
+        assert_eq!(origins_left(&state)?, 1, "SIGKILL ran no destructor");
         let ran = score_arm(&env, set.as_bytes())?;
         let card = ran.card()?;
         assert_eq!(
@@ -687,7 +657,7 @@ fn a_killed_eval_leaves_nothing_the_next_run_does_not_collect() -> TestResult {
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
     assert_eq!(
-        eval_entries(&state.path)?,
+        eval_entries(&state)?,
         0,
         "the dead run's origin and its lock file were collected"
     );
@@ -709,10 +679,10 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         .filter_map(|one| one["write"].as_array().map(Vec::len))
         .sum();
     assert_eq!(ids.len(), 12, "the shipped set holds twelve tasks");
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let ran = mock_model::run(Config::seeded(7), |handle: &Handle| {
         let ran = score_arm(
-            &operator(&state.path, handle.addr(), &FLASH, "3"),
+            &operator(&state, handle.addr(), &FLASH, "3"),
             SHIPPED_SET.as_bytes(),
         )?;
         assert_eq!(
@@ -742,7 +712,7 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         card["cost_complete"], true,
         "every completion reported usage"
     );
-    assert_eq!(origins_left(&state.path)?, 0, "every origin removed");
+    assert_eq!(origins_left(&state)?, 0, "every origin removed");
     if rss_tool().is_some() {
         assert!(
             ran.peak_rss_kib().is_some(),

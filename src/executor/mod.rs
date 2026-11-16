@@ -14,7 +14,7 @@ pub mod routes;
 mod run;
 mod session;
 #[cfg(test)]
-mod sim_tree;
+pub(crate) mod sim_tree;
 mod task;
 mod workspace;
 

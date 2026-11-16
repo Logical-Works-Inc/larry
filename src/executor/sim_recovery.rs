@@ -9,8 +9,6 @@
 //! are not. One seed drives every draw, so a failing seed replays exactly.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use larry_contracts::authority::Scope;
@@ -32,19 +30,20 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE_0031,
 ];
 
-/// Per-process counter that gives each simulation its own state directory.
-static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The sim's pinned instant: only the journal capacity is read from the lease, so a fixed reading
+/// keeps every seed replaying the same trace (larry#267).
+const PINNED_INSTANT: SystemTime = SystemTime::UNIX_EPOCH;
 
-/// A fresh scratch directory under the system temp dir.
-fn scratch_directory() -> PathBuf {
-    let index = DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("larry-recovery-{}-{index}", std::process::id()))
+/// A fresh state directory: empty when it is made and removed when its guard drops, so a
+/// process id the system reuses never lands a simulation in a stale tree (larry#267).
+fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_error::SimError> {
+    crate::executor::sim_tree::scratch("larry-recovery")
 }
 
 /// The policy an unset `LARRY_POLICY` yields, and the journal capacity it sets.
 fn settings() -> Result<(BTreeSet<Scope>, usize), ExecError> {
     let scopes = policy(&|_name: &str| None)?;
-    let expiry = lease_end(SystemTime::now()).map_err(ExecError::Gate)?;
+    let expiry = lease_end(PINNED_INSTANT).map_err(ExecError::Gate)?;
     let capacity = task_settings(&scopes, expiry).journal_capacity;
     Ok((scopes, capacity))
 }
@@ -55,7 +54,7 @@ fn settings() -> Result<(BTreeSet<Scope>, usize), ExecError> {
 #[test]
 fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
     let (scopes, capacity) = settings()?;
-    let state = scratch_directory();
+    let state = scratch_directory()?;
     std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     let id = "018f0000-0000-7000-8000-000000000001";
     assert!(
@@ -73,7 +72,6 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
         !journal_live(&state, &scopes, id)?,
         "a journal whose lock was released is not live"
     );
-    drop(std::fs::remove_dir_all(&state));
     Ok(())
 }
 
@@ -84,7 +82,7 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
 #[test]
 fn sim_recover_skips_a_held_journal_and_sets_every_other_aside() -> TestResult {
     let (scopes, capacity) = settings()?;
-    let state = scratch_directory();
+    let state = scratch_directory()?;
     let journals = state.join(JOURNALS_DIR);
     std::fs::create_dir_all(&journals)?;
     let held_id = "018f0000-0000-7000-8000-000000000002";
@@ -118,7 +116,6 @@ fn sim_recover_skips_a_held_journal_and_sets_every_other_aside() -> TestResult {
     );
     assert!(note.exists(), "a file that is not a journal is left alone");
     drop(held);
-    drop(std::fs::remove_dir_all(&state));
     Ok(())
 }
 
@@ -129,7 +126,7 @@ fn sim_recover_skips_a_held_journal_and_sets_every_other_aside() -> TestResult {
 fn sim_a_dead_journal_directory_is_set_aside_exactly_for_every_seed() -> TestResult {
     for seed in SEEDS {
         let (scopes, capacity) = settings()?;
-        let state = scratch_directory();
+        let state = scratch_directory()?;
         let journals = state.join(JOURNALS_DIR);
         std::fs::create_dir_all(&journals)?;
         let mut seeded = Seeded::from_seed(seed);
@@ -171,7 +168,6 @@ fn sim_a_dead_journal_directory_is_set_aside_exactly_for_every_seed() -> TestRes
             );
         }
         assert!(note.exists(), "seed {seed}: a file is left alone");
-        drop(std::fs::remove_dir_all(&state));
     }
     Ok(())
 }
@@ -183,8 +179,8 @@ fn sim_a_dead_journal_directory_is_set_aside_exactly_for_every_seed() -> TestRes
 fn sim_two_state_directories_never_set_aside_each_others_journals() -> TestResult {
     let (scopes, capacity) = settings()?;
     for seed in SEEDS {
-        let left = scratch_directory();
-        let right = scratch_directory();
+        let left = scratch_directory()?;
+        let right = scratch_directory()?;
         std::fs::create_dir_all(left.join(JOURNALS_DIR))?;
         std::fs::create_dir_all(right.join(JOURNALS_DIR))?;
         let mut seeded = Seeded::from_seed(seed);
@@ -218,8 +214,6 @@ fn sim_two_state_directories_never_set_aside_each_others_journals() -> TestResul
             right_count,
             "seed {seed}: the right directory sets aside its own journals afterwards"
         );
-        drop(std::fs::remove_dir_all(&left));
-        drop(std::fs::remove_dir_all(&right));
     }
     Ok(())
 }

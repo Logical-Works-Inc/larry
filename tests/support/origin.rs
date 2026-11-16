@@ -2,44 +2,18 @@
 //! from (larry#85, larry#86, larry#123): a temp directory that removes itself,
 //! and a git repository with one commit and no background maintenance.
 //! `tests/support/exec_cli.rs` re-exports both for the `larry exec` journeys;
-//! `tests/mcp_stdio_journey.rs` includes this file alone.
+//! `tests/mcp_stdio_journey.rs` includes this file alone. The temp directory
+//! itself is the one guard of the integration tests, `support/temp_dir.rs`
+//! (larry#267).
 
 use std::error::Error;
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A fresh directory under the system temp dir, removed when dropped.
-pub struct TempDir {
-    /// Where the directory lives.
-    path: PathBuf,
-}
-
-impl TempDir {
-    /// Creates an empty directory whose name no other test in this process uses.
-    pub fn new() -> io::Result<TempDir> {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let run = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("larry-exec-{}-{run}", std::process::id()));
-        fs::remove_dir_all(&path).ok();
-        fs::create_dir_all(&path)?;
-        Ok(TempDir { path })
-    }
-
-    /// The directory path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // Cleanup is best effort: a leftover temp dir must never fail a journey.
-        fs::remove_dir_all(&self.path).ok();
-    }
-}
+#[path = "temp_dir.rs"]
+mod temp_dir;
+pub use temp_dir::TempDir;
 
 /// A state dir for the executor and a fresh origin repository, in that order.
 pub fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {

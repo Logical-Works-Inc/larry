@@ -7,20 +7,20 @@
 //! the link.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_std::seeded::Seeded;
+
+#[path = "support/temp_dir.rs"]
+mod temp_dir;
+use temp_dir::TempDir;
 
 /// Failures propagate instead of panicking.
 type Check<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Seeds the simulation draws issue lists for.
 const SEEDS: u64 = 64;
-
-/// Distinct scratch directories made by this test binary.
-static SCRATCHES: AtomicU64 = AtomicU64::new(0);
 
 /// The workflow text.
 fn workflow() -> Check<String> {
@@ -55,18 +55,16 @@ fn issue_link_script(text: &str) -> Check<String> {
 /// A scratch directory holding the script and a stand-in `gh` that prints `answer` and records
 /// its arguments, removed when dropped.
 struct Runner {
-    /// The directory.
-    dir: PathBuf,
+    /// The directory and the guard that removes it (larry#267).
+    dir: TempDir,
 }
 
 impl Runner {
     /// Writes the job's script and a `gh` answering `answer`.
     fn new(script: &str, answer: &str) -> Check<Self> {
-        let serial = SCRATCHES.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("larry-issue-link-{}-{serial}", std::process::id()));
-        fs::create_dir(&dir)?;
-        let runner = Self { dir };
+        let runner = Self {
+            dir: TempDir::new()?,
+        };
         fs::write(runner.dir.join("step.sh"), script)?;
         fs::write(runner.dir.join("answer"), answer)?;
         let gh = format!(
@@ -102,13 +100,6 @@ impl Runner {
     /// The arguments the stand-in `gh` was called with.
     fn args(&self) -> Check<String> {
         Ok(fs::read_to_string(self.dir.join("args"))?)
-    }
-}
-
-impl Drop for Runner {
-    fn drop(&mut self) {
-        // Best effort: a leftover scratch directory never fails a check.
-        drop(fs::remove_dir_all(&self.dir));
     }
 }
 

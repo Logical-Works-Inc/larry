@@ -318,7 +318,7 @@ fn start_host(state: &Path) -> Result<Serving, Box<dyn Error>> {
 /// answered. Keys are random, so the trace hashes the request with its key
 /// slot named, not the key's bytes.
 fn run_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let mut rng = Seeded::from_seed(seed);
     let keyed = key_tenants(&mut rng, &state)?;
     let dir = state.display().to_string();
@@ -392,7 +392,7 @@ fn send_probes(addr: std::net::SocketAddr, seed: u64, keyed: &[Keyed]) -> Result
 
 #[test]
 fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let mut keyed = Vec::with_capacity(TENANTS);
     for index in 0..TENANTS {
         let name = format!("tenant-{index}");
@@ -435,7 +435,7 @@ fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult 
 
 #[test]
 fn sim_serve_two_identities_on_one_path_at_once_each_see_only_themselves() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let alpha = issue_key(&state, "alpha")?;
     let beta = issue_key(&state, "beta")?;
     let dir = state.display().to_string();
@@ -493,7 +493,7 @@ const DENIAL_SEEDS: [u64; 4] = [1, 2, 0x5EED_0089, 0xDEAD_BEEF];
 /// key, or a tenant that holds one and is sent another tenant's key or a tampered
 /// one. Each must be `401`. Returns the trace hash of what was sent and answered.
 fn run_denial_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let mut rng = Seeded::from_seed(seed);
     let keyed = key_tenants(&mut rng, &state)?;
     let mut serving = start_host(&state)?;
@@ -562,7 +562,7 @@ const RELOAD_NAMES: [&str; 3] = ["ada", "bo", "cy"];
 /// when it was read. A revoke lowers the count by one, and a store grown past the
 /// cap reloads closed with its count. Returns the trace hash of the lines.
 fn reload_pass(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     for name in RELOAD_NAMES {
         issue_key(&state, name)?;
     }

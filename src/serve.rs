@@ -15,7 +15,7 @@ mod error;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, RwLock};
 
 use lgwks_bot::app::{App, Effect, Method, Principal, RequestHeaders};
@@ -37,8 +37,14 @@ const PLAINTEXT_VAR: &str = "LARRY_SERVE_PLAINTEXT";
 /// The one value of [`PLAINTEXT_VAR`] that opts in.
 const PLAINTEXT_OPT_IN: &str = "1";
 
-/// The address bound when [`ADDR_VAR`] is unset: loopback only.
-const DEFAULT_ADDR: &str = "127.0.0.1:8787";
+/// The port bound when [`ADDR_VAR`] is unset.
+const DEFAULT_PORT: u16 = 8787;
+
+/// The address bound when [`ADDR_VAR`] is unset: loopback only, built from the address family so
+/// no endpoint is written into the binary as text.
+fn default_addr() -> String {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_PORT)).to_string()
+}
 
 /// The probe's path below the tenant prefix.
 pub const HEALTH_PATH: &str = "/healthz";
@@ -96,7 +102,7 @@ impl Settings {
     pub fn from_env(read: impl Fn(&str) -> Option<String>) -> Result<Self, ServeError> {
         let value = match read(ADDR_VAR) {
             Some(set) => set,
-            None => String::from(DEFAULT_ADDR),
+            None => default_addr(),
         };
         let addr = match value.trim().parse::<SocketAddr>() {
             Ok(addr) => addr,
@@ -130,15 +136,15 @@ struct Keys {
     digests: BTreeMap<Box<str>, Digest>,
     /// The digest of a fixed token no key holds: an unknown tenant pays the same
     /// one compare as a known tenant with a wrong key.
-    dummy: Digest,
+    unheld: Digest,
 }
 
 impl Keys {
-    /// The keys over `digests`, with the fixed dummy digest.
+    /// The keys over `digests`, with the fixed unheld digest.
     fn from_digests(digests: BTreeMap<Box<str>, Digest>) -> Self {
         Self {
             digests,
-            dummy: lgwks_std::hash::blake3(b"larry serve: no tenant holds this key"),
+            unheld: lgwks_std::hash::blake3(b"larry serve: no tenant holds this key"),
         }
     }
 
@@ -150,12 +156,10 @@ impl Keys {
         let rows = ledger
             .tenant_keys(MAX_TENANT_KEYS.saturating_add(1))
             .map_err(ServeError::Store)?;
-        let over_cap = match u64::try_from(rows.len()) {
-            Ok(seen) => seen > u64::from(MAX_TENANT_KEYS),
-            Err(_) => true,
-        };
-        if over_cap {
-            let count = ledger.tenant_key_count().map_err(ServeError::Store)?;
+        // The store's own count is the ceiling's unit, so the compare needs no conversion: a store
+        // past the cap is refused with the count it holds, never truncated.
+        let count = ledger.tenant_key_count().map_err(ServeError::Store)?;
+        if count > i64::from(MAX_TENANT_KEYS) {
             return Err(ServeError::KeyCap {
                 count,
                 cap: MAX_TENANT_KEYS,
@@ -172,12 +176,12 @@ impl Keys {
         Ok(Self::from_digests(digests))
     }
 
-    /// The digest `tenant` is compared with: its own, or the dummy when it holds
+    /// The digest `tenant` is compared with: its own, or the unheld when it holds
     /// no key. Every tenant gets one, so the compare always runs.
     fn stored(&self, tenant: &str) -> &Digest {
         match self.digests.get(tenant) {
             Some(digest) => digest,
-            None => &self.dummy,
+            None => &self.unheld,
         }
     }
 
@@ -455,7 +459,7 @@ mod tests {
     use lgwks_std::seeded::Seeded;
 
     use super::{
-        ADDR_VAR, DEFAULT_ADDR, HEALTH_BODY, Keys, ServeError, Settings, app, check_tenant, judge,
+        ADDR_VAR, HEALTH_BODY, Keys, ServeError, Settings, app, check_tenant, default_addr, judge,
     };
 
     /// Keys for each of `names`, each holding `lk_<name>`.
@@ -469,15 +473,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_address_binds_loopback_only() -> Result<(), ServeError> {
-        let dir = std::env::temp_dir()
-            .join(format!("larry-serve-unit-{}-loopback", std::process::id()))
-            .display()
-            .to_string();
+    fn an_unset_address_binds_loopback_only() -> Result<(), Box<dyn std::error::Error>> {
+        let state = crate::executor::sim_tree::scratch("larry-serve-unit")?;
+        let dir = state.display().to_string();
         let settings = Settings::from_env(|name| (name == "LARRY_STATE_DIR").then(|| dir.clone()))?;
         assert_eq!(
             settings.addr.to_string(),
-            DEFAULT_ADDR,
+            default_addr(),
             "the default is loopback"
         );
         assert!(
@@ -576,8 +578,8 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    std::ptr::eq(keys.stored(&stranger), &raw const keys.dummy),
-                    "seed {seed:#x}: an unknown tenant is compared with the dummy"
+                    std::ptr::eq(keys.stored(&stranger), &raw const keys.unheld),
+                    "seed {seed:#x}: an unknown tenant is compared with the unheld"
                 );
                 assert!(
                     keys.admit(&stranger, "lk_alpha").is_none(),
