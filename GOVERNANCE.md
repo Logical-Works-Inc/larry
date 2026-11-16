@@ -1,7 +1,7 @@
 ---
 type: Contract
 title: Larry repository governance
-description: Authority, change control, enforcement and evidence boundaries for Larry, version 1.4.
+description: Authority, change control, enforcement and evidence boundaries for Larry, version 1.5.
 resource: /GOVERNANCE.md
 tags: [governance, assurance, traceability, larry]
 generated: {by: claude-code, at: 2026-11-09}
@@ -13,7 +13,8 @@ sources: [Director orders 2026-09-15 to 2026-11-09, /AGENTS.md, /specification.m
 
 # Larry governance
 
-Governance version 1.4 (2026-11-09): the falsifier ports landed, the action-pin gap filed, every
+Governance version 1.5 (2026-11-16): every change goes through a completed human frontend, the TUI
+first (larry#241, ADR 0045); AppCUI left the lock. Version 1.4 (2026-11-09): the falsifier ports landed, the action-pin gap filed, every
 document renamed Larry. Version 1.3 (2026-11-07): the public flip, runners by visibility, the dependency
 register gate and the falsifier order. Version 1.2 (2026-11-03) folded in the Logical-Works-Inc move, the Python ban, the
 120-line law, the dependency relaxation, the kernel absorption and the HL3 license. AGENTS.md is the operating entry point; specification.md owns product
@@ -107,6 +108,8 @@ never claim enforcement GitHub does not apply.
 - Gap larry#177: the `rust` job in ci.yml runs `actions/checkout@v4`, `dtolnay/rust-toolchain@stable` and
   `Swatinem/rust-cache@v2` by mutable tag; every other action is SHA-pinned. Director 2026-11-09: not pinned
   yet, marked as a gap.
+- Human frontend (larry#241): the TUI PTY journeys run on Linux and macOS (larry#245, ADR 0048). The pane
+  shows output only once a command ends (larry#252). The suite is over its 90 s budget (larry#246).
 
 Every runtime acceptance claim still needs full behaviour and failure coverage, declared resource limits,
 retained failures, physical baselines, cross-tenant tests and the real delivery endpoint. Until then those

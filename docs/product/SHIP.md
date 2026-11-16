@@ -5,7 +5,7 @@ description: Every PR left in the plan, in ship order, with the proof that close
 resource: /docs/product/SHIP.md
 tags: [larry, plan, checklist, ship]
 generated: {by: claude-code, at: 2026-11-06}
-verified: {by: claude-code, method: gh issue list and the merged PRs read 2026-11-14}
+verified: {by: claude-code, method: gh issue list and the merged PRs read 2026-11-16}
 status: live
 stale_after: 2026-12-06
 sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-checklist.md]
@@ -20,16 +20,10 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 4. New work enters as an issue and a line here in the PR that files it. Never delete a line: tick it, or strike it with the reason and the Director's order.
 
 ## Shipped
-- [x] #112 newest estate pins, #116 runner by visibility: PR #113, ea3645d
-- [x] #117 public-alpha warning, SECURITY.md, CONTRIBUTING.md, licence clause: PR #118, 4ff17c5
-- [x] #119 cancellation waits for reconciliation, runtime split: PR #120, 1f46189, 544 tests in 2.03 s
-- [x] #121 `target/` ignored at any depth: PR #122, a65507a. Repository public 2026-11-06: runner deleted, interaction limits, fork-PR approval, private reporting
-- [x] #201 model routing 1: a route table per tenant replaces the hardcoded 9router gateway and model (ADR 0039): PR #222, 910 tests.
-- [x] #209 a retry after a refused sync is refused, and only a restore admits it (ADR 0036): PR #220.
-- [x] #206 a diff over 1 MiB seals unaccepted and verify agrees (ADR 0038): PR #221.
-- [x] #210 serve: plaintext bind needs LARRY_SERVE_PLAINTEXT=1, larry serve revoke, 65,536-key cap (ADR 0040): PR #223.
-- [x] #219 a reduce that fails after the journal took a command keeps it pending (ADR 0041): PR #225, 913 tests.
-- [x] #214 a surviving process group keeps its ledger row, every executor wait bounded (ADR 0042): PR #226, spawn-to-row p99 14.25 ms.
+- [x] #112 newest estate pins, #116 runner by visibility: PR #113, ea3645d. #117 public-alpha warning, SECURITY.md, CONTRIBUTING.md, licence clause: PR #118, 4ff17c5.
+- [x] #119 cancellation waits for reconciliation, runtime split: PR #120, 1f46189, 544 tests in 2.03 s. #121 `target/` ignored at any depth: PR #122, a65507a. Repository public 2026-11-06: runner deleted, interaction limits, fork-PR approval, private reporting.
+- [x] #201 model routing 1: a route table per tenant replaces the hardcoded 9router gateway and model (ADR 0039): PR #222, 910 tests. #209 a retry after a refused sync is refused, and only a restore admits it (ADR 0036): PR #220. #206 a diff over 1 MiB seals unaccepted and verify agrees (ADR 0038): PR #221.
+- [x] #210 serve: plaintext bind needs LARRY_SERVE_PLAINTEXT=1, larry serve revoke, 65,536-key cap (ADR 0040): PR #223. #219 a reduce that fails after the journal took a command keeps it pending (ADR 0041): PR #225, 913 tests. #214 a surviving process group keeps its ledger row, every executor wait bounded (ADR 0042): PR #226, spawn-to-row p99 14.25 ms.
 
 ## 1. Weekend ship: Larry v0.1, the executor (#114, umbrella #71)
 - [x] First merge after the flip runs CI on `ubuntu-latest` and is green: PR #126, rust, simulation, e2e/journey, governance and docs-check all passing on hosted runners.
@@ -111,7 +105,16 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [ ] #217 (hardening) docs match the pins and the code. Proof: `larry governance` green; each changed number printed by the command that measured it.
 - [ ] #224 (hardening) the governance latency budget test no longer depends on suite load. Acceptance: the full parallel suite passes 3 times in a row on Oracle with the test present; the serial run prints p50, p95, p99 and peak RSS, and asserts the budget.
 - [x] #227 (hardening) every governance document current after the #200 sweep merges. Proof: `larry governance`, `larry tracker --check` and docs-check green; every named test resolves: PR #229, 920 tests.
+- [ ] #246 (hardening) the workspace suite under the 90 s budget (188 s on Oracle, PR #240). Proof: before and after times on Oracle, test count not lower.
+
+## 8. Human frontend (#241; Director 2026-11-16: "in tui, then Mac app then iOS and android apps")
+- [x] #238, #239 bare `larry` is a split terminal that asks before every command (ADR 0045): PR #240, 923 tests; first paint 32.6 ms, keystroke p99 4.3 ms, idle 0 bytes, peak RSS 11.7 MiB (debug, 120x32). Director: "lock it in for now".
+- [x] #242 Esc ends a running command: PR #250, Esc to "Interrupted" 103 ms (one sample). #243 commands run isolated, Seatbelt or Landlock, no `model.command` (ADR 0046): PR #251, origin byte-identical after an approved write outside; per command p50 3 ms open, 8 ms confined (30 samples, macOS debug).
+- [x] #245 the PTY journeys on macOS in CI (ADR 0048): PR #254, `e2e/journey (macos-latest)` green in 2m21s; probe input p50 1.9 ms, p95 2.5 ms, p99 5.3 ms (20 samples), RSS 8,208 KiB.
+- [x] #244 the artifact pane shows the task's diff, output and receipt (ADR 0047): PR #253, 13 pane sims (256 hostile seeds), journey at 120x32 (the pane opens at 108 columns) shows the diff before the folder changes.
+- [ ] #252 the pane streams a running command's output. Proof: a PTY journey shows a command's first line before its second exists.
+- [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
+- iOS and Android: #115 in section 4, after #90 and #247.
 
 ## Holds and open design
-- Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2.
-- #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.
+- Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2. #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.

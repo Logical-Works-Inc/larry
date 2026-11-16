@@ -56,7 +56,7 @@ INVARIANTS.md and the plan before the first edit.
   `contract/APPROVED.toml` names that issue. Loco.rs fills web, ORM, jobs, mail and auth gaps; the
   owner of every capability is set in `docs/dependencies/cargo-sweep.md`, and a new edge updates it.
 - New workspace members or crates of ours need the Director's name.
-- A broken upstream edge gets a pin plus an issue (logicalworks-crates#841: appcui_proc_macro =0.3.6).
+- A broken upstream edge gets a pin plus an issue (logicalworks-crates#841 held appcui_proc_macro until ADR 0045).
 
 ## Gates
 
