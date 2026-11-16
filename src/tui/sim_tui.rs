@@ -11,7 +11,8 @@ use std::time::Duration;
 use crate::executor::Isolation;
 use crate::sim_lanes::sweep_on;
 
-/// A paint is CPU-bound, so every sweep here runs on one lane (see [`sweep_on`]).
+/// A paint is CPU-bound, so every sweep here runs on one lane (see [`sweep_on`]); the dev
+/// profile's optimized code is what makes each paint cheaper (ADR 0049).
 const PAINT_LANES: u64 = 1;
 
 use super::app::{App, Input, Key, MAX_ENTRIES};

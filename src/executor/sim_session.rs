@@ -488,7 +488,8 @@ fn run_one(when: When, seed: u64, path_env: &str) -> Result<String, CancelSimErr
 /// Every seed's trace hash, in seed order.
 fn sweep(path_env: &str) -> Result<Vec<String>, CancelSimError> {
     // Each seed owns its state directory and workspace, so the seeds run on bounded lanes and
-    // come back in seed order.
+    // come back in seed order. A seed mostly waits on its command, so lanes pay here (ADR 0049:
+    // 5.6 s to 1.8 s on the 4-core CI runner).
     let hashes = sim_lanes::sweep(
         CANCEL_SEEDS,
         |_lane, seed| -> Result<String, CancelSimError> {
