@@ -448,6 +448,34 @@ fn tui_journey_apply_writes_the_diff_into_the_folder() -> Journey {
     Ok(())
 }
 
+/// The artifact pane beside the chat (larry#244; the PTY is 120 columns, past the 108 that
+/// open it): while the question about the change is asked the pane already shows its file list
+/// and hunk, before the folder holds the file; once the person applies it the sealed report's
+/// receipt takes the pane, and Tab goes back to the command's output.
+#[test]
+fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
+    let replies = [COMMAND, r#"{"done":"wrote hello.txt"}"#];
+    let ran = frame(scripted(44, &replies), |pty, _, work| {
+        ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for(REVIEW)?;
+        pty.wait_for("  hello.txt  +1 -0")?;
+        pty.wait_for("+hello")?;
+        assert!(
+            !work.join("hello.txt").exists(),
+            "shown before the folder changes"
+        );
+        pty.send("y")?;
+        pty.wait_for(APPLIED)?;
+        pty.wait_for("commands  1 run, 0 declined, 0 interrupted")?;
+        pty.wait_for("digest    ")?;
+        pty.send("\t")?;
+        pty.wait_for("$ printf")
+    })?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    Ok(())
+}
+
 /// Files in the bulk folders of the overhead measurement, and their size in bytes.
 const BULK_FILES: usize = 600;
 /// Bytes of each bulk file.

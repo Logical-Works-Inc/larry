@@ -149,6 +149,9 @@ pub(crate) trait Observer {
     fn review(&mut self, _summary: &[String]) -> Handoff {
         Handoff::Discard
     }
+    /// The change in full, as a unified diff of at most 1 MiB, offered once just before
+    /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
+    fn diff(&mut self, _text: &str) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
     fn handed(&mut self, line: &str, applied: bool);
     /// The model asks to run `command` as step `step`; nothing runs unless this

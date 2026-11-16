@@ -199,6 +199,7 @@ impl Island {
         if diff.text.trim().is_empty() {
             return Outcome::None;
         }
+        observer.diff(&diff.text);
         match observer.review(&summary(diff)) {
             Handoff::Discard => {
                 observer.handed("discarded; your folder is unchanged", false);
