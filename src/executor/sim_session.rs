@@ -20,7 +20,7 @@ use std::time::Duration;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::{CommandResult, clip, run_command};
+use super::super::run::{CommandResult, Place, clip, run_command};
 use super::{
     ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
     check, parse_reply,
@@ -408,7 +408,7 @@ fn drive(
                 .then(|| scope.spawn(|| flip_when_listed(state, &cancel)));
             let result = run_command(
                 &argv,
-                work,
+                Place::Open(work),
                 path_env,
                 COMMAND_TIMEOUT,
                 &ledger,
@@ -517,7 +517,7 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
         let ledger = Ledger::open(&state)?;
         let outcome = run_command(
             &argv,
-            &work,
+            Place::Open(&work),
             &path_env,
             SHORT_TIMEOUT,
             &ledger,

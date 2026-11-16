@@ -72,7 +72,9 @@ const EXECUTOR_CAPABILITIES: [Scope; 5] = [
 
 /// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
 /// command (larry#93) is never in it: only an operator who isolates the commands
-/// outside Larry, as a Harbor task container does, names `model.command`.
+/// outside Larry, as a Harbor task container does, names `model.command`. A terminal
+/// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
+/// needs no such scope and runs under this policy as it is.
 const DEFAULT_POLICY: [Scope; 4] = [
     Scope::FileRead,
     Scope::FileWrite,
@@ -89,6 +91,15 @@ fn default_policy() -> BTreeSet<Scope> {
 /// plus the model choosing the commands.
 pub(super) fn session_scopes() -> BTreeSet<Scope> {
     EXECUTOR_CAPABILITIES.iter().copied().collect()
+}
+
+/// The scopes a terminal session needs when Larry itself confines each command to a
+/// workspace copy (larry#243): a briefed task's scopes without `model.command`, which
+/// names a command run on the host with no confinement of Larry's own.
+pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
+    let mut scopes = session_scopes();
+    scopes.remove(&Scope::ModelCommand);
+    scopes
 }
 
 /// The prefix the estate capability names carry and a policy name omits.

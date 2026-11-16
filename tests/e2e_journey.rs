@@ -30,12 +30,14 @@ use pty::{Journey, Pty, Screen, replied};
 const IDLE: Duration = Duration::from_secs(5);
 /// Input round trips the probe times.
 const ROUND_TRIPS: usize = 20;
-/// Every scope a session needs, `model.command` among them.
-const SESSION_POLICY: &str = "file.read,file.write,process.spawn,model.invoke,model.command";
 /// The composer's placeholder: the frame is up and takes a task.
 const READY: &str = "Ask Larry to do something";
 /// The question Larry asks before a command.
 const ASK: &str = "Run this command?";
+/// The question Larry asks once the session ends with a change in its copy of the folder.
+const REVIEW: &str = "Apply this change";
+/// What the frame says once that change is in the person's folder.
+const APPLIED: &str = "applied to your folder";
 /// What the model's command writes.
 const COMMAND: &str = r#"{"command":"printf 'hello\n' > hello.txt"}"#;
 /// What Larry tells the model about a declined command (`executor::session::DECLINED`).
@@ -45,7 +47,9 @@ const QUIT: &str = "\x03";
 /// Ctrl+U: clears the composer.
 const CLEAR: &str = "\x15";
 
-/// The operator's settings for a terminal session against `mock` in `state`.
+/// The operator's settings for a terminal session against `mock` in `state`: the default
+/// policy, which holds no `model.command`, because each command runs in an isolated copy of the
+/// folder (larry#243).
 fn operator(state: &Path, mock: &Handle) -> Vec<(&'static str, OsString)> {
     vec![
         ("LARRY_STATE_DIR", state.as_os_str().to_owned()),
@@ -56,8 +60,34 @@ fn operator(state: &Path, mock: &Handle) -> Vec<(&'static str, OsString)> {
         ("LARRY_MODEL", OsString::from("mock-model")),
         ("LARRY_MODEL_KEY", OsString::from("tui-key")),
         ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
-        ("LARRY_POLICY", OsString::from(SESSION_POLICY)),
     ]
+}
+
+/// A digest of every entry beneath `root`, `.git` included: path, kind and bytes or link target.
+fn tree_hash(root: &Path) -> Journey<String> {
+    let mut hasher = lgwks_std::hash::Hasher::new();
+    let mut pending = vec![std::path::PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(root.join(&relative))? {
+            names.push(entry?.file_name());
+        }
+        names.sort();
+        for name in names {
+            let path = relative.join(&name);
+            let full = root.join(&path);
+            let meta = std::fs::symlink_metadata(&full)?;
+            hasher.update(path.to_string_lossy().as_bytes());
+            if meta.is_dir() {
+                pending.push(path);
+            } else if meta.is_symlink() {
+                hasher.update(std::fs::read_link(&full)?.to_string_lossy().as_bytes());
+            } else {
+                hasher.update(&std::fs::read(&full)?);
+            }
+        }
+    }
+    Ok(hasher.finalize().to_hex())
 }
 
 /// A mock whose replies are `contents`, in order.
@@ -128,6 +158,14 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
             "nothing runs before the person answers"
         );
         pty.send("y")?;
+        // The command ran in a copy: the person's folder changes only at the review.
+        pty.wait_for(REVIEW)?;
+        assert!(
+            !work.join("hello.txt").exists(),
+            "an approved command never writes the folder itself"
+        );
+        pty.send("y")?;
+        pty.wait_for(APPLIED)?;
         pty.wait_for("wrote hello.txt")?;
         assert_eq!(mock.served(), 2, "the command, then the summary");
         Ok(())
@@ -239,47 +277,64 @@ fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
 #[test]
 fn tui_journey_esc_kills_running_command() -> Journey {
     let replies = [r#"{"command":"sleep 30 & echo $! > bg.pid; sleep 30"}"#];
-    let ran = frame(scripted(31, &replies), |pty, mock, work| {
-        ask(pty)?;
-        pty.send("y")?;
-        pty.wait_for("esc to interrupt")?;
-        // Esc is pressed only once the background member is up, so its death is the group's,
-        // not a race with the shell's own start.
-        let background = work.join("bg.pid");
-        let mut probes = 0_u32;
-        while !background.exists() {
-            probes = probes.saturating_add(1);
-            assert!(probes < 100_000, "the command never wrote bg.pid");
-            std::thread::yield_now();
-        }
-        let pressed = Instant::now();
-        pty.send("\x1b")?;
-        pty.wait_for("Interrupted")?;
-        let esc_to_interrupted = pressed.elapsed();
-        assert!(
-            esc_to_interrupted < Duration::from_millis(500),
-            "Esc to Interrupted took {esc_to_interrupted:?}"
-        );
-        let pid = std::fs::read_to_string(&background)?.trim().to_owned();
-        assert!(!pid.is_empty(), "bg.pid holds the background pid");
-        let probe = Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(Stdio::null())
-            .status()?;
-        assert!(
-            !probe.success(),
-            "the background member {pid} died with its group"
-        );
-        assert_eq!(mock.served(), 1, "no second model call after the interrupt");
-        let mut figure = String::new();
-        writeln!(
-            figure,
-            "{{\"esc_to_interrupted_ms\":{:.0}}}",
-            esc_to_interrupted.as_secs_f64() * 1000.0
-        )?;
-        std::io::stderr().lock().write_all(figure.as_bytes())?;
-        Ok(())
-    })?;
+    let (state, work) = fixture()?;
+    let workspaces = state.path().join("ws");
+    let config = scripted(31, &replies);
+    let ran = frame_in(
+        &state,
+        work,
+        config,
+        Box::new(|pty, mock, _| {
+            ask(pty)?;
+            pty.send("y")?;
+            pty.wait_for("esc to interrupt")?;
+            // Esc is pressed only once the background member is up, so its death is the group's,
+            // not a race with the shell's own start. The command runs in the session's copy.
+            let mut probes = 0_u32;
+            let background = loop {
+                let found = std::fs::read_dir(&workspaces)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path().join("tree").join("bg.pid"))
+                    .find(|path| path.exists());
+                if let Some(path) = found {
+                    break path;
+                }
+                probes = probes.saturating_add(1);
+                assert!(probes < 100_000, "the command never wrote bg.pid");
+                std::thread::yield_now();
+            };
+            // The copy goes with the interrupted session, so the pid is read before Esc.
+            let pid = std::fs::read_to_string(&background)?.trim().to_owned();
+            let pressed = Instant::now();
+            pty.send("\x1b")?;
+            pty.wait_for("Interrupted")?;
+            let esc_to_interrupted = pressed.elapsed();
+            assert!(
+                esc_to_interrupted < Duration::from_millis(500),
+                "Esc to Interrupted took {esc_to_interrupted:?}"
+            );
+            assert!(!pid.is_empty(), "bg.pid holds the background pid");
+            let probe = Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(Stdio::null())
+                .status()?;
+            assert!(
+                !probe.success(),
+                "the background member {pid} died with its group"
+            );
+            assert_eq!(mock.served(), 1, "no second model call after the interrupt");
+            let mut figure = String::new();
+            writeln!(
+                figure,
+                "{{\"esc_to_interrupted_ms\":{:.0}}}",
+                esc_to_interrupted.as_secs_f64() * 1000.0
+            )?;
+            std::io::stderr().lock().write_all(figure.as_bytes())?;
+            Ok(())
+        }),
+    )?;
     assert!(
         ran.status.success(),
         "Ctrl+C on an empty box exits 0: {}",
@@ -307,6 +362,8 @@ fn sim_tui_same_seed_same_trace_hash_through_the_binary() -> Journey {
             Box::new(|pty, mock, _| {
                 ask(pty)?;
                 pty.send("y")?;
+                pty.wait_for(REVIEW)?;
+                pty.send("y")?;
                 pty.wait_for("wrote hello.txt")?;
                 hashes.push(mock.trace_hash());
                 Ok(())
@@ -317,6 +374,148 @@ fn sim_tui_same_seed_same_trace_hash_through_the_binary() -> Journey {
         work = ran.work;
     }
     assert_eq!(hashes.first(), hashes.get(1), "same seed, same trace");
+    Ok(())
+}
+
+/// The issue's proof (larry#243): the model asks for a write outside the workspace, the person
+/// approves it, the kernel refuses it, the person discards the rest, and the folder is
+/// byte-identical, `.git` included.
+#[test]
+fn tui_journey_write_outside_workspace_leaves_origin_identical() -> Journey {
+    let (state, work) = fixture()?;
+    let escape = format!(
+        r#"{{"command":"printf x > {}/escape.txt; printf y > inside.txt"}}"#,
+        work.path().display()
+    );
+    let replies = [escape.as_str(), r#"{"done":"kept out"}"#];
+    let before = tree_hash(work.path())?;
+    let ran = frame_in(
+        &state,
+        work,
+        scripted(41, &replies),
+        Box::new(|pty, _, origin| {
+            ask(pty)?;
+            pty.send("y")?;
+            pty.wait_for(REVIEW)?;
+            // The write outside the copy never reached it: only the inside write is offered.
+            pty.wait_for("inside.txt  new  +1 -0")?;
+            assert!(
+                !origin.join("escape.txt").exists() && !origin.join("inside.txt").exists(),
+                "nothing reaches the folder before the person answers"
+            );
+            pty.send("n")?;
+            pty.wait_for("discarded")?;
+            pty.wait_for("kept out")
+        }),
+    )?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    assert_eq!(
+        tree_hash(ran.work.path())?,
+        before,
+        "the origin tree is byte-identical"
+    );
+    Ok(())
+}
+
+/// An approved change lands in the folder exactly as shown: the file is there with its bytes,
+/// and git sees that one untracked file and nothing else changed.
+#[test]
+fn tui_journey_apply_writes_the_diff_into_the_folder() -> Journey {
+    let replies = [COMMAND, r#"{"done":"wrote hello.txt"}"#];
+    let ran = frame(scripted(43, &replies), |pty, _, work| {
+        ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for(REVIEW)?;
+        pty.wait_for("hello.txt  new  +1 -0")?;
+        assert!(!work.join("hello.txt").exists());
+        pty.send("y")?;
+        pty.wait_for(APPLIED)?;
+        pty.wait_for("wrote hello.txt")
+    })?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    assert_eq!(
+        std::fs::read_to_string(ran.work.path().join("hello.txt"))?,
+        "hello\n"
+    );
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(ran.work.path())
+        .output()?;
+    assert_eq!(String::from_utf8(status.stdout)?, "?? hello.txt\n");
+    Ok(())
+}
+
+/// Files in the bulk folders of the overhead measurement, and their size in bytes.
+const BULK_FILES: usize = 600;
+/// Bytes of each bulk file.
+const BULK_BYTES: usize = 2048;
+/// Rounds of the overhead measurement.
+const BULK_ROUNDS: usize = 5;
+
+/// Time from the person's Enter to Larry's question about the first command, which includes the
+/// workspace snapshot and the confinement probe, against a plain `cp -R` of the same folder (the
+/// rival): the whole path, with its PTY and its gateway, over `BULK_ROUNDS` fresh folders of
+/// `BULK_FILES` files. Prints the figures; asserts only that every round was measured.
+#[test]
+fn tui_journey_probe_reports_isolation_overhead_against_a_plain_copy() -> Journey {
+    let mut isolated = Vec::new();
+    let mut plain = Vec::new();
+    for round in 0..BULK_ROUNDS {
+        let (state, work) = fixture()?;
+        for file in 0..BULK_FILES {
+            let bucket = file.checked_div(100).ok_or("a bucket")?;
+            let folder = work.path().join(format!("bulk{bucket}"));
+            std::fs::create_dir_all(&folder)?;
+            std::fs::write(folder.join(format!("f{file}.txt")), "x".repeat(BULK_BYTES))?;
+        }
+        let rival = state.path().join("plain-copy");
+        let started = Instant::now();
+        let copied = Command::new("cp")
+            .arg("-R")
+            .arg(work.path())
+            .arg(&rival)
+            .status()?;
+        plain.push(started.elapsed());
+        assert!(copied.success(), "the rival copy ran");
+        let replies = [COMMAND, r#"{"done":"left it alone"}"#];
+        let config = scripted(u64::try_from(round)?, &replies);
+        let ran = frame_in(
+            &state,
+            work,
+            config,
+            Box::new(|pty, _, _| {
+                pty.wait_for(READY)?;
+                let sent = Instant::now();
+                pty.send("write hello.txt\r")?;
+                pty.wait_for(ASK)?;
+                isolated.push(sent.elapsed());
+                pty.send("n")?;
+                pty.wait_for("left it alone")
+            }),
+        )?;
+        assert!(
+            ran.status.success(),
+            "round {round}: exits 0: {}",
+            ran.status
+        );
+    }
+    isolated.sort();
+    plain.sort();
+    let mut figures = String::new();
+    writeln!(
+        figures,
+        "{{\"scope\":\"debug binary, PTY, mock gateway, {BULK_FILES} files of {BULK_BYTES} bytes\",\
+         \"rounds\":{BULK_ROUNDS},\"enter_to_question_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1}}},\
+         \"plain_cp_r_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1}}}}}",
+        nearest_rank(&isolated, 50)?,
+        nearest_rank(&isolated, 95)?,
+        nearest_rank(&isolated, 99)?,
+        nearest_rank(&plain, 50)?,
+        nearest_rank(&plain, 95)?,
+        nearest_rank(&plain, 99)?,
+    )?;
+    std::io::stderr().lock().write_all(figures.as_bytes())?;
+    assert_eq!((isolated.len(), plain.len()), (BULK_ROUNDS, BULK_ROUNDS));
     Ok(())
 }
 
@@ -375,6 +574,10 @@ fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
                     Pty::open(owner, work_b.path(), &operator(state_b.path(), mock_b))?;
                 ask(&mut first)?;
                 ask(&mut second)?;
+                first.send("y")?;
+                second.send("y")?;
+                first.wait_for(REVIEW)?;
+                second.wait_for(REVIEW)?;
                 first.send("y")?;
                 second.send("y")?;
                 first.wait_for("wrote hello.txt")?;

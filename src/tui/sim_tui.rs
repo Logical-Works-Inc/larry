@@ -8,6 +8,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash as _, Hasher as _};
 use std::time::Duration;
 
+use crate::executor::Isolation;
+
 use super::app::{App, Input, Key, MAX_ENTRIES};
 use super::buffer::{Buffer, Frame, render};
 use super::cells::Header;
@@ -325,6 +327,21 @@ fn sim_tui_esc_answers_a_question_with_decline() {
     }
 }
 
+/// Settings over `root` with a model route to the discard port, which nothing serves: a
+/// session that reaches the model fails loudly, and these sims never let it.
+fn unreachable_model(
+    root: &std::path::Path,
+) -> Result<crate::executor::Settings, crate::executor::ExecError> {
+    let state = root.to_string_lossy().into_owned();
+    crate::executor::Settings::from_env(move |name| match name {
+        "LARRY_STATE_DIR" => Some(state.clone()),
+        "LARRY_MODEL_URL" => Some(String::from("http://127.0.0.1:9/v1")),
+        "LARRY_MODEL" => Some(String::from("sim-model")),
+        "LARRY_MODEL_KEY" => Some(String::from("sim-key")),
+        _ => None,
+    })
+}
+
 /// The real `run_session` behind the worker, with no in-crate stand-in: under the default
 /// policy (no `model.command`, `executor::gate`) the gate refuses before any model call, the
 /// refusal reaches the frame as events ending in `Ended::Refused`, and dropping a worker
@@ -333,19 +350,12 @@ fn sim_tui_esc_answers_a_question_with_decline() {
 fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("larry-tui-worker-{}", std::process::id()));
     std::fs::create_dir_all(&root)?;
-    let state = root.to_string_lossy().into_owned();
-    // A route to the discard port, which nothing serves: the gate must refuse before it is used.
-    let settings = crate::executor::Settings::from_env(move |name| match name {
-        "LARRY_STATE_DIR" => Some(state.clone()),
-        "LARRY_MODEL_URL" => Some(String::from("http://127.0.0.1:9/v1")),
-        "LARRY_MODEL" => Some(String::from("sim-model")),
-        "LARRY_MODEL_KEY" => Some(String::from("sim-key")),
-        _ => None,
-    })?;
+    let settings = unreachable_model(&root)?;
     let worker = super::worker::Worker::spawn(
         String::from("write hello.txt"),
         root.clone(),
         settings.clone(),
+        Isolation::Host,
         false,
     )?;
     let mut seen = Vec::new();
@@ -366,9 +376,173 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         "a refused session runs nothing"
     );
     // A worker dropped before its session reports is cancelled and joined, not leaked.
-    let early = super::worker::Worker::spawn(String::from("x"), root, settings, true)?;
+    let early =
+        super::worker::Worker::spawn(String::from("x"), root, settings, Isolation::Host, true)?;
     drop(early);
     Ok(())
+}
+
+/// A host that cannot confine reaches the frame as one typed failure: no question, no copy,
+/// and the person is told why (larry#243).
+#[test]
+fn sim_tui_worker_refused_confinement_ends_failed_with_the_reason()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!("larry-tui-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
+    let settings = unreachable_model(&root)?;
+    let isolation = Isolation::Workspace(crate::executor::Platform::Other);
+    let worker =
+        super::worker::Worker::spawn(String::from("x"), root.clone(), settings, isolation, false)?;
+    let mut seen = Vec::new();
+    while let Some(event) = worker.wait(Duration::from_secs(30)) {
+        let last = matches!(event, Event::Ended(_));
+        seen.push(event);
+        if last {
+            break;
+        }
+    }
+    match seen.last() {
+        Some(&Event::Ended(Ended::Failed(ref why))) => {
+            assert!(why.contains("no kernel confinement"), "{why}");
+        }
+        other => return Err(format!("expected a typed failure, got {other:?}").into()),
+    }
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(*event, Event::Ask(_) | Event::Review(_)))
+    );
+    assert!(
+        !root.join("ws").exists(),
+        "a refused session copied nothing"
+    );
+    Ok(())
+}
+
+/// `/status` names the reason commands are off, whatever it is, and says commands run in an
+/// isolated copy when they may run.
+#[test]
+fn sim_tui_header_status_names_why_commands_are_off() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!("larry-tui-header-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
+    let state = root.to_string_lossy().into_owned();
+    let with = |policy: Option<&'static str>| {
+        let state = state.clone();
+        crate::executor::Settings::from_env(move |name| match name {
+            "LARRY_STATE_DIR" => Some(state.clone()),
+            "LARRY_POLICY" => policy.map(str::to_owned),
+            _ => None,
+        })
+    };
+    let (_, off) = super::header(&with(Some("")), &root, None);
+    let line = off
+        .iter()
+        .find(|line| line.starts_with("commands:"))
+        .ok_or("no commands line")?;
+    assert!(
+        line.starts_with("commands: off (the policy does not allow a session"),
+        "{line}"
+    );
+    let (_, on) = super::header(&with(None), &root, None);
+    let line = on
+        .iter()
+        .find(|line| line.starts_with("commands:"))
+        .ok_or("no commands line")?;
+    assert_eq!(
+        line,
+        "commands: asked before each one, run in an isolated copy"
+    );
+    Ok(())
+}
+
+/// A frame holding a review answers it only with an explicit yes: every key is judged against
+/// the rule, and "always" has no meaning for a change to the person's own folder.
+#[test]
+fn sim_tui_apply_or_discard_answers_the_review() {
+    use super::app::Effect;
+    use super::worker::Decision;
+    let summary = vec![
+        String::from("1 file changed, +1 -0"),
+        String::from("a.txt  new  +1 -0"),
+    ];
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::new(seed);
+        let mut app = App::new(header(), Vec::new(), 40 + rng.pick(200), 10 + rng.pick(60));
+        app.handle(Input::Key(Key::Char('x')));
+        app.handle(Input::Key(Key::Enter));
+        app.handle(Input::Worker(Event::Review(summary.clone())));
+        assert!(app.busy(), "seed {seed}");
+        let (key, want) = match rng.pick(9) {
+            0 => (Key::Char('y'), Some(Decision::Run)),
+            1 => (Key::Char('Y'), Some(Decision::Run)),
+            2 => (Key::Char('n'), Some(Decision::Decline)),
+            3 => (Key::Esc, Some(Decision::Decline)),
+            4 => (Key::Enter, Some(Decision::Decline)),
+            5 => (Key::Interrupt, Some(Decision::Decline)),
+            6 => (Key::Char('a'), None),
+            7 => (Key::Char('q'), None),
+            _ => (Key::Up, None),
+        };
+        let effects = app.handle(Input::Key(key));
+        match want {
+            Some(decision) => {
+                assert_eq!(
+                    effects.first(),
+                    Some(&Effect::Decide(decision)),
+                    "seed {seed} {key:?}"
+                );
+            }
+            None => assert!(
+                effects.is_empty(),
+                "seed {seed} {key:?} answered the review"
+            ),
+        }
+    }
+}
+
+/// The toggle moves between Apply and Discard only, and Enter confirms the highlighted one.
+#[test]
+fn sim_tui_apply_toggle_confirms_the_highlight() {
+    use super::app::Effect;
+    use super::worker::Decision;
+    let mut app = App::new(header(), Vec::new(), 100, 30);
+    app.handle(Input::Worker(Event::Review(vec![String::from(
+        "1 file changed, +1 -0",
+    )])));
+    assert!(app.handle(Input::Key(Key::Left)).is_empty());
+    assert!(app.handle(Input::Key(Key::Right)).is_empty());
+    let effects = app.handle(Input::Key(Key::Left));
+    assert!(effects.is_empty());
+    let confirmed = app.handle(Input::Key(Key::Enter));
+    assert_eq!(confirmed.first(), Some(&Effect::Decide(Decision::Run)));
+}
+
+/// Names in a review and the hand-off line are the folder's, not Larry's: whatever they hold,
+/// no painted row carries an escape or a bidi control.
+#[test]
+fn sim_tui_apply_review_lines_are_sanitized() {
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::new(seed);
+        let mut app = App::new(header(), Vec::new(), 60 + rng.pick(160), 20 + rng.pick(40));
+        let lines: Vec<String> = (0..1 + rng.pick(4))
+            .map(|_| HOSTILE[rng.pick(HOSTILE.len())].to_owned())
+            .collect();
+        app.handle(Input::Worker(Event::Review(lines)));
+        app.handle(Input::Worker(Event::Handed {
+            line: HOSTILE[rng.pick(HOSTILE.len())].to_owned(),
+            applied: rng.pick(2) == 1,
+        }));
+        let frame = app.draw();
+        for row in 0..frame.buffer.height() {
+            let text = frame.buffer.row_text(row);
+            assert!(
+                !text
+                    .chars()
+                    .any(|ch| ch == '\u{1b}' || ('\u{202A}'..='\u{202E}').contains(&ch)),
+                "seed {seed} row {row}: {text:?}"
+            );
+        }
+    }
 }
 
 #[test]
