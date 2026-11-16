@@ -320,6 +320,10 @@ fn a_timed_out_command_has_its_whole_group_killed() -> TestResult {
         "the blocked command must be reported timed out"
     );
     assert!(
+        !flag_of(result, "interrupted")?,
+        "a timeout is never also an interrupt (larry#242)"
+    );
+    assert!(
         !flag_of(&report, "accepted")?,
         "a timed-out run is never accepted"
     );

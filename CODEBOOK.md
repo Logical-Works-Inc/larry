@@ -71,7 +71,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::session`, `executor::compact` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035); its auto-compaction: old output cleared, old steps folded into a record, the window learned from a gateway refusal (ADR 0044) |
 | `executor::ledger`, `executor::ledger_routes`, `executor::routes` | The SQLite record of live groups, the reap after a kill -9, the receipt key and the per-tenant route table (`ledger_routes`: at most 256 routes a tenant, one default, every statement names the tenant); `larry route` and the route a task resolves to (larry#201, ADR 0039) |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
-| `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
+| `executor::workspace`, `executor::workspace::snapshot` | The throwaway `git clone --local` workspace, its diff and its removal; the bounded snapshot of a person's folder and the checked `git apply` back (larry#243) |
+| `executor::confine`, `executor::island` | The kernel wrapper (Seatbelt, Landlock) and its probe; a session's isolated copy, its review diff and its handoff (larry#243, ADR 0046) |
 | `eval`, `eval::sim_eval` | `larry eval`: one arm over a matched set, origins, outcomes, the scorecard (ADR 0009); the seeded simulations of its scoring and set checks |
 | `eval::set` | The bounded task set and its typed refusals, checked before any task runs |
 | `eval::score` | Whole-number prices and costs, nearest-rank percentiles, the card |
@@ -83,7 +84,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `tui::app` | The pure state: keys and session events in, effects and one frame out; no terminal, no clock |
 | `tui::worker` | `run_session` on its own thread; bounded event and answer channels; approve, decline, cancel, join |
 | `tui::buffer`, `tui::style` | The cell buffer, its diff and DEC 2026 frame; reset-first SGR, widths, wrap, sanitize |
-| `tui::layout` | The phone-ratio chat column (44..64) and the artifact pane at 108+ columns |
+| `tui::layout`, `tui::pane` | The phone-ratio chat column (44..64) and the artifact pane at 108+ columns; the pane's bounded Output, Diff and Receipt tabs and their paint (larry#244, ADR 0047) |
 | `tui::cells`, `tui::composer` | Transcript entries drawn the Codex way; the multi-line composer, history and slash popup |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008); `mcp::wire` the stdio framing and envelope; `mcp::modern` the stateless 2026-07-28 era; `mcp::legacy` the initialize lifecycle of the four earlier revisions; `mcp::tools` the one tool, `larry_submit_task` |
 | `acp` | `larry acp`: the Agent Client Protocol agent Harbor drives; each prompt a terminal session (ADR 0035); `acp::tests` its protocol surface with no executor behind it; `acp::sim_acp` the seeded adversarial simulations of that surface |

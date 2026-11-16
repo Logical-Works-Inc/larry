@@ -3,6 +3,7 @@
 //! the ACP agent's (larry#93). A helper that cannot build its input says why with
 //! a variant a caller can match, never a boxed string.
 
+use std::env::VarError;
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -11,6 +12,8 @@ use std::string::FromUtf8Error;
 
 use lgwks_std::json;
 use lgwks_std::seeded::DrawError;
+
+use crate::executor::ExecError;
 
 /// Why a simulation helper could not build its input.
 #[derive(Debug)]
@@ -27,6 +30,10 @@ pub(crate) enum SimError {
     Utf8(FromUtf8Error),
     /// A fixed table or a path lacked what the helper needs.
     Missing(&'static str),
+    /// The executor refused a step the helper needs (a ledger, an origin, a workspace).
+    Exec(ExecError),
+    /// An environment variable the helper reads is unset or not text.
+    Env(VarError),
 }
 
 impl fmt::Display for SimError {
@@ -38,6 +45,8 @@ impl fmt::Display for SimError {
             Self::Json(ref cause) => write!(out, "json: {cause}"),
             Self::Utf8(ref cause) => write!(out, "output is not UTF-8: {cause}"),
             Self::Missing(what) => write!(out, "missing: {what}"),
+            Self::Exec(ref cause) => write!(out, "executor: {cause}"),
+            Self::Env(ref cause) => write!(out, "environment: {cause}"),
         }
     }
 }
@@ -51,7 +60,21 @@ impl Error for SimError {
             Self::Json(ref cause) => Some(cause),
             Self::Utf8(ref cause) => Some(cause),
             Self::Missing(_) => None,
+            Self::Exec(ref cause) => Some(cause),
+            Self::Env(ref cause) => Some(cause),
         }
+    }
+}
+
+impl From<ExecError> for SimError {
+    fn from(cause: ExecError) -> Self {
+        Self::Exec(cause)
+    }
+}
+
+impl From<VarError> for SimError {
+    fn from(cause: VarError) -> Self {
+        Self::Env(cause)
     }
 }
 

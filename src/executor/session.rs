@@ -3,9 +3,13 @@
 //! Terminal-Bench task asks of an agent, and what `larry acp` runs for Harbor.
 //!
 //! The session is one displayed `WorkProposal` through the executor's admission
-//! gate, like every task: it needs every executor scope, `model.command` among
-//! them, which no default policy holds, so a session runs only where an operator
-//! has granted it, as for a Harbor task container that isolates the commands.
+//! gate, like every task. Run on the host (`larry acp`) it needs every executor
+//! scope, `model.command` among them, which no default policy holds, so it runs
+//! only where an operator has granted it, as for a Harbor task container that
+//! isolates the commands. Run isolated (the terminal frontend, larry#243) every
+//! command runs in a confined copy of the folder (`super::island`), the model
+//! is told its directory is `.`, and the folder changes only when the person
+//! approves the diff the session ends with; the default policy suffices.
 //! Each reply is exactly one JSON object, `{"command": "<sh -c text>"}` or
 //! `{"done": "<summary>"}`; each command runs in its own process group under the
 //! executor's timeout, tracked in the ledger so a kill -9 is reaped by the next
@@ -14,7 +18,9 @@
 //! model's window, so the length of the conversation never stops a session. The
 //! loop stops at the model's `done`, at 256 steps, at three refused replies in a
 //! row, at a model refusal, or at a cancellation checked before every model call
-//! and every command. The sealed report records every command as the model saw it,
+//! and every command and polled while one runs: the person's cancel kills the
+//! running command's process group and the report counts it interrupted
+//! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
 use std::fmt;
@@ -32,8 +38,10 @@ use super::compact::{Answer, Conversation};
 use super::digest_hex;
 use super::gate::{self, Subject};
 use super::identity::fresh_id;
+use super::island::{Island, Isolation, Outcome};
 use super::prepare;
-use super::run::{CommandResult, run_command};
+use super::run::{CommandResult, Place, run_command};
+use super::workspace::report_members;
 use crate::model::{Completion, ModelClient};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
@@ -124,14 +132,28 @@ pub(crate) enum Approval {
 /// What the model is shown for a command the person declined.
 const DECLINED: &str = "not run: the person declined this command";
 
-/// Whether `settings` lets a session run commands at all: the policy holds
-/// every scope [`gate::session_scopes`] needs, `model.command` among them.
-pub(crate) fn admits(settings: &Settings) -> bool {
-    gate::session_scopes().is_subset(&settings.policy)
+/// The person's answer to the change a session made in its copy of their folder (larry#243).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Handoff {
+    /// Apply exactly the diff shown to the folder.
+    Apply,
+    /// Leave the folder as it is.
+    Discard,
 }
 
 /// What a session reports while it runs, and how it learns it was cancelled.
 pub(crate) trait Observer {
+    /// The session ended with `summary` as the change its commands made in the copy of
+    /// the person's folder; the folder changes only when this answers [`Handoff::Apply`].
+    /// The answer for an observer nobody can ask is to discard.
+    fn review(&mut self, _summary: &[String]) -> Handoff {
+        Handoff::Discard
+    }
+    /// The change in full, as a unified diff of at most 1 MiB, offered once just before
+    /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
+    fn diff(&mut self, _text: &str) {}
+    /// What became of that change: `line` says so, and `applied` whether it is in the folder.
+    fn handed(&mut self, line: &str, applied: bool);
     /// The model asks to run `command` as step `step`; nothing runs unless this
     /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
     /// inside the operator's isolated container under the same gate and runs it.
@@ -222,10 +244,11 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
 
 /// The status line the model is shown for one clipped command result.
 fn status(result: &CommandResult) -> String {
-    let ended = match (result.timed_out(), result.exit_code()) {
-        (true, _) => String::from("timed out; its process group was killed"),
-        (false, Some(code)) => format!("exit status {code}"),
-        (false, None) => String::from("ended by a signal"),
+    let ended = match (result.timed_out(), result.interrupted(), result.exit_code()) {
+        (false, false, Some(code)) => format!("exit status {code}"),
+        (false, false, None) => String::from("ended by a signal"),
+        (true, false, _) => String::from("timed out; its process group was killed"),
+        (_, true, _) => String::from("interrupted by the person; its process group was killed"),
     };
     if result.truncated() {
         format!("{ended} (output past {OBSERVED_BYTES} bytes of a stream was cut)")
@@ -282,36 +305,67 @@ pub(crate) fn run_session(
     instruction: &str,
     cwd: &Path,
     settings: &Settings,
+    isolation: Isolation,
     observer: &mut dyn Observer,
 ) -> Result<Ended, ExecError> {
     check(instruction, cwd).map_err(ExecError::Session)?;
+    // A host that cannot confine refuses here, before the ledger, the model or a copy.
+    isolation.check()?;
     let (ledger, key) = prepare(settings)?;
     let route = settings.route(&ledger, None)?;
     let config = settings.model_config(&route)?;
     let document = json::to_vec(&json!({
-        "session": { "cwd": cwd.to_string_lossy(), "instruction": instruction }
+        "session": {
+            "cwd": cwd.to_string_lossy(),
+            "instruction": instruction,
+            "isolation": isolation.name(),
+        }
     }))
     .map_err(|cause| ExecError::Gate(cause.into()))?;
     let task_id = fresh_id()?;
     let task_digest = digest_hex(&document);
     let mut stop = None;
     let subject = Subject {
-        required: gate::session_scopes(),
+        required: isolation.required(),
         path: cwd,
         bytes: &document,
     };
     let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
+        // Opened inside the gate: a denied session copies nothing.
+        let island = match isolation {
+            Isolation::Host => None,
+            Isolation::Workspace(platform) => {
+                Some(Island::open(platform, settings, &task_id, cwd)?)
+            }
+        };
         let client = ModelClient::new(config, backoff);
         let mut turn = Turn {
             client: &client,
             settings,
             ledger: &ledger,
             task_id: &task_id,
-            cwd,
+            place: match island {
+                Some(ref isle) => isle.place(),
+                None => Place::Open(cwd),
+            },
+            // The model is told its directory is `.` in a copy, so the request carries
+            // no run id and no path of the person's.
+            shown: match island {
+                Some(_) => String::from("."),
+                None => cwd.display().to_string(),
+            },
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
-        let body = json!({
+        let mut outcome = Outcome::None;
+        let mut diff = None;
+        if let Some(ref isle) = island
+            && done.stop == Stop::EndTurn
+        {
+            diff = isle.diff()?;
+            outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
+        }
+        let mut body = json!({
             "task_id": task_id,
             "task_digest": task_digest,
             "diff": null,
@@ -321,10 +375,24 @@ pub(crate) fn run_session(
                 "stop": done.stop.name(),
                 "commands": done.records.len(),
                 "declined": done.declined,
+                "interrupted": done.interrupted,
                 "route": route.seal(),
                 "compaction": done.compaction,
+                "isolation": match island {
+                    Some(ref isle) => isle.describe(),
+                    None => json!({ "mode": isolation.name() }),
+                },
+                "handoff": outcome.name(),
             },
         });
+        // An isolated session records the change it made, whole or cut (larry#206).
+        if island.is_some()
+            && let Some(object) = body.as_object_mut()
+        {
+            for (name, member) in report_members(diff) {
+                object.insert(name.to_owned(), member);
+            }
+        }
         stop = Some(done.stop);
         Ok(Report::sealed(body, &key))
     })?;
@@ -349,6 +417,8 @@ struct Steps {
     compaction: Value,
     /// Commands the person declined; none of them ran.
     declined: usize,
+    /// Commands the person interrupted; each had its process group killed (larry#242).
+    interrupted: usize,
 }
 
 /// One session's loop state.
@@ -361,24 +431,25 @@ struct Turn<'a> {
     ledger: &'a Ledger,
     /// The run's identity.
     task_id: &'a str,
-    /// The directory every command runs in.
-    cwd: &'a Path,
+    /// Where every command runs: the directory itself, or its confined copy.
+    place: Place<'a>,
+    /// The directory the model is told it works in.
+    shown: String,
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
 }
 
 impl Turn<'_> {
     /// Asks, runs and observes until a stop, and returns it with each command's
-    /// record, what compaction did and how many commands the person declined.
+    /// record, what compaction did and how many commands the person declined
+    /// or interrupted.
     fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
-        let task = format!(
-            "Working directory: {}\n\nTask:\n{instruction}",
-            self.cwd.display()
-        );
+        let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut refused = 0_usize;
         let mut declined = 0_usize;
+        let mut interrupted = 0_usize;
         let stop = loop {
             if steps.len().saturating_add(declined) >= MAX_STEPS {
                 break Stop::MaxTurnRequests;
@@ -425,13 +496,16 @@ impl Turn<'_> {
                     }
                     self.observer.started(step, &command);
                     let argv = [String::from("sh"), String::from("-c"), command.clone()];
+                    // The person's cancel is polled while the command runs, so Esc
+                    // ends it and its whole group, not only the next step (larry#242).
                     let result = run_command(
                         &argv,
-                        self.cwd,
+                        self.place,
                         &self.settings.path,
                         self.settings.timeout,
                         self.ledger,
                         self.task_id,
+                        &|| self.observer.cancelled(),
                     )?
                     .clipped(OBSERVED_BYTES);
                     let answer = Answer::Observed {
@@ -440,10 +514,16 @@ impl Turn<'_> {
                         status: status(&result),
                         output: Some(streams(&result)),
                     };
-                    let passed = result.exit_code() == Some(0) && !result.timed_out();
+                    let was_interrupted = result.interrupted();
+                    let passed =
+                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
                     self.observer.finished(step, &answer.text(), passed);
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
+                    if was_interrupted {
+                        interrupted = interrupted.saturating_add(1);
+                        break Stop::Cancelled;
+                    }
                 }
                 Err(fault) => {
                     refused = refused.saturating_add(1);
@@ -462,6 +542,7 @@ impl Turn<'_> {
             records: steps,
             compaction: conversation.json(),
             declined,
+            interrupted,
         })
     }
 

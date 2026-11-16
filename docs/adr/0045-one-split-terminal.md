@@ -47,8 +47,9 @@ with DEC 2026. OpenCode keeps the chat 44 to 64 columns wide and splits at 108 c
 
 - AppCUI and its subtree leave the lock (713 lines). crossterm was in the tree already. unicode-width
   has no dependencies. Both cite logicalworks-crates#1067.
-- Esc stops the session at its next step. A running command ends at its timeout, because
-  `run_command` has no cancel hook yet.
+- Esc stops the session at its next step and ends a running command (larry#242):
+  `run_command` polls the person's cancel every 25 ms, kills the command's process
+  group, reaps it and drops its ledger row, and the report counts the run interrupted.
 - Model and command output are sanitized: no escape, control or bidi character reaches the terminal.
 
 ## Rejected

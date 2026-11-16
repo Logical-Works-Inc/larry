@@ -15,6 +15,7 @@ mod buffer;
 mod cells;
 mod composer;
 mod layout;
+mod pane;
 #[cfg(test)]
 mod sim_parts;
 #[cfg(test)]
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 
-use crate::executor::{ExecError, Settings, admits, process_env};
+use crate::executor::{ExecError, Isolation, Settings, process_env};
 use app::{App, Effect, Input, Key};
 use buffer::{Frame, render};
 use cells::Header;
@@ -40,6 +41,8 @@ use worker::{Ended, Event, Worker};
 const BUSY_WAIT: Duration = Duration::from_millis(100);
 /// How long the loop waits for a key while idle; nothing repaints meanwhile.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
+/// Columns of the reason `/status` gives for commands that are off.
+const STATUS_REASON: usize = 100;
 /// Session events one loop turn takes before it paints, so a burst cannot starve keys.
 const EVENTS_PER_TURN: usize = worker::EVENTS;
 
@@ -185,13 +188,7 @@ fn header(
                 Ok(route) => Ok(route.model().to_owned()),
                 Err(cause) => Err(format!("none ({cause})")),
             };
-            let blocked = (!admits(settings)).then(|| {
-                String::from(
-                    "Tasks cannot run commands: add model.command to LARRY_POLICY \
-                     where the commands are isolated.",
-                )
-            });
-            (model, blocked)
+            (model, Isolation::workspace().blocked(settings))
         }
         Err(ref cause) => (Err(String::from("none")), Some(cause.to_string())),
     };
@@ -204,13 +201,13 @@ fn header(
             }
         ),
         format!("directory: {directory}"),
-        format!(
-            "commands: {}",
-            match blocked {
-                Some(_) => "refused by the policy",
-                None => "asked before each one",
-            }
-        ),
+        match blocked {
+            Some(ref why) => format!(
+                "commands: off ({})",
+                style::ellipsize(&style::sanitize(why, false), STATUS_REASON)
+            ),
+            None => String::from("commands: asked before each one, run in an isolated copy"),
+        },
     ];
     let header = Header {
         version: String::from(env!("CARGO_PKG_VERSION")),
@@ -323,7 +320,8 @@ fn start(
     let failed = match *settings {
         Ok(ref settings) => {
             let dir: PathBuf = cwd.to_path_buf();
-            match Worker::spawn(instruction, dir, settings.clone(), app.always()) {
+            let isolation = Isolation::workspace();
+            match Worker::spawn(instruction, dir, settings.clone(), isolation, app.always()) {
                 Ok(running) => return Some(running),
                 Err(cause) => format!("Larry could not start the session: {cause}"),
             }

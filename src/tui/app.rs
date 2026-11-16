@@ -13,11 +13,12 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::buffer::{Buffer, Frame, Rect};
+use super::buffer::{Buffer, Frame};
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
 use super::layout::split;
-use super::style::{Line, Span, Style, ellipsize, line_width, sanitize, text_width, wrap};
+use super::pane::Pane;
+use super::style::{Line, Span, Style, ellipsize, sanitize, text_width, wrap};
 use super::worker::{Decision, Ended, Event};
 
 /// Most transcript entries kept; the oldest goes first.
@@ -31,9 +32,6 @@ const HELP: [&str; 4] = [
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
 ];
-/// What the artifact pane says until artifacts land in it.
-const PANE_TEXT: &str = "Charts, diffs and previews for this chat show here.";
-
 /// One key, already read from the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Key {
@@ -114,8 +112,9 @@ enum Phase {
     Idle,
     /// A session runs; the command, while one runs.
     Working(Option<String>),
-    /// The session asks to run this command; the highlighted answer.
-    Asking(String, Decision),
+    /// The session asks to run this command, or, with no command, whether to apply the
+    /// change its copy of the folder holds (larry#243); the highlighted answer.
+    Asking(Option<String>, Decision),
     /// Interrupted; whether a command still runs.
     Stopping(bool),
 }
@@ -149,6 +148,8 @@ pub(crate) struct App {
     said: Option<String>,
     /// A one-line hint over the footer until the next key.
     hint: Option<String>,
+    /// The artifact pane's state: the task's output, diff and receipt (larry#244).
+    pane: Pane,
 }
 
 /// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
@@ -184,6 +185,44 @@ pub(crate) fn hints(items: &[&str], width: usize) -> Line {
     vec![Span::new(text, Style::MUTED)]
 }
 
+/// The marker and style of a row of choices, highlighted or not.
+fn marked(on: bool) -> (&'static str, Style) {
+    if on {
+        ("›", Style::ACCENT.bold())
+    } else {
+        (" ", Style::PLAIN)
+    }
+}
+
+/// What is asked: the title, the answers in the order ←/→ walks them, and the footer keys.
+type Offer = (
+    &'static str,
+    &'static [(Decision, &'static str)],
+    &'static [&'static str],
+);
+
+/// The question about a command that `running`, or the review of the session's change.
+/// A review has no "always": the diff of the person's own folder is asked about every time.
+fn offer(running: bool) -> Offer {
+    if running {
+        (
+            "△ Run this command?",
+            &[
+                (Decision::Run, "Yes"),
+                (Decision::Always, "Always"),
+                (Decision::Decline, "No"),
+            ],
+            &["y yes", "a always", "n no", "←/→ select", "enter confirm"],
+        )
+    } else {
+        (
+            "△ Apply this change to your folder?",
+            &[(Decision::Run, "Apply"), (Decision::Decline, "Discard")],
+            &["y apply", "n discard", "←/→ select", "enter confirm"],
+        )
+    }
+}
+
 /// `said`, or `fallback` when the session said nothing.
 fn or_said(said: Option<String>, fallback: &str) -> String {
     match said {
@@ -209,6 +248,7 @@ impl App {
             quitting: false,
             said: None,
             hint: None,
+            pane: Pane::new(),
         }
     }
 
@@ -266,10 +306,11 @@ impl App {
     fn event(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Ask(command) => {
-                self.phase = Phase::Asking(command, Decision::Run);
+                self.phase = Phase::Asking(Some(command), Decision::Run);
                 self.scroll = 0;
             }
             Event::Started(command) => {
+                self.pane.started(&command);
                 self.phase = if matches!(self.phase, Phase::Working(_)) {
                     Phase::Working(Some(command))
                 } else {
@@ -280,13 +321,13 @@ impl App {
                 observation,
                 passed,
             } => {
-                let command = match self.phase {
-                    Phase::Working(Some(ref command)) => command.clone(),
-                    Phase::Idle | Phase::Working(None) | Phase::Asking(..) | Phase::Stopping(_) => {
-                        String::from("(command)")
-                    }
+                let command = if let Phase::Working(Some(ref command)) = self.phase {
+                    command.clone()
+                } else {
+                    String::from("(command)")
                 };
                 let (status, output) = split_observation(&observation);
+                self.pane.finished(&command, &status, &output, passed);
                 self.push(Entry::Ran {
                     command,
                     status,
@@ -299,6 +340,20 @@ impl App {
                 };
             }
             Event::Said(text) => self.said = Some(text),
+            Event::Review(summary) => {
+                // The names in a diff are the folder's, not Larry's: each line is made safe.
+                self.push(Entry::Info(
+                    summary.iter().map(|line| sanitize(line, false)).collect(),
+                ));
+                self.phase = Phase::Asking(None, Decision::Decline);
+                self.scroll = 0;
+            }
+            Event::Handed { line, applied } => {
+                let style = if applied { Style::GOOD } else { Style::WARN };
+                self.push(Entry::Notice(style, sanitize(&line, false)));
+            }
+            Event::Diff(text) => self.pane.set_diff(&text),
+            Event::Receipt(receipt) => self.pane.set_receipt(receipt),
             Event::Ended(ended) => return self.ended(ended),
         }
         Vec::new()
@@ -329,6 +384,9 @@ impl App {
 
     /// One key.
     fn key(&mut self, key: Key) -> Vec<Effect> {
+        if self.pane_key(key) {
+            return Vec::new();
+        }
         if let Phase::Asking(ref command, choice) = self.phase {
             let command = command.clone();
             return self.answer(key, command, choice);
@@ -377,6 +435,23 @@ impl App {
         Vec::new()
     }
 
+    /// PgUp, PgDn and Tab belong to the pane while the screen is wide enough to show it,
+    /// the question included, so the diff can be read before the answer; Tab still
+    /// completes while the slash popup is open.
+    fn pane_key(&mut self, key: Key) -> bool {
+        if split(self.width, self.height).artifact.is_none() {
+            return false;
+        }
+        let body = Pane::body(self.height);
+        match key {
+            Key::PageUp => self.pane.page(true, body),
+            Key::PageDown => self.pane.page(false, body),
+            Key::Tab if self.composer.popup().is_none() => self.pane.next_tab(),
+            _ => return false,
+        }
+        true
+    }
+
     /// Esc or Ctrl+C while a session runs.
     fn interrupt(&mut self, key: Key) -> Vec<Effect> {
         match self.phase {
@@ -394,21 +469,23 @@ impl App {
     }
 
     /// A key while the session asks about `command`, `choice` highlighted.
-    fn answer(&mut self, key: Key, command: String, choice: Decision) -> Vec<Effect> {
+    /// The same keys answer the review of a session's change (no `command`), which has no
+    /// "always": its `a` falls to the ignored keys.
+    fn answer(&mut self, key: Key, command: Option<String>, choice: Decision) -> Vec<Effect> {
         let decision = match key {
             Key::Char('y' | 'Y') => Decision::Run,
-            Key::Char('a' | 'A') => Decision::Always,
+            Key::Char('a' | 'A') if command.is_some() => Decision::Always,
             Key::Char('n' | 'N') | Key::Esc | Key::Interrupt => Decision::Decline,
             Key::Enter => choice,
             Key::Left | Key::Right => {
-                let order = [Decision::Run, Decision::Always, Decision::Decline];
-                let at = order.iter().position(|&item| item == choice);
+                let order = offer(command.is_some()).1;
+                let at = order.iter().position(|&(item, _)| item == choice);
                 let next = match (key, at) {
                     (Key::Left, Some(index)) => index.checked_sub(1),
                     (_, Some(index)) => index.checked_add(1),
                     (_, None) => None,
                 };
-                if let Some(&picked) = next.and_then(|index| order.get(index)) {
+                if let Some(&(picked, _)) = next.and_then(|index| order.get(index)) {
                     self.phase = Phase::Asking(command, picked);
                 }
                 return Vec::new();
@@ -430,7 +507,9 @@ impl App {
             | Key::KillWord => return Vec::new(),
         };
         match decision {
-            Decision::Decline => self.push(Entry::Declined(command)),
+            Decision::Decline => command
+                .into_iter()
+                .for_each(|command| self.push(Entry::Declined(command))),
             Decision::Always => self.always = true,
             Decision::Run => {}
         }
@@ -490,15 +569,13 @@ impl App {
         self.started = self.now;
         self.said = None;
         self.scroll = 0;
+        self.pane.begin();
         vec![Effect::Start(text)]
     }
 
     /// Rows one Page Up or Page Down moves.
     fn page(&self) -> usize {
-        match self.height.checked_div(2) {
-            Some(half) => half.max(1),
-            None => 1,
-        }
+        self.height.checked_div(2).into_iter().sum::<usize>().max(1)
     }
 
     /// The chat column's inner width: one cell of margin each side.
@@ -569,30 +646,6 @@ impl App {
         ])
     }
 
-    /// The question block: what will run and the three answers.
-    fn question(command: &str, choice: Decision, width: usize) -> Vec<Line> {
-        let mut rows = vec![vec![Span::new("△ Run this command?", Style::WARN.bold())]];
-        let lead = vec![Span::new("$ ", Style::MUTED)];
-        let rest = vec![Span::new("  ", Style::PLAIN)];
-        for line in sanitize(command, true).split('\n') {
-            rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
-        }
-        let mut choices = Vec::new();
-        for (decision, label) in [
-            (Decision::Run, "Yes"),
-            (Decision::Always, "Always"),
-            (Decision::Decline, "No"),
-        ] {
-            if decision == choice {
-                choices.push(Span::new(format!("› {label}  "), Style::ACCENT.bold()));
-            } else {
-                choices.push(Span::new(format!("  {label}  "), Style::PLAIN));
-            }
-        }
-        rows.push(choices);
-        rows
-    }
-
     /// The bottom block (status, popup or question, composer, footer) and the
     /// cursor's column and row in it.
     fn bottom(&self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
@@ -600,20 +653,39 @@ impl App {
         if let Some(status) = self.status_row() {
             rows.push(status);
         }
+        // A screen too narrow for the pane keeps the change as one line (larry#244).
+        if split(self.width, self.height).artifact.is_none()
+            && let Some(summary) = self.pane.summary()
+        {
+            rows.push(vec![Span::new(ellipsize(&summary, width), Style::MUTED)]);
+        }
         let mut cursor = None;
         let footer: &[&str] = if let Phase::Asking(ref command, choice) = self.phase {
-            rows.extend(Self::question(command, choice, width));
-            &["y yes", "a always", "n no", "←/→ select", "enter confirm"]
+            let (title, answers, keys) = offer(command.is_some());
+            rows.push(vec![Span::new(title, Style::WARN.bold())]);
+            let lead = vec![Span::new("$ ", Style::MUTED)];
+            let rest = vec![Span::new("  ", Style::PLAIN)];
+            for text in command.iter().map(|command| sanitize(command, true)) {
+                for line in text.split_terminator('\n') {
+                    rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
+                }
+            }
+            rows.push(
+                answers
+                    .iter()
+                    .map(|&(decision, label)| {
+                        let (mark, style) = marked(decision == choice);
+                        Span::new(format!("{mark} {label}  "), style)
+                    })
+                    .collect(),
+            );
+            keys
         } else {
             if let Some(popup) = self.composer.popup() {
                 for (index, (name, about)) in popup.into_iter().enumerate() {
-                    let (mark, style) = if index == self.composer.selected_row() {
-                        ("› ", Style::ACCENT.bold())
-                    } else {
-                        ("  ", Style::PLAIN)
-                    };
+                    let (mark, style) = marked(index == self.composer.selected_row());
                     rows.push(vec![
-                        Span::new(format!("{mark}{name}  "), style),
+                        Span::new(format!("{mark} {name}  "), style),
                         Span::new(about, Style::MUTED),
                     ]);
                 }
@@ -641,32 +713,6 @@ impl App {
         (rows, cursor)
     }
 
-    /// Paints the artifact pane: a rule on its left edge and its placeholder.
-    fn pane(buffer: &mut Buffer, area: Rect) {
-        let rule = area.x.saturating_sub(1);
-        for row in area.y..area.bottom() {
-            buffer.put(rule, row, area.x, "│", Style::MUTED);
-        }
-        let left = area.x.saturating_add(2);
-        let title = area.y.saturating_add(1);
-        buffer.put(left, title, area.right(), "Artifacts", Style::MUTED.bold());
-        let width = area.width.saturating_sub(4).max(1);
-        let lines = wrap(&[Span::new(PANE_TEXT, Style::MUTED)], width, &[], &[]);
-        let middle = match area.height.checked_div(2) {
-            Some(half) => area.y.saturating_add(half),
-            None => area.y,
-        };
-        for (offset, line) in lines.iter().enumerate() {
-            let pad: usize = width
-                .saturating_sub(line_width(line))
-                .checked_div(2)
-                .into_iter()
-                .sum();
-            let row = middle.saturating_add(offset);
-            buffer.put_line(left.saturating_add(pad), row, area.right(), line);
-        }
-    }
-
     /// The frame for the current state.
     pub(crate) fn draw(&self) -> Frame {
         let mut buffer = Buffer::new(self.width, self.height);
@@ -691,7 +737,7 @@ impl App {
             buffer.put_line(left, top.saturating_add(offset), right, line);
         }
         if let Some(pane) = regions.artifact {
-            Self::pane(&mut buffer, pane);
+            self.pane.paint(&mut buffer, pane);
         }
         let cursor = cursor.and_then(|(column, row)| {
             let y = top.saturating_add(row.checked_sub(skip)?);

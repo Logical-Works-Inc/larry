@@ -13,6 +13,11 @@ use std::process::{Command, Output, Stdio};
 
 use super::ExecError;
 
+mod snapshot;
+#[cfg(test)]
+pub(crate) use snapshot::ApplyFault;
+pub(crate) use snapshot::summary;
+
 /// Largest diff kept for one task, in bytes; a longer diff is cut and sealed as truncated (larry#206).
 pub(crate) const DIFF_LIMIT: usize = 1_048_576;
 

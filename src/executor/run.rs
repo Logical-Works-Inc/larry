@@ -1,6 +1,7 @@
 //! One acceptance command in its own process group, under a timeout (larry#85).
 
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -11,7 +12,13 @@ use std::time::{Duration, Instant};
 use lgwks_std::process::{identify_process, kill_process_group, process_group_exists};
 
 use super::ExecError;
+use super::confine::Confine;
 use super::ledger::Ledger;
+
+// A command's own process group is what a timeout or a cancel kills; a target without
+// one has no safe way to run it, so the build refuses rather than run it ungrouped.
+#[cfg(not(unix))]
+compile_error!("the executor runs each command in its own process group: Unix targets only");
 
 /// Bytes of each output stream kept from its start in the report (larry#206).
 const HEAD_BYTES: usize = 524_288;
@@ -37,6 +44,12 @@ const GROUP_PROBES: u32 = 10_000;
 /// members are briefly zombies, so the probes yield between checks; the bound is the
 /// elapsed time, which a count of yields never measured.
 const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Longest one slice of the command wait sleeps before it checks the person's
+/// cancel again (larry#242): it bounds Esc-to-kill latency for a running
+/// command. `tui_journey_esc_kills_running_command` measures the whole path
+/// (`esc_to_interrupted_ms`, under 500 ms) against this 25 ms slice.
+const CANCEL_POLL: Duration = Duration::from_millis(25);
 
 /// One captured stream: its first bytes, its last bytes, and how many bytes fell between them.
 #[derive(Default)]
@@ -100,6 +113,9 @@ pub(crate) struct CommandResult {
     exit_code: Option<i32>,
     /// Whether the timeout fired and the group was killed.
     timed_out: bool,
+    /// Whether the person cancelled the command and its group was killed
+    /// (larry#242); never true together with `timed_out`.
+    interrupted: bool,
     /// Standard output: its head and its tail, joined by a marker line, lossily decoded.
     stdout: String,
     /// Standard error: its head and its tail, joined by a marker line, lossily decoded.
@@ -123,6 +139,11 @@ impl CommandResult {
     /// Whether the timeout fired and the group was killed.
     pub(crate) const fn timed_out(&self) -> bool {
         self.timed_out
+    }
+
+    /// Whether the person cancelled the command and its group was killed (larry#242).
+    pub(crate) const fn interrupted(&self) -> bool {
+        self.interrupted
     }
 
     /// The kept standard output.
@@ -158,6 +179,7 @@ impl CommandResult {
             "pgid": self.pgid,
             "exit_code": self.exit_code,
             "timed_out": self.timed_out,
+            "interrupted": self.interrupted,
             "stdout": self.stdout,
             "stderr": self.stderr,
             "stdout_dropped": self.stdout_dropped,
@@ -168,23 +190,62 @@ impl CommandResult {
     }
 }
 
-/// Runs `argv` in `workspace` in its own process group, with the environment cleared to
-/// PATH, HOME (the workspace), and LANG=C. A timeout or a leader's exit kills the whole group.
+/// Where a command runs: a directory as it is, or a workspace the kernel confines it to
+/// (larry#243).
+#[derive(Clone, Copy)]
+pub(crate) enum Place<'a> {
+    /// This directory, open to whatever the command does in it.
+    Open(&'a Path),
+    /// This confinement's tree, behind its wrapper, with `TMPDIR` at its scratch directory.
+    Confined(&'a Confine),
+}
+
+/// Runs `argv` in `place` in its own process group, with the environment cleared to
+/// PATH, HOME (the workspace), and LANG=C. The leader's exit, a timeout, or the person's
+/// cancel (`cancelled`, polled at most [`CANCEL_POLL`] apart, larry#242) kills the whole
+/// group; a timeout and an interrupt are reported as `timed_out` and `interrupted`,
+/// never both at once.
 pub(crate) fn run_command(
     argv: &[String],
-    workspace: &Path,
+    place: Place<'_>,
     path_env: &str,
     timeout: Duration,
     ledger: &Ledger,
     task_id: &str,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<CommandResult, ExecError> {
     let started_at = Instant::now();
-    let Some((program, arguments)) = argv.split_first() else {
+    if argv.is_empty() {
+        return Err(spawn_failure(
+            "",
+            io::Error::other("acceptance command is empty"),
+        ));
+    }
+    // A confined command is the platform's wrapper plus the model's argv, so the kernel
+    // confines it and everything it forks; the result still names the model's argv.
+    let (workspace, scratch, wrapped) = match place {
+        Place::Open(path) => (path, None, None),
+        Place::Confined(confine) => (
+            confine.tree(),
+            Some(confine.scratch()),
+            Some(confine.wrap(argv)),
+        ),
+    };
+    let launch: &[String] = match wrapped.as_deref() {
+        Some(prefixed) => prefixed,
+        None => argv,
+    };
+    let Some((program, arguments)) = launch.split_first() else {
         return Err(spawn_failure(
             "",
             io::Error::other("acceptance command is empty"),
         ));
     };
+    // Computed before the spawn: an overflow found inside the scope below would leave
+    // the live leader unkilled, and the scope would wait on it.
+    let deadline = started_at.checked_add(timeout).ok_or_else(|| {
+        spawn_failure(program, io::Error::other("the command deadline overflowed"))
+    })?;
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -195,8 +256,12 @@ pub(crate) fn run_command(
         .env("LANG", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    if let Some(directory) = scratch {
+        command.env("TMPDIR", directory);
+    }
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|source| spawn_failure(program, source))?;
@@ -234,28 +299,19 @@ pub(crate) fn run_command(
     }
 
     let (status_sender, status_receiver) = mpsc::sync_channel::<io::Result<ExitStatus>>(1);
-    let (status, timed_out, stdout, stderr) = std::thread::scope(
-        |scope| -> Result<(io::Result<ExitStatus>, bool, Captured, Captured), ExecError> {
+    let (status, timed_out, interrupted, stdout, stderr) = std::thread::scope(
+        |scope| -> Result<(io::Result<ExitStatus>, bool, bool, Captured, Captured), ExecError> {
             let stdout_reader = scope.spawn(move || capture(stdout_pipe));
             let stderr_reader = scope.spawn(move || capture(stderr_pipe));
             scope.spawn(move || drop(status_sender.send(child.wait())));
-            let (status, timed_out) = match status_receiver.recv_timeout(timeout) {
-                Ok(status) => (status, false),
-                Err(RecvTimeoutError::Timeout) => {
-                    settle_group(pgid)?;
-                    (flatten(status_receiver.recv()), true)
-                }
-                Err(RecvTimeoutError::Disconnected) => (
-                    Err(io::Error::other("the waiter ended without a status")),
-                    false,
-                ),
-            };
+            let (status, timed_out, interrupted) =
+                wait_for_status(&status_receiver, pgid, deadline, cancelled)?;
             // The leader is gone; a background member still holding the pipes must die too,
             // or the readers below would block forever.
             settle_group(pgid)?;
             let stdout = join_reader(stdout_reader, program)?;
             let stderr = join_reader(stderr_reader, program)?;
-            Ok((status, timed_out, stdout, stderr))
+            Ok((status, timed_out, interrupted, stdout, stderr))
         },
     )?;
     let status = status.map_err(|source| spawn_failure(program, source))?;
@@ -273,6 +329,7 @@ pub(crate) fn run_command(
         pgid,
         exit_code: status.code(),
         timed_out,
+        interrupted,
         stdout: stdout_text,
         stderr: stderr_text,
         stdout_dropped,
@@ -280,6 +337,43 @@ pub(crate) fn run_command(
         truncated: stdout_dropped > 0 || stderr_dropped > 0,
         duration_ms,
     })
+}
+
+/// Waits for the command's status in slices of at most [`CANCEL_POLL`] until
+/// `deadline`, checking `cancelled` after each slice: the person's Esc ends a
+/// running command, not only the next step (larry#242). A cancel kills the
+/// group and takes the status exactly as the deadline does, so exactly one of
+/// `interrupted` and `timed_out` is set; a waiter that ends without a status is
+/// the fault it always was.
+fn wait_for_status(
+    receiver: &mpsc::Receiver<io::Result<ExitStatus>>,
+    pgid: i32,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(io::Result<ExitStatus>, bool, bool), ExecError> {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            settle_group(pgid)?;
+            return Ok((flatten(receiver.recv()), true, false));
+        }
+        match receiver.recv_timeout(CANCEL_POLL.min(left)) {
+            Ok(status) => return Ok((status, false, false)),
+            Err(RecvTimeoutError::Timeout) => {
+                if cancelled() {
+                    settle_group(pgid)?;
+                    return Ok((flatten(receiver.recv()), false, true));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Ok((
+                    Err(io::Error::other("the waiter ended without a status")),
+                    false,
+                    false,
+                ));
+            }
+        }
+    }
 }
 
 /// Cuts `text` to at most `bytes` on a character boundary and reports whether it cut.

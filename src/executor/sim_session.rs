@@ -1,17 +1,29 @@
 //! Seeded simulations of a terminal session's reply parser and output clip
-//! (larry#93). Each case is built from a seed together with the answer the rule
-//! gives it, so the parser is judged against the rule, never against itself.
+//! (larry#93), and of the person's cancel before, during and after a command
+//! (larry#242). Each case is built from a seed together with the answer the rule
+//! gives it, so the parser is judged against the rule, never against itself. The
+//! cancel simulation drives `run_command` itself with its cancel closure and
+//! flips the flag from a data witness (the ledger lists the group), never a timer.
 //! Source: the Agent Client Protocol prompt turn (one model reply, one tool call)
 //! and CWE-20 (improper input validation): every malformed reply gets its exact
 //! refusal and nothing runs.
 
+use std::collections::BTreeSet;
+use std::fmt;
+use std::io;
 use std::mem::discriminant;
+use std::num::TryFromIntError;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
-use lgwks_std::seeded::Seeded;
+use lgwks_std::process::process_group_exists;
+use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::clip;
+use super::super::run::{CommandResult, Place, clip, run_command};
 use super::{
-    MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError, check, parse_reply,
+    ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
+    check, parse_reply,
 };
 use crate::sim_error::SimError;
 
@@ -221,5 +233,338 @@ fn sim_observations_keep_their_bound_on_char_boundaries_for_every_seed() -> Test
             );
         }
     }
+    Ok(())
+}
+
+/// Seeds the cancel simulation sweeps.
+const CANCEL_SEEDS: u64 = 32;
+
+/// The timeout every cancel run is given: far past every cancel, so it only ends a
+/// run that failed to be cancelled, and the failure then reports itself.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Ledger probes the during schedule makes before it gives up and cancels anyway: a
+/// bound on failure, never a decision, which the ledger's own rows make. A count and
+/// not a deadline, because a simulation reads no clock.
+const WITNESS_PROBES: u32 = 200_000;
+
+/// When the person's cancel lands against the command (larry#242).
+#[derive(Debug, Clone, Copy)]
+enum When {
+    /// The closure is true from its first call: the command is killed at once.
+    Before,
+    /// The flag flips once the ledger lists the command's group.
+    During,
+    /// The command exits on its own; the flag flips only after `run_command` returns.
+    After,
+}
+
+impl When {
+    /// Every schedule, in the order a seed runs them.
+    const ALL: [When; 3] = [When::Before, When::During, When::After];
+
+    /// The schedule's name in a trace.
+    const fn name(self) -> &'static str {
+        match self {
+            When::Before => "before",
+            When::During => "during",
+            When::After => "after",
+        }
+    }
+
+    /// The shell script of the schedule: a long sleep to interrupt (with a
+    /// background member for the group to take down) or a command that exits 0.
+    const fn script(self) -> &'static str {
+        match self {
+            When::Before => "sleep 30",
+            When::During => "sleep 30 & sleep 30",
+            When::After => "true",
+        }
+    }
+}
+
+/// A fresh scratch directory under the system temp dir, one per run.
+fn scratch(tag: &str) -> PathBuf {
+    /// Per-process counter that gives each run its own directories.
+    static DIRECTORIES: AtomicU64 = AtomicU64::new(0);
+    let index = DIRECTORIES.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("larry-esc-{}-{tag}-{index}", std::process::id()))
+}
+
+/// Whether the ledger under `state` lists a group before the probe bounds run out.
+fn group_is_listed(state: &Path) -> Result<bool, ExecError> {
+    let ledger = Ledger::open(state)?;
+    let mut probes = 0_u32;
+    while probes < WITNESS_PROBES {
+        if !ledger.live_tasks()?.is_empty() {
+            return Ok(true);
+        }
+        probes = probes.saturating_add(1);
+        std::thread::yield_now();
+    }
+    Ok(false)
+}
+
+/// Flips `cancel` once the ledger lists the command's group (a data witness) and
+/// says whether it did. The flag flips on every path out, so a witness that fails
+/// ends the command at once and the run reports the failure.
+fn flip_when_listed(state: &Path, cancel: &AtomicBool) -> Result<bool, ExecError> {
+    let listed = group_is_listed(state);
+    cancel.store(true, Ordering::Release);
+    listed
+}
+
+/// Why one cancel run could not be driven to its assertions.
+#[derive(Debug)]
+enum CancelSimError {
+    /// The marker text could not be built.
+    Text(SimError),
+    /// The seeded stream refused a draw.
+    Draw(DrawError),
+    /// A drawn number does not fit its type.
+    Range(TryFromIntError),
+    /// The executor refused the run or the ledger.
+    Exec(ExecError),
+    /// A scratch directory or a group probe failed.
+    Io(io::Error),
+    /// The ledger witness thread panicked.
+    WitnessPanicked,
+    /// The command's record lacks a field the run needs.
+    Missing(&'static str),
+}
+
+impl fmt::Display for CancelSimError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Text(ref cause) => write!(out, "marker text: {cause}"),
+            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
+            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
+            Self::Exec(ref cause) => write!(out, "executor: {cause}"),
+            Self::Io(ref cause) => write!(out, "scratch or probe: {cause}"),
+            Self::WitnessPanicked => out.write_str("the ledger witness thread panicked"),
+            Self::Missing(what) => write!(out, "missing: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for CancelSimError {}
+
+impl From<SimError> for CancelSimError {
+    fn from(cause: SimError) -> Self {
+        Self::Text(cause)
+    }
+}
+
+impl From<DrawError> for CancelSimError {
+    fn from(cause: DrawError) -> Self {
+        Self::Draw(cause)
+    }
+}
+
+impl From<TryFromIntError> for CancelSimError {
+    fn from(cause: TryFromIntError) -> Self {
+        Self::Range(cause)
+    }
+}
+
+impl From<ExecError> for CancelSimError {
+    fn from(cause: ExecError) -> Self {
+        Self::Exec(cause)
+    }
+}
+
+impl From<io::Error> for CancelSimError {
+    fn from(cause: io::Error) -> Self {
+        Self::Io(cause)
+    }
+}
+
+/// One schedule of one seed against `run_command`: asserts what the result and the
+/// ledger must say and returns the facts that do not vary by run, the trace the
+/// sweep hashes. The seed draws the marker text in the command.
+fn drive(
+    when: When,
+    seed: u64,
+    path_env: &str,
+    state: &Path,
+    work: &Path,
+) -> Result<String, CancelSimError> {
+    let at = when.name();
+    std::fs::create_dir_all(work)?;
+    let mut rng = Seeded::from_seed(seed.wrapping_add(3 << 32));
+    let marker_len = usize::try_from(rng.below(48)?)?.saturating_add(1);
+    let marker = text(&mut rng, marker_len)?.replace('\n', " ");
+    let argv = [
+        String::from("sh"),
+        String::from("-c"),
+        format!("{} # seed {seed} {marker}", when.script()),
+    ];
+    let ledger = Ledger::open(state)?;
+    let cancel = AtomicBool::new(matches!(when, When::Before));
+    let task_id = format!("sim-esc-{seed}-{at}");
+    let (result, witnessed) = std::thread::scope(
+        |scope| -> Result<(CommandResult, Option<bool>), CancelSimError> {
+            let watcher = matches!(when, When::During)
+                .then(|| scope.spawn(|| flip_when_listed(state, &cancel)));
+            let result = run_command(
+                &argv,
+                Place::Open(work),
+                path_env,
+                COMMAND_TIMEOUT,
+                &ledger,
+                &task_id,
+                &|| cancel.load(Ordering::Acquire),
+            );
+            cancel.store(true, Ordering::Release);
+            let witnessed = match watcher {
+                Some(watcher) => match watcher.join() {
+                    Ok(listed) => Some(listed?),
+                    Err(_) => return Err(CancelSimError::WitnessPanicked),
+                },
+                None => None,
+            };
+            Ok((result?, witnessed))
+        },
+    )?;
+    let (exit_code, timed_out, interrupted) =
+        (result.exit_code(), result.timed_out(), result.interrupted());
+    let record = result.into_json();
+    let pgid = i32::try_from(
+        record["pgid"]
+            .as_i64()
+            .ok_or(CancelSimError::Missing("the record's pgid"))?,
+    )?;
+    let gone = !process_group_exists(pgid)?;
+    let unlisted = ledger.live_tasks()?.is_empty();
+    assert!(!timed_out, "seed {seed} {at}: a cancel is never a timeout");
+    assert!(gone, "seed {seed} {at}: process group {pgid} is gone");
+    assert!(unlisted, "seed {seed} {at}: the ledger lists no group");
+    match when {
+        When::Before | When::During => {
+            assert!(interrupted, "seed {seed} {at}: the command was interrupted");
+            assert_eq!(exit_code, None, "seed {seed} {at}: a kill is no exit code");
+        }
+        When::After => {
+            assert!(!interrupted, "seed {seed} {at}: a finished command is not");
+            assert_eq!(exit_code, Some(0), "seed {seed} {at}: a normal exit");
+        }
+    }
+    if matches!(when, When::During) {
+        assert_eq!(
+            witnessed,
+            Some(true),
+            "seed {seed} {at}: the ledger showed the group before the cancel"
+        );
+    }
+    Ok(format!(
+        "{at} argv {argv:?} exit {exit_code:?} timed {timed_out} interrupted {interrupted} gone {gone} unlisted {unlisted}\n"
+    ))
+}
+
+/// One schedule of one seed in a fresh state directory and workspace, both removed
+/// afterwards whatever the outcome.
+fn run_one(when: When, seed: u64, path_env: &str) -> Result<String, CancelSimError> {
+    let state = scratch("state");
+    let work = scratch("work");
+    let outcome = drive(when, seed, path_env, &state, &work);
+    let state_removed = std::fs::remove_dir_all(&state);
+    let work_removed = std::fs::remove_dir_all(&work);
+    let trace = outcome?;
+    state_removed?;
+    work_removed?;
+    Ok(trace)
+}
+
+/// Every seed's trace hash, in seed order.
+fn sweep(path_env: &str) -> Result<Vec<String>, CancelSimError> {
+    let mut hashes = Vec::with_capacity(usize::try_from(CANCEL_SEEDS)?);
+    for seed in 0..CANCEL_SEEDS {
+        let mut trace = String::new();
+        for when in When::ALL {
+            trace.push_str(&run_one(when, seed, path_env)?);
+        }
+        let mut hasher = lgwks_std::hash::Hasher::new();
+        hasher.update(trace.as_bytes());
+        hashes.push(hasher.finalize().to_hex());
+    }
+    Ok(hashes)
+}
+
+/// The timeout the timeout run is given: short, so the deadline and not a cancel ends it.
+const SHORT_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Seeds the timeout run draws its marker text for.
+const TIMEOUT_SEEDS: u64 = 4;
+
+/// A command left alone past its timeout ends as a timeout and never as an interrupt:
+/// the cancel closure is false throughout, the group is killed and gone, the ledger
+/// is empty and no exit code is reported (larry#242).
+#[test]
+fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
+    let path_env = std::env::var("PATH")?;
+    for seed in 0..TIMEOUT_SEEDS {
+        let state = scratch("timeout-state");
+        let work = scratch("timeout-work");
+        std::fs::create_dir_all(&work)?;
+        let mut rng = Seeded::from_seed(seed.wrapping_add(4 << 32));
+        let marker_len = usize::try_from(rng.below(48)?)?.saturating_add(1);
+        let marker = text(&mut rng, marker_len)?.replace('\n', " ");
+        let argv = [
+            String::from("sh"),
+            String::from("-c"),
+            format!("sleep 30 & sleep 30 # seed {seed} {marker}"),
+        ];
+        let ledger = Ledger::open(&state)?;
+        let outcome = run_command(
+            &argv,
+            Place::Open(&work),
+            &path_env,
+            SHORT_TIMEOUT,
+            &ledger,
+            "sim-timeout",
+            &|| false,
+        );
+        let listed = ledger.live_tasks();
+        let cleaned = (
+            std::fs::remove_dir_all(&state),
+            std::fs::remove_dir_all(&work),
+        );
+        let result = outcome?;
+        assert!(result.timed_out(), "seed {seed}: the deadline ended it");
+        assert!(
+            !result.interrupted(),
+            "seed {seed}: a timeout is not an interrupt"
+        );
+        assert_eq!(result.exit_code(), None, "seed {seed}: a kill is no exit");
+        let record = result.into_json();
+        let pgid = i32::try_from(record["pgid"].as_i64().ok_or("no pgid")?)?;
+        assert!(
+            !process_group_exists(pgid)?,
+            "seed {seed}: process group {pgid} is gone"
+        );
+        assert!(listed?.is_empty(), "seed {seed}: the ledger lists no group");
+        cleaned.0?;
+        cleaned.1?;
+    }
+    Ok(())
+}
+
+/// Esc before, during and after a command, driven through `run_command` and its
+/// cancel closure with no model and no session: before kills the command at once,
+/// during kills a group with a background member once the ledger lists it, after
+/// leaves a normal exit untouched; the group is gone and unlisted each time, and
+/// the same 32 seeds swept twice give the same trace hashes (larry#242).
+#[test]
+fn sim_esc_before_during_after_command() -> TestResult {
+    let path_env = std::env::var("PATH")?;
+    let first = sweep(&path_env)?;
+    let second = sweep(&path_env)?;
+    assert_eq!(first, second, "the same seeds give the same trace hashes");
+    let distinct: BTreeSet<&String> = first.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        first.len(),
+        "each seed's marker gives its own trace"
+    );
     Ok(())
 }
