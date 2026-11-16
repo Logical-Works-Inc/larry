@@ -21,11 +21,11 @@ use super::worker::{Ended, Event};
 const SEEDS: u64 = 256;
 
 /// A xorshift64* stream: the one source of every choice in a run.
-struct Seeded(u64);
+pub(super) struct Seeded(u64);
 
 impl Seeded {
     /// A stream for `seed`; zero is moved off the fixed point.
-    fn new(seed: u64) -> Self {
+    pub(super) fn new(seed: u64) -> Self {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
@@ -43,14 +43,14 @@ impl Seeded {
     }
 
     /// An index in `0..len`.
-    fn pick(&mut self, len: usize) -> usize {
+    pub(super) fn pick(&mut self, len: usize) -> usize {
         let bound = u64::try_from(len).into_iter().sum();
         usize::try_from(self.below(bound)).into_iter().sum()
     }
 }
 
 /// Text a hostile model or command might print: escapes, controls, bidi, wide.
-const HOSTILE: [&str; 8] = [
+pub(super) const HOSTILE: [&str; 8] = [
     "\x1b]0;owned\x07",
     "\x1b[2J\x1b[H",
     "\x1b[31mred\x1b[0m",
@@ -367,6 +367,22 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         }
     }
     assert_eq!(seen.last(), Some(&Event::Ended(Ended::Refused)), "{seen:?}");
+    // The sealed refusal reaches the frame as a receipt: not accepted, nothing ran.
+    let Some(before_end) = seen.iter().rev().nth(1) else {
+        return Err("no event before the end".into());
+    };
+    let Event::Receipt(ref receipt) = *before_end else {
+        return Err(format!("expected a receipt before the end, got {before_end:?}").into());
+    };
+    assert!(!receipt.accepted, "{receipt:?}");
+    assert_eq!(
+        (
+            receipt.commands,
+            receipt.handoff.as_str(),
+            receipt.digest.len()
+        ),
+        (0, "none", 12)
+    );
     assert!(
         !seen.iter().any(|event| matches!(*event, Event::Ask(_))),
         "{seen:?}"

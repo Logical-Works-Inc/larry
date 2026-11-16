@@ -13,11 +13,12 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::buffer::{Buffer, Frame, Rect};
+use super::buffer::{Buffer, Frame};
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
 use super::layout::split;
-use super::style::{Line, Span, Style, ellipsize, line_width, sanitize, text_width, wrap};
+use super::pane::Pane;
+use super::style::{Line, Span, Style, ellipsize, sanitize, text_width, wrap};
 use super::worker::{Decision, Ended, Event};
 
 /// Most transcript entries kept; the oldest goes first.
@@ -31,9 +32,6 @@ const HELP: [&str; 4] = [
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
 ];
-/// What the artifact pane says until artifacts land in it.
-const PANE_TEXT: &str = "Charts, diffs and previews for this chat show here.";
-
 /// One key, already read from the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Key {
@@ -150,6 +148,8 @@ pub(crate) struct App {
     said: Option<String>,
     /// A one-line hint over the footer until the next key.
     hint: Option<String>,
+    /// The artifact pane's state: the task's output, diff and receipt (larry#244).
+    pane: Pane,
 }
 
 /// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
@@ -248,6 +248,7 @@ impl App {
             quitting: false,
             said: None,
             hint: None,
+            pane: Pane::new(),
         }
     }
 
@@ -309,6 +310,7 @@ impl App {
                 self.scroll = 0;
             }
             Event::Started(command) => {
+                self.pane.started(&command);
                 self.phase = if matches!(self.phase, Phase::Working(_)) {
                     Phase::Working(Some(command))
                 } else {
@@ -325,6 +327,7 @@ impl App {
                     String::from("(command)")
                 };
                 let (status, output) = split_observation(&observation);
+                self.pane.finished(&command, &status, &output, passed);
                 self.push(Entry::Ran {
                     command,
                     status,
@@ -349,6 +352,8 @@ impl App {
                 let style = if applied { Style::GOOD } else { Style::WARN };
                 self.push(Entry::Notice(style, sanitize(&line, false)));
             }
+            Event::Diff(text) => self.pane.set_diff(&text),
+            Event::Receipt(receipt) => self.pane.set_receipt(receipt),
             Event::Ended(ended) => return self.ended(ended),
         }
         Vec::new()
@@ -379,6 +384,9 @@ impl App {
 
     /// One key.
     fn key(&mut self, key: Key) -> Vec<Effect> {
+        if self.pane_key(key) {
+            return Vec::new();
+        }
         if let Phase::Asking(ref command, choice) = self.phase {
             let command = command.clone();
             return self.answer(key, command, choice);
@@ -425,6 +433,23 @@ impl App {
             Key::Esc | Key::Interrupt | Key::EndOfInput => {}
         }
         Vec::new()
+    }
+
+    /// PgUp, PgDn and Tab belong to the pane while the screen is wide enough to show it,
+    /// the question included, so the diff can be read before the answer; Tab still
+    /// completes while the slash popup is open.
+    fn pane_key(&mut self, key: Key) -> bool {
+        if split(self.width, self.height).artifact.is_none() {
+            return false;
+        }
+        let body = Pane::body(self.height);
+        match key {
+            Key::PageUp => self.pane.page(true, body),
+            Key::PageDown => self.pane.page(false, body),
+            Key::Tab if self.composer.popup().is_none() => self.pane.next_tab(),
+            _ => return false,
+        }
+        true
     }
 
     /// Esc or Ctrl+C while a session runs.
@@ -544,6 +569,7 @@ impl App {
         self.started = self.now;
         self.said = None;
         self.scroll = 0;
+        self.pane.begin();
         vec![Effect::Start(text)]
     }
 
@@ -627,6 +653,12 @@ impl App {
         if let Some(status) = self.status_row() {
             rows.push(status);
         }
+        // A screen too narrow for the pane keeps the change as one line (larry#244).
+        if split(self.width, self.height).artifact.is_none()
+            && let Some(summary) = self.pane.summary()
+        {
+            rows.push(vec![Span::new(ellipsize(&summary, width), Style::MUTED)]);
+        }
         let mut cursor = None;
         let footer: &[&str] = if let Phase::Asking(ref command, choice) = self.phase {
             let (title, answers, keys) = offer(command.is_some());
@@ -681,30 +713,6 @@ impl App {
         (rows, cursor)
     }
 
-    /// Paints the artifact pane: a rule on its left edge and its placeholder.
-    fn pane(buffer: &mut Buffer, area: Rect) {
-        let rule = area.x.saturating_sub(1);
-        for row in area.y..area.bottom() {
-            buffer.put(rule, row, area.x, "│", Style::MUTED);
-        }
-        let left = area.x.saturating_add(2);
-        let title = area.y.saturating_add(1);
-        buffer.put(left, title, area.right(), "Artifacts", Style::MUTED.bold());
-        let width = area.width.saturating_sub(4).max(1);
-        let lines = wrap(&[Span::new(PANE_TEXT, Style::MUTED)], width, &[], &[]);
-        let half: usize = area.height.checked_div(2).into_iter().sum();
-        let middle = area.y.saturating_add(half);
-        for (offset, line) in lines.iter().enumerate() {
-            let pad: usize = width
-                .saturating_sub(line_width(line))
-                .checked_div(2)
-                .into_iter()
-                .sum();
-            let row = middle.saturating_add(offset);
-            buffer.put_line(left.saturating_add(pad), row, area.right(), line);
-        }
-    }
-
     /// The frame for the current state.
     pub(crate) fn draw(&self) -> Frame {
         let mut buffer = Buffer::new(self.width, self.height);
@@ -729,7 +737,7 @@ impl App {
             buffer.put_line(left, top.saturating_add(offset), right, line);
         }
         if let Some(pane) = regions.artifact {
-            Self::pane(&mut buffer, pane);
+            self.pane.paint(&mut buffer, pane);
         }
         let cursor = cursor.and_then(|(column, row)| {
             let y = top.saturating_add(row.checked_sub(skip)?);

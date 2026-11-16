@@ -84,7 +84,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `tui::app` | The pure state: keys and session events in, effects and one frame out; no terminal, no clock |
 | `tui::worker` | `run_session` on its own thread; bounded event and answer channels; approve, decline, cancel, join |
 | `tui::buffer`, `tui::style` | The cell buffer, its diff and DEC 2026 frame; reset-first SGR, widths, wrap, sanitize |
-| `tui::layout` | The phone-ratio chat column (44..64) and the artifact pane at 108+ columns |
+| `tui::layout`, `tui::pane` | The phone-ratio chat column (44..64) and the artifact pane at 108+ columns; the pane's bounded Output, Diff and Receipt tabs and their paint (larry#244, ADR 0047) |
 | `tui::cells`, `tui::composer` | Transcript entries drawn the Codex way; the multi-line composer, history and slash popup |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008); `mcp::wire` the stdio framing and envelope; `mcp::modern` the stateless 2026-07-28 era; `mcp::legacy` the initialize lifecycle of the four earlier revisions; `mcp::tools` the one tool, `larry_submit_task` |
 | `acp` | `larry acp`: the Agent Client Protocol agent Harbor drives; each prompt a terminal session (ADR 0035); `acp::tests` its protocol surface with no executor behind it; `acp::sim_acp` the seeded adversarial simulations of that surface |

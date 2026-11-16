@@ -15,6 +15,7 @@ mod buffer;
 mod cells;
 mod composer;
 mod layout;
+mod pane;
 #[cfg(test)]
 mod sim_parts;
 #[cfg(test)]
