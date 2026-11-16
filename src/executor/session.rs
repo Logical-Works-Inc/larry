@@ -14,7 +14,9 @@
 //! model's window, so the length of the conversation never stops a session. The
 //! loop stops at the model's `done`, at 256 steps, at three refused replies in a
 //! row, at a model refusal, or at a cancellation checked before every model call
-//! and every command. The sealed report records every command as the model saw it,
+//! and every command and polled while one runs: the person's cancel kills the
+//! running command's process group and the report counts it interrupted
+//! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
 use std::fmt;
@@ -222,10 +224,11 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
 
 /// The status line the model is shown for one clipped command result.
 fn status(result: &CommandResult) -> String {
-    let ended = match (result.timed_out(), result.exit_code()) {
-        (true, _) => String::from("timed out; its process group was killed"),
-        (false, Some(code)) => format!("exit status {code}"),
-        (false, None) => String::from("ended by a signal"),
+    let ended = match (result.timed_out(), result.interrupted(), result.exit_code()) {
+        (false, false, Some(code)) => format!("exit status {code}"),
+        (false, false, None) => String::from("ended by a signal"),
+        (true, false, _) => String::from("timed out; its process group was killed"),
+        (_, true, _) => String::from("interrupted by the person; its process group was killed"),
     };
     if result.truncated() {
         format!("{ended} (output past {OBSERVED_BYTES} bytes of a stream was cut)")
@@ -321,6 +324,7 @@ pub(crate) fn run_session(
                 "stop": done.stop.name(),
                 "commands": done.records.len(),
                 "declined": done.declined,
+                "interrupted": done.interrupted,
                 "route": route.seal(),
                 "compaction": done.compaction,
             },
@@ -349,6 +353,8 @@ struct Steps {
     compaction: Value,
     /// Commands the person declined; none of them ran.
     declined: usize,
+    /// Commands the person interrupted; each had its process group killed (larry#242).
+    interrupted: usize,
 }
 
 /// One session's loop state.
@@ -369,7 +375,8 @@ struct Turn<'a> {
 
 impl Turn<'_> {
     /// Asks, runs and observes until a stop, and returns it with each command's
-    /// record, what compaction did and how many commands the person declined.
+    /// record, what compaction did and how many commands the person declined
+    /// or interrupted.
     fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
         let task = format!(
             "Working directory: {}\n\nTask:\n{instruction}",
@@ -379,6 +386,7 @@ impl Turn<'_> {
         let mut steps: Vec<Value> = Vec::new();
         let mut refused = 0_usize;
         let mut declined = 0_usize;
+        let mut interrupted = 0_usize;
         let stop = loop {
             if steps.len().saturating_add(declined) >= MAX_STEPS {
                 break Stop::MaxTurnRequests;
@@ -425,6 +433,8 @@ impl Turn<'_> {
                     }
                     self.observer.started(step, &command);
                     let argv = [String::from("sh"), String::from("-c"), command.clone()];
+                    // The person's cancel is polled while the command runs, so Esc
+                    // ends it and its whole group, not only the next step (larry#242).
                     let result = run_command(
                         &argv,
                         self.cwd,
@@ -432,6 +442,7 @@ impl Turn<'_> {
                         self.settings.timeout,
                         self.ledger,
                         self.task_id,
+                        &|| self.observer.cancelled(),
                     )?
                     .clipped(OBSERVED_BYTES);
                     let answer = Answer::Observed {
@@ -440,10 +451,16 @@ impl Turn<'_> {
                         status: status(&result),
                         output: Some(streams(&result)),
                     };
-                    let passed = result.exit_code() == Some(0) && !result.timed_out();
+                    let was_interrupted = result.interrupted();
+                    let passed =
+                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
                     self.observer.finished(step, &answer.text(), passed);
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
+                    if was_interrupted {
+                        interrupted = interrupted.saturating_add(1);
+                        break Stop::Cancelled;
+                    }
                 }
                 Err(fault) => {
                     refused = refused.saturating_add(1);
@@ -462,6 +479,7 @@ impl Turn<'_> {
             records: steps,
             compaction: conversation.json(),
             declined,
+            interrupted,
         })
     }
 

@@ -233,6 +233,61 @@ fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
     Ok(())
 }
 
+/// Esc ends a running command, not only the next step (larry#242): the mock model asks for a
+/// command with a background member, the person approves it, Esc kills the whole group within
+/// 500 ms, the frame says Interrupted, the background pid is gone, and Ctrl+C exits 0.
+#[test]
+fn tui_journey_esc_kills_running_command() -> Journey {
+    let replies = [r#"{"command":"sleep 30 & echo $! > bg.pid; sleep 30"}"#];
+    let ran = frame(scripted(31, &replies), |pty, mock, work| {
+        ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for("esc to interrupt")?;
+        // Esc is pressed only once the background member is up, so its death is the group's,
+        // not a race with the shell's own start.
+        let background = work.join("bg.pid");
+        let mut probes = 0_u32;
+        while !background.exists() {
+            probes = probes.saturating_add(1);
+            assert!(probes < 100_000, "the command never wrote bg.pid");
+            std::thread::yield_now();
+        }
+        let pressed = Instant::now();
+        pty.send("\x1b")?;
+        pty.wait_for("Interrupted")?;
+        let esc_to_interrupted = pressed.elapsed();
+        assert!(
+            esc_to_interrupted < Duration::from_millis(500),
+            "Esc to Interrupted took {esc_to_interrupted:?}"
+        );
+        let pid = std::fs::read_to_string(&background)?.trim().to_owned();
+        assert!(!pid.is_empty(), "bg.pid holds the background pid");
+        let probe = Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(Stdio::null())
+            .status()?;
+        assert!(
+            !probe.success(),
+            "the background member {pid} died with its group"
+        );
+        assert_eq!(mock.served(), 1, "no second model call after the interrupt");
+        let mut figure = String::new();
+        writeln!(
+            figure,
+            "{{\"esc_to_interrupted_ms\":{:.0}}}",
+            esc_to_interrupted.as_secs_f64() * 1000.0
+        )?;
+        std::io::stderr().lock().write_all(figure.as_bytes())?;
+        Ok(())
+    })?;
+    assert!(
+        ran.status.success(),
+        "Ctrl+C on an empty box exits 0: {}",
+        ran.status
+    );
+    Ok(())
+}
+
 /// One seed, one conversation: the approve journey run twice in the same folders against an
 /// OpenRouter-style padded reply (`Fault::PaddedDone`) gives the gateway the same requests in
 /// the same order.
