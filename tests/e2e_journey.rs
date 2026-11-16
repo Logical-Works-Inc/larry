@@ -290,23 +290,26 @@ fn tui_journey_esc_kills_running_command() -> Journey {
             pty.wait_for("esc to interrupt")?;
             // Esc is pressed only once the background member is up, so its death is the group's,
             // not a race with the shell's own start. The command runs in the session's copy.
+            // The shell creates bg.pid before `echo` writes into it, so the file is read until it
+            // holds the pid, not only until it exists (an empty read flaked on Linux, PR #251).
+            // The copy goes with the interrupted session, so the pid is read before Esc.
             let mut probes = 0_u32;
-            let background = loop {
+            let pid = loop {
                 let found = std::fs::read_dir(&workspaces)
                     .into_iter()
                     .flatten()
                     .flatten()
                     .map(|entry| entry.path().join("tree").join("bg.pid"))
-                    .find(|path| path.exists());
-                if let Some(path) = found {
-                    break path;
+                    .filter_map(|path| std::fs::read_to_string(path).ok())
+                    .map(|text| text.trim().to_owned())
+                    .find(|text| !text.is_empty());
+                if let Some(text) = found {
+                    break text;
                 }
                 probes = probes.saturating_add(1);
                 assert!(probes < 100_000, "the command never wrote bg.pid");
                 std::thread::yield_now();
             };
-            // The copy goes with the interrupted session, so the pid is read before Esc.
-            let pid = std::fs::read_to_string(&background)?.trim().to_owned();
             let pressed = Instant::now();
             pty.send("\x1b")?;
             pty.wait_for("Interrupted")?;

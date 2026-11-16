@@ -274,8 +274,13 @@ fn sim_confine_kernel_refuses_a_write_beside_the_tree() -> TestResult {
             let out = run_confined(&confine, &shell(&route), &path, &tmp)?;
             assert!(!out.status.success(), "seed {seed}: `{route}` ran");
             let said = String::from_utf8_lossy(&out.stderr).to_lowercase();
+            // Landlock answers a link or rename that would reparent a file across the rule
+            // boundary with EXDEV, not EACCES, when the refer right is not granted (Linux
+            // Landlock documentation, LANDLOCK_ACCESS_FS_REFER); that is the kernel's refusal.
             assert!(
-                said.contains("not permitted") || said.contains("permission denied"),
+                said.contains("not permitted")
+                    || said.contains("permission denied")
+                    || said.contains("cross-device link"),
                 "seed {seed}: `{route}` failed for another reason: {said}"
             );
         }
