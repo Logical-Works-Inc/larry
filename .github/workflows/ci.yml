@@ -50,6 +50,40 @@ jobs:
       - if: ${{ github.event.repository.private || steps.nextest.outcome != 'success' }}
         run: cargo test --workspace --all-targets --locked
 
+  # The PTY journeys on macOS (larry#245, ADR 0048). sim.yml's e2e-journey runs
+  # them on Linux, where commands are confined by Landlock; this leg runs the
+  # Seatbelt path a Mac user lives. Hosted only: a public repository never runs
+  # on the self-hosted Mac (larry#116), and while private sim.yml's self-hosted
+  # leg is already a Mac.
+  e2e-journey-macos:
+    # mac-specific: proves the macOS confinement path, sandbox-exec (Seatbelt, ADR 0046), and the BSD `script` PTY branch of tests/support/pty.rs; neither exists on Linux, which runs Landlock instead.
+    name: e2e/journey (macos-latest)
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: journey-macos
+      - id: nextest
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: taiki-e/install-action@379230e3202a8992f107d2a2dca15562c37d67bf
+        with:
+          tool: nextest
+      - if: ${{ steps.nextest.outcome == 'success' }}
+        run: cargo nextest run --locked -p larry-demo --test e2e_journey
+      - if: ${{ steps.nextest.outcome != 'success' }}
+        run: cargo test --locked -p larry-demo --test e2e_journey
+      # The probes print p50/p95/p99 and peak RSS; a passing test's output is
+      # captured, so they run again uncaptured for the log (same build).
+      - name: Print the journey probes
+        run: cargo test --locked -p larry-demo --test e2e_journey -- --nocapture --test-threads 1 probe
+
   # The specification and governance lanes, carried over from Larry's
   # workflow. Action SHAs are pinned here because this job ran that way
   # before the merge; the rust job above keeps its tag refs for the same
