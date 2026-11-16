@@ -15,6 +15,8 @@
 mod http_wire;
 #[path = "support/mock_model.rs"]
 mod mock_model;
+#[path = "../src/sim_lanes.rs"]
+mod sim_lanes;
 
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -347,29 +349,57 @@ fn a_truncated_body_is_a_transport_failure_never_a_short_reply() -> TestResult {
     Ok(())
 }
 
+/// The wait is idle, so the 64 seeds run at once on the bounded lanes against one mock whose
+/// script delays its first 64 requests: each client times out on its own 150 ms clock, the mock
+/// admits all 64 connections, and the totals stand in for the old per-seed `served == 1`: exactly
+/// 64 requests reached it (none resent) and each seed's own body arrived once.
 #[test]
 fn a_delay_past_the_timeout_is_a_timeout() -> TestResult {
-    for seed in 0..SEEDS {
-        mock_model::run(scripted(seed, vec![Some(Fault::Delay)]), |handle| {
+    let delayed = vec![Some(Fault::Delay); usize::try_from(SEEDS)?];
+    let config = Config {
+        max_connections: usize::try_from(SEEDS)?,
+        ..scripted(0, delayed)
+    };
+    mock_model::run(config, |handle| {
+        let base = base_of(handle.addr());
+        let outcomes = sim_lanes::sweep(SEEDS, |_lane, seed| {
             let table = with(
-                settings(&base_of(handle.addr()), "test-key"),
+                settings(&base, "test-key"),
                 &[
                     ("LARRY_MODEL_TIMEOUT_MS", "150"),
                     ("LARRY_MODEL_ATTEMPTS", "1"),
                 ],
             );
-            let outcome = client_from(table)?.complete(&[user("slow")]);
+            client_from(table).and_then(|client| client.complete(&[user(&format!("slow {seed}"))]))
+        })?;
+        // One gate serves every delayed reply, so a release mid-sweep would free a client
+        // still inside its own 150 ms: all 64 are released once the last has timed out.
+        for _ in 0..SEEDS {
             handle.release_delayed();
+        }
+        for (seed, outcome) in (0..SEEDS).zip(outcomes) {
             assert_eq!(
                 outcome,
                 Err(ModelError::Timeout),
                 "seed {seed}: a reply that outlasts the timeout is a timeout"
             );
-            assert_eq!(handle.served(), 1, "seed {seed}: a timeout is never resent");
-            Ok::<_, Box<dyn Error>>(())
-        })?;
-    }
-    Ok(())
+        }
+        assert_eq!(
+            handle.served(),
+            SEEDS,
+            "a timeout is never resent: one request per seed"
+        );
+        let bodies = handle.requests();
+        for seed in 0..SEEDS {
+            let wanted = format!("\"slow {seed}\"");
+            let arrived = bodies
+                .iter()
+                .filter(|body| String::from_utf8_lossy(body).contains(&wanted))
+                .count();
+            assert_eq!(arrived, 1, "seed {seed}: its own request arrived once");
+        }
+        Ok::<_, Box<dyn Error>>(())
+    })
 }
 
 #[test]

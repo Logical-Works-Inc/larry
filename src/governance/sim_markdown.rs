@@ -13,8 +13,8 @@ use super::documents::{Documents, MAX_DOCUMENT_BYTES};
 use super::markdown::{self, FIELDS, MAX_LINES};
 use super::patterns::{INVENTORIES, Patterns};
 use super::sim_support::{
-    SimError, SimResult, append, assert_refused, count_of, docs_tree, errors_of, loaded, names_of,
-    pick, replace_all, replace_once, text_of, top_level, whole_of,
+    SimError, SimResult, append, assert_refused, count_of, docs_tree, each_seed, errors_of, loaded,
+    names_of, pick, replace_all, replace_once, text_of, top_level, whole_of, with_patterns,
 };
 
 /// Seeds each control runs; each seed validates the whole tree once.
@@ -92,7 +92,7 @@ fn key_lines(text: &str) -> Vec<String> {
 fn sim_missing_frontmatter_is_named() -> SimResult {
     let base = loaded()?;
     let names = names_of(&base);
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();
         let broken = *pick(
@@ -106,7 +106,8 @@ fn sim_missing_frontmatter_is_named() -> SimResult {
             &format!("{name}: missing frontmatter envelope"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -142,7 +143,7 @@ fn required_key(line: &str) -> bool {
 fn sim_duplicate_frontmatter_key_is_refused() -> SimResult {
     let base = loaded()?;
     let names = names_of(&base);
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let (name, line) = seeded_key_line(&mut rng, &base, &names, any_key)?;
         let mut documents = base.clone();
@@ -157,7 +158,8 @@ fn sim_duplicate_frontmatter_key_is_refused() -> SimResult {
             &format!("{name}: duplicate frontmatter key"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -168,11 +170,11 @@ fn sim_duplicate_frontmatter_key_is_refused() -> SimResult {
 fn sim_docs_tree_frontmatter_is_enforced() -> SimResult {
     let base = loaded()?;
     let tree = docs_tree(&base);
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let (name, line) = seeded_key_line(&mut rng, &base, &tree, required_key)?;
         let Some((key, value)) = line.split_once(':') else {
-            return Err(Box::new(SimError::Absent(String::from("a key line"))));
+            return Err(SimError::Absent(String::from("a key line")));
         };
         let mut documents = base.clone();
         replace_once(
@@ -187,7 +189,8 @@ fn sim_docs_tree_frontmatter_is_enforced() -> SimResult {
                 && error.contains(&format!("'{key}'"))
         });
         assert!(named, "seed {seed}: {name} must miss {key}: {errors:?}");
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -203,7 +206,7 @@ fn opener(rng: &mut Seeded) -> Result<String, SimError> {
 #[test]
 fn sim_unclosed_fence_in_the_specification_is_refused() -> SimResult {
     let base = loaded()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let fence = "`".repeat(rng.index(4)?.saturating_add(3));
         let mut documents = base.clone();
@@ -217,7 +220,8 @@ fn sim_unclosed_fence_in_the_specification_is_refused() -> SimResult {
             errors.contains(&format!("{last}: unclosed code fence")),
             "seed {seed}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -226,7 +230,7 @@ fn sim_unclosed_fence_in_the_specification_is_refused() -> SimResult {
 fn sim_unclosed_indented_and_tilde_fences_are_refused() -> SimResult {
     let base = loaded()?;
     let names = names_of(&base);
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();
         let mut documents = base.clone();
@@ -243,7 +247,8 @@ fn sim_unclosed_indented_and_tilde_fences_are_refused() -> SimResult {
             errors.contains(&format!("{name}: unclosed code fence")),
             "seed {seed}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -253,7 +258,7 @@ fn sim_missing_visuals_are_refused() -> SimResult {
     let base = loaded()?;
     let spec = whole_of(&base, "specification.md")?;
     let fences = spec.matches("```mermaid").count();
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let keep = rng.index(4)?;
         let mut documents = base.clone();
@@ -267,7 +272,8 @@ fn sim_missing_visuals_are_refused() -> SimResult {
             )),
             "seed {seed}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -275,7 +281,7 @@ fn sim_missing_visuals_are_refused() -> SimResult {
 #[test]
 fn sim_valid_tilde_mermaid_fences_pass() -> SimResult {
     let base = loaded()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let tildes = "~".repeat(rng.index(4)?.saturating_add(3));
         let mut documents = base.clone();
@@ -285,7 +291,8 @@ fn sim_valid_tilde_mermaid_fences_pass() -> SimResult {
             errors.is_empty(),
             "seed {seed}: tilde fences must pass: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -296,7 +303,7 @@ fn sim_valid_tilde_mermaid_fences_pass() -> SimResult {
 fn sim_the_line_law_holds_at_its_boundary_for_every_document() -> SimResult {
     let base = loaded()?;
     let names = names_of(&base);
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();
         let text = text_of(&base, &name)?;
@@ -324,7 +331,8 @@ fn sim_the_line_law_holds_at_its_boundary_for_every_document() -> SimResult {
             errors.contains(&expected),
             "seed {seed}: expected {expected:?} in {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -341,7 +349,7 @@ fn sim_long_fence_holds_a_shorter_content_fence() -> SimResult {
             names.push(name);
         }
     }
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();
         let character = if rng.below(2)? == 0 { "`" } else { "~" };
@@ -362,7 +370,8 @@ fn sim_long_fence_holds_a_shorter_content_fence() -> SimResult {
             errors.is_empty(),
             "seed {seed}: {outer} holding {inner} must pass: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -370,24 +379,25 @@ fn sim_long_fence_holds_a_shorter_content_fence() -> SimResult {
 #[test]
 fn sim_escaping_link_is_refused() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let docs_only = rng.below(2)? == 0;
-        let (name, escaped, errors) =
-            relinked(&mut rng, &base, &patterns, docs_only, &mut |rng, target| {
+        let (name, escaped, errors) = with_patterns(|patterns| {
+            relinked(&mut rng, &base, patterns, docs_only, &mut |rng, target| {
                 let bare = target.trim_start_matches('/');
                 Ok(format!(
                     "{}{bare}",
                     *pick(rng, &["../", "/../", "docs/../"])?
                 ))
-            })?;
+            })
+        })?;
         assert_refused(
             &errors,
             &format!("{name}: unresolved or escaping local link {escaped}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -395,23 +405,24 @@ fn sim_escaping_link_is_refused() -> SimResult {
 #[test]
 fn sim_missing_link_is_refused() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
-        let (name, missing, errors) =
-            relinked(&mut rng, &base, &patterns, false, &mut |rng, _target| {
+        let (name, missing, errors) = with_patterns(|patterns| {
+            relinked(&mut rng, &base, patterns, false, &mut |rng, _target| {
                 Ok(format!(
                     "{}missing-{}.md",
                     *pick(rng, &["", "/docs/", "docs/deep/"])?,
                     rng.below(1 << 20)?
                 ))
-            })?;
+            })
+        })?;
         assert_refused(
             &errors,
             &format!("{name}: unresolved or escaping local link {missing}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -419,24 +430,25 @@ fn sim_missing_link_is_refused() -> SimResult {
 #[test]
 fn sim_missing_heading_fragment_is_refused() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
-        let (name, broken, errors) =
-            relinked(&mut rng, &base, &patterns, false, &mut |rng, target| {
+        let (name, broken, errors) = with_patterns(|patterns| {
+            relinked(&mut rng, &base, patterns, false, &mut |rng, target| {
                 let fragment = format!("definitely-missing-{}", rng.below(1 << 20)?);
                 Ok(if rng.below(2)? == 0 {
                     format!("{target}#{fragment}")
                 } else {
                     format!("#{fragment}")
                 })
-            })?;
+            })
+        })?;
         assert_refused(
             &errors,
             &format!("{name}: unresolved heading fragment {broken}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -459,7 +471,6 @@ fn percent_encode_some(rng: &mut Seeded, text: &str) -> Result<String, SimError>
 #[test]
 fn sim_valid_heading_fragment_passes() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
     let mut fixed = base.clone();
     replace_once(
         &mut fixed,
@@ -471,23 +482,25 @@ fn sim_valid_heading_fragment_passes() -> SimResult {
         errors_of(&fixed)?.is_empty(),
         "the Python control's own fragment must pass"
     );
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
-        let (name, linked, errors) =
-            relinked(&mut rng, &base, &patterns, false, &mut |rng, target| {
+        let (name, linked, errors) = with_patterns(|patterns| {
+            relinked(&mut rng, &base, patterns, false, &mut |rng, target| {
                 let destination = text_of(&base, target.trim_start_matches('/'))?;
-                let ids: Vec<String> = markdown::heading_ids(&destination, &patterns)
+                let ids: Vec<String> = markdown::heading_ids(&destination, patterns)
                     .into_iter()
                     .collect();
                 let id = pick(rng, &ids)?.clone();
                 let fragment = percent_encode_some(rng, &id)?;
                 Ok(format!("{target}#{fragment}"))
-            })?;
+            })
+        })?;
         assert!(
             errors.is_empty(),
             "seed {seed}: {name} linking {linked} must resolve: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -496,7 +509,7 @@ fn sim_valid_heading_fragment_passes() -> SimResult {
 fn sim_code_block_heading_is_not_destination() -> SimResult {
     let base = loaded()?;
     let names = top_level();
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();
         let number = rng.below(1 << 20)?;
@@ -512,7 +525,8 @@ fn sim_code_block_heading_is_not_destination() -> SimResult {
             &format!("{name}: unresolved heading fragment #phantom-heading-{number}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -520,7 +534,6 @@ fn sim_code_block_heading_is_not_destination() -> SimResult {
 #[test]
 fn sim_unsafe_link_scheme_is_refused() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
     let unsafe_targets = [
         "javascript:bad",
         "JaVaScRiPt:alert(1",
@@ -533,18 +546,20 @@ fn sim_unsafe_link_scheme_is_refused() -> SimResult {
         "\u{1}javascript:x",
         "java\tscript:x",
     ];
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
-        let (name, bad, errors) =
-            relinked(&mut rng, &base, &patterns, false, &mut |rng, _target| {
+        let (name, bad, errors) = with_patterns(|patterns| {
+            relinked(&mut rng, &base, patterns, false, &mut |rng, _target| {
                 Ok(String::from(*pick(rng, &unsafe_targets)?))
-            })?;
+            })
+        })?;
         assert_refused(
             &errors,
             &format!("{name}: unsupported link scheme {bad}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -553,7 +568,7 @@ fn sim_unsafe_link_scheme_is_refused() -> SimResult {
 fn sim_oversized_document_is_refused() -> SimResult {
     let base = loaded()?;
     let names = top_level();
-    for seed in 0..4 {
+    each_seed(4, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &names)?.clone();
         let text = text_of(&base, &name)?;
@@ -568,7 +583,8 @@ fn sim_oversized_document_is_refused() -> SimResult {
             errors.contains(&format!("{name}: document exceeds byte limit")),
             "seed {seed}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -578,7 +594,7 @@ fn sim_oversized_document_is_refused() -> SimResult {
 fn sim_docs_tree_undefined_reference_is_named_exactly() -> SimResult {
     let base = loaded()?;
     let tree = docs_tree(&base);
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let name = pick(&mut rng, &tree)?.clone();
         let inventory = pick(&mut rng, &INVENTORIES)?;
@@ -605,6 +621,7 @@ fn sim_docs_tree_undefined_reference_is_named_exactly() -> SimResult {
             errors.contains(&expected),
             "seed {seed}: expected {expected:?} in {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }

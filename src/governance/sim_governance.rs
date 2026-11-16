@@ -12,8 +12,8 @@ use lgwks_std::seeded::Seeded;
 use super::documents::Documents;
 use super::patterns::{INVENTORIES, Inventory, Patterns};
 use super::sim_support::{
-    SimError, SimResult, append, assert_refused, count_of, errors_of, loaded, pick, replace_once,
-    text_of, top_level, whole_of,
+    SimError, SimResult, append, assert_refused, count_of, each_seed, errors_of, loaded, pick,
+    replace_once, text_of, top_level, whole_of, with_patterns,
 };
 use super::{ANCHORS, execution_section};
 
@@ -99,7 +99,7 @@ fn renamed_row(
 #[test]
 fn sim_missing_document_is_named_for_every_seed() -> SimResult {
     let base = loaded()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let mut documents = base.clone();
         let name = pick(&mut rng, &top_level())?.clone();
@@ -109,7 +109,8 @@ fn sim_missing_document_is_named_for_every_seed() -> SimResult {
             errors.contains(&format!("missing document: {name}")),
             "seed {seed}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -119,7 +120,7 @@ fn sim_missing_document_is_named_for_every_seed() -> SimResult {
 fn sim_anchor_case_does_not_change_meaning() -> SimResult {
     let base = loaded()?;
     let agents = text_of(&base, "AGENTS.md")?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let anchor = *pick(&mut rng, &ANCHORS)?;
         let mut flips = Vec::new();
@@ -150,7 +151,8 @@ fn sim_anchor_case_does_not_change_meaning() -> SimResult {
                 .any(|error| error.contains("missing governance anchor")),
             "seed {seed}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -159,7 +161,7 @@ fn sim_anchor_case_does_not_change_meaning() -> SimResult {
 fn sim_missing_owner_anchor_is_named() -> SimResult {
     let base = loaded()?;
     let agents = text_of(&base, "AGENTS.md")?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let anchor = *pick(&mut rng, &ANCHORS)?;
         let stripped = rewrite_at(
@@ -175,7 +177,8 @@ fn sim_missing_owner_anchor_is_named() -> SimResult {
             &format!("AGENTS.md: missing governance anchor {anchor}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -184,13 +187,13 @@ fn sim_missing_owner_anchor_is_named() -> SimResult {
 #[test]
 fn sim_removed_inventory_row_is_refused() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let remove = |rng: &mut Seeded, ids: &[String]| -> Result<(String, String), SimError> {
             Ok((pick(rng, ids)?.clone(), String::from("removed")))
         };
-        let (inventory, id, errors) = renamed_row(&mut rng, &base, &patterns, &remove)?;
+        let (inventory, id, errors) =
+            with_patterns(|patterns| renamed_row(&mut rng, &base, patterns, &remove))?;
         let label = inventory.label;
         let broken = errors
             .iter()
@@ -202,7 +205,8 @@ fn sim_removed_inventory_row_is_refused() -> SimResult {
             broken,
             "seed {seed}: removing {id} must break {label}: {errors:?}"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -210,21 +214,22 @@ fn sim_removed_inventory_row_is_refused() -> SimResult {
 #[test]
 fn sim_duplicate_inventory_row_is_refused() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let duplicate = |rng: &mut Seeded, ids: &[String]| -> Result<(String, String), SimError> {
             let kept = pick(rng, ids)?.clone();
             let others: Vec<String> = ids.iter().filter(|id| **id != kept).cloned().collect();
             Ok((pick(rng, &others)?.clone(), kept))
         };
-        let (inventory, _renamed, errors) = renamed_row(&mut rng, &base, &patterns, &duplicate)?;
+        let (inventory, _renamed, errors) =
+            with_patterns(|patterns| renamed_row(&mut rng, &base, patterns, &duplicate))?;
         let expected = format!(
             "{}: incomplete, duplicate or noncontiguous inventory",
             inventory.label
         );
         assert_refused(&errors, &expected, seed);
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -241,33 +246,35 @@ fn requirement_rows(spec: &str, patterns: &Patterns) -> Vec<String> {
 #[test]
 fn sim_undefined_decision_is_named_exactly() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
     let spec = whole_of(&base, "specification.md")?;
-    let rows = requirement_rows(&spec, &patterns);
+    let rows = with_patterns(|patterns| Ok(requirement_rows(&spec, patterns)))?;
     let decisions = count_of(&base, "decisions")?;
-    for seed in 0..SEEDS {
-        let mut rng = Seeded::from_seed(seed);
-        let row = pick(&mut rng, &rows)?;
-        let cited = patterns.matches(&patterns.decision, row);
-        let old = *pick(&mut rng, &cited)?;
-        let undefined = format!(
-            "D{:02}",
-            decisions.saturating_add(1).saturating_add(rng.index(800)?)
-        );
-        let mut documents = base.clone();
-        let holder = replace_once(
-            &mut documents,
-            "specification.md",
-            row.as_str(),
-            &row.replacen(old, &undefined, 1),
-        )?;
-        let errors = errors_of(&documents)?;
-        let expected = format!("{holder}: undefined D references ['{undefined}']");
-        assert!(
-            errors.contains(&expected),
-            "seed {seed}: expected {expected:?} in {errors:?}"
-        );
-    }
+    each_seed(SEEDS, |seed| {
+        with_patterns(|patterns| {
+            let mut rng = Seeded::from_seed(seed);
+            let row = pick(&mut rng, &rows)?;
+            let cited = patterns.matches(&patterns.decision, row);
+            let old = *pick(&mut rng, &cited)?;
+            let undefined = format!(
+                "D{:02}",
+                decisions.saturating_add(1).saturating_add(rng.index(800)?)
+            );
+            let mut documents = base.clone();
+            let holder = replace_once(
+                &mut documents,
+                "specification.md",
+                row.as_str(),
+                &row.replacen(old, &undefined, 1),
+            )?;
+            let errors = errors_of(&documents)?;
+            let expected = format!("{holder}: undefined D references ['{undefined}']");
+            assert!(
+                errors.contains(&expected),
+                "seed {seed}: expected {expected:?} in {errors:?}"
+            );
+            Ok(())
+        })
+    })?;
     Ok(())
 }
 
@@ -276,29 +283,31 @@ fn sim_undefined_decision_is_named_exactly() -> SimResult {
 #[test]
 fn sim_missing_acceptance_mapping_is_reported_with_its_row() -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
     let spec = whole_of(&base, "specification.md")?;
-    let rows = requirement_rows(&spec, &patterns);
-    for seed in 0..SEEDS {
-        let mut rng = Seeded::from_seed(seed);
-        let row = pick(&mut rng, &rows)?;
-        let regex = if rng.below(2)? == 0 {
-            &patterns.decision
-        } else {
-            &patterns.falsifier
-        };
-        let mut stripped = row.clone();
-        for token in patterns.matches(regex, row) {
-            stripped = stripped.replace(token, "none");
-        }
-        let mut documents = base.clone();
-        replace_once(&mut documents, "specification.md", row.as_str(), &stripped)?;
-        let errors = errors_of(&documents)?;
-        assert!(
-            errors.contains(&format!("unmapped requirement: {stripped}")),
-            "seed {seed}: {errors:?}"
-        );
-    }
+    let rows = with_patterns(|patterns| Ok(requirement_rows(&spec, patterns)))?;
+    each_seed(SEEDS, |seed| {
+        with_patterns(|patterns| {
+            let mut rng = Seeded::from_seed(seed);
+            let row = pick(&mut rng, &rows)?;
+            let regex = if rng.below(2)? == 0 {
+                &patterns.decision
+            } else {
+                &patterns.falsifier
+            };
+            let mut stripped = row.clone();
+            for token in patterns.matches(regex, row) {
+                stripped = stripped.replace(token, "none");
+            }
+            let mut documents = base.clone();
+            replace_once(&mut documents, "specification.md", row.as_str(), &stripped)?;
+            let errors = errors_of(&documents)?;
+            assert!(
+                errors.contains(&format!("unmapped requirement: {stripped}")),
+                "seed {seed}: {errors:?}"
+            );
+            Ok(())
+        })
+    })?;
     Ok(())
 }
 
@@ -306,7 +315,7 @@ fn sim_missing_acceptance_mapping_is_reported_with_its_row() -> SimResult {
 #[test]
 fn sim_stale_log_inventory_is_refused() -> SimResult {
     let base = loaded()?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let label = pick(&mut rng, &INVENTORIES)?.label;
         let count = count_of(&base, label)?;
@@ -326,7 +335,8 @@ fn sim_stale_log_inventory_is_refused() -> SimResult {
             &format!("log inventory drift: {label}, observed {count}"),
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -349,17 +359,18 @@ fn without_token(section: &str, id: &str) -> Result<String, SimError> {
 /// mention of it, checked against the errors: the case the two Python allocation controls built.
 fn unallocated_control(mention: bool) -> SimResult {
     let base = loaded()?;
-    let patterns = Patterns::new()?;
     let spec = whole_of(&base, "specification.md")?;
     let section =
         execution_section(&spec).ok_or_else(|| SimError::Absent(String::from("Cell 11")))?;
-    let owned: Vec<String> = patterns
-        .groups(&patterns.owns, section, 1)
-        .into_iter()
-        .flat_map(|cases| cases.split('/'))
-        .map(String::from)
-        .collect();
-    for seed in 0..SEEDS {
+    let owned: Vec<String> = with_patterns(|patterns| {
+        Ok(patterns
+            .groups(&patterns.owns, section, 1)
+            .into_iter()
+            .flat_map(|cases| cases.split('/'))
+            .map(String::from)
+            .collect())
+    })?;
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let id = pick(&mut rng, &owned)?.clone();
         let mut documents = base.clone();
@@ -382,7 +393,8 @@ fn unallocated_control(mention: bool) -> SimResult {
             error.starts_with("unallocated execution cases") && error.contains(&format!("'{id}'"))
         });
         assert!(named, "seed {seed}: {id} must be unallocated: {errors:?}");
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -437,7 +449,7 @@ fn sim_insufficient_crash_cases_are_refused() -> SimResult {
     let ceiling = falsifiers
         .checked_div(10)
         .ok_or_else(|| SimError::Absent(String::from("falsifiers")))?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let count = rng.index(ceiling.max(1))?.max(1);
         let cases = distinct_falsifiers(&mut rng, falsifiers, count)?;
@@ -453,7 +465,8 @@ fn sim_insufficient_crash_cases_are_refused() -> SimResult {
             "planned crash fraction below 10 percent",
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -464,7 +477,7 @@ fn sim_duplicate_or_unknown_crash_case_is_refused() -> SimResult {
     let log = whole_of(&base, "log.md")?;
     let (line, cases) = crash_line(&log)?;
     let falsifiers = count_of(&base, "falsifiers")?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let mut changed = cases.clone();
         if rng.below(2)? == 0 {
@@ -491,7 +504,8 @@ fn sim_duplicate_or_unknown_crash_case_is_refused() -> SimResult {
             "invalid planned crash inventory",
             seed,
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -533,7 +547,7 @@ fn sim_skill_is_not_a_kill() -> SimResult {
     let spec = whole_of(&base, "specification.md")?;
     let (line, _cases) = crash_line(&log)?;
     let falsifiers = count_of(&base, "falsifiers")?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let count = rng.index(5)?.saturating_add(8);
         let cases = distinct_falsifiers(&mut rng, falsifiers, count)?;
@@ -554,7 +568,8 @@ fn sim_skill_is_not_a_kill() -> SimResult {
                 "seed {seed}: {case} fault verdict must match the reference"
             );
         }
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -565,7 +580,7 @@ fn sim_inventory_can_grow() -> SimResult {
     let requirements = count_of(&base, "requirements")?;
     let decisions = count_of(&base, "decisions")?;
     let falsifiers = count_of(&base, "falsifiers")?;
-    for seed in 0..SEEDS {
+    each_seed(SEEDS, |seed| {
         let mut rng = Seeded::from_seed(seed);
         let mut grown = String::new();
         let added = rng.index(3)?.saturating_add(1);
@@ -597,6 +612,7 @@ fn sim_inventory_can_grow() -> SimResult {
             total,
             "seed {seed}: the count follows the rows"
         );
-    }
+        Ok(())
+    })?;
     Ok(())
 }

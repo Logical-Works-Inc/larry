@@ -108,14 +108,49 @@ fn simulation(initial: u64, fault: u8) -> TestResult<ContentDigest> {
     Ok(ContentDigest::over(&[&bytes]))
 }
 
-/// Each run repeats exact seeds and compares traces, not a success boolean.
+/// Seeds one sweep replays.
+const SEEDS: u64 = 1_000;
+
+/// Scoped threads one sweep runs on, each owning a disjoint contiguous range of the seeds. The
+/// replay is CPU-bound and nextest already runs one test per core, so one lane: four lanes
+/// took 6.5 s to 11.3 s on the 4-core CI runner (run 43949143055, larry#246).
+const LANES: u64 = 1;
+
+/// Replays seeds `from..to` twice each and compares the traces; the first mismatch or failure is
+/// named as text, which, unlike a boxed error, can leave its lane.
+fn replays(from: u64, to: u64, fault: u8) -> Result<(), String> {
+    for seed in from..to {
+        let first = simulation(seed, fault).map_err(|error| format!("seed {seed}: {error}"))?;
+        let second = simulation(seed, fault).map_err(|error| format!("seed {seed}: {error}"))?;
+        if first != second {
+            return Err(format!("seed {seed}, fault {fault}: replay hash"));
+        }
+    }
+    Ok(())
+}
+
+/// Each run repeats exact seeds and compares traces, not a success boolean. The 1,000 seeds are
+/// split over [`LANES`] disjoint ranges that together cover every seed once.
 fn sweep(start: u64, fault: u8) -> TestResult {
-    for seed in start..start.saturating_add(1_000) {
-        assert_eq!(
-            simulation(seed, fault)?,
-            simulation(seed, fault)?,
-            "seed {seed}, fault {fault}: replay hash"
-        );
+    let end = start.saturating_add(SEEDS);
+    let chunk = SEEDS.div_ceil(LANES);
+    let outcomes: Vec<Result<(), String>> = std::thread::scope(|threads| {
+        let mut running = Vec::new();
+        for lane in 0..LANES {
+            let from = start.saturating_add(lane.saturating_mul(chunk)).min(end);
+            let to = from.saturating_add(chunk).min(end);
+            running.push(threads.spawn(move || replays(from, to, fault)));
+        }
+        running
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(outcome) => outcome,
+                Err(_) => Err(String::from("a sweep lane panicked")),
+            })
+            .collect()
+    });
+    for outcome in outcomes {
+        outcome?;
     }
     Ok(())
 }
