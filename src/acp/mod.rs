@@ -28,7 +28,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use lgwks_std::json::{Map, Value, json};
 
-use crate::executor::{Approval, ExecError, Observer, Settings, run_session};
+use crate::executor::{Approval, ExecError, Isolation, Observer, Settings, run_session};
 use crate::mcp::wire::{self, Envelope, Frame};
 
 /// The one protocol version Larry speaks; any other request is answered with it.
@@ -375,7 +375,8 @@ impl Agent<'_> {
                 return updates.close(stopped(id, "refusal", None));
             }
         };
-        match run_session(&instruction, &cwd, settings, &mut updates) {
+        // `larry acp` runs on the operator's isolated host under `model.command` (larry#93).
+        match run_session(&instruction, &cwd, settings, Isolation::Host, &mut updates) {
             Ok(ended) => {
                 let reply = stopped(id, ended.stop.name(), Some(ended.report.json()));
                 updates.close(reply)
@@ -536,6 +537,11 @@ impl<W: Write> Observer for Updates<'_, W> {
             "sessionUpdate": "agent_message_chunk",
             "content": { "type": "text", "text": text }
         }));
+    }
+
+    /// A host session has no copy to hand back, so nothing is ever reviewed or applied here.
+    fn handed(&mut self, line: &str, _applied: bool) {
+        self.message(line);
     }
 
     fn cancelled(&self) -> bool {

@@ -64,6 +64,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | MCP stdio (Face 3) | forge-mcp server ported onto `lgwks_std::json` | `rmcp`: 62 crates for JSON-RPC we own |
 | MCP remote, Streamable HTTP and OAuth (Face 2) | `rmcp` | stdio port: carries no transport or OAuth |
 | Sandboxed execution | Nova (crates#846) | forge stations: interim, Apple `container` only |
+| Terminal commands, interim kernel confinement (larry#243, ADR 0046) | host `sandbox-exec` (macOS), `setpriv --landlock` (Linux), gap crates#1075 | host-wide `model.command`: refused |
 | Executor process groups, orphan reaping (larry#85) | `lgwks_std::process` | processkit: kill-on-drop dies with its owner under kill -9 |
 | Executor ledger of live groups (larry#85) | `lgwks_deps` `sqlite` | a pid file: no start instant, so a reused pid reads as live |
 | Typed errors | `thiserror` | estate has no derive |

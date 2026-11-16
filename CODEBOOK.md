@@ -71,7 +71,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `executor::session`, `executor::compact` | A terminal session: one gated proposal, one `command` or `done` reply per step, its stops (ADR 0035); its auto-compaction: old output cleared, old steps folded into a record, the window learned from a gateway refusal (ADR 0044) |
 | `executor::ledger`, `executor::ledger_routes`, `executor::routes` | The SQLite record of live groups, the reap after a kill -9, the receipt key and the per-tenant route table (`ledger_routes`: at most 256 routes a tenant, one default, every statement names the tenant); `larry route` and the route a task resolves to (larry#201, ADR 0039) |
 | `executor::receipt` | The ed25519 seal over a report, its verification and derived verdict (ADR 0006) |
-| `executor::workspace` | The throwaway `git clone --local` workspace, its diff and its removal |
+| `executor::workspace`, `executor::workspace::snapshot` | The throwaway `git clone --local` workspace, its diff and its removal; the bounded snapshot of a person's folder and the checked `git apply` back (larry#243) |
+| `executor::confine`, `executor::island` | The kernel wrapper (Seatbelt, Landlock) and its probe; a session's isolated copy, its review diff and its handoff (larry#243, ADR 0046) |
 | `eval`, `eval::sim_eval` | `larry eval`: one arm over a matched set, origins, outcomes, the scorecard (ADR 0009); the seeded simulations of its scoring and set checks |
 | `eval::set` | The bounded task set and its typed refusals, checked before any task runs |
 | `eval::score` | Whole-number prices and costs, nearest-rank percentiles, the card |

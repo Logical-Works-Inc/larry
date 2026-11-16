@@ -16,7 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
-use crate::executor::{Approval, ExecError, Observer, Settings, Stop, run_session};
+use crate::executor::{
+    Approval, ExecError, Handoff, Isolation, Observer, Settings, Stop, run_session,
+};
 
 /// Events one session may have in flight to the frame.
 pub(crate) const EVENTS: usize = 64;
@@ -63,6 +65,16 @@ pub(crate) enum Event {
     },
     /// A message for the person: the summary, or why the session stopped.
     Said(String),
+    /// The session ended with this change in its copy of the folder; the frame answers
+    /// with [`Worker::decide`]: [`Decision::Run`] applies it, anything else discards it.
+    Review(Vec<String>),
+    /// What became of that change, and whether it is now in the person's folder.
+    Handed {
+        /// The one line that says so.
+        line: String,
+        /// Whether the folder changed.
+        applied: bool,
+    },
     /// The session ended; nothing follows.
     Ended(Ended),
 }
@@ -122,6 +134,27 @@ impl Observer for Relay {
         self.send(Event::Said(text.to_owned()));
     }
 
+    /// Always asks, even after "always": a change to the person's own folder is never
+    /// standing consent. Only [`Decision::Run`] applies; a cancel, "no", a closed frame
+    /// and every other answer discard.
+    fn review(&mut self, summary: &[String]) -> Handoff {
+        if self.cancelled() {
+            return Handoff::Discard;
+        }
+        self.send(Event::Review(summary.to_vec()));
+        match self.decisions.recv() {
+            Ok(Decision::Run) => Handoff::Apply,
+            Ok(Decision::Always | Decision::Decline) | Err(_) => Handoff::Discard,
+        }
+    }
+
+    fn handed(&mut self, line: &str, applied: bool) {
+        self.send(Event::Handed {
+            line: line.to_owned(),
+            applied,
+        });
+    }
+
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
@@ -152,12 +185,13 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    /// Starts the session on `instruction` in `cwd`; `always` carries the
-    /// person's "don't ask again" from an earlier task of this run.
+    /// Starts the session on `instruction` in `cwd` under `isolation`; `always` carries
+    /// the person's "don't ask again" from an earlier task of this run.
     pub(crate) fn spawn(
         instruction: String,
         cwd: PathBuf,
         settings: Settings,
+        isolation: Isolation,
         always: bool,
     ) -> std::io::Result<Self> {
         let (event_tx, events) = sync_channel(EVENTS);
@@ -173,8 +207,8 @@ impl Worker {
             .name(String::from("larry-session"))
             .spawn(move || {
                 let mut relay = relay;
-                let outcome =
-                    run_session(&instruction, &cwd, &settings, &mut relay).map(|done| done.stop);
+                let outcome = run_session(&instruction, &cwd, &settings, isolation, &mut relay)
+                    .map(|done| done.stop);
                 relay.send(Event::Ended(ended(outcome)));
             })?;
         Ok(Self {
@@ -225,5 +259,82 @@ impl Drop for Worker {
         {
             self.cancel.store(true, Ordering::Release);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::{Receiver, sync_channel};
+
+    use super::{Decision, Event, Handoff, Observer, Relay};
+
+    /// A relay whose person has `answer` waiting (`None`: the frame is gone), and its events.
+    fn relay(answer: Option<Decision>, always: bool, cancelled: bool) -> (Relay, Receiver<Event>) {
+        let (event_tx, events) = sync_channel(4);
+        let (decision_tx, decisions) = sync_channel(1);
+        if let Some(decision) = answer {
+            assert!(decision_tx.try_send(decision).is_ok());
+        }
+        let relay = Relay {
+            events: event_tx,
+            decisions,
+            cancel: Arc::new(AtomicBool::new(cancelled)),
+            always,
+        };
+        (relay, events)
+    }
+
+    /// Only an explicit yes applies a change to the person's folder: "always", "no", a gone
+    /// frame and a cancel each discard, and a standing "always" never skips the question.
+    #[test]
+    fn sim_tui_worker_review_applies_only_on_run() {
+        let cases = [
+            (Some(Decision::Run), false, false, Handoff::Apply, true),
+            (Some(Decision::Run), true, false, Handoff::Apply, true),
+            (Some(Decision::Always), false, false, Handoff::Discard, true),
+            (
+                Some(Decision::Decline),
+                false,
+                false,
+                Handoff::Discard,
+                true,
+            ),
+            (None, false, false, Handoff::Discard, true),
+            (Some(Decision::Run), false, true, Handoff::Discard, false),
+        ];
+        for (answer, always, cancelled, want, asked) in cases {
+            let (mut relay, events) = relay(answer, always, cancelled);
+            let summary = vec![String::from("1 file changed, +1 -0")];
+            assert_eq!(
+                relay.review(&summary),
+                want,
+                "{answer:?} always {always} cancelled {cancelled}"
+            );
+            let sent = events.try_recv();
+            assert_eq!(
+                sent.is_ok(),
+                asked,
+                "{answer:?}: the question was or was not sent"
+            );
+            if let Ok(event) = sent {
+                assert_eq!(event, Event::Review(summary));
+            }
+        }
+    }
+
+    /// The hand-off line reaches the frame whole, with whether the folder changed.
+    #[test]
+    fn sim_tui_worker_handed_reaches_the_frame() {
+        let (mut relay, events) = relay(None, false, false);
+        relay.handed("applied to your folder", true);
+        assert_eq!(
+            events.try_recv().ok(),
+            Some(Event::Handed {
+                line: String::from("applied to your folder"),
+                applied: true
+            })
+        );
     }
 }

@@ -114,8 +114,9 @@ enum Phase {
     Idle,
     /// A session runs; the command, while one runs.
     Working(Option<String>),
-    /// The session asks to run this command; the highlighted answer.
-    Asking(String, Decision),
+    /// The session asks to run this command, or, with no command, whether to apply the
+    /// change its copy of the folder holds (larry#243); the highlighted answer.
+    Asking(Option<String>, Decision),
     /// Interrupted; whether a command still runs.
     Stopping(bool),
 }
@@ -182,6 +183,44 @@ pub(crate) fn hints(items: &[&str], width: usize) -> Line {
         text.push_str(item);
     }
     vec![Span::new(text, Style::MUTED)]
+}
+
+/// The marker and style of a row of choices, highlighted or not.
+fn marked(on: bool) -> (&'static str, Style) {
+    if on {
+        ("›", Style::ACCENT.bold())
+    } else {
+        (" ", Style::PLAIN)
+    }
+}
+
+/// What is asked: the title, the answers in the order ←/→ walks them, and the footer keys.
+type Offer = (
+    &'static str,
+    &'static [(Decision, &'static str)],
+    &'static [&'static str],
+);
+
+/// The question about a command that `running`, or the review of the session's change.
+/// A review has no "always": the diff of the person's own folder is asked about every time.
+fn offer(running: bool) -> Offer {
+    if running {
+        (
+            "△ Run this command?",
+            &[
+                (Decision::Run, "Yes"),
+                (Decision::Always, "Always"),
+                (Decision::Decline, "No"),
+            ],
+            &["y yes", "a always", "n no", "←/→ select", "enter confirm"],
+        )
+    } else {
+        (
+            "△ Apply this change to your folder?",
+            &[(Decision::Run, "Apply"), (Decision::Decline, "Discard")],
+            &["y apply", "n discard", "←/→ select", "enter confirm"],
+        )
+    }
 }
 
 /// `said`, or `fallback` when the session said nothing.
@@ -266,7 +305,7 @@ impl App {
     fn event(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Ask(command) => {
-                self.phase = Phase::Asking(command, Decision::Run);
+                self.phase = Phase::Asking(Some(command), Decision::Run);
                 self.scroll = 0;
             }
             Event::Started(command) => {
@@ -280,11 +319,10 @@ impl App {
                 observation,
                 passed,
             } => {
-                let command = match self.phase {
-                    Phase::Working(Some(ref command)) => command.clone(),
-                    Phase::Idle | Phase::Working(None) | Phase::Asking(..) | Phase::Stopping(_) => {
-                        String::from("(command)")
-                    }
+                let command = if let Phase::Working(Some(ref command)) = self.phase {
+                    command.clone()
+                } else {
+                    String::from("(command)")
                 };
                 let (status, output) = split_observation(&observation);
                 self.push(Entry::Ran {
@@ -299,6 +337,18 @@ impl App {
                 };
             }
             Event::Said(text) => self.said = Some(text),
+            Event::Review(summary) => {
+                // The names in a diff are the folder's, not Larry's: each line is made safe.
+                self.push(Entry::Info(
+                    summary.iter().map(|line| sanitize(line, false)).collect(),
+                ));
+                self.phase = Phase::Asking(None, Decision::Decline);
+                self.scroll = 0;
+            }
+            Event::Handed { line, applied } => {
+                let style = if applied { Style::GOOD } else { Style::WARN };
+                self.push(Entry::Notice(style, sanitize(&line, false)));
+            }
             Event::Ended(ended) => return self.ended(ended),
         }
         Vec::new()
@@ -394,21 +444,23 @@ impl App {
     }
 
     /// A key while the session asks about `command`, `choice` highlighted.
-    fn answer(&mut self, key: Key, command: String, choice: Decision) -> Vec<Effect> {
+    /// The same keys answer the review of a session's change (no `command`), which has no
+    /// "always": its `a` falls to the ignored keys.
+    fn answer(&mut self, key: Key, command: Option<String>, choice: Decision) -> Vec<Effect> {
         let decision = match key {
             Key::Char('y' | 'Y') => Decision::Run,
-            Key::Char('a' | 'A') => Decision::Always,
+            Key::Char('a' | 'A') if command.is_some() => Decision::Always,
             Key::Char('n' | 'N') | Key::Esc | Key::Interrupt => Decision::Decline,
             Key::Enter => choice,
             Key::Left | Key::Right => {
-                let order = [Decision::Run, Decision::Always, Decision::Decline];
-                let at = order.iter().position(|&item| item == choice);
+                let order = offer(command.is_some()).1;
+                let at = order.iter().position(|&(item, _)| item == choice);
                 let next = match (key, at) {
                     (Key::Left, Some(index)) => index.checked_sub(1),
                     (_, Some(index)) => index.checked_add(1),
                     (_, None) => None,
                 };
-                if let Some(&picked) = next.and_then(|index| order.get(index)) {
+                if let Some(&(picked, _)) = next.and_then(|index| order.get(index)) {
                     self.phase = Phase::Asking(command, picked);
                 }
                 return Vec::new();
@@ -430,7 +482,9 @@ impl App {
             | Key::KillWord => return Vec::new(),
         };
         match decision {
-            Decision::Decline => self.push(Entry::Declined(command)),
+            Decision::Decline => command
+                .into_iter()
+                .for_each(|command| self.push(Entry::Declined(command))),
             Decision::Always => self.always = true,
             Decision::Run => {}
         }
@@ -495,10 +549,7 @@ impl App {
 
     /// Rows one Page Up or Page Down moves.
     fn page(&self) -> usize {
-        match self.height.checked_div(2) {
-            Some(half) => half.max(1),
-            None => 1,
-        }
+        self.height.checked_div(2).into_iter().sum::<usize>().max(1)
     }
 
     /// The chat column's inner width: one cell of margin each side.
@@ -569,30 +620,6 @@ impl App {
         ])
     }
 
-    /// The question block: what will run and the three answers.
-    fn question(command: &str, choice: Decision, width: usize) -> Vec<Line> {
-        let mut rows = vec![vec![Span::new("△ Run this command?", Style::WARN.bold())]];
-        let lead = vec![Span::new("$ ", Style::MUTED)];
-        let rest = vec![Span::new("  ", Style::PLAIN)];
-        for line in sanitize(command, true).split('\n') {
-            rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
-        }
-        let mut choices = Vec::new();
-        for (decision, label) in [
-            (Decision::Run, "Yes"),
-            (Decision::Always, "Always"),
-            (Decision::Decline, "No"),
-        ] {
-            if decision == choice {
-                choices.push(Span::new(format!("› {label}  "), Style::ACCENT.bold()));
-            } else {
-                choices.push(Span::new(format!("  {label}  "), Style::PLAIN));
-            }
-        }
-        rows.push(choices);
-        rows
-    }
-
     /// The bottom block (status, popup or question, composer, footer) and the
     /// cursor's column and row in it.
     fn bottom(&self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
@@ -602,18 +629,31 @@ impl App {
         }
         let mut cursor = None;
         let footer: &[&str] = if let Phase::Asking(ref command, choice) = self.phase {
-            rows.extend(Self::question(command, choice, width));
-            &["y yes", "a always", "n no", "←/→ select", "enter confirm"]
+            let (title, answers, keys) = offer(command.is_some());
+            rows.push(vec![Span::new(title, Style::WARN.bold())]);
+            let lead = vec![Span::new("$ ", Style::MUTED)];
+            let rest = vec![Span::new("  ", Style::PLAIN)];
+            for text in command.iter().map(|command| sanitize(command, true)) {
+                for line in text.split_terminator('\n') {
+                    rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
+                }
+            }
+            rows.push(
+                answers
+                    .iter()
+                    .map(|&(decision, label)| {
+                        let (mark, style) = marked(decision == choice);
+                        Span::new(format!("{mark} {label}  "), style)
+                    })
+                    .collect(),
+            );
+            keys
         } else {
             if let Some(popup) = self.composer.popup() {
                 for (index, (name, about)) in popup.into_iter().enumerate() {
-                    let (mark, style) = if index == self.composer.selected_row() {
-                        ("› ", Style::ACCENT.bold())
-                    } else {
-                        ("  ", Style::PLAIN)
-                    };
+                    let (mark, style) = marked(index == self.composer.selected_row());
                     rows.push(vec![
-                        Span::new(format!("{mark}{name}  "), style),
+                        Span::new(format!("{mark} {name}  "), style),
                         Span::new(about, Style::MUTED),
                     ]);
                 }
@@ -652,10 +692,8 @@ impl App {
         buffer.put(left, title, area.right(), "Artifacts", Style::MUTED.bold());
         let width = area.width.saturating_sub(4).max(1);
         let lines = wrap(&[Span::new(PANE_TEXT, Style::MUTED)], width, &[], &[]);
-        let middle = match area.height.checked_div(2) {
-            Some(half) => area.y.saturating_add(half),
-            None => area.y,
-        };
+        let half: usize = area.height.checked_div(2).into_iter().sum();
+        let middle = area.y.saturating_add(half);
         for (offset, line) in lines.iter().enumerate() {
             let pad: usize = width
                 .saturating_sub(line_width(line))

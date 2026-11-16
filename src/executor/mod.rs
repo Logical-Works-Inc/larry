@@ -3,14 +3,18 @@
 
 mod author;
 mod compact;
+mod confine;
 mod gate;
 mod identity;
+mod island;
 mod ledger;
 mod receipt;
 mod recovery;
 pub mod routes;
 mod run;
 mod session;
+#[cfg(test)]
+mod sim_tree;
 mod task;
 mod workspace;
 
@@ -25,16 +29,20 @@ use larry_contracts::authority::Scope;
 use larry_runtime::error::RuntimeError;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-use run::run_command;
+use run::{Place, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
 use crate::model::{ModelClient, ModelConfig, ModelError, Route, RouteError};
 pub use author::AuthorFault;
+pub use confine::ConfineError;
+#[cfg(test)]
+pub(crate) use confine::Platform;
+pub(crate) use island::Isolation;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use session::SessionError;
-pub(crate) use session::{Approval, MAX_INSTRUCTION_BYTES, Observer, Stop, admits, run_session};
+pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop, run_session};
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -158,6 +166,16 @@ pub enum ExecError {
         /// The variable's name.
         name: String,
     },
+    /// A session's commands could not be confined to a workspace copy, so none ran
+    /// (larry#243).
+    Confine(ConfineError),
+    /// The folder is past a bound a workspace copy keeps, so no copy was made (larry#243).
+    SnapshotTooLarge {
+        /// What was counted: files, bytes, directory levels or bytes of file names.
+        what: &'static str,
+        /// The bound it passed.
+        limit: u64,
+    },
 }
 
 /// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
@@ -251,6 +269,11 @@ impl fmt::Display for ExecError {
             Self::NotUnicode { ref name } => {
                 write!(out, "exec {name} is not UTF-8; set it to UTF-8 text")
             }
+            Self::Confine(ref cause) => write!(out, "exec confinement: {cause}"),
+            Self::SnapshotTooLarge { what, limit } => write!(
+                out,
+                "the folder is too large to copy for an isolated session: more than {limit} {what}"
+            ),
         }
     }
 }
@@ -279,6 +302,7 @@ impl std::error::Error for ExecError {
             Self::Unsealed(ref cause) => Some(cause),
             Self::Journals(ref cause) => Some(cause),
             Self::Session(ref cause) => Some(cause),
+            Self::Confine(ref cause) => Some(cause),
             Self::KeyMissing
             | Self::StateDirUnset
             | Self::BadTimeout { .. }
@@ -288,6 +312,7 @@ impl std::error::Error for ExecError {
             | Self::BadBase { .. }
             | Self::GroupSurvived { .. }
             | Self::NotUnicode { .. }
+            | Self::SnapshotTooLarge { .. }
             | Self::LedgerLockTimeout { .. } => None,
         }
     }
@@ -653,7 +678,7 @@ fn run_task(
         // so only the timeout ends it (larry#242).
         let result = run_command(
             argv,
-            workspace.path(),
+            Place::Open(workspace.path()),
             &settings.path,
             settings.timeout,
             ledger,

@@ -73,7 +73,10 @@ lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "
 # the app edge (`edge`) serves the routes, and `signal` stops it on SIGTERM.
 # The estate owns HTTP serving, so no Loco here; the crate count and cold build
 # are measured in docs/dependencies/cargo-sweep.md.
-lgwks_bot = { workspace = true, features = ["edge", "signal"] }
+# `process` (larry#243, ADR 0046) is read for `SandboxProfile` and `LandlockRules` only, the estate's
+# validation of the confinement a TUI command runs under; the std wrapper and the write-only profile
+# the estate lacks are logicalworks-crates#1075.
+lgwks_bot = { workspace = true, features = ["edge", "signal", "process"] }
 lgwks_deps = { workspace = true, features = ["sqlite"] }
 # The terminal frontend (larry#239, ADR 0045): raw mode, keys, bracketed paste and resize. It was in
 # the tree under AppCUI already, so the direct edge adds no crate; AppCUI and its subtree leave.

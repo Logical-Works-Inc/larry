@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use lgwks_std::process::{identify_process, kill_process_group, process_group_exists};
 
 use super::ExecError;
+use super::confine::Confine;
 use super::ledger::Ledger;
 
 // A command's own process group is what a timeout or a cancel kills; a target without
@@ -189,14 +190,24 @@ impl CommandResult {
     }
 }
 
-/// Runs `argv` in `workspace` in its own process group, with the environment cleared to
+/// Where a command runs: a directory as it is, or a workspace the kernel confines it to
+/// (larry#243).
+#[derive(Clone, Copy)]
+pub(crate) enum Place<'a> {
+    /// This directory, open to whatever the command does in it.
+    Open(&'a Path),
+    /// This confinement's tree, behind its wrapper, with `TMPDIR` at its scratch directory.
+    Confined(&'a Confine),
+}
+
+/// Runs `argv` in `place` in its own process group, with the environment cleared to
 /// PATH, HOME (the workspace), and LANG=C. The leader's exit, a timeout, or the person's
 /// cancel (`cancelled`, polled at most [`CANCEL_POLL`] apart, larry#242) kills the whole
 /// group; a timeout and an interrupt are reported as `timed_out` and `interrupted`,
 /// never both at once.
 pub(crate) fn run_command(
     argv: &[String],
-    workspace: &Path,
+    place: Place<'_>,
     path_env: &str,
     timeout: Duration,
     ledger: &Ledger,
@@ -204,7 +215,27 @@ pub(crate) fn run_command(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CommandResult, ExecError> {
     let started_at = Instant::now();
-    let Some((program, arguments)) = argv.split_first() else {
+    if argv.is_empty() {
+        return Err(spawn_failure(
+            "",
+            io::Error::other("acceptance command is empty"),
+        ));
+    }
+    // A confined command is the platform's wrapper plus the model's argv, so the kernel
+    // confines it and everything it forks; the result still names the model's argv.
+    let (workspace, scratch, wrapped) = match place {
+        Place::Open(path) => (path, None, None),
+        Place::Confined(confine) => (
+            confine.tree(),
+            Some(confine.scratch()),
+            Some(confine.wrap(argv)),
+        ),
+    };
+    let launch: &[String] = match wrapped.as_deref() {
+        Some(prefixed) => prefixed,
+        None => argv,
+    };
+    let Some((program, arguments)) = launch.split_first() else {
         return Err(spawn_failure(
             "",
             io::Error::other("acceptance command is empty"),
@@ -226,6 +257,9 @@ pub(crate) fn run_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(directory) = scratch {
+        command.env("TMPDIR", directory);
+    }
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
