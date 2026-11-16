@@ -119,6 +119,54 @@ fn tui_dep_budget_lock_drops_appcui() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// The lines of the checklist section whose heading contains `title`, up to the next heading.
+fn section<'text>(checklist: &'text str, title: &str) -> Vec<&'text str> {
+    checklist
+        .lines()
+        .skip_while(|line| !(line.starts_with("## ") && line.contains(title)))
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .filter(|line| line.starts_with("- "))
+        .collect()
+}
+
+/// The Director, 2026-11-16: "all changes will be routed through a completed human frontend (in
+/// tui, then Mac app then iOS and android apps)" (larry#241). The checklist keeps that order:
+/// the TUI line first and ticked, the Mac app before the phone apps, and every open line its proof.
+#[test]
+fn the_ship_checklist_keeps_the_frontend_order() -> Result<(), Box<dyn std::error::Error>> {
+    let checklist = std::fs::read_to_string(root().join("docs/product/SHIP.md"))?;
+    let lines = section(&checklist, "Human frontend");
+    let at = |needle: &str| lines.iter().position(|line| line.contains(needle));
+    assert!(
+        lines
+            .first()
+            .is_some_and(|line| line.starts_with("- [x] #238, #239")),
+        "the shipped TUI line leads the section: {lines:?}"
+    );
+    let (mac, phone) = (at("#247"), at("#115"));
+    assert!(
+        mac.is_some() && phone.is_some(),
+        "both later frontends are named"
+    );
+    assert!(
+        mac < phone,
+        "the Mac app comes before the phones: {lines:?}"
+    );
+    let open: Vec<&&str> = lines
+        .iter()
+        .filter(|line| line.starts_with("- [ ]") && !line.contains("Proof:"))
+        .collect();
+    assert!(open.is_empty(), "each open line names its proof: {open:?}");
+    let sample = "## 8. Human frontend\n- [x] a\n- [ ] b\n## 9. Next\n- [ ] c\n";
+    assert_eq!(section(sample, "Human frontend"), ["- [x] a", "- [ ] b"]);
+    assert!(
+        section(sample, "Missing").is_empty(),
+        "no section, no lines"
+    );
+    Ok(())
+}
+
 /// The one governed document whose title names the old name: the record of the rename itself.
 const RENAME_RECORD: &str = "docs/adr/0005-rename-rocco-to-larry.md";
 

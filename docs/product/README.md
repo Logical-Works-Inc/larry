@@ -91,6 +91,11 @@ hosted outside Canada, so customer data never takes this path; Face 2 picks a ho
 propose, probe and compose run as journalled steps; no grader verdict reaches the improver; lessons live
 in Logical-DB per tenant. Never a fork or wrapper of Harness² (Python, file-tree state).
 
+**Human frontend (larry#241).** The Director, 2026-11-16: "all changes will be routed through a completed
+human frontend (in tui, then Mac app then iOS and android apps)". Bare `larry` is the first (ADR 0045, PR
+#240): a phone-shaped chat column, an artifact pane on wide screens, and a yes, always or no before each
+command. Its app state reads no terminal and no clock, so the Mac (#247) and phone (#115) shells reuse it.
+
 **Rocco handoff.** Rocco's dock (page-transition Markov chain plus BM25 over walkthroughs, extending
 lgwks-frontend `src/lib/rocco-rank.js`) hands a low-confidence session to Larry's Face 2 with its context.
 
