@@ -1,7 +1,7 @@
 //! The shipped `larry` binary on a real PTY, and the screen it paints (larry#239).
 //!
-//! `script(1)` supplies the terminal, 32x120, `TERM=xterm-256color`, with only PATH, TERM and
-//! the caller's settings set. The screen model keeps the terminal's rules: CUP moves the
+//! `script(1)` supplies the terminal, 32x120, `TERM=xterm-256color`, with only the fixed PATH,
+//! TERM and the caller's settings set. The screen model keeps the terminal's rules: CUP moves the
 //! cursor, ED clears, OSC is skipped, printable text lands at the cursor. Source: ECMA-48 (CSI,
 //! OSC), POSIX `script(1)` and `kill(2)`. `tests/e2e_journey.rs` includes this file.
 
@@ -18,6 +18,10 @@ pub type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Upper bound on each wait; it only bounds a failure, never orders events.
 const PATIENCE: Duration = Duration::from_secs(30);
+/// The PATH every terminal's shell gets: the directories the journeys' tools live in, never the
+/// host's PATH (larry#269). `script`, `sh`, `stty`, `git`, `cp` and `sleep` live under one of
+/// these on macOS and Linux, so the frame behaves the same on any host that runs the suite.
+pub const TEST_PATH: &str = "/usr/bin:/bin";
 /// Terminal rows.
 const ROWS: usize = 32;
 /// Terminal columns.
@@ -201,8 +205,8 @@ pub fn replied(before: Option<&str>, now: &str, text: &str) -> Result<bool, Stri
 }
 
 impl<'scope> Pty<'scope> {
-    /// Starts the shipped binary in a fresh 32x120 terminal in `cwd`, with only PATH, TERM
-    /// and `env` set. The shell prints its own PID before it execs the binary, so the PID is
+    /// Starts the shipped binary in a fresh 32x120 terminal in `cwd`, with only the fixed PATH,
+    /// TERM and `env` set. The shell prints its own PID before it execs the binary, so the PID is
     /// the binary's.
     pub fn open<'env>(
         owner: &'scope Scope<'scope, 'env>,
@@ -219,10 +223,7 @@ impl<'scope> Pty<'scope> {
         } else {
             command.args(["-q", "/dev/null", "sh", "-c", &inner]);
         }
-        command
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").ok_or("PATH is unset")?)
-            .current_dir(cwd);
+        command.env_clear().env("PATH", TEST_PATH).current_dir(cwd);
         for &(name, ref value) in env {
             command.env(name, value);
         }
@@ -366,4 +367,41 @@ fn forward(mut stdout: ChildStdout, sender: &SyncSender<Vec<u8>>) -> std::io::Re
             return Ok(());
         }
     }
+}
+
+/// A reply is text the keys brought: text already on screen before them is refused, whatever
+/// the screen shows now; with no keys typed since the last wait, presence alone answers.
+#[test]
+fn a_wait_refuses_text_that_was_on_screen_before_the_keys() {
+    let board = "Review retry boundary  Workspace handoff";
+    let opened = "HOME  /  MOO  /  Workspace handoff";
+    assert_eq!(
+        replied(Some(board), opened, "MOO  /  Workspace handoff"),
+        Ok(true)
+    );
+    assert_eq!(
+        replied(Some(board), board, "MOO  /  Workspace handoff"),
+        Ok(false)
+    );
+    assert!(replied(Some(board), opened, "Workspace handoff").is_err());
+    assert_eq!(replied(None, board, "Workspace handoff"), Ok(true));
+    assert_eq!(replied(None, board, "remember this"), Ok(false));
+}
+
+/// The screen model places text by CUP, clears on ED, skips OSC by BEL or ST, decodes UTF-8
+/// split across chunks and wraps at the right edge.
+#[test]
+fn the_screen_model_follows_the_terminal_rules() {
+    let mut screen = Screen::new();
+    screen.ingest(b"\x1b]0;title\x07\x1b[2;3Hab\x1b]8;;x\x1b\\c\xc3");
+    screen.ingest(b"\xa9");
+    let text = screen.text();
+    let second = text.lines().nth(1).map(str::trim_end);
+    assert_eq!(second, Some("  abc\u{e9}"), "row 2: {text:?}");
+    screen.ingest(b"\x1b[J\x1b[1;120Hxy");
+    let wrapped = screen.text();
+    let first = wrapped.lines().next().map(str::trim);
+    assert_eq!(first, Some("x"), "x at the edge: {wrapped:?}");
+    let next = wrapped.lines().nth(1).map(str::trim);
+    assert_eq!(next, Some("y"), "y wraps: {wrapped:?}");
 }

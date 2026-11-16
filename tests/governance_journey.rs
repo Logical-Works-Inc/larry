@@ -12,6 +12,8 @@
 
 #[path = "../src/governance/fixture.rs"]
 mod fixture;
+#[path = "support/ps.rs"]
+mod ps;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
@@ -438,34 +440,49 @@ fn percentile(sorted: &[Duration], per_cent: usize) -> Duration {
     }
 }
 
-/// The peak RSS in KiB `/usr/bin/time` reports for one check of `root`.
+/// Probes the peak-RSS sampler makes before it calls one check runaway; each probe is one `ps`.
+const RSS_PROBES: u32 = 100_000;
+
+/// The peak RSS in KiB of one check of `root`, sampled from `ps` while it runs: the PTY probe's
+/// own read, never `/usr/bin/time` (larry#269), so a host without that tool still measures it.
+/// `None` when the check was too short to catch a sample.
 fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
-    let flag = if cfg!(target_os = "macos") {
-        "-l"
-    } else {
-        "-v"
-    };
-    if !Path::new("/usr/bin/time").is_file() {
-        return Ok(None);
-    }
-    let output = Command::new("/usr/bin/time")
-        .args([flag, LARRY, "governance", "--root"])
+    let mut child = Command::new(LARRY)
+        .args(["governance", "--root"])
         .arg(root)
-        .output()?;
-    let stderr = text(&output.stderr);
-    let Some(line) = stderr.lines().find(|line| {
-        line.to_ascii_lowercase()
-            .contains("maximum resident set size")
-    }) else {
-        return Ok(None);
+        .env_clear()
+        .env("PATH", std::env::var("PATH")?)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pid = child.id().to_string();
+    let mut peak: Option<u64> = None;
+    let mut probes: u32 = 0;
+    let status = loop {
+        if let Some((_, kib)) = ps::sample(&pid) {
+            peak = Some(match peak {
+                Some(seen) => seen.max(kib),
+                None => kib,
+            });
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        probes = probes.saturating_add(1);
+        if probes >= RSS_PROBES {
+            drop(child.kill());
+            drop(child.wait());
+            return Err(
+                format!("one governance check did not exit within {RSS_PROBES} probes").into(),
+            );
+        }
+        std::thread::yield_now();
     };
-    let digits: String = line.chars().filter(char::is_ascii_digit).collect();
-    let value: u64 = digits.parse()?;
-    Ok(Some(if cfg!(target_os = "macos") {
-        value.div_ceil(1024)
-    } else {
-        value
-    }))
+    if !status.success() {
+        return Err(format!("the sampled governance check failed: {status}").into());
+    }
+    Ok(peak)
 }
 
 /// The check's own budget: a wall-clock figure other tests must not decide, so this test runs
@@ -495,7 +512,7 @@ fn governance_check_latency_and_peak_rss_stay_in_budget() -> TestResult {
     );
     let rss = peak_rss_kib(&tree.path)?;
     let figures = format!(
-        "governance over {RUNS} runs on the fixture tree: p50 {p50:?} p95 {p95:?} p99 {p99:?}, peak RSS {rss:?} KiB\n"
+        "governance over {RUNS} runs on the fixture tree: p50 {p50:?} p95 {p95:?} p99 {p99:?}, peak RSS {rss:?} KiB (ps sample)\n"
     );
     io::stderr().lock().write_all(figures.as_bytes())?;
     assert!(

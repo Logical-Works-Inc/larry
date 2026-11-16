@@ -12,6 +12,8 @@ mod http_wire;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "support/ps.rs"]
+mod ps;
 #[path = "support/pty.rs"]
 mod pty;
 
@@ -23,8 +25,8 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use mock_model::{Config, Fault, Handle};
-use origin::{TempDir, fixture};
-use pty::{Journey, Pty, Screen, replied};
+use origin::{TempDir, fixture, git_command};
+use pty::{Journey, Pty};
 
 /// The idle window the probe watches.
 const IDLE: Duration = Duration::from_secs(5);
@@ -440,11 +442,31 @@ fn tui_journey_apply_writes_the_diff_into_the_folder() -> Journey {
         std::fs::read_to_string(ran.work.path().join("hello.txt"))?,
         "hello\n"
     );
-    let status = Command::new("git")
+    let status = git_command(ran.work.path())
         .args(["status", "--porcelain"])
-        .current_dir(ran.work.path())
         .output()?;
     assert_eq!(String::from_utf8(status.stdout)?, "?? hello.txt\n");
+    Ok(())
+}
+
+/// The terminal's shell gets the fixed PATH, never the host's (larry#269): the model's command
+/// writes `$PATH` inside the confined copy and the review shows it as `/usr/bin:/bin`, so a host
+/// tool that shadows `git`, `sh` or `sleep` cannot change what a journey runs.
+#[test]
+fn the_terminal_gets_the_fixed_path_not_the_host() -> Journey {
+    let replies = [
+        r#"{"command":"printf '%s' \"$PATH\" > path.txt"}"#,
+        r#"{"done":"read the path"}"#,
+    ];
+    let ran = frame(scripted(47, &replies), |pty, _, _| {
+        ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for(REVIEW)?;
+        pty.wait_for("/usr/bin:/bin")?;
+        pty.send("n")?;
+        pty.wait_for("read the path")
+    })?;
+    assert!(ran.status.success(), "Ctrl+C exits 0: {}", ran.status);
     Ok(())
 }
 
@@ -634,57 +656,9 @@ fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
     })
 }
 
-/// A reply is text the keys brought: text already on screen before them is refused, whatever
-/// the screen shows now; with no keys typed since the last wait, presence alone answers.
-#[test]
-fn a_wait_refuses_text_that_was_on_screen_before_the_keys() {
-    let board = "Review retry boundary  Workspace handoff";
-    let opened = "HOME  /  MOO  /  Workspace handoff";
-    assert_eq!(
-        replied(Some(board), opened, "MOO  /  Workspace handoff"),
-        Ok(true)
-    );
-    assert_eq!(
-        replied(Some(board), board, "MOO  /  Workspace handoff"),
-        Ok(false)
-    );
-    assert!(replied(Some(board), opened, "Workspace handoff").is_err());
-    assert_eq!(replied(None, board, "Workspace handoff"), Ok(true));
-    assert_eq!(replied(None, board, "remember this"), Ok(false));
-}
-
-/// The screen model places text by CUP, clears on ED, skips OSC by BEL or ST, decodes UTF-8
-/// split across chunks and wraps at the right edge.
-#[test]
-fn the_screen_model_follows_the_terminal_rules() {
-    let mut screen = Screen::new();
-    screen.ingest(b"\x1b]0;title\x07\x1b[2;3Hab\x1b]8;;x\x1b\\c\xc3");
-    screen.ingest(b"\xa9");
-    let text = screen.text();
-    let second = text.lines().nth(1).map(str::trim_end);
-    assert_eq!(second, Some("  abc\u{e9}"), "row 2: {text:?}");
-    screen.ingest(b"\x1b[J\x1b[1;120Hxy");
-    let wrapped = screen.text();
-    let first = wrapped.lines().next().map(str::trim);
-    assert_eq!(first, Some("x"), "x at the edge: {wrapped:?}");
-    let next = wrapped.lines().nth(1).map(str::trim);
-    assert_eq!(next, Some("y"), "y wraps: {wrapped:?}");
-}
-
-/// CPU seconds and RSS KiB of `pid`, from `ps -o time=,rss=`.
+/// CPU seconds and RSS KiB of `pid`, from the probe's own `ps` sample (larry#269).
 fn sample(pid: &str) -> Journey<(f64, u64)> {
-    let output = Command::new("ps")
-        .args(["-p", pid, "-o", "time=,rss="])
-        .output()?;
-    let text = String::from_utf8(output.stdout)?;
-    let mut fields = text.split_whitespace();
-    let time = fields.next().ok_or("ps printed no time")?;
-    let rss: u64 = fields.next().ok_or("ps printed no rss")?.parse()?;
-    let mut seconds = 0.0_f64;
-    for part in time.split(':') {
-        seconds = seconds.mul_add(60.0, part.parse::<f64>()?);
-    }
-    Ok((seconds, rss))
+    ps::sample(pid).ok_or_else(|| format!("ps reported nothing for {pid}").into())
 }
 
 /// The `rank`th percentile of `sorted`, by nearest rank, in milliseconds.
