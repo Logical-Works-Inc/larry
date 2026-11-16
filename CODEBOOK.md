@@ -102,7 +102,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::tracker` | `larry tracker`: the tracker page rendered from `tools/tracker/tracker.json` |
 | `governance::pyjson`, `governance::pystr` | JSON printed as CPython's `json.dumps`; the CPython `str` semantics the messages need |
 | `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
-| `governance::sim_*`, `governance::tests` | Seeded ports of the Python controls, parser references, bounds and two-root checks; the controls against the real tree, mutated in memory only |
+| `governance::sim_*`, `governance::tests`, `governance::fixture` | Seeded ports of the Python controls, parser references, bounds and two-root checks; the controls over a governed fixture tree the tests write for themselves, also included by path into `tests/governance_journey.rs`; `sim_governance` mutates documents in memory only (larry#270) |
 | `src/main.rs` | The demo binary entry |
 | `src/bin/larry.rs` | The `larry` launcher: the split terminal, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |

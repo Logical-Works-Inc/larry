@@ -14,6 +14,8 @@ mod pystr;
 pub(crate) mod receipts;
 
 #[cfg(test)]
+mod fixture;
+#[cfg(test)]
 mod sim_governance;
 #[cfg(test)]
 mod sim_markdown;
