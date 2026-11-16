@@ -1,5 +1,6 @@
-//! Effect-free fixture state behind the `larry` workspace demo and its native AppCUI view.
-//! Every command changes only this owned session; no backend is connected.
+//! Larry's library: the executor, the model client, the MCP and ACP servers, `larry serve`,
+//! the terminal frontend (`tui`), and the effect-free fixture state behind `larry-demo`.
+//! A `larry-demo` command changes only its owned session; no backend is connected.
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -15,12 +16,11 @@ pub mod governance;
 pub mod mascot;
 pub mod mcp;
 pub mod model;
-pub mod native;
 pub mod rerank;
 pub mod serve;
 #[cfg(test)]
 pub(crate) mod sim_error;
-pub mod theme;
+pub mod tui;
 
 /// Distinguishes the temporary files of concurrent replacements inside one process.
 static REPLACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -313,7 +313,7 @@ impl Demo {
     pub fn snapshot(&self) -> Result<String, json::Error> {
         let inspection = self.selected.map(|index| &EVENTS[index]);
         let value = json::json!({
-            "mode": "DEMO — JSON fixture harness; native AppCUI view: cargo run --bin larry",
+            "mode": "DEMO — JSON fixture harness; the terminal frontend: cargo run --bin larry",
             "effects": "none: no execution, providers, filesystem reads or writes",
             "persistence": "session only; reset and restart discard synthetic notes",
             "scenario": if self.empty { "empty" } else { "change" },

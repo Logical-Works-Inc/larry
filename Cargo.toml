@@ -54,7 +54,7 @@ lgwks_std = { version = "=4.2.0", default-features = false }
 # (larry#191) is the newest release; 8.3.0 (larry#187) added `RecordJournal::admits` and
 # `RecordProjection::admit` (crates#898, #905, #906), which larry#90 builds on.
 lgwks_bot = { version = "=8.4.0", default-features = false }
-# The dependency-admission storefront. The larry package opts into `appcui` and `sqlite`; the
+# The dependency-admission storefront. The larry package opts into `sqlite`; the
 # published storefront owns that dependency and its transitive admission. 7.2.0 (larry#189)
 # is a major release; the ledger's `sqlite::open` and `sqlite::migrate` calls take its API.
 lgwks_deps = { version = "=7.2.0", default-features = false }
@@ -74,7 +74,12 @@ lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "
 # The estate owns HTTP serving, so no Loco here; the crate count and cold build
 # are measured in docs/dependencies/cargo-sweep.md.
 lgwks_bot = { workspace = true, features = ["edge", "signal"] }
-lgwks_deps = { workspace = true, features = ["appcui", "sqlite"] }
+lgwks_deps = { workspace = true, features = ["sqlite"] }
+# The terminal frontend (larry#239, ADR 0045): raw mode, keys, bracketed paste and resize. It was in
+# the tree under AppCUI already, so the direct edge adds no crate; AppCUI and its subtree leave.
+crossterm = { version = "=0.29.0", default-features = false, features = ["events", "bracketed-paste"] }  # gap: Logical-Works-Inc/logicalworks-crates#1067
+# Display width (UAX #11) for wrapping CJK, emoji and combining marks in the frame; no dependencies.
+unicode-width = "=0.2.3"  # gap: Logical-Works-Inc/logicalworks-crates#1067
 
 [features]
 # The local reranker (larry#150): Candle runs the pinned Qwen3 reranker and the Hugging Face

@@ -53,7 +53,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Code reading, diffs | `lgwks_ast` | `syn`: the estate has one reader |
 | Prompt-injection screen (larry#37) | `lgwks_deps` `llm-guard` | a classifier of our own first |
 | Rerank port (larry#53) | `lgwks_deps` `ml-candle`, `ml-tokenizers` | Python reranker: banned |
-| Terminal UI | `lgwks_deps` `appcui` (already) | none |
+| Terminal UI (larry#239, ADR 0045) | Larry's own cell frame on `crossterm` =0.29.0 and `unicode-width` =0.2.3, gap crates#1067 | AppCUI: bold lost its colour, 82 crates; cursive, iocraft, ratatui: see ADR 0045 |
 | HTTP routes, body and tenant bounds (larry#88) | `lgwks_bot::app` (axum through `lgwks_deps`), ADR 0021 | Loco: 544 crates, a second edge |
 | Human sign-in, password hashing, magic links | **Loco** `auth` | estate owns none |
 | Approval mail, out-of-band checks (larry#41) | **Loco** mailers (lettre) | estate owns none |

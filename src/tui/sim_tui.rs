@@ -1,0 +1,515 @@
+//! Seeded simulations of the terminal frame (larry#239, ADR 0045). One seed
+//! drives every size, key, paste and session event; no clock, no terminal.
+//! Sources: ECMA-48 SGR and CUP; the terminal-wg synchronized-output spec
+//! (DEC 2026); CVE-2021-42574 (Trojan Source bidi) and CVE-2003-0063 (xterm
+//! title-report escape injection) for the hostile-output cases.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash as _, Hasher as _};
+use std::time::Duration;
+
+use super::app::{App, Input, Key, MAX_ENTRIES};
+use super::buffer::{Buffer, Frame, render};
+use super::cells::Header;
+use super::layout::{CHAT_MAX, CHAT_MIN, SPLIT_MIN, split};
+use super::style::Style;
+use super::worker::{Ended, Event};
+
+/// Seeds each simulation runs.
+const SEEDS: u64 = 256;
+
+/// A xorshift64* stream: the one source of every choice in a run.
+struct Seeded(u64);
+
+impl Seeded {
+    /// A stream for `seed`; zero is moved off the fixed point.
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+
+    /// The next value.
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// A value in `0..bound`, or 0 for an empty bound.
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next().checked_rem(bound).into_iter().sum()
+    }
+
+    /// An index in `0..len`.
+    fn pick(&mut self, len: usize) -> usize {
+        let bound = u64::try_from(len).into_iter().sum();
+        usize::try_from(self.below(bound)).into_iter().sum()
+    }
+}
+
+/// Text a hostile model or command might print: escapes, controls, bidi, wide.
+const HOSTILE: [&str; 8] = [
+    "\x1b]0;owned\x07",
+    "\x1b[2J\x1b[H",
+    "\x1b[31mred\x1b[0m",
+    "\u{202e}gnp.exe",
+    "\u{2066}if admin\u{2069}",
+    "表示幅のテスト😀",
+    "e\u{301}\u{301}\u{301}",
+    "\r\x08\x08\x00tab\there",
+];
+
+/// A header for a simulated run.
+fn header() -> Header {
+    Header {
+        version: String::from("0.0.0"),
+        model: Ok(String::from("sim-model")),
+        directory: String::from("~/sim"),
+        blocked: None,
+    }
+}
+
+/// One seeded input.
+fn input(rng: &mut Seeded) -> Input {
+    let text = |rng: &mut Seeded| HOSTILE[rng.pick(HOSTILE.len())].to_owned();
+    match rng.below(14) {
+        0 => Input::Resize(rng.pick(260), rng.pick(90)),
+        1 => Input::Paste(text(rng)),
+        2 => Input::Worker(Event::Ask(text(rng))),
+        3 => Input::Worker(Event::Started(text(rng))),
+        4 => Input::Worker(Event::Finished {
+            observation: format!("exit {}\n{}", rng.below(3), text(rng)),
+            passed: rng.below(2) == 0,
+        }),
+        5 => Input::Worker(Event::Said(text(rng))),
+        6 => Input::Worker(Event::Ended(Ended::Done)),
+        7 => Input::Worker(Event::Ended(Ended::Failed(text(rng)))),
+        8 => Input::Tick(Duration::from_millis(rng.below(100_000))),
+        _ => {
+            let keys = [
+                Key::Char('y'),
+                Key::Char('n'),
+                Key::Char('a'),
+                Key::Char('/'),
+                Key::Enter,
+                Key::NewLine,
+                Key::Backspace,
+                Key::Left,
+                Key::Up,
+                Key::PageUp,
+                Key::PageDown,
+                Key::Tab,
+                Key::Esc,
+                Key::KillWord,
+            ];
+            Input::Key(keys[rng.pick(keys.len())])
+        }
+    }
+}
+
+/// Runs `steps` seeded inputs through a fresh app; returns the app and every
+/// byte the driver would have written.
+fn drive(seed: u64, steps: usize) -> (App, Vec<u8>) {
+    let mut rng = Seeded::new(seed);
+    let mut app = App::new(header(), vec![String::from("model: sim")], 120, 34);
+    let mut shown: Option<Frame> = None;
+    let mut wire = Vec::new();
+    for _ in 0..steps {
+        app.handle(input(&mut rng));
+        let frame = app.draw();
+        render(shown.as_ref(), &frame, &mut wire);
+        shown = Some(frame);
+    }
+    (app, wire)
+}
+
+/// Every SGR parameter list in `wire`, in order, with the text after it.
+fn sgr_runs(wire: &[u8]) -> Vec<(Vec<u32>, String)> {
+    let text = String::from_utf8_lossy(wire);
+    let mut runs = Vec::new();
+    for piece in text.split("\x1b[").skip(1) {
+        let Some(end) = piece.find(|character: char| character.is_ascii_alphabetic()) else {
+            continue;
+        };
+        let (params, rest) = piece.split_at(end);
+        if !rest.starts_with('m') {
+            continue;
+        }
+        let codes = params
+            .split(';')
+            .filter_map(|code| code.parse().ok())
+            .collect();
+        runs.push((codes, rest.get(1..).into_iter().collect()));
+    }
+    runs
+}
+
+#[test]
+fn layout_chat_column_keeps_phone_ratio_and_reserves_artifact_pane() {
+    for width in 0..=400 {
+        for height in [0, 1, 10, 24, 34, 48, 69, 70, 120, 500] {
+            let regions = split(width, height);
+            assert_eq!(regions.chat.x, 0);
+            assert_eq!(regions.chat.height, height);
+            match regions.artifact {
+                None => {
+                    assert!(width < SPLIT_MIN, "{width}x{height} lost its pane");
+                    assert_eq!(regions.chat.width, width);
+                }
+                Some(pane) => {
+                    assert!(width >= SPLIT_MIN);
+                    assert!((CHAT_MIN..=CHAT_MAX).contains(&regions.chat.width));
+                    // One rule cell between the chat and the pane; the pane takes the rest.
+                    assert_eq!(pane.x, regions.chat.width.saturating_add(1));
+                    assert_eq!(pane.right(), width);
+                    assert!(pane.width >= SPLIT_MIN.saturating_sub(CHAT_MAX).saturating_sub(1));
+                }
+            }
+        }
+    }
+    // A phone is 9:19.5 and a cell about 1:2, so 52 rows want 48 columns.
+    assert_eq!(split(160, 52).chat.width, 48);
+}
+
+#[test]
+fn sim_tui_any_size_any_input_paints_inside_bounds() {
+    for seed in 0..SEEDS {
+        let (app, _) = drive(seed, 96);
+        let frame = app.draw();
+        let grid: &Buffer = &frame.buffer;
+        assert!(grid.width() <= super::buffer::MAX_COLUMNS);
+        assert!(grid.height() <= super::buffer::MAX_ROWS);
+        if let Some((x, y)) = frame.cursor {
+            assert!(
+                x < grid.width() && y < grid.height(),
+                "seed {seed}: cursor off grid"
+            );
+        }
+    }
+}
+
+#[test]
+fn sim_tui_hostile_output_cannot_write_escapes() {
+    for seed in 0..SEEDS {
+        let (_, wire) = drive(seed, 96);
+        let text = String::from_utf8_lossy(&wire);
+        for piece in text.split('\x1b').skip(1) {
+            // Only the frame's own sequences: CSI with digits, `;` and `?` then a final.
+            let ok = piece.starts_with('[')
+                && piece
+                    .chars()
+                    .skip(1)
+                    .find(|character| {
+                        !(character.is_ascii_digit() || matches!(character, ';' | '?'))
+                    })
+                    .is_some_and(|last| matches!(last, 'H' | 'J' | 'm' | 'h' | 'l'));
+            assert!(ok, "seed {seed}: foreign escape {:?}", piece.get(..12));
+        }
+        assert!(
+            !text.contains("\x1b]"),
+            "seed {seed}: an OSC reached the wire"
+        );
+        for banned in [
+            '\u{7}', '\u{8}', '\0', '\r', '\u{202e}', '\u{2066}', '\u{2069}',
+        ] {
+            assert!(
+                !text.contains(banned),
+                "seed {seed}: {banned:?} reached the wire"
+            );
+        }
+    }
+}
+
+#[test]
+fn sim_tui_bold_cells_keep_colour_on_the_wire() {
+    let mut saw_bold_colour = false;
+    for seed in 0..SEEDS {
+        let (_, wire) = drive(seed, 64);
+        for (codes, _) in sgr_runs(&wire) {
+            // Every style run starts from reset: nothing of the last run survives.
+            assert_eq!(
+                codes.first(),
+                Some(&0),
+                "seed {seed}: SGR {codes:?} without reset"
+            );
+            // A reset never follows the bold or the colour inside one run.
+            assert!(
+                !codes.iter().skip(1).any(|code| *code == 0),
+                "seed {seed}: {codes:?}"
+            );
+            if codes.contains(&1) && codes.iter().any(|code| (30..=37).contains(code)) {
+                saw_bold_colour = true;
+            }
+        }
+    }
+    let mut wire = Vec::new();
+    Style::ACCENT.bold().sgr(&mut wire);
+    assert_eq!(wire, b"\x1b[0;1;36m");
+    assert!(saw_bold_colour, "no seed painted a bold coloured cell");
+}
+
+#[test]
+fn sim_tui_same_seed_same_frame_hash() {
+    let hash = |seed: u64| {
+        let (_, wire) = drive(seed, 128);
+        let mut hasher = DefaultHasher::new();
+        wire.hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut distinct = std::collections::BTreeSet::new();
+    for seed in 0..64 {
+        let first = hash(seed);
+        assert_eq!(first, hash(seed), "seed {seed} replayed differently");
+        distinct.insert(first);
+    }
+    assert!(
+        distinct.len() > 32,
+        "seeds collapse to {} traces",
+        distinct.len()
+    );
+}
+
+#[test]
+fn sim_tui_unchanged_frame_writes_nothing() {
+    for seed in 0..SEEDS {
+        let (app, _) = drive(seed, 48);
+        let frame = app.draw();
+        let mut wire = Vec::new();
+        render(Some(&frame), &frame, &mut wire);
+        assert!(
+            wire.is_empty(),
+            "seed {seed}: an idle repaint wrote {} bytes",
+            wire.len()
+        );
+        render(None, &frame, &mut wire);
+        assert!(wire.starts_with(b"\x1b[?2026h"));
+        assert!(wire.ends_with(b"\x1b[?2026l"));
+    }
+}
+
+#[test]
+fn sim_tui_transcript_and_events_stay_bounded_past_cap() {
+    let mut app = App::new(header(), Vec::new(), 120, 34);
+    let past = MAX_ENTRIES.saturating_mul(3);
+    for step in 0..past {
+        app.handle(Input::Worker(Event::Finished {
+            observation: format!("exit 0\nline {step}"),
+            passed: true,
+        }));
+    }
+    assert_eq!(app.entries().len(), MAX_ENTRIES);
+    // The newest survives; the header and the oldest went first.
+    let frame = app.draw();
+    let rows: String = (0..frame.buffer.height())
+        .map(|row| frame.buffer.row_text(row))
+        .collect();
+    assert!(rows.contains(&format!("line {}", past.saturating_sub(1))));
+    assert_eq!(super::worker::EVENTS, 64);
+}
+
+#[test]
+fn sim_tui_esc_answers_a_question_with_decline() {
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::new(seed);
+        let mut app = App::new(header(), Vec::new(), 40 + rng.pick(200), 10 + rng.pick(60));
+        app.handle(Input::Key(Key::Char('x')));
+        let started = app.handle(Input::Key(Key::Enter));
+        assert_eq!(started, vec![super::app::Effect::Start(String::from("x"))]);
+        app.handle(Input::Worker(Event::Ask(String::from("rm -rf /"))));
+        let answer = app.handle(Input::Key(Key::Esc));
+        assert_eq!(
+            answer,
+            vec![super::app::Effect::Decide(super::worker::Decision::Decline)],
+            "seed {seed}"
+        );
+    }
+}
+
+/// The real `run_session` behind the worker, with no in-crate stand-in: under the default
+/// policy (no `model.command`, `executor::gate`) the gate refuses before any model call, the
+/// refusal reaches the frame as events ending in `Ended::Refused`, and dropping a worker
+/// mid-flight joins its thread.
+#[test]
+fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!("larry-tui-worker-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
+    let state = root.to_string_lossy().into_owned();
+    // A route to the discard port, which nothing serves: the gate must refuse before it is used.
+    let settings = crate::executor::Settings::from_env(move |name| match name {
+        "LARRY_STATE_DIR" => Some(state.clone()),
+        "LARRY_MODEL_URL" => Some(String::from("http://127.0.0.1:9/v1")),
+        "LARRY_MODEL" => Some(String::from("sim-model")),
+        "LARRY_MODEL_KEY" => Some(String::from("sim-key")),
+        _ => None,
+    })?;
+    let worker = super::worker::Worker::spawn(
+        String::from("write hello.txt"),
+        root.clone(),
+        settings.clone(),
+        false,
+    )?;
+    let mut seen = Vec::new();
+    while let Some(event) = worker.wait(Duration::from_secs(30)) {
+        let last = matches!(event, Event::Ended(_));
+        seen.push(event);
+        if last {
+            break;
+        }
+    }
+    assert_eq!(seen.last(), Some(&Event::Ended(Ended::Refused)), "{seen:?}");
+    assert!(
+        !seen.iter().any(|event| matches!(*event, Event::Ask(_))),
+        "{seen:?}"
+    );
+    assert!(
+        !root.join("hello.txt").exists(),
+        "a refused session runs nothing"
+    );
+    // A worker dropped before its session reports is cancelled and joined, not leaked.
+    let early = super::worker::Worker::spawn(String::from("x"), root, settings, true)?;
+    drop(early);
+    Ok(())
+}
+
+#[test]
+fn tui_error_variants_name_their_cause() {
+    use std::error::Error as _;
+    let terminal = super::TuiError::Terminal(std::io::Error::other("no tty"));
+    assert_eq!(terminal.to_string(), "terminal: no tty");
+    assert!(terminal.source().is_some(), "the io cause is kept");
+    let directory = super::TuiError::Directory(std::io::Error::other("gone"));
+    assert_eq!(directory.to_string(), "working directory: gone");
+    assert!(directory.source().is_some(), "the io cause is kept");
+}
+
+/// What Up recalls from an empty composer, newest first, until it stops moving.
+fn recalled(composer: &mut super::composer::Composer) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..=super::composer::HISTORY {
+        let before = composer.text().to_owned();
+        composer.up();
+        let text = composer.text().to_owned();
+        if text == before {
+            break;
+        }
+        seen.push(text);
+    }
+    seen
+}
+
+/// The double-clicker and the fat-finger: blank and repeated submissions. Reference model:
+/// history keeps a submission only when it is not blank and not the same as the newest kept
+/// one, so Up never offers an empty line or the same line twice in a row.
+#[test]
+fn sim_tui_history_skips_blank_and_repeated_submissions() {
+    let pool = [
+        "",
+        "   ",
+        "\n",
+        "fix the build",
+        "fix the build",
+        "run tests",
+        "ls",
+    ];
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::new(seed);
+        let mut composer = super::composer::Composer::default();
+        let mut model: Vec<String> = Vec::new();
+        for _ in 0..rng.pick(24) {
+            let text = pool[rng.pick(pool.len())];
+            composer.insert(text);
+            assert_eq!(composer.take(), sanitize_kept(text));
+            let kept = sanitize_kept(text);
+            if !kept.trim().is_empty() && model.last() != Some(&kept) {
+                model.push(kept);
+            }
+        }
+        let mut expected = model.clone();
+        expected.reverse();
+        assert_eq!(recalled(&mut composer), expected, "seed {seed}");
+    }
+}
+
+/// The text the composer keeps for `text`: newlines stay, controls go.
+fn sanitize_kept(text: &str) -> String {
+    super::style::sanitize(text, true)
+}
+
+/// The wrong-order fool: Up on the second line of a draft moves within the draft, never
+/// replaces it with history; Up on the first line recalls.
+#[test]
+fn sim_tui_up_recalls_history_only_from_the_first_line() {
+    let mut composer = super::composer::Composer::default();
+    composer.insert("earlier task");
+    composer.take();
+    composer.insert("first line\nsecond line");
+    composer.up();
+    assert_eq!(
+        composer.text(),
+        "first line\nsecond line",
+        "the draft is kept"
+    );
+    composer.home();
+    composer.clear();
+    composer.insert("one line");
+    composer.up();
+    assert_eq!(composer.text(), "earlier task", "the first line recalls");
+}
+
+/// Only `bold()` makes a style bold: every tone alone writes reset then its colour.
+#[test]
+fn sim_tui_plain_styles_are_never_bold() {
+    let cases: [(Style, &[u8]); 6] = [
+        (Style::PLAIN, b"\x1b[0m"),
+        (Style::MUTED, b"\x1b[0;2m"),
+        (Style::ACCENT, b"\x1b[0;36m"),
+        (Style::GOOD, b"\x1b[0;32m"),
+        (Style::WARN, b"\x1b[0;33m"),
+        (Style::BAD, b"\x1b[0;31m"),
+    ];
+    for (style, wire) in cases {
+        let mut out = Vec::new();
+        style.sgr(&mut out);
+        assert_eq!(out, wire);
+    }
+}
+
+/// The giant-and-empty fool: seeded words and runs of spaces wrapped at every width. Oracle:
+/// no row starts with a space, no row is wider than the width (a word wider than a row is cut
+/// by character), and the words read back in order.
+#[test]
+fn sim_tui_wrap_drops_spaces_at_breaks_and_keeps_every_word() {
+    let words = ["a", "bb", "cccc", "ddddddddd", "表示", "e\u{301}"];
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::new(seed);
+        let mut text = String::new();
+        for _ in 0..rng.pick(16) {
+            for _ in 0..rng.pick(4) {
+                text.push(' ');
+            }
+            text.push_str(words[rng.pick(words.len())]);
+        }
+        let width = 2 + rng.pick(20);
+        let rows = super::style::wrap(
+            &[super::style::Span::new(text.clone(), Style::PLAIN)],
+            width,
+            &[],
+            &[],
+        );
+        let mut read = String::new();
+        for row in &rows {
+            let joined: String = row.iter().map(|span| span.text.as_str()).collect();
+            assert!(
+                !joined.starts_with(' '),
+                "seed {seed} width {width}: {joined:?}"
+            );
+            assert!(
+                super::style::text_width(&joined) <= width,
+                "seed {seed}: {joined:?}"
+            );
+            read.push_str(&joined);
+        }
+        let squeeze = |value: &str| value.split_whitespace().collect::<String>();
+        assert_eq!(squeeze(&read), squeeze(&text), "seed {seed} width {width}");
+    }
+}

@@ -16,10 +16,8 @@
 # The `lgwks_*` edges are deliberately absent: lgwks_std is the workspace
 # stdlib+ (self-exempt) and lgwks_deps is the estate's own admission
 # storefront, so `lgwks-deps check` reports them as owned without a row. The
-# AppCUI edge is `lgwks_deps`/`appcui`, not a direct appcui dependency; that
-# storefront admission is recorded in `docs/architecture/visual-pass.md`. Its
-# proc-macro is held at the release appcui was built with (appcui 0.5.8 needs
-# `^0.3.9`) in Cargo.lock until Logical-Works-Inc/logicalworks-crates#841 lands.
+# AppCUI edge (`lgwks_deps`/`appcui`) left with larry#239 (ADR 0045): the
+# terminal frame is Larry's own on the two rows at the end of this file.
 #
 # `lgwks_bot` (defaults off) is an edge of larry-contracts and larry-runtime from larry#74, the
 # clock and skew rows; as an `lgwks_*` crate it is estate-owned and needs no row.
@@ -53,6 +51,40 @@ replacement = "std::error"
 blocker = "lgwks_std exposes no derive for std::error::Error (Logical-Works-Inc/logicalworks-crates#842), so the C02 contract errors would need hand-written Display and source impls."
 cost = { cold_build_s = 1.95, crates = 8, binary_bytes = 35024, measured = "2026-11-07", command = "cargo build --locked -p thiserror@2.0.20 --target-dir <fresh> (sccache on; crates from cargo tree -e normal,build; bytes are the thiserror rlib)" }
 review = "2027-02-07"
+
+# The terminal frontend (larry#239, ADR 0045). crossterm was already in the
+# lock under AppCUI; dropping AppCUI took the larry-demo normal tree from 250 to
+# 210 unique crates (cargo tree --locked -e normal --prefix none | sort -u, on
+# Oracle, 2026-11-16).
+[[approved]]
+crate = "crossterm"
+tier = "boundary"
+version = "=0.29.0"
+license = "MIT"
+owner = "larry-demo"
+capability = "terminal-io"
+source = "registry"
+allowed_consumers = "larry-demo"
+allowed_kinds = "normal"
+reason = "raw mode, key events, bracketed paste and resize for bare `larry`; std has no termios or key decoding and no lgwks_* crate owns a terminal runtime (Drishti is GPUI). Estate gap: Logical-Works-Inc/logicalworks-crates#1067; retire this row when it closes."
+approved_by = "srinji-kaggss (Director)"
+approved_on = "2026-11-16"
+review = "https://github.com/Logical-Works-Inc/larry/issues/239"
+
+[[approved]]
+crate = "unicode-width"
+tier = "boundary"
+version = "=0.2.3"
+license = "MIT OR Apache-2.0"
+owner = "larry-demo"
+capability = "display-width"
+source = "registry"
+allowed_consumers = "larry-demo"
+allowed_kinds = "normal"
+reason = "UAX #11 display widths so the frame wraps CJK, emoji and combining marks; no dependencies; std and lgwks_std have no width table. Estate gap: Logical-Works-Inc/logicalworks-crates#1067; retire this row when it closes."
+approved_by = "srinji-kaggss (Director)"
+approved_on = "2026-11-16"
+review = "https://github.com/Logical-Works-Inc/larry/issues/239"
 
 # ── bevy_ecs: SUPERSEDED, NOT AN EDGE ────────────────────────────────────────
 #

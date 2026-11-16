@@ -34,7 +34,7 @@ pub use author::AuthorFault;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use session::SessionError;
-pub(crate) use session::{Observer, run_session};
+pub(crate) use session::{Approval, MAX_INSTRUCTION_BYTES, Observer, Stop, admits, run_session};
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -152,6 +152,44 @@ pub enum ExecError {
     Journals(std::io::Error),
     /// A terminal session was refused before anything ran (larry#93).
     Session(SessionError),
+    /// A variable Larry reads holds bytes that are not UTF-8: it is refused,
+    /// never read as unset (larry#239).
+    NotUnicode {
+        /// The variable's name.
+        name: String,
+    },
+}
+
+/// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
+fn read_by_larry(name: &str) -> bool {
+    name == "PATH" || name == "HOME" || name.starts_with("LARRY_")
+}
+
+/// The process environment as one snapshot every setting reads from: a
+/// variable that is absent is unset, and a variable Larry reads whose name or
+/// value is not UTF-8 refuses the whole snapshot, so no setting falls back to
+/// a default on bytes it could not read.
+///
+/// # Errors
+///
+/// [`ExecError::NotUnicode`] naming the first such variable.
+pub fn process_env() -> Result<impl Fn(&str) -> Option<String> + Send + Sync + 'static, ExecError> {
+    let mut table = std::collections::BTreeMap::new();
+    for (name, value) in std::env::vars_os() {
+        let lossy = name.to_string_lossy().into_owned();
+        if !read_by_larry(&lossy) {
+            continue;
+        }
+        match (name.into_string(), value.into_string()) {
+            (Ok(name), Ok(value)) => {
+                table.insert(name, value);
+            }
+            (Ok(_) | Err(_), Err(_)) | (Err(_), Ok(_)) => {
+                return Err(ExecError::NotUnicode { name: lossy });
+            }
+        }
+    }
+    Ok(move |name: &str| table.get(name).cloned())
 }
 
 impl fmt::Display for ExecError {
@@ -210,6 +248,9 @@ impl fmt::Display for ExecError {
             ),
             Self::Journals(ref cause) => write!(out, "exec journals: {cause}"),
             Self::Session(ref cause) => write!(out, "session: {cause}"),
+            Self::NotUnicode { ref name } => {
+                write!(out, "exec {name} is not UTF-8; set it to UTF-8 text")
+            }
         }
     }
 }
@@ -246,6 +287,7 @@ impl std::error::Error for ExecError {
             | Self::NotARepo { .. }
             | Self::BadBase { .. }
             | Self::GroupSurvived { .. }
+            | Self::NotUnicode { .. }
             | Self::LedgerLockTimeout { .. } => None,
         }
     }

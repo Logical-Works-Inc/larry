@@ -79,13 +79,12 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
 | `model::config`, `model::route` | Key read from the route's variable (never shown; a stored route's is `LARRY_KEY_*` only), timeout, retry, the `env` route; the route (id, URL, model, key variable, residency), its checks and the resolver (larry#201) |
 | `model::wire`, `model::wire::sim` (`sim_wire.rs`) | The request body and the reply parser, cached and written tokens in every provider shape; the seeded usage round trips (larry#230, ADR 0043) |
-| `native` | The native AppCUI view: session state, commands and saturating geometry |
-| `native::render` | Painting the forge chrome: transcript, panels, dashboard, input, status hub |
-| `native::input` | Key routing and the paint entry point of the session view |
-| `native::workspace` | The board-first workspace: cards, the `ink!` and `shell_card!` painters |
-| `native::workspace::views` | The board, truth and work scenes |
-| `native::workspace::input` | Workspace keys, mouse and paint |
-| `theme` | View colours |
+| `tui` | Bare `larry`: the terminal guard, key mapping and the drive loop over a real session (ADR 0045) |
+| `tui::app` | The pure state: keys and session events in, effects and one frame out; no terminal, no clock |
+| `tui::worker` | `run_session` on its own thread; bounded event and answer channels; approve, decline, cancel, join |
+| `tui::buffer`, `tui::style` | The cell buffer, its diff and DEC 2026 frame; reset-first SGR, widths, wrap, sanitize |
+| `tui::layout` | The phone-ratio chat column (44..64) and the artifact pane at 108+ columns |
+| `tui::cells`, `tui::composer` | Transcript entries drawn the Codex way; the multi-line composer, history and slash popup |
 | `mcp` | The `larry mcp` server; `larry_submit_task` runs the executor (ADR 0008); `mcp::wire` the stdio framing and envelope; `mcp::modern` the stateless 2026-07-28 era; `mcp::legacy` the initialize lifecycle of the four earlier revisions; `mcp::tools` the one tool, `larry_submit_task` |
 | `acp` | `larry acp`: the Agent Client Protocol agent Harbor drives; each prompt a terminal session (ADR 0035); `acp::tests` its protocol surface with no executor behind it; `acp::sim_acp` the seeded adversarial simulations of that surface |
 | `serve`, `serve::error` | `larry serve`: the address, tenant keys, the snapshot a SIGHUP reloads, the routes on `lgwks_bot::app`, the stop signals; its typed refusals (ADR 0021, 0022, 0040) |
@@ -104,7 +103,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
 | `governance::sim_*`, `governance::tests` | Seeded ports of the Python controls, parser references, bounds and two-root checks; the controls against the real tree, mutated in memory only |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs` | The `larry` launcher: native view, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
+| `src/bin/larry.rs` | The `larry` launcher: the split terminal, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `governance`, `tracker`, `mascot`, `serve` |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json`, `eval/errands-v1.json` | The shipped matched task set, 12 POSIX sh tasks; 12 Rust errands with hidden tests, the cache benchmark's set (larry#230) |
