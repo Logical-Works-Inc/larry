@@ -268,10 +268,20 @@ impl Scratch {
     /// A fresh, empty scratch directory tagged `tag`.
     pub(crate) fn new(tag: &str) -> Result<Self, SimError> {
         let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        Self::at(std::env::temp_dir().join(format!(
             "larry-governance-{}-{tag}-{sequence}",
             std::process::id()
-        ));
+        )))
+    }
+
+    /// A scratch at `path`: one already there is gone before it is made, and dropping the guard
+    /// removes the tree, so a process id the system reuses never lands a test in a stale tree.
+    fn at(path: PathBuf) -> Result<Self, SimError> {
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+            Err(cause) => return Err(cause.into()),
+        }
         fs::create_dir_all(&path)?;
         Ok(Self { path })
     }
@@ -329,4 +339,32 @@ impl Drop for Scratch {
 /// The top-level document names, owned, for a seeded pick.
 pub(crate) fn top_level() -> Vec<String> {
     DOCUMENTS.iter().map(|name| String::from(*name)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::Scratch;
+
+    /// A scratch left at its name by a dead process is gone before a fresh one is made, and the
+    /// guard removes the tree when it drops (larry#270).
+    #[test]
+    fn a_scratch_starts_empty_and_removes_itself() -> Result<(), Box<dyn std::error::Error>> {
+        let path =
+            std::env::temp_dir().join(format!("larry-governance-stale-{}", std::process::id()));
+        drop(fs::remove_dir_all(&path));
+        fs::create_dir_all(path.join("old"))?;
+        fs::write(path.join("old").join("file"), "left by a dead run")?;
+        let fresh = Scratch::at(path)?;
+        assert!(
+            fs::read_dir(fresh.path())?.next().is_none(),
+            "a stale tree leaked into a fresh scratch"
+        );
+        fs::write(fresh.path().join("mine"), "x")?;
+        let kept = fresh.path().to_path_buf();
+        drop(fresh);
+        assert!(!kept.exists(), "the scratch outlived its guard");
+        Ok(())
+    }
 }

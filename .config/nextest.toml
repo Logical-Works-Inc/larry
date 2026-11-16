@@ -2,3 +2,13 @@
 # wall (AGENTS.md), and a `larry serve` child that never exits once held a run for 7 hours (larry#88).
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The governance latency budget (larry#224) is a wall-clock figure, so it runs alone in its own
+# group: another test's load must never decide it. It measures the shipped binary on a fixture
+# tree the test writes (larry#270), never the live checkout.
+[test-groups]
+governance-latency = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "test(governance_check_latency_and_peak_rss_stay_in_budget)"
+test-group = "governance-latency"

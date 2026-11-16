@@ -10,6 +10,9 @@
 //! the governed documents; a stale page is refused until regenerated; a kill -9 mid-write
 //! leaves a whole page; the checker never writes; local-ci runs no Python governance lane.
 
+#[path = "../src/governance/fixture.rs"]
+mod fixture;
+
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -71,6 +74,30 @@ impl Tree {
         for directory in COPIED {
             copy_files(&Path::new(ROOT).join(directory), &tree.at(directory))?;
         }
+        Ok(tree)
+    }
+
+    /// A governed fixture tree the checker passes on its own terms, never a copy of the live
+    /// checkout (larry#224, larry#270): the latency figures are measured on it.
+    fn fixture() -> Result<Tree, Box<dyn Error>> {
+        let sequence = COPIES.fetch_add(1, Ordering::Relaxed);
+        let tree = Tree {
+            path: std::env::temp_dir().join(format!(
+                "larry-governance-fixture-{}-{sequence}",
+                std::process::id()
+            )),
+        };
+        // A directory left at this name by a dead run is gone before the fixture is written.
+        drop(fs::remove_dir_all(&tree.path));
+        fs::create_dir(&tree.path)?;
+        fixture::governed(&tree.path, &Path::new(ROOT).join("tools").join("receipts"))?;
+        let rendered = larry(&["tracker"], &tree.path)?;
+        assert_eq!(
+            rendered.status.code(),
+            Some(0),
+            "the fixture page renders: {}",
+            text(&rendered.stderr)
+        );
         Ok(tree)
     }
 
@@ -429,8 +456,8 @@ fn percentile(sorted: &[Duration], per_cent: usize) -> Duration {
     }
 }
 
-/// The peak RSS in KiB `/usr/bin/time` reports for one check of the repository.
-fn peak_rss_kib() -> Result<Option<u64>, Box<dyn Error>> {
+/// The peak RSS in KiB `/usr/bin/time` reports for one check of `root`.
+fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
     let flag = if cfg!(target_os = "macos") {
         "-l"
     } else {
@@ -440,7 +467,8 @@ fn peak_rss_kib() -> Result<Option<u64>, Box<dyn Error>> {
         return Ok(None);
     }
     let output = Command::new("/usr/bin/time")
-        .args([flag, LARRY, "governance", "--root", ROOT])
+        .args([flag, LARRY, "governance", "--root"])
+        .arg(root)
         .output()?;
     let stderr = text(&output.stderr);
     let Some(line) = stderr.lines().find(|line| {
@@ -458,17 +486,23 @@ fn peak_rss_kib() -> Result<Option<u64>, Box<dyn Error>> {
     }))
 }
 
+/// The check's own budget: a wall-clock figure other tests must not decide, so this test runs
+/// alone in the `governance-latency` nextest group (`.config/nextest.toml`) on a fixture tree the
+/// test writes (larry#224, larry#270). The peak RSS does not depend on load and is asserted the
+/// same way.
 #[test]
 fn governance_check_latency_and_peak_rss_stay_in_budget() -> TestResult {
+    let tree = Tree::fixture()?;
     let mut samples = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         let started = Instant::now();
-        let checked = larry(&["governance"], Path::new(ROOT))?;
+        let checked = larry(&["governance"], &tree.path)?;
         samples.push(started.elapsed());
         assert_eq!(
             checked.status.code(),
             Some(0),
-            "the repository passes its own gate"
+            "the fixture tree passes its own gate: {}",
+            text(&checked.stderr)
         );
     }
     samples.sort();
@@ -477,9 +511,9 @@ fn governance_check_latency_and_peak_rss_stay_in_budget() -> TestResult {
         percentile(&samples, 95),
         percentile(&samples, 99),
     );
-    let rss = peak_rss_kib()?;
+    let rss = peak_rss_kib(&tree.path)?;
     let figures = format!(
-        "governance over {RUNS} runs: p50 {p50:?} p95 {p95:?} p99 {p99:?}, peak RSS {rss:?} KiB\n"
+        "governance over {RUNS} runs on the fixture tree: p50 {p50:?} p95 {p95:?} p99 {p99:?}, peak RSS {rss:?} KiB\n"
     );
     io::stderr().lock().write_all(figures.as_bytes())?;
     assert!(

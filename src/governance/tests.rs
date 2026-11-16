@@ -1,33 +1,163 @@
-//! Governance controls against the real tree, with mutations made in memory only.
+//! Controls of the governance checker over fixture trees the tests write for themselves
+//! (larry#270): no control reads the live checkout's documents, so a half-edited document cannot
+//! fail a unit test or the mutation gate. CI's `governance` job and `larry governance` at
+//! pre-commit still check the real tree.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use super::check;
+use lgwks_std::hash;
+
+use super::sim_support::Scratch;
+use super::{check, fixture, tracker};
 
 /// The repository root, the directory this crate is built from.
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The product's retained receipts: the checker's one home for the pinned receipt identity.
+fn retained_receipts() -> PathBuf {
+    root().join("tools").join("receipts")
+}
+
+/// A fixture tree with its tracker page written by the product's own renderer.
+fn fixture_tree() -> Result<Scratch, Box<dyn std::error::Error>> {
+    let tree = Scratch::new("governance")?;
+    fixture::governed(tree.path(), &retained_receipts())?;
+    tracker::write(tree.path())?;
+    Ok(tree)
+}
+
 #[test]
-fn current_documents_pass_the_structural_gate() -> Result<(), Box<dyn std::error::Error>> {
-    let report = check(root());
+fn a_fixture_tree_passes_the_structural_gate() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = fixture_tree()?;
+    let report = check(tree.path());
     assert!(
         report.ok(),
-        "the real tree must pass: {:?}",
+        "the fixture tree must pass: {:?}",
+        report.errors()
+    );
+    let readme = std::fs::read_to_string(tree.path().join("README.md"))?;
+    assert!(
+        readme.contains("The governed fixture readme"),
+        "the fixture readme is the one the test wrote"
+    );
+    let digest = hash::blake3(readme.as_bytes()).to_hex();
+    assert!(
+        report.pretty().contains(&digest),
+        "the report digests the fixture's own README, never a checkout file"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_document_past_the_line_law_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = fixture_tree()?;
+    let part = tree.path().join("docs/specification/part-04-cells.md");
+    let text = std::fs::read_to_string(&part)?;
+    std::fs::write(&part, format!("{text}{}", "\n".repeat(121)))?;
+    let report = check(tree.path());
+    assert!(!report.ok(), "a grown document must fail the gate");
+    assert!(
+        report
+            .errors()
+            .iter()
+            .any(|error| error.contains("over the 120-line law")),
+        "the line law still fails its test: {:?}",
         report.errors()
     );
     Ok(())
 }
 
 #[test]
-fn generated_page_matches_the_committed_one() -> Result<(), Box<dyn std::error::Error>> {
-    let page = super::tracker::render(root())?;
-    let committed =
-        std::fs::read_to_string(root().join("tools").join("tracker").join("index.html"))?;
+fn a_missing_document_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = fixture_tree()?;
+    std::fs::remove_file(tree.path().join("README.md"))?;
+    let report = check(tree.path());
+    assert!(!report.ok(), "a tree without its README must fail the gate");
+    assert!(
+        report
+            .errors()
+            .contains(&String::from("missing document: README.md")),
+        "the missing document is named: {:?}",
+        report.errors()
+    );
+    Ok(())
+}
+
+#[test]
+fn the_fixture_tracker_page_matches_its_render() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = fixture_tree()?;
+    let page = tracker::render(tree.path())?;
     assert_eq!(
-        page, committed,
-        "the rendered tracker must match index.html byte for byte"
+        page,
+        std::fs::read_to_string(tree.path().join("tools/tracker/index.html"))?,
+        "the written page is the render, byte for byte"
+    );
+    assert!(
+        tracker::is_current(tree.path())?,
+        "the committed page is current"
+    );
+    let data = std::fs::read_to_string(tree.path().join("tools/tracker/tracker.json"))?;
+    std::fs::write(
+        tree.path().join("tools/tracker/tracker.json"),
+        data.replace("\"falsifier_total\":54", "\"falsifier_total\":55"),
+    )?;
+    assert!(
+        !tracker::is_current(tree.path())?,
+        "an edit left unrendered is stale"
+    );
+    let report = check(tree.path());
+    assert!(
+        report
+            .errors()
+            .iter()
+            .any(|error| error.contains("falsifier_total is 55")),
+        "the drift is named: {:?}",
+        report.errors()
+    );
+    Ok(())
+}
+
+#[test]
+fn two_fixture_trees_at_once_keep_their_own_report() -> Result<(), Box<dyn std::error::Error>> {
+    let first = fixture_tree()?;
+    let second = fixture_tree()?;
+    let readme = std::fs::read_to_string(first.path().join("README.md"))?;
+    std::fs::write(
+        first.path().join("README.md"),
+        format!("{readme}\nStray reference R9999.\n"),
+    )?;
+    let solo = (check(first.path()).pretty(), check(second.path()).pretty());
+    assert_ne!(solo.0, solo.1, "the two trees differ");
+    let together: Vec<(String, String)> = std::thread::scope(|scope| {
+        (0..4)
+            .map(|_| scope.spawn(|| (check(first.path()).pretty(), check(second.path()).pretty())))
+            .filter_map(|handle| handle.join().ok())
+            .collect()
+    });
+    assert_eq!(together.len(), 4, "every thread finished");
+    for pair in together {
+        assert_eq!(pair, solo, "a concurrent check equals its solo report");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_symlinked_fixture_document_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = fixture_tree()?;
+    let readme = tree.path().join("README.md");
+    let moved = tree.path().join("moved.txt");
+    std::fs::rename(&readme, &moved)?;
+    std::os::unix::fs::symlink(&moved, &readme)?;
+    let report = check(tree.path());
+    assert!(!report.ok(), "a symlinked document must fail the load");
+    assert!(
+        report.errors().contains(&String::from(
+            "symbolic-link document is not admitted: README.md"
+        )),
+        "the symlink is named: {:?}",
+        report.errors()
     );
     Ok(())
 }
@@ -52,15 +182,6 @@ fn missing_reranker_receipt_is_rejected() -> Result<(), Box<dyn std::error::Erro
     assert!(
         errors.iter().any(|error| error.contains("none retained")),
         "an empty receipt directory must be refused: {errors:?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn tracker_is_current_on_the_real_tree() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(
-        super::tracker::is_current(root())?,
-        "the committed tracker must be current"
     );
     Ok(())
 }
