@@ -649,6 +649,8 @@ fn run_task(
     };
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
+        // An acceptance command has no person watching it who could cancel it,
+        // so only the timeout ends it (larry#242).
         let result = run_command(
             argv,
             workspace.path(),
@@ -656,6 +658,7 @@ fn run_task(
             settings.timeout,
             ledger,
             task_id,
+            &|| false,
         )?;
         results.push(result.into_json());
     }
