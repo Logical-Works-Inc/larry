@@ -174,14 +174,76 @@ fn reranker_receipts_are_present_and_valid() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn missing_reranker_receipt_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let scratch =
-        std::env::temp_dir().join(format!("larry-governance-{}-none", std::process::id()));
-    std::fs::create_dir_all(scratch.join("tools").join("receipts"))?;
-    let errors = super::receipts::receipt_errors(&scratch);
-    std::fs::remove_dir_all(&scratch)?;
+    let scratch = Scratch::new("receipts-none")?;
+    std::fs::create_dir_all(scratch.path().join("tools").join("receipts"))?;
+    let errors = super::receipts::receipt_errors(scratch.path());
     assert!(
         errors.iter().any(|error| error.contains("none retained")),
         "an empty receipt directory must be refused: {errors:?}"
+    );
+    Ok(())
+}
+
+/// The temp-path rule (larry#267): the old `<label>-<pid>` fixture is refused with its file and
+/// line, while the guard route, the guard file itself, and a process id that names something other
+/// than a temp path pass.
+#[test]
+fn a_pid_temp_path_in_test_code_is_refused_and_the_guard_passes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tree = Scratch::new("temp-paths")?;
+    let tests = tree.path().join("tests");
+    std::fs::create_dir_all(&tests)?;
+    let fixture = tests.join("old_fixture.rs");
+    std::fs::write(
+        &fixture,
+        "fn state() -> std::path::PathBuf {\n    \
+         std::env::temp_dir().join(format!(\"larry-old-{}\", std::process::id()))\n}\n",
+    )?;
+    assert_eq!(
+        super::temp_paths::errors(tree.path()),
+        [String::from(
+            "a process id names a temp directory outside the guard: tests/old_fixture.rs:2"
+        )],
+        "the old fixture is refused, naming its file and line"
+    );
+    std::fs::write(
+        &fixture,
+        "fn state() -> origin::TempDir {\n    origin::TempDir::new()\n}\n",
+    )?;
+    assert!(
+        super::temp_paths::errors(tree.path()).is_empty(),
+        "the guard route passes"
+    );
+    let naming = concat!(
+        "const DEAD_PID: i32 = 2_147_483_646;\n",
+        "fn name() -> String {\n",
+        "    format!(\"origin-{DEAD_PID}-0\", DEAD_PID)\n",
+        "}\n"
+    );
+    std::fs::write(&fixture, naming)?;
+    assert!(
+        super::temp_paths::errors(tree.path()).is_empty(),
+        "a process id that names no temp directory passes"
+    );
+    let guard = tree.path().join("src/executor/sim_tree.rs");
+    std::fs::create_dir_all(tree.path().join("src/executor"))?;
+    std::fs::write(
+        &guard,
+        "fn scratch_name() -> std::path::PathBuf {\n    \
+         std::env::temp_dir().join(format!(\"x-{}\", std::process::id()))\n}\n",
+    )?;
+    assert!(
+        super::temp_paths::errors(tree.path()).is_empty(),
+        "the guard that empties and removes is the one temp path a process id may name"
+    );
+    std::fs::write(
+        tree.path().join("src/production.rs"),
+        "fn report() -> std::path::PathBuf {\n    \
+         std::env::temp_dir().join(format!(\"a-{}\", std::process::id()))\n}\n",
+    )?;
+    assert!(
+        super::temp_paths::errors(tree.path()).is_empty(),
+        "a production file is not test code, so the rule does not reach it"
     );
     Ok(())
 }

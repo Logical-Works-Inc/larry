@@ -22,7 +22,7 @@ mod serve_cli;
 use std::error::Error;
 use std::io::{self, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -74,9 +74,10 @@ fn refusal(started: Result<Serving, Box<dyn Error>>, what: &str) -> Result<Strin
     }
 }
 
-/// A fresh state directory with a key for `acme`, a host over it, and the key.
-fn start() -> Result<(Serving, String, PathBuf), Box<dyn Error>> {
-    let state = fresh_state_dir();
+/// A fresh state directory with a key for `acme`, a host over it, and the key. The
+/// directory's guard comes back with them, so the host's store outlives this call (larry#267).
+fn start() -> Result<(Serving, String, serve_cli::TempDir), Box<dyn Error>> {
+    let state = fresh_state_dir()?;
     let key = issue_key(&state, "acme")?;
     Ok((start_on(&state)?, key, state))
 }
@@ -122,7 +123,7 @@ fn a_health_probe_answers_on_production_defaults() -> TestResult {
 
 #[test]
 fn a_tenant_request_needs_that_tenants_own_key() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let acme = issue_key(&state, "acme")?;
     let beta = issue_key(&state, "beta")?;
     let mut serving = start_on(&state)?;
@@ -157,7 +158,7 @@ fn a_tenant_request_needs_that_tenants_own_key() -> TestResult {
 
 #[test]
 fn issuing_again_rotates_the_key() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let first = issue_key(&state, "acme")?;
     let second = issue_key(&state, "acme")?;
     assert_ne!(first, second, "every issue draws a new key");
@@ -282,13 +283,13 @@ fn no_state_directory_is_refused_before_binding() -> TestResult {
 
 #[test]
 fn a_bad_tenant_name_gets_no_key() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let past = "a".repeat(65);
     for name in ["", "a.b", "a b", past.as_str()] {
         let output = Command::new(env!("CARGO_BIN_EXE_larry"))
             .args(["serve", "key", name])
             .env_clear()
-            .env("LARRY_STATE_DIR", &state)
+            .env("LARRY_STATE_DIR", &*state)
             .stdin(Stdio::null())
             .output()?;
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -304,7 +305,7 @@ fn a_bad_tenant_name_gets_no_key() -> TestResult {
 
 #[test]
 fn a_taken_port_is_refused_with_its_address() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let dir = state.display().to_string();
     let holder = TcpListener::bind("127.0.0.1:0")?;
     let taken = holder.local_addr()?.to_string();
@@ -356,7 +357,7 @@ fn percentile_line(label: &str, mut latencies: Vec<Duration>) -> String {
 
 #[test]
 fn a_non_loopback_bind_without_the_plaintext_opt_in_is_refused() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let message = refusal(start_at("0.0.0.0:0", &state), "0.0.0.0 without the opt-in")?;
     assert!(
         message.contains("exit status: 1")
@@ -403,7 +404,7 @@ fn a_plaintext_flag_other_than_one_is_refused() -> TestResult {
 
 #[test]
 fn a_revoked_key_gets_401_on_its_next_request_with_no_restart() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let acme = issue_key(&state, "acme")?;
     let beta = issue_key(&state, "beta")?;
     let mut serving = start_on(&state)?;
@@ -447,7 +448,7 @@ fn a_revoked_key_gets_401_on_its_next_request_with_no_restart() -> TestResult {
 
 #[test]
 fn a_revoke_of_an_unkeyed_tenant_is_refused() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     issue_key(&state, "acme")?;
     let output = revoke(&state, "ghost")?;
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -462,7 +463,7 @@ fn a_revoke_of_an_unkeyed_tenant_is_refused() -> TestResult {
 
 #[test]
 fn a_revoke_survives_a_hard_kill_and_restart() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let acme = issue_key(&state, "acme")?;
     let mut first = start_on(&state)?;
     let addr = first.addr();
@@ -488,7 +489,7 @@ fn a_revoke_survives_a_hard_kill_and_restart() -> TestResult {
 
 #[test]
 fn a_key_store_past_the_cap_refuses_startup() -> TestResult {
-    let state = fresh_state_dir();
+    let state = fresh_state_dir()?;
     let acme = issue_key(&state, "acme")?;
     fill_key_store(&state, 0, KEY_CAP)?;
     let message = refusal(start_at("127.0.0.1:0", &state), "a store past the cap")?;

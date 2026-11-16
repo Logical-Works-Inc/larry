@@ -362,12 +362,23 @@ fn unreachable_model(
 /// mid-flight joins its thread.
 #[test]
 fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!("larry-tui-worker-{}", std::process::id()));
-    std::fs::create_dir_all(&root)?;
+    // The tree a dead run with this process id left at the old `larry-tui-worker-<pid>` name is
+    // here, and the fixture starts empty anyway (larry#267).
+    let stale = crate::executor::sim_tree::leftover("larry-tui-worker", "hello.txt")?;
+    assert!(
+        stale.display().to_string().contains("larry-tui-worker-"),
+        "the leftover sits at the old name: {}",
+        stale.display()
+    );
+    assert!(
+        stale.join("hello.txt").exists(),
+        "the old leftover is present"
+    );
+    let root = crate::executor::sim_tree::scratch("tui-worker")?;
     let settings = unreachable_model(&root)?;
     let worker = super::worker::Worker::spawn(
         String::from("write hello.txt"),
-        root.clone(),
+        root.to_path_buf(),
         settings.clone(),
         Isolation::Host,
         false,
@@ -406,8 +417,13 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         "a refused session runs nothing"
     );
     // A worker dropped before its session reports is cancelled and joined, not leaked.
-    let early =
-        super::worker::Worker::spawn(String::from("x"), root, settings, Isolation::Host, true)?;
+    let early = super::worker::Worker::spawn(
+        String::from("x"),
+        root.to_path_buf(),
+        settings,
+        Isolation::Host,
+        true,
+    )?;
     drop(early);
     Ok(())
 }
@@ -417,12 +433,18 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
 #[test]
 fn sim_tui_worker_refused_confinement_ends_failed_with_the_reason()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!("larry-tui-refused-{}", std::process::id()));
-    std::fs::create_dir_all(&root)?;
+    let stale = crate::executor::sim_tree::leftover("larry-tui-refused", "ws")?;
+    assert!(stale.join("ws").exists(), "the old leftover is present");
+    let root = crate::executor::sim_tree::scratch("tui-refused")?;
     let settings = unreachable_model(&root)?;
     let isolation = Isolation::Workspace(crate::executor::Platform::Other);
-    let worker =
-        super::worker::Worker::spawn(String::from("x"), root.clone(), settings, isolation, false)?;
+    let worker = super::worker::Worker::spawn(
+        String::from("x"),
+        root.to_path_buf(),
+        settings,
+        isolation,
+        false,
+    )?;
     let mut seen = Vec::new();
     while let Some(event) = worker.wait(Duration::from_secs(30)) {
         let last = matches!(event, Event::Ended(_));
@@ -453,8 +475,9 @@ fn sim_tui_worker_refused_confinement_ends_failed_with_the_reason()
 /// isolated copy when they may run.
 #[test]
 fn sim_tui_header_status_names_why_commands_are_off() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!("larry-tui-header-{}", std::process::id()));
-    std::fs::create_dir_all(&root)?;
+    let stale = crate::executor::sim_tree::leftover("larry-tui-header", "state")?;
+    assert!(stale.join("state").exists(), "the old leftover is present");
+    let root = crate::executor::sim_tree::scratch("tui-header")?;
     let state = root.to_string_lossy().into_owned();
     let with = |policy: Option<&'static str>| {
         let state = state.clone();

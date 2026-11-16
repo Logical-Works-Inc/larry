@@ -7,7 +7,6 @@
 
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
 
 use lgwks_std::json::{Map, Value, json};
 use lgwks_std::seeded::Seeded;
@@ -54,16 +53,11 @@ fn valid_path(rng: &mut Seeded) -> Result<String, SimError> {
     Ok(parts.join("/"))
 }
 
-/// A fresh directory under the system temp dir for one test.
-pub(super) fn scratch(name: &str) -> Result<PathBuf, SimError> {
-    let path = std::env::temp_dir().join(format!("larry-author-{name}-{}", std::process::id()));
-    match fs::remove_dir_all(&path) {
-        Ok(()) => {}
-        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
-        Err(cause) => return Err(SimError::Io(cause)),
-    }
-    fs::create_dir_all(&path)?;
-    Ok(path)
+/// A fresh directory under the system temp dir for one test: empty when it is made and removed
+/// when its guard drops, so a process id the system reuses never lands a test in a stale tree
+/// (larry#267).
+pub(super) fn scratch(name: &str) -> Result<crate::executor::sim_tree::Scratch, SimError> {
+    crate::executor::sim_tree::scratch(&format!("larry-author-{name}"))
 }
 
 #[test]
@@ -242,7 +236,7 @@ fn sim_author_saboteur_symlinks_at_any_depth_are_refused_exactly() -> TestResult
         let path = valid_path(&mut rng)?;
         let parts: Vec<&str> = path.split('/').collect();
         let depth = usize::try_from(rng.below(u64::try_from(parts.len())?.saturating_add(1))?)?;
-        let mut prefix = tree.clone();
+        let mut prefix = tree.to_path_buf();
         for part in parts.iter().take(depth) {
             prefix.push(part);
             fs::create_dir_all(&prefix)?;
@@ -250,7 +244,7 @@ fn sim_author_saboteur_symlinks_at_any_depth_are_refused_exactly() -> TestResult
         let linked = depth < parts.len();
         if let Some(part) = parts.get(depth) {
             let target = if rng.below(2)? == 0 {
-                neighbour.clone()
+                neighbour.to_path_buf()
             } else {
                 neighbour.join("gone")
             };
@@ -280,9 +274,7 @@ fn sim_author_saboteur_symlinks_at_any_depth_are_refused_exactly() -> TestResult
             0,
             "seed {seed}: the neighbour is untouched"
         );
-        fs::remove_dir_all(&tree)?;
     }
-    fs::remove_dir_all(&neighbour)?;
     Ok(())
 }
 

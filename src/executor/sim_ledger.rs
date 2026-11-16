@@ -11,9 +11,8 @@
 
 use std::fmt;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_std::process::{ProcessIdentity, identify_process};
 use lgwks_std::seeded::Seeded;
@@ -42,13 +41,10 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE_0021,
 ];
 
-/// Per-process counter that gives each simulation its own state directory.
-static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A fresh scratch directory under the system temp dir.
-fn scratch_directory() -> PathBuf {
-    let index = DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("larry-ledger-sim-{}-{index}", std::process::id()))
+/// A fresh state directory: empty when it is made and removed when its guard drops, so a
+/// process id the system reuses never lands a simulation in a stale tree (larry#267).
+fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_error::SimError> {
+    crate::executor::sim_tree::scratch("larry-ledger-sim")
 }
 
 /// A report of `length` bytes drawn from the alphabet a sealed report is made of.
@@ -74,7 +70,7 @@ fn drawn_report(
 /// refused one byte under it, and an id with no record reads as none.
 #[test]
 fn sim_a_report_roundtrips_at_every_seeded_bound() -> TestResult {
-    let directory = scratch_directory();
+    let directory = scratch_directory()?;
     let ledger = Ledger::open(&directory)?;
     for seed in SEEDS {
         let mut seeded = Seeded::from_seed(seed);
@@ -104,7 +100,6 @@ fn sim_a_report_roundtrips_at_every_seeded_bound() -> TestResult {
             );
         }
     }
-    drop(std::fs::remove_dir_all(&directory));
     Ok(())
 }
 
@@ -112,7 +107,7 @@ fn sim_a_report_roundtrips_at_every_seeded_bound() -> TestResult {
 /// reads another's, and a second record under one id never moves the first.
 #[test]
 fn sim_two_runs_never_share_a_recorded_report_for_every_seed() -> TestResult {
-    let directory = scratch_directory();
+    let directory = scratch_directory()?;
     let ledger = Ledger::open(&directory)?;
     for seed in SEEDS {
         let mut seeded = Seeded::from_seed(seed);
@@ -144,7 +139,6 @@ fn sim_two_runs_never_share_a_recorded_report_for_every_seed() -> TestResult {
             "seed {seed}: the first record under one id is the run"
         );
     }
-    drop(std::fs::remove_dir_all(&directory));
     Ok(())
 }
 
@@ -152,7 +146,7 @@ fn sim_two_runs_never_share_a_recorded_report_for_every_seed() -> TestResult {
 /// never a truncated or silent answer, for every seed's own report.
 #[test]
 fn sim_a_refusal_past_the_bound_names_the_recorded_length() -> TestResult {
-    let directory = scratch_directory();
+    let directory = scratch_directory()?;
     let ledger = Ledger::open(&directory)?;
     for seed in SEEDS {
         let mut seeded = Seeded::from_seed(seed);
@@ -175,7 +169,6 @@ fn sim_a_refusal_past_the_bound_names_the_recorded_length() -> TestResult {
             }
         }
     }
-    drop(std::fs::remove_dir_all(&directory));
     Ok(())
 }
 
@@ -185,7 +178,7 @@ fn sim_a_refusal_past_the_bound_names_the_recorded_length() -> TestResult {
 #[test]
 fn sim_a_report_survives_a_reopen_for_every_seed() -> TestResult {
     for seed in SEEDS {
-        let directory = scratch_directory();
+        let directory = scratch_directory()?;
         let mut written: Vec<(String, Vec<u8>)> = Vec::new();
         {
             let ledger = Ledger::open(&directory)?;
@@ -210,7 +203,6 @@ fn sim_a_report_survives_a_reopen_for_every_seed() -> TestResult {
             );
         }
         drop(reopened);
-        drop(std::fs::remove_dir_all(&directory));
     }
     Ok(())
 }
@@ -291,6 +283,8 @@ enum GroupSimError {
         /// What the third reap settled.
         third: usize,
     },
+    /// The shared scratch guard could not make its directory.
+    Tree(crate::sim_error::SimError),
 }
 
 impl fmt::Display for GroupSimError {
@@ -347,6 +341,7 @@ impl fmt::Display for GroupSimError {
                 out,
                 "seed {seed:#x}: the owned and stranger rows settle once each, got {second} and {third}"
             ),
+            Self::Tree(ref cause) => write!(out, "scratch tree: {cause}"),
         }
     }
 }
@@ -368,7 +363,14 @@ impl std::error::Error for GroupSimError {
             | Self::Settled { .. }
             | Self::Crossed { .. }
             | Self::Final { .. } => None,
+            Self::Tree(ref cause) => Some(cause),
         }
+    }
+}
+
+impl From<crate::sim_error::SimError> for GroupSimError {
+    fn from(cause: crate::sim_error::SimError) -> Self {
+        Self::Tree(cause)
     }
 }
 
@@ -417,7 +419,7 @@ fn racing_start(directory: &Path) -> Result<usize, GroupSimError> {
 /// The racing starts scenario for one seed: `rows` dead rows, then `starts` handles reap
 /// at once. Returns the trace (the oracle's facts, no pids) after every row is judged.
 fn racing_trace(seed: u64) -> Result<String, GroupSimError> {
-    let directory = scratch_directory();
+    let directory = scratch_directory()?;
     let mut seeded = Seeded::from_seed(seed);
     let rows = 1_usize.saturating_add(seeded.index(24)?);
     let starts = 2_usize.saturating_add(seeded.index(14)?);
@@ -435,7 +437,7 @@ fn racing_trace(seed: u64) -> Result<String, GroupSimError> {
         // Every racer is spawned before the first is joined, so the starts overlap.
         let mut racers = Vec::with_capacity(starts);
         for _ in 0..starts {
-            let dir = directory.as_path();
+            let dir: &Path = &directory;
             racers.push(scope.spawn(move || racing_start(dir)));
         }
         let mut outcomes = Vec::with_capacity(starts);
@@ -449,7 +451,6 @@ fn racing_trace(seed: u64) -> Result<String, GroupSimError> {
     })?;
     let total: usize = settled.iter().sum();
     let left = Ledger::open(&directory)?.live_tasks()?;
-    drop(std::fs::remove_dir_all(&directory));
     if !left.is_empty() {
         return Err(GroupSimError::Survivors {
             seed,
@@ -488,8 +489,8 @@ fn sim_racing_starts_settle_every_dead_row_and_leave_none_for_every_seed() -> Te
 /// B's start reaps its own ledger, racing A's reopen. B settles nothing of A's and A keeps every
 /// row until A's own start reaps them all. Returns the trace of what the oracle observed.
 fn two_tenant_trace(seed: u64) -> Result<String, GroupSimError> {
-    let tenant_a = scratch_directory();
-    let tenant_b = scratch_directory();
+    let tenant_a = scratch_directory()?;
+    let tenant_b = scratch_directory()?;
     let mut seeded = Seeded::from_seed(seed);
     let rows = 1_usize.saturating_add(seeded.index(16)?);
     let b_rows = seeded.index(4)?;
@@ -514,8 +515,8 @@ fn two_tenant_trace(seed: u64) -> Result<String, GroupSimError> {
         }
     }
     let (foreign, left) = std::thread::scope(|scope| {
-        let b_dir = tenant_b.as_path();
-        let a_dir = tenant_a.as_path();
+        let b_dir: &Path = &tenant_b;
+        let a_dir: &Path = &tenant_a;
         let b_start = scope.spawn(move || racing_start(b_dir));
         let a_open =
             scope.spawn(move || Ledger::open(a_dir).and_then(|ledger| ledger.live_tasks()));
@@ -531,8 +532,6 @@ fn two_tenant_trace(seed: u64) -> Result<String, GroupSimError> {
     })?;
     let own = racing_start(&tenant_a)?;
     let after = Ledger::open(&tenant_a)?.live_tasks()?.len();
-    drop(std::fs::remove_dir_all(&tenant_a));
-    drop(std::fs::remove_dir_all(&tenant_b));
     if foreign != b_rows || left != rows || own != rows || after != 0 {
         return Err(GroupSimError::Crossed {
             seed,
@@ -567,7 +566,7 @@ fn sim_two_tenants_reap_only_their_own_rows_for_every_seed() -> TestResult {
 /// stranger's live group is never signalled, and a damaged row is dropped unsignalled.
 /// Returns the trace of what the oracle observed.
 fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
-    let directory = scratch_directory();
+    let directory = scratch_directory()?;
     let mut seeded = Seeded::from_seed(seed);
     let damage = 1_usize.saturating_add(seeded.index(4)?);
     let mut owned = Command::new("sleep").arg("30").process_group(0).spawn()?;
@@ -613,7 +612,6 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
     stranger.wait()?;
     let third = ledger.reap()?;
     let rows = ledger.live_tasks()?;
-    drop(std::fs::remove_dir_all(&directory));
     if second != 1 || third != 1 || !rows.is_empty() {
         return Err(GroupSimError::Final {
             seed,

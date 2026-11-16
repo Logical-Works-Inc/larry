@@ -227,13 +227,8 @@ impl Ledger {
 /// The store round trip, the tenant wall and the damage refusal, through `Ledger` only.
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::{Draft, Kind, Ledger, Route, RouteError};
     use crate::executor::ExecError;
-
-    /// Per-process counter that gives each test its own state directory.
-    static DIRECTORIES: AtomicU64 = AtomicU64::new(0);
 
     /// A route over `id` with `model`.
     fn route(id: &str, model: &str) -> Result<Route, RouteError> {
@@ -250,12 +245,10 @@ mod tests {
         })
     }
 
-    /// A fresh ledger in its own directory, and the directory.
-    fn open() -> Result<(Ledger, std::path::PathBuf), Box<dyn std::error::Error>> {
-        let index = DIRECTORIES.fetch_add(1, Ordering::Relaxed);
-        let directory =
-            std::env::temp_dir().join(format!("larry-routes-{}-{index}", std::process::id()));
-        drop(std::fs::remove_dir_all(&directory));
+    /// A fresh ledger in its own directory, and the directory: empty when it is made and removed
+    /// when its guard drops, so a reused process id never lands a test in a stale tree (larry#267).
+    fn open() -> Result<(Ledger, crate::executor::sim_tree::Scratch), Box<dyn std::error::Error>> {
+        let directory = crate::executor::sim_tree::scratch("larry-routes")?;
         Ok((Ledger::open(&directory)?, directory))
     }
 

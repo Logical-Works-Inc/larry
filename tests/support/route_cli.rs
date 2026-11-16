@@ -5,14 +5,15 @@
 //! and use every item in it.
 
 use std::error::Error;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::thread::ScopedJoinHandle;
 
 use larry_demo::executor::routes::{self, RouteCliError};
 use lgwks_std::json::{self, Value};
+
+#[path = "temp_dir.rs"]
+mod temp_dir;
+pub use temp_dir::TempDir;
 
 /// What every simulation returns.
 pub type TestResult = Result<(), Box<dyn Error>>;
@@ -22,39 +23,6 @@ pub const GATEWAY: &str = "http://gateway.test:8443/v1";
 
 /// Route ids the generated tables draw from.
 pub const POOL: [&str; 6] = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
-
-/// A tenant's state directory, removed when it goes out of scope.
-pub struct Scratch {
-    /// The directory every route row of this tenant lives under.
-    root: PathBuf,
-}
-
-impl Scratch {
-    /// A new, empty state directory that no other test in this process holds.
-    pub fn new() -> io::Result<Scratch> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("larry-route-sim-{}-{serial}", std::process::id()));
-        if root.exists() {
-            fs::remove_dir_all(&root)?;
-        }
-        fs::create_dir_all(&root)?;
-        Ok(Scratch { root })
-    }
-
-    /// The directory.
-    pub fn path(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // A leftover temp directory must never fail a simulation.
-        drop(fs::remove_dir_all(&self.root));
-    }
-}
 
 /// Runs `larry route <args>` against `state` with the extra variables `env`,
 /// and returns what it printed.

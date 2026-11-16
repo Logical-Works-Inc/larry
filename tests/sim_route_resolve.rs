@@ -21,7 +21,7 @@ use larry_demo::executor::{Task, TaskError};
 use larry_demo::model::RouteError;
 use lgwks_std::json::{Value, json};
 use lgwks_std::seeded::Seeded;
-use route_cli::{GATEWAY, POOL, Scratch, TestResult, add, joined, listed, parse, route_run};
+use route_cli::{GATEWAY, POOL, TempDir, TestResult, add, joined, listed, parse, route_run};
 
 /// The id a task naming `named` resolves to by the written rule, from the
 /// table's `included` routes, its `default` and whether the environment
@@ -54,7 +54,7 @@ fn expected_route(
 fn sim_resolver_order_holds_for_every_generated_table() -> TestResult {
     for seed in 0..64_u64 {
         let mut rng = Seeded::from_seed(seed);
-        let state = Scratch::new()?;
+        let state = TempDir::new()?;
         let mut included: Vec<&str> = Vec::new();
         for id in POOL {
             if rng.below(2)? == 1 {
@@ -118,7 +118,7 @@ fn sim_resolver_order_holds_for_every_generated_table() -> TestResult {
 /// knob fails nothing that never uses it, and fails the task that does.
 #[test]
 fn sim_a_poisoned_environment_fails_only_what_needs_it() -> TestResult {
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     add(state.path(), "alpha", &[], &["--default"])?;
     let poisoned = [
         ("LARRY_MODEL_URL", GATEWAY),
@@ -132,7 +132,7 @@ fn sim_a_poisoned_environment_fails_only_what_needs_it() -> TestResult {
         Some("alpha"),
         "the stored default answers"
     );
-    let other = Scratch::new()?;
+    let other = TempDir::new()?;
     assert!(
         matches!(
             route_run(other.path(), &poisoned, &["resolve"]),
@@ -158,7 +158,7 @@ type Cases = [(&'static str, Option<Truth>); 4];
 /// keyed by route id alone.
 #[test]
 fn sim_two_tenants_resolve_only_their_own_routes() -> TestResult {
-    let (one, two) = (Scratch::new()?, Scratch::new()?);
+    let (one, two) = (TempDir::new()?, TempDir::new()?);
     let shared = |model: &'static str, url: &'static str, residency: &'static str| {
         [
             ("--model", model),

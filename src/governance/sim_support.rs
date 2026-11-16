@@ -6,7 +6,7 @@ use std::cell::OnceCell;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lgwks_std::json;
@@ -38,6 +38,8 @@ pub(crate) enum SimError {
     Lane(LaneError),
     /// The tracker could not be rendered or read.
     Tracker(TrackerError),
+    /// The shared scratch guard could not make its directory.
+    Tree(crate::sim_error::SimError),
 }
 
 impl fmt::Display for SimError {
@@ -51,6 +53,7 @@ impl fmt::Display for SimError {
             Self::Format(ref cause) => write!(out, "case text refused: {cause}"),
             Self::Lane(ref cause) => write!(out, "seed sweep: {cause}"),
             Self::Tracker(ref cause) => write!(out, "tracker: {cause}"),
+            Self::Tree(ref cause) => write!(out, "scratch tree: {cause}"),
         }
     }
 }
@@ -90,6 +93,12 @@ impl From<io::Error> for SimError {
 impl From<GovernanceError> for SimError {
     fn from(cause: GovernanceError) -> Self {
         Self::Refused(cause)
+    }
+}
+
+impl From<crate::sim_error::SimError> for SimError {
+    fn from(cause: crate::sim_error::SimError) -> Self {
+        Self::Tree(cause)
     }
 }
 
@@ -258,32 +267,22 @@ pub(crate) fn docs_tree(documents: &Documents) -> Vec<String> {
 /// Distinguishes the scratch trees of one test process.
 static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// A scratch directory under the system temporary directory, removed when dropped.
+/// A scratch directory under the system temporary directory, removed when dropped. It is the one
+/// guard of the crate's tests, `executor::sim_tree::Scratch`: empty when it is made, so a process
+/// id the system reuses never lands a test in a stale tree (larry#267).
 pub(crate) struct Scratch {
-    /// The directory.
-    path: PathBuf,
+    /// The directory and the guard that removes it.
+    tree: crate::executor::sim_tree::Scratch,
 }
 
 impl Scratch {
     /// A fresh, empty scratch directory tagged `tag`.
     pub(crate) fn new(tag: &str) -> Result<Self, SimError> {
         let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        Self::at(std::env::temp_dir().join(format!(
-            "larry-governance-{}-{tag}-{sequence}",
-            std::process::id()
-        )))
-    }
-
-    /// A scratch at `path`: one already there is gone before it is made, and dropping the guard
-    /// removes the tree, so a process id the system reuses never lands a test in a stale tree.
-    fn at(path: PathBuf) -> Result<Self, SimError> {
-        match fs::remove_dir_all(&path) {
-            Ok(()) => {}
-            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
-            Err(cause) => return Err(cause.into()),
-        }
-        fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        let label = format!("governance-{tag}-{sequence}");
+        Ok(Self {
+            tree: crate::executor::sim_tree::scratch(&label)?,
+        })
     }
 
     /// A scratch copy of every file `larry governance` reads: the documents, the `docs/` tree,
@@ -310,12 +309,12 @@ impl Scratch {
 
     /// The scratch root.
     pub(crate) fn path(&self) -> &Path {
-        &self.path
+        &self.tree
     }
 
     /// Writes `bytes` at `relative`, creating its parents.
     pub(crate) fn write(&self, relative: &str, bytes: &[u8]) -> Result<(), SimError> {
-        let target = self.path.join(relative);
+        let target = self.tree.join(relative);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -325,14 +324,7 @@ impl Scratch {
 
     /// Reads the text at `relative`.
     pub(crate) fn read(&self, relative: &str) -> Result<String, SimError> {
-        Ok(fs::read_to_string(self.path.join(relative))?)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // Best effort: a leftover scratch tree never fails a simulation.
-        drop(fs::remove_dir_all(&self.path));
+        Ok(fs::read_to_string(self.tree.join(relative))?)
     }
 }
 
@@ -347,16 +339,16 @@ mod tests {
 
     use super::Scratch;
 
-    /// A scratch left at its name by a dead process is gone before a fresh one is made, and the
-    /// guard removes the tree when it drops (larry#270).
+    /// A leftover a dead process with this process id left at a fixture's old name is present, a
+    /// fresh scratch is empty anyway, and the guard removes the tree when it drops (larry#267).
     #[test]
     fn a_scratch_starts_empty_and_removes_itself() -> Result<(), Box<dyn std::error::Error>> {
-        let path =
-            std::env::temp_dir().join(format!("larry-governance-stale-{}", std::process::id()));
-        drop(fs::remove_dir_all(&path));
-        fs::create_dir_all(path.join("old"))?;
-        fs::write(path.join("old").join("file"), "left by a dead run")?;
-        let fresh = Scratch::at(path)?;
+        let stale = crate::executor::sim_tree::leftover("larry-governance-stale", "file")?;
+        assert!(
+            stale.join("file").exists(),
+            "the stale file of a dead run is present"
+        );
+        let fresh = Scratch::new("stale")?;
         assert!(
             fs::read_dir(fresh.path())?.next().is_none(),
             "a stale tree leaked into a fresh scratch"

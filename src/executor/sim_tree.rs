@@ -40,9 +40,10 @@ impl Shape {
 static LEFT: AtomicU64 = AtomicU64::new(0);
 
 /// A scratch directory that is empty when made and removed when dropped, so a process id the
-/// system reuses never lands a test in a stale tree.
+/// system reuses never lands a test in a stale tree. The crate's tests hold it, and the checker
+/// in `governance::temp_paths` allows the process id in a temp path here alone (larry#267).
 #[derive(Debug)]
-pub(in crate::executor) struct Scratch {
+pub(crate) struct Scratch {
     /// The directory, resolved the way the kernel resolves it.
     path: PathBuf,
 }
@@ -78,6 +79,41 @@ impl Drop for Scratch {
     }
 }
 
+/// A stale tree a dead process with this process id left at a fixture's old `<label>-<pid>`
+/// name (larry#267): a test makes one to prove the fixture that replaced it starts empty anyway.
+/// It removes itself when dropped, so a failing test leaves nothing behind either.
+#[derive(Debug)]
+pub(crate) struct Leftover {
+    /// The old fixture's directory.
+    path: PathBuf,
+}
+
+/// A leftover at the old `<label>-<pid>` name, holding one stale file named `file`.
+pub(crate) fn leftover(label: &str, file: &str) -> Result<Leftover, SimError> {
+    let dir = std::env::temp_dir().join(format!("{label}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).or_else(|cause| match cause.kind() {
+        io::ErrorKind::NotFound => Ok(()),
+        _ => Err(cause),
+    })?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(file), "left by a dead run")?;
+    Ok(Leftover { path: dir })
+}
+
+impl Deref for Leftover {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Leftover {
+    fn drop(&mut self) {
+        drop(std::fs::remove_dir_all(&self.path));
+    }
+}
+
 /// The directory name of scratch number `number` under `label`: the process and the count,
 /// no clock and no random.
 fn scratch_name(label: &str, number: u64) -> String {
@@ -85,7 +121,7 @@ fn scratch_name(label: &str, number: u64) -> String {
 }
 
 /// A fresh empty directory: one already at the name is removed first.
-pub(in crate::executor) fn scratch(label: &str) -> Result<Scratch, SimError> {
+pub(crate) fn scratch(label: &str) -> Result<Scratch, SimError> {
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(scratch_name(label, number));
     match std::fs::remove_dir_all(&dir) {
@@ -116,6 +152,27 @@ fn sim_tree_scratch_starts_empty_and_removes_itself() -> Result<(), SimError> {
     drop(fresh);
     assert!(!path.exists(), "the scratch outlived its guard");
     assert_eq!(LEFT.load(Ordering::Relaxed), 0, "a removal failed");
+    Ok(())
+}
+
+/// A leftover at a fixture's old name holds its stale file while it lives, a fresh scratch under
+/// the same label is empty with it present, and the leftover removes itself (larry#267).
+#[test]
+fn sim_tree_a_leftover_at_an_old_name_never_reaches_a_fresh_scratch() -> Result<(), SimError> {
+    let stale = leftover("larry-267-leftover", "hello.txt")?;
+    assert!(
+        stale.join("hello.txt").exists(),
+        "the leftover holds the stale file the old fixture tripped on"
+    );
+    let fresh = scratch("larry-267-leftover")?;
+    assert!(
+        std::fs::read_dir(&fresh)?.next().is_none(),
+        "a leftover at an old name leaked into the new fixture"
+    );
+    drop(fresh);
+    let path = stale.to_path_buf();
+    drop(stale);
+    assert!(!path.exists(), "the leftover outlived its guard");
     Ok(())
 }
 

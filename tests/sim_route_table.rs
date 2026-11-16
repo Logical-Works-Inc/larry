@@ -21,7 +21,7 @@ use larry_demo::model::RouteError;
 use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
-use route_cli::{GATEWAY, POOL, Scratch, TestResult, add, joined, listed, parse, route_run};
+use route_cli::{GATEWAY, POOL, TempDir, TestResult, add, joined, listed, parse, route_run};
 
 /// The most routes a tenant holds.
 const CAP: usize = 256;
@@ -44,7 +44,7 @@ enum Outcome {
 /// lets two adders both see 255 and store 257 routes.
 #[test]
 fn sim_route_cap_refuses_the_257th_and_keeps_256() -> TestResult {
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let mut rng = Seeded::from_seed(0x5EED_0201);
     let mut ids = Vec::new();
     for index in 0..320_u32 {
@@ -185,7 +185,7 @@ fn reference(field: &str, text: &str) -> Option<RouteError> {
 /// escape byte, a credential or a query into the store.
 #[test]
 fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let long_id = "a".repeat(65);
     let long_url = format!("{GATEWAY}/{}", "p".repeat(2048));
     let long_describe = "d".repeat(1025);
@@ -364,7 +364,7 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
 /// click, or a replay that clears the default.
 #[test]
 fn sim_route_add_replayed_is_one_row() -> TestResult {
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     for _ in 0..200 {
         add(state.path(), "alpha", &[], &["--default"])?;
     }
@@ -414,7 +414,7 @@ fn sim_route_add_replayed_is_one_row() -> TestResult {
 /// One seeded script of route operations against a fresh state directory, and
 /// the BLAKE3 digest of every output, every refusal and every listing, in order.
 fn trace_of(seed: u64) -> Result<String, Box<dyn Error>> {
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let mut rng = Seeded::from_seed(seed);
     let mut hasher = Hasher::new();
     for step in 0..48_u32 {
@@ -466,7 +466,7 @@ fn sim_same_seed_same_route_trace_hash() -> TestResult {
 /// caught: a bound off by one on either side of the prefix or of the 64-byte cap.
 #[test]
 fn sim_key_variable_length_walk_matches_the_written_bounds() -> TestResult {
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let ladder = format!("LARRY_KEY_{}", "A".repeat(72));
     for length in 0..=72_usize {
         let name: String = ladder.chars().take(length).collect();
@@ -501,7 +501,7 @@ fn sim_key_variable_length_walk_matches_the_written_bounds() -> TestResult {
 fn sim_monkey_edits_of_a_valid_key_variable_agree_with_the_reference() -> TestResult {
     /// What the monkey types.
     const KEYS: [char; 8] = ['L', 'Y', '_', 'a', '7', '-', '\u{c9}', ' '];
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let mut rng = Seeded::from_seed(0x0DDB_1750);
     let (mut accepted, mut refused) = (0_u32, 0_u32);
     let mut last_good: Option<String> = None;
@@ -574,7 +574,7 @@ fn set_key_env(state: &Path, name: &str) -> Result<(), Box<dyn Error>> {
 /// store sends the operator's secret to the tenant's host.
 #[test]
 fn sim_a_row_edited_outside_the_namespace_fails_its_own_tenant_alone() -> TestResult {
-    let (victim, bystander) = (Scratch::new()?, Scratch::new()?);
+    let (victim, bystander) = (TempDir::new()?, TempDir::new()?);
     for state in [&victim, &bystander] {
         add(state.path(), "main", &[], &["--default"])?;
     }
@@ -630,7 +630,7 @@ fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> Test
         "AWS_SECRET_ACCESS_KEY",
         "HOME",
     ];
-    let state = Scratch::new()?;
+    let state = TempDir::new()?;
     let mut rng = Seeded::from_seed(0x5AB0_7E42);
     let mut plans: Vec<Vec<(String, String)>> = Vec::new();
     for thread in 0..8_u32 {

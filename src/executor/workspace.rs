@@ -530,8 +530,6 @@ mod sim;
 /// Unit tests of the origin lock (larry#214).
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::{hold_origin, origin_held, sweep_origins};
 
     /// A pid no live process holds: the largest positive `i32` less one.
@@ -541,8 +539,7 @@ mod tests {
     /// with its lock file once the lock is released (larry#214).
     #[test]
     fn an_eval_origin_is_live_while_its_lock_is_held() -> Result<(), Box<dyn std::error::Error>> {
-        let state: PathBuf =
-            std::env::temp_dir().join(format!("larry-origin-lock-{}", std::process::id()));
+        let state = crate::executor::sim_tree::scratch("larry-origin-lock")?;
         let eval = state.join("eval");
         let name = format!("origin-{DEAD_PID}-0");
         let origin = eval.join(&name);
@@ -568,7 +565,6 @@ mod tests {
             !eval.join(format!("{name}.lock")).exists(),
             "the sweep removes the stale lock file"
         );
-        drop(std::fs::remove_dir_all(&state));
         Ok(())
     }
 }

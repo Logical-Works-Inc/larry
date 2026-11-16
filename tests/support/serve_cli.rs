@@ -5,27 +5,28 @@
 //! and stopped one way.
 
 use std::error::Error;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lgwks_deps::storefront::rusqlite;
 use lgwks_std::json::{self, Value};
 
+#[path = "temp_dir.rs"]
+mod temp_dir;
+pub use temp_dir::TempDir;
+
 /// How long one exchange may take before the host is called broken: a bound on
 /// a hung host, never the pace of a working one.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Per-process counter that gives each host its own state directory.
-static STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A fresh, empty state directory under the system temp dir.
-pub fn fresh_state_dir() -> PathBuf {
-    let index = STATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("larry-serve-{}-{index}", std::process::id()))
+/// A fresh, empty state directory under the system temp dir, removed when its
+/// guard drops (larry#267).
+pub fn fresh_state_dir() -> std::io::Result<TempDir> {
+    TempDir::new()
 }
 
 /// `larry serve key <tenant>` against `state`: the key it printed once.
@@ -100,8 +101,12 @@ pub struct Serving {
 fn stderr_text(stderr: Option<ChildStderr>) -> String {
     let mut text = String::new();
     if let Some(mut stream) = stderr {
-        // A closed or unreadable stderr leaves the text empty; the exit status is the evidence.
-        stream.read_to_string(&mut text).ok();
+        match stream.read_to_string(&mut text) {
+            Ok(_) => {}
+            // The child closed its stderr before the read ended: the text says so, and the exit
+            // status stays the evidence.
+            Err(cause) => drop(write!(text, "<stderr unreadable: {cause}>")),
+        }
     }
     text
 }
@@ -191,9 +196,10 @@ impl Serving {
 impl Drop for Serving {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            // The child may already be gone; either way it is reaped here.
-            child.kill().ok();
-            child.wait().ok();
+            // The child may already be gone; either way it is reaped here. A reap that fails is
+            // the operating system's answer about a gone process, never the test's result.
+            drop(child.kill());
+            drop(child.wait());
         }
     }
 }
@@ -220,8 +226,15 @@ pub fn exchange(
     stream.set_read_timeout(Some(EXCHANGE_TIMEOUT))?;
     stream.set_write_timeout(Some(EXCHANGE_TIMEOUT))?;
     stream.write_all(head.as_bytes())?;
-    // A refused body (413) may close before it is all written; the answer is still read.
-    stream.write_all(body).ok();
+    // A refused body (413) may close before it is all written; the answer is still read below.
+    match stream.write_all(body) {
+        Ok(()) => {}
+        // The host answered and closed its side mid-body: its answer is what this exchange reads.
+        Err(cause)
+            if cause.kind() == std::io::ErrorKind::BrokenPipe
+                || cause.kind() == std::io::ErrorKind::ConnectionReset => {}
+        Err(cause) => return Err(cause.into()),
+    }
     let mut answer = Vec::new();
     stream.read_to_end(&mut answer)?;
     let text = String::from_utf8(answer)?;

@@ -13,8 +13,8 @@ use std::fmt;
 use std::io;
 use std::mem::discriminant;
 use std::num::TryFromIntError;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use lgwks_std::process::process_group_exists;
@@ -284,12 +284,11 @@ impl When {
     }
 }
 
-/// A fresh scratch directory under the system temp dir, one per run.
-fn scratch(tag: &str) -> PathBuf {
-    /// Per-process counter that gives each run its own directories.
-    static DIRECTORIES: AtomicU64 = AtomicU64::new(0);
-    let index = DIRECTORIES.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("larry-esc-{}-{tag}-{index}", std::process::id()))
+/// A fresh scratch directory under the system temp dir, one per run: empty when it is made and
+/// removed when its guard drops, so a process id the system reuses never lands a run in a stale
+/// tree (larry#267).
+fn scratch(tag: &str) -> Result<crate::executor::sim_tree::Scratch, SimError> {
+    crate::executor::sim_tree::scratch(&format!("larry-esc-{tag}"))
 }
 
 /// Whether the ledger under `state` lists a group before the probe bounds run out.
@@ -474,14 +473,18 @@ fn drive(
 /// One schedule of one seed in a fresh state directory and workspace, both removed
 /// afterwards whatever the outcome.
 fn run_one(when: When, seed: u64, path_env: &str) -> Result<String, CancelSimError> {
-    let state = scratch("state");
-    let work = scratch("work");
+    let state = scratch("state")?;
+    let work = scratch("work")?;
     let outcome = drive(when, seed, path_env, &state, &work);
-    let state_removed = std::fs::remove_dir_all(&state);
-    let work_removed = std::fs::remove_dir_all(&work);
+    let (state_path, work_path) = (state.to_path_buf(), work.to_path_buf());
+    drop(state);
+    drop(work);
     let trace = outcome?;
-    state_removed?;
-    work_removed?;
+    for path in [state_path, work_path] {
+        if path.exists() {
+            return Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty).into());
+        }
+    }
     Ok(trace)
 }
 
@@ -518,9 +521,8 @@ const TIMEOUT_SEEDS: u64 = 4;
 fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
     let path_env = std::env::var("PATH")?;
     for seed in 0..TIMEOUT_SEEDS {
-        let state = scratch("timeout-state");
-        let work = scratch("timeout-work");
-        std::fs::create_dir_all(&work)?;
+        let state = scratch("timeout-state")?;
+        let work = scratch("timeout-work")?;
         let mut rng = Seeded::from_seed(seed.wrapping_add(4 << 32));
         let marker_len = usize::try_from(rng.below(48)?)?.saturating_add(1);
         let marker = text(&mut rng, marker_len)?.replace('\n', " ");
@@ -540,10 +542,11 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
             &|| false,
         );
         let listed = ledger.live_tasks();
-        let cleaned = (
-            std::fs::remove_dir_all(&state),
-            std::fs::remove_dir_all(&work),
-        );
+        let (state_path, work_path) = (state.to_path_buf(), work.to_path_buf());
+        drop(ledger);
+        drop(state);
+        drop(work);
+        let trees_removed = !state_path.exists() && !work_path.exists();
         let result = outcome?;
         assert!(result.timed_out(), "seed {seed}: the deadline ended it");
         assert!(
@@ -558,8 +561,7 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
             "seed {seed}: process group {pgid} is gone"
         );
         assert!(listed?.is_empty(), "seed {seed}: the ledger lists no group");
-        cleaned.0?;
-        cleaned.1?;
+        assert!(trees_removed, "seed {seed}: the fixture removes its trees");
     }
     Ok(())
 }
