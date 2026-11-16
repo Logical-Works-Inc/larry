@@ -9,7 +9,10 @@ use std::hash::{Hash as _, Hasher as _};
 use std::time::Duration;
 
 use crate::executor::Isolation;
-use crate::sim_lanes::sweep;
+use crate::sim_lanes::sweep_on;
+
+/// A paint is CPU-bound, so every sweep here runs on one lane (see [`sweep_on`]).
+const PAINT_LANES: u64 = 1;
 
 use super::app::{App, Input, Key, MAX_ENTRIES};
 use super::buffer::{Buffer, Frame, render};
@@ -176,7 +179,7 @@ fn layout_chat_column_keeps_phone_ratio_and_reserves_artifact_pane() {
 
 #[test]
 fn sim_tui_any_size_any_input_paints_inside_bounds() -> Result<(), Box<dyn std::error::Error>> {
-    sweep(SEEDS, |_lane, seed| {
+    sweep_on(PAINT_LANES, SEEDS, |_lane, seed| {
         let (app, _) = drive(seed, 96);
         let frame = app.draw();
         let grid: &Buffer = &frame.buffer;
@@ -194,7 +197,7 @@ fn sim_tui_any_size_any_input_paints_inside_bounds() -> Result<(), Box<dyn std::
 
 #[test]
 fn sim_tui_hostile_output_cannot_write_escapes() -> Result<(), Box<dyn std::error::Error>> {
-    sweep(SEEDS, |_lane, seed| {
+    sweep_on(PAINT_LANES, SEEDS, |_lane, seed| {
         let (_, wire) = drive(seed, 96);
         let text = String::from_utf8_lossy(&wire);
         for piece in text.split('\x1b').skip(1) {
@@ -227,7 +230,7 @@ fn sim_tui_hostile_output_cannot_write_escapes() -> Result<(), Box<dyn std::erro
 
 #[test]
 fn sim_tui_bold_cells_keep_colour_on_the_wire() -> Result<(), Box<dyn std::error::Error>> {
-    let saw = sweep(SEEDS, |_lane, seed| {
+    let saw = sweep_on(PAINT_LANES, SEEDS, |_lane, seed| {
         let mut saw_bold_colour = false;
         let (_, wire) = drive(seed, 64);
         for (codes, _) in sgr_runs(&wire) {
@@ -266,7 +269,7 @@ fn sim_tui_same_seed_same_frame_hash() -> Result<(), Box<dyn std::error::Error>>
         wire.hash(&mut hasher);
         hasher.finish()
     };
-    let hashes = sweep(64, |_lane, seed| {
+    let hashes = sweep_on(PAINT_LANES, 64, |_lane, seed| {
         let first = hash(seed);
         assert_eq!(first, hash(seed), "seed {seed} replayed differently");
         first
@@ -282,7 +285,7 @@ fn sim_tui_same_seed_same_frame_hash() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn sim_tui_unchanged_frame_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
-    sweep(SEEDS, |_lane, seed| {
+    sweep_on(PAINT_LANES, SEEDS, |_lane, seed| {
         let (app, _) = drive(seed, 48);
         let frame = app.draw();
         let mut wire = Vec::new();

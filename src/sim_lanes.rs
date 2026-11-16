@@ -67,7 +67,11 @@ pub(crate) fn sweep<Out: Send>(
 /// `work(lane, seed)` for every seed in `0..count` on at most `lanes` scoped threads (never more
 /// than [`MAX_LANES`]): lane `n` runs one contiguous chunk, in order, so the lane of a seed is
 /// fixed by `lanes` and `count` alone. The outputs are in seed order. When a lane panics the
-/// others still finish and are joined, and the first panicked lane is named.
+/// others still finish and are joined, and the first panicked lane is named. A sweep that keeps
+/// a core busy passes one lane: nextest already runs one test per core, so lanes there only
+/// oversubscribe the host (on the 4-core CI runner, run 43949143055, the CPU-bound sims took 1.4
+/// to 3.8 times longer on lanes and slowed the tests beside them). Lanes pay on a sweep that
+/// mostly waits ([`sweep`]).
 pub(crate) fn sweep_on<Out: Send>(
     lanes: u64,
     count: u64,

@@ -112,8 +112,9 @@ fn simulation(initial: u64, fault: u8) -> TestResult<ContentDigest> {
 const SEEDS: u64 = 1_000;
 
 /// Scoped threads one sweep runs on, each owning a disjoint contiguous range of the seeds. The
-/// runtimes are private to a seed, so no state is shared between lanes.
-const LANES: u64 = 4;
+/// replay is CPU-bound and nextest already runs one test per core, so one lane: four lanes
+/// took 6.5 s to 11.3 s on the 4-core CI runner (run 43949143055, larry#246).
+const LANES: u64 = 1;
 
 /// Replays seeds `from..to` twice each and compares the traces; the first mismatch or failure is
 /// named as text, which, unlike a boxed error, can leave its lane.

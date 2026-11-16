@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lgwks_std::json;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use crate::sim_lanes::{LaneError, sweep};
+use crate::sim_lanes::{LaneError, sweep_on};
 
 use super::documents::{self, DOCUMENTS, Documents};
 use super::error::GovernanceError;
@@ -124,13 +124,13 @@ pub(crate) fn with_patterns<T>(
     })
 }
 
-/// Runs `check` for every seed in `0..count` on the bounded lanes; the first failing seed's
-/// error is returned, in seed order.
+/// Runs `check` for every seed in `0..count` on one lane (a governance check is CPU-bound, see
+/// [`sweep_on`]); the first failing seed's error is returned, in seed order.
 pub(crate) fn each_seed(
     count: u64,
     check: impl Fn(u64) -> Result<(), SimError> + Sync,
 ) -> Result<(), SimError> {
-    for outcome in sweep(count, |_lane, seed| check(seed))? {
+    for outcome in sweep_on(1, count, |_lane, seed| check(seed))? {
         outcome?;
     }
     Ok(())
