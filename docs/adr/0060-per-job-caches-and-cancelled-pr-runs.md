@@ -32,9 +32,9 @@ push. Measured on main at 91ee874 (ubuntu-latest):
 
 ## Decision
 
-- Each job names its own `shared-key`: `lint-`, `test-`, `simulation-`,
-  `journey-`, `journey-macos`, `governance-`, each suffixed `self-hosted` or
-  `hosted` by visibility. Every cache step saves only when
+- Each job names its own `shared-key`: `lint-`, `rerank-lint-`, `test-`,
+  `simulation-`, `journey-`, `journey-macos`, `governance-`, each suffixed
+  `self-hosted` or `hosted` by visibility. Every cache step saves only when
   `github.ref == 'refs/heads/main'`, so a pull request restores a key and never
   writes what main restores.
 - `governance.yml` owns the governance steps. ci.yml's `governance` job is
@@ -44,8 +44,11 @@ push. Measured on main at 91ee874 (ubuntu-latest):
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}}`. A second
   push to one PR cancels the run its first push started. A push to main never
   cancels, because that run is the proof of the landed commit.
-- The old `rust` job splits into `lint` (rustfmt and both clippy calls) and
-  `test` (the workspace nextest lane), which run in parallel.
+- The old `rust` job splits into `lint` (rustfmt and the workspace clippy) and
+  `test` (the workspace nextest lane), which run in parallel. The
+  feature-gated reranker clippy gets its own `rerank-lint` job: on the first
+  run its cold build took 132 s of the `lint` job's 317 s, which put `lint` past
+  the 5-minute budget.
 - The larry#116 runner rule stays on every `runs-on`: the self-hosted Mac while
   private, ubuntu-latest once public, never self-hosted when public.
 
@@ -57,16 +60,19 @@ push. Measured on main at 91ee874 (ubuntu-latest):
   `github.ref` and a PR ref is never `refs/heads/main`.
 - The governance steps run once per PR, down from two builds of `larry`.
 - A red `lint` check arrives in seconds beside the test lane instead of after
-  it.
+  it, and its cold build fits the 5-minute budget now that the reranker build
+  is its own job.
 - `tests/ci_fallback_job.rs` names the `test` job, because the bounded nextest
   install and its `cargo test` fallback moved there with the lane. Its
-  assertions are unchanged.
+  assertions are unchanged, and it holds one key per job.
 
 ## Rejected
 
 - Keeping one shared key and only adding `cancel-in-progress`: it leaves both
   cold governance builds, keeps the e2e and simulation jobs on one cache, and a
   cancel on main would kill the run that proves the landed commit.
+- One `lint` job holding both clippy calls: measured 5m17s cold on the first
+  run of larry#307, past the 5-minute budget.
 - Cancelling every event with `cancel-in-progress: true`: a fast follow-up push
   to main would cancel the proof of the commit that just landed.
 - A `paths` filter to stop the duplicate governance run: the second copy still

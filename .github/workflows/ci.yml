@@ -15,8 +15,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # The lint half of the old `rust` lane, split out so rustfmt and both clippy
-  # calls report in parallel with the tests instead of after them (larry#307).
+  # The lint half of the old `rust` lane, split out so rustfmt and the
+  # workspace clippy report in parallel with the tests instead of after them
+  # (larry#307).
   lint:
     # Runner by visibility (larry#116, see sim.yml): the self-hosted Mac while
     # private, GitHub-hosted ubuntu-latest once public; never self-hosted on a
@@ -42,8 +43,23 @@ jobs:
       # different thing from the standard it appears to enforce, and a green
       # check would mean less than a reader would take it to mean.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # The reranker engine is feature-gated (larry#150, ADR 0013): lint the
-      # binary with it on, so the gated path never rots unbuilt.
+
+  # The reranker engine is feature-gated (larry#150, ADR 0013). Its cold build
+  # was 132 s of the old lint job's 317 s, so it lints in parallel with its own
+  # cache key and the lint job stays inside the 5-minute budget (larry#307).
+  rerank-lint:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: rerank-lint-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Lint the binary with the feature on, so the gated path never rots unbuilt.
       - run: cargo clippy --locked --features rerank --bin larry-rerank -- -D warnings
 
   # The test half of the old `rust` lane: the workspace suite AGENTS.md

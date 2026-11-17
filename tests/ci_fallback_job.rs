@@ -110,6 +110,7 @@ fn every_job_owns_its_cache_and_saves_it_only_from_main() -> Check {
     // restores a key and never writes what main restores.
     let own = [
         "shared-key: lint-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}",
+        "shared-key: rerank-lint-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}",
         "shared-key: test-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}",
         "shared-key: simulation-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}",
         "shared-key: journey-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}",
@@ -133,7 +134,7 @@ fn every_job_owns_its_cache_and_saves_it_only_from_main() -> Check {
     assert_eq!(
         seen,
         own.len(),
-        "each of the six jobs owns its own shared-key: {own:?}"
+        "each of the seven jobs owns its own shared-key: {own:?}"
     );
     Ok(())
 }
