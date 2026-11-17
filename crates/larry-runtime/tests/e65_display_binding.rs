@@ -180,7 +180,7 @@ fn swap_journey(seed: u64, change_on: u64) -> Result<ContentDigest> {
             "admission swap must be atomic"
         );
         assert_eq!(
-            runtime.remaining_budget(),
+            runtime.remaining_budget(TenantId::from_bytes([1; 16])),
             10_000,
             "no reservation on admission refusal"
         );
@@ -195,7 +195,7 @@ fn swap_journey(seed: u64, change_on: u64) -> Result<ContentDigest> {
             "the durable intent must retain exactly what was shown"
         );
         assert_eq!(
-            runtime.remaining_budget(),
+            runtime.remaining_budget(TenantId::from_bytes([1; 16])),
             9_997,
             "ambiguous reservation remains held"
         );

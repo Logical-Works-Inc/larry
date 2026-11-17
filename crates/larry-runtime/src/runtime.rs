@@ -253,8 +253,14 @@ pub struct Runtime<P, O> {
     questions: approval::Book,
     /// Host-supplied snapshots and resource bounds.
     settings: RuntimeSettings,
-    /// Budget not yet reserved by recorded intents.
-    remaining_budget: u64,
+    /// Budget not yet reserved by recorded intents, one counter per tenant
+    /// (larry#208).
+    ///
+    /// A tenant enters when one of its runs is tracked, so the map holds no
+    /// more tenants than the run table's capacity, and one tenant's spend
+    /// never refuses another tenant's effect. `restore` seeds a counter for
+    /// every tenant a recorded intent spent from.
+    budgets: BTreeMap<TenantId, u64>,
     /// Tenant ownership of tracked runs.
     runs: BTreeMap<RunId, RunLive>,
     /// Bounded effect witnesses in operation identity order.
@@ -280,7 +286,6 @@ where
         if settings.run_capacity == 0 {
             return Err(RuntimeError::RunLimitReached { capacity: 0 });
         }
-        let remaining_budget = settings.initial_budget;
         let fence = RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound)?;
         Ok(Self {
             journal,
@@ -292,7 +297,7 @@ where
             admitted: VecDeque::new(),
             questions: approval::Book::default(),
             settings,
-            remaining_budget,
+            budgets: BTreeMap::new(),
             runs: BTreeMap::new(),
             live: BTreeMap::new(),
             tick_count: 0,
@@ -384,10 +389,16 @@ where
         self.tick_count
     }
 
-    /// The budget still unreserved.
+    /// The budget `tenant` still has unreserved (larry#208).
+    ///
+    /// A tenant no run has been tracked for has reserved nothing, so it reads
+    /// the whole initial budget; no counter is invented for it.
     #[must_use]
-    pub const fn remaining_budget(&self) -> u64 {
-        self.remaining_budget
+    pub fn remaining_budget(&self, tenant: TenantId) -> u64 {
+        match self.budgets.get(&tenant) {
+            Some(&budget) => budget,
+            None => self.settings.initial_budget,
+        }
     }
 
     /// Runs one bounded, deterministic tick.
@@ -516,7 +527,16 @@ where
             return Ok(());
         }
 
-        let mut pinned = self.pinned_inputs(proposal, at);
+        // The admission epoch comes from the fence and the tenant from the run
+        // table, never from the proposal: a command cannot declare the security
+        // generation it is admitted under or the tenant it is admitted for, so
+        // a hostile generator cannot name a generation that outlives a
+        // revocation, or record an effect — or re-attribute a run after a
+        // restart — to a tenant it does not own (D42, E63). The pinned budget
+        // snapshot is that tenant's own remainder, so the decision bounds one
+        // tenant's spend and never another's (larry#208).
+        let tenant = self.tenant_of(run)?;
+        let mut pinned = self.pinned_inputs(tenant, proposal, at);
         if let Some(shown) = display {
             shown.constrain(&mut pinned);
         }
@@ -535,14 +555,6 @@ where
         // Reservation: the intent is durable *before* the effect can leave,
         // and the budget is deducted against the same pinned snapshot that was
         // just recorded, so replay re-derives the identical decision.
-        //
-        // The admission epoch comes from the fence and the tenant from the run
-        // table, never from the proposal: a command cannot declare the security
-        // generation it is admitted under or the tenant it is admitted for, so
-        // a hostile generator cannot name a generation that outlives a
-        // revocation, or record an effect — or re-attribute a run after a
-        // restart — to a tenant it does not own (D42, E63).
-        let tenant = self.tenant_of(run)?;
         let intent = proposal.intent(tenant, self.fence.epoch()?);
         let intent = match display {
             Some(shown) => intent.with_binding(*shown.binding()),
@@ -550,7 +562,13 @@ where
         };
         let proof = crate::gate::Proof::issue(&pinned, &self.clock);
         self.record_intent(run, intent, authorization)?;
-        self.remaining_budget = self.remaining_budget.saturating_sub(proposal.cost);
+        // One budget per tenant (larry#208): the cost comes out of this run's
+        // own tenant's counter, never a pool the other tenants share.
+        let remaining = self
+            .budgets
+            .entry(tenant)
+            .or_insert(self.settings.initial_budget);
+        *remaining = remaining.saturating_sub(proposal.cost);
         report.authorized.push(intent.operation);
         self.live.insert(
             intent.operation,
@@ -714,11 +732,15 @@ where
 
     let mut runs: BTreeMap<RunId, RunLive> = BTreeMap::new();
     let mut live: BTreeMap<OperationId, LiveEffect> = BTreeMap::new();
-    let mut reserved_budget: u64 = 0;
-
-    for record in projection.authorizations() {
-        reserved_budget = reserved_budget.saturating_add(record.pinned.request.cost);
-    }
+    // One counter per tenant (larry#208): every recorded intent's cost is spent
+    // from the tenant its own event named, so a restart keeps each tenant's own
+    // remainder instead of one pooled balance. A tenant the journal never let
+    // reserve is absent, and reads its whole initial budget.
+    let budgets: BTreeMap<TenantId, u64> = projection
+        .reserved_by_tenant()
+        .into_iter()
+        .map(|(tenant, spent)| (tenant, settings.initial_budget.saturating_sub(spent)))
+        .collect();
     let leases = retry::leases(projection.authorizations());
     // `cap::Auth` never serializes, so each recorded authorization is re-issued
     // a proof for only the lease left on the clock now (larry#77); an intent
@@ -799,7 +821,7 @@ where
         ready: VecDeque::new(),
         admitted: pending,
         questions,
-        remaining_budget: settings.initial_budget.saturating_sub(reserved_budget),
+        budgets,
         settings,
         runs,
         live,

@@ -341,8 +341,13 @@ fn sim_cancel_costs_no_budget() -> Outcome {
     replay(80_u64..88, |seed| -> Sim<(u64, usize)> {
         let mut runtime: TestRuntime = reader(ScriptedOwner::new(), 100)?;
         nix(&mut runtime, 17, 17)?;
-        assert_eq!(runtime.remaining_budget(), 100, "cancel reserves nothing");
-        let (first_budget, first_len) = (runtime.remaining_budget(), runtime.journal().len());
+        assert_eq!(
+            runtime.remaining_budget(tenant(1)),
+            100,
+            "cancel reserves nothing"
+        );
+        let (first_budget, first_len) =
+            (runtime.remaining_budget(tenant(1)), runtime.journal().len());
         assert_eq!(first_budget, 100, "seed {seed}: cancel costs nothing");
         Ok((first_budget, first_len))
     })

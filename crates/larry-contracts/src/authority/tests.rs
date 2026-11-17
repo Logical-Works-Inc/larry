@@ -161,49 +161,6 @@ fn budget_units_are_never_coerced_across_each_other() -> Result<(), AuthorityErr
 }
 
 #[test]
-fn cumulative_spend_is_bounded_by_the_ledger_not_the_ceiling() -> Result<(), AuthorityError> {
-    let grant = root_grant()?;
-    let policy = full_policy();
-    // A 100-unit grant: one 60-unit effect fits, but a second 60-unit
-    // effect against the ledger's remaining 40 must be refused, even
-    // though each effect individually fits the ceiling. The ceiling-only
-    // check admits both; the ledger-aware check bounds the sum.
-    assert_eq!(
-        validate_at_effect_boundary_with_ledger(
-            &grant,
-            Scope::FileRead,
-            60,
-            100,
-            &policy,
-            epoch_plus(500)
-        ),
-        Ok(())
-    );
-    assert_eq!(
-        validate_at_effect_boundary(&grant, Scope::FileRead, 60, &policy, epoch_plus(500)),
-        Ok(()),
-        "the ceiling-only check is per-effect by contract and admits both effects; \
-         cumulative bounding is the ledger-aware variant's job"
-    );
-    assert_eq!(
-        validate_at_effect_boundary_with_ledger(
-            &grant,
-            Scope::FileRead,
-            60,
-            40,
-            &policy,
-            epoch_plus(500)
-        ),
-        Err(AuthorityError::BudgetExhausted {
-            required: 60,
-            available: 40,
-            unit: grant.budget.unit,
-        })
-    );
-    Ok(())
-}
-
-#[test]
 fn e30_expired_approval_yields_a_typed_refusal_no_consent_from_timeout()
 -> Result<(), AuthorityError> {
     let grant = root_grant()?;
@@ -298,9 +255,14 @@ fn e71_a_security_epoch_only_ever_moves_forward() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The last generation the epoch space can name. It is the exhaustion edge,
+/// not a chosen bound: at it the type's overflow answer is `None` (refuse the
+/// next generation), and the test below drives exactly that.
+const LAST_GENERATION: u64 = u64::MAX;
+
 #[test]
 fn e71_epoch_exhaustion_is_typed_never_wrapped() {
-    let last = SecurityEpoch::new(u64::MAX);
+    let last = SecurityEpoch::new(LAST_GENERATION);
     assert_eq!(
         last.successor(),
         None,

@@ -115,7 +115,10 @@ fn sim_denials_budget_reports_exact_amounts() -> Outcome {
             )],
             "budget names required and remaining"
         );
-        let (first_budget, first_fp) = (runtime.remaining_budget(), trace(runtime.journal()));
+        let (first_budget, first_fp) = (
+            runtime.remaining_budget(tenant(1)),
+            trace(runtime.journal()),
+        );
         assert_eq!(first_budget, 7, "seed {seed}: denial reserves nothing");
         Ok((first_budget, first_fp))
     })
@@ -146,8 +149,12 @@ fn sim_denials_exact_cost_authorizes_to_zero() -> Outcome {
         runtime.offer(5, &body)?;
         let tick = runtime.tick()?;
         assert_eq!(tick.authorized(), &[operation(5)], "exact cost authorizes");
-        assert_eq!(runtime.remaining_budget(), 0, "budget reaches exactly zero");
-        Ok(runtime.remaining_budget())
+        assert_eq!(
+            runtime.remaining_budget(tenant(1)),
+            0,
+            "budget reaches exactly zero"
+        );
+        Ok(runtime.remaining_budget(tenant(1)))
     })
 }
 
@@ -190,7 +197,10 @@ fn sim_denials_policy_denial_ignores_budget() -> Outcome {
         runtime.offer(7, &body)?;
         let tick = runtime.tick()?;
         assert_eq!(tick.denied().len(), 1, "policy denies regardless of budget");
-        let (first_budget, first_fp) = (runtime.remaining_budget(), trace(runtime.journal()));
+        let (first_budget, first_fp) = (
+            runtime.remaining_budget(tenant(1)),
+            trace(runtime.journal()),
+        );
         assert_eq!(first_budget, 1_000, "seed {seed}: denial reserves nothing");
         Ok((first_budget, first_fp))
     })
@@ -217,7 +227,10 @@ fn sim_denials_capability_denial_holds_budget() -> Outcome {
         runtime.offer(8, &body)?;
         let tick = runtime.tick()?;
         assert_eq!(tick.denied().len(), 1, "capability denies");
-        let (first_budget, first_fp) = (runtime.remaining_budget(), trace(runtime.journal()));
+        let (first_budget, first_fp) = (
+            runtime.remaining_budget(tenant(1)),
+            trace(runtime.journal()),
+        );
         assert_eq!(first_budget, 50, "seed {seed}: denial reserves nothing");
         Ok((first_budget, first_fp))
     })
@@ -316,7 +329,11 @@ fn sim_denials_denial_folds_failed_after_restore() -> Outcome {
         runtime.tick()?;
         let restored = reopen(runtime.into_journal(), 5)?;
         assert_state(restored.projection(), run(13), RunState::Failed)?;
-        assert_eq!(restored.remaining_budget(), 5, "denial reserves nothing");
+        assert_eq!(
+            restored.remaining_budget(tenant(1)),
+            5,
+            "denial reserves nothing"
+        );
         Ok(trace(restored.journal()))
     })
 }
