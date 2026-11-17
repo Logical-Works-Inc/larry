@@ -133,10 +133,11 @@ pub fn millis(duration: Duration) -> f64 {
 
 /// Opens the executor's ledger read-only and waits for a live group to be recorded, within one
 /// failure deadline; returns that group's pid. The row appears as the executor inserts it, so
-/// the wait is on the row and its deadline only bounds a failure (larry#268).
+/// the wait is on the row and its deadline only bounds a failure; a read refused because the
+/// writer holds the lock is answered again inside that deadline (larry#268, larry#294).
 pub fn live_group_pid(db: &Path) -> Result<i32, Box<dyn Error>> {
     let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    deadline::await_event(
+    live_group_pid_through(
         "a live group was recorded in the ledger",
         || match connection.query_row("SELECT pid FROM live_groups", [], |row| {
             row.get::<_, i64>(0)
@@ -146,4 +147,67 @@ pub fn live_group_pid(db: &Path) -> Result<i32, Box<dyn Error>> {
             Err(cause) => Err(cause.into()),
         },
     )
+}
+
+/// [`live_group_pid`]'s rule over one reader: a missing row is the wait, every other refusal is
+/// retried inside [`deadline::PATIENCE`] and the last cause is reported when it passes, because a
+/// `SQLITE_BUSY` while the writer holds the lock is the wait's own condition (larry#294).
+fn live_group_pid_through(
+    what: &str,
+    read: impl FnMut() -> Result<Option<i32>, Box<dyn Error>>,
+) -> Result<i32, Box<dyn Error>> {
+    deadline::await_retrying(what, deadline::PATIENCE, read)
+}
+
+/// Seeds the busy-ledger simulation sweeps.
+const BUSY_SEEDS: u64 = 8;
+
+/// A ledger read refused with `SQLITE_BUSY` twice is retried inside the deadline and answers
+/// the pid once the writer releases its lock, for every seed: a row is read after the lock is
+/// released, never instead of it (larry#294).
+#[test]
+fn sim_live_group_pid_answers_after_two_busy_reads() -> Result<(), Box<dyn Error>> {
+    for seed in 0..BUSY_SEEDS {
+        let mut rng = lgwks_std::seeded::Seeded::from_seed(seed);
+        let pid = i32::try_from(rng.below(60_000)?.saturating_add(1))?;
+        let dir = TempDir::new()?;
+        let db = dir.join("ledger.db");
+        // The writer holds the database exclusively, so the reader's own query is refused with
+        // SQLITE_BUSY until the third attempt releases it.
+        let writer = Connection::open(&db)?;
+        writer.execute_batch(&format!(
+            "CREATE TABLE live_groups (pid INTEGER); INSERT INTO live_groups VALUES ({pid}); BEGIN EXCLUSIVE;"
+        ))?;
+        let reader = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut attempts = 0_u64;
+        let mut first_refusal = String::new();
+        let answered = live_group_pid_through("a live group was recorded in the ledger", || {
+            attempts = attempts.saturating_add(1);
+            if attempts == 3 {
+                writer.execute_batch("ROLLBACK")?;
+            }
+            match reader.query_row("SELECT pid FROM live_groups", [], |row| {
+                row.get::<_, i64>(0)
+            }) {
+                Ok(pid) => Ok(Some(i32::try_from(pid)?)),
+                Err(lgwks_deps::storefront::rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(cause) => {
+                    if attempts == 1 {
+                        first_refusal = cause.to_string();
+                    }
+                    Err(cause.into())
+                }
+            }
+        })?;
+        assert!(
+            first_refusal.contains("database is locked"),
+            "seed {seed}: the first read is refused because the writer holds the lock: {first_refusal}"
+        );
+        assert_eq!(answered, pid, "seed {seed}: the pid the row holds");
+        assert_eq!(
+            attempts, 3,
+            "seed {seed}: two busy reads are retried, then the released row answers"
+        );
+    }
+    Ok(())
 }

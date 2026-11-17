@@ -41,7 +41,7 @@ const EPERM: i32 = 1;
 /// Killed members are briefly zombies, so the probes yield between checks, and both group
 /// waits end on this one bound read from the clock their caller injected: a count of yields
 /// measured the scheduler, so a loaded host ended it early and an idle one late.
-const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
+pub(super) const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Longest one slice of the command wait sleeps before it checks the person's
 /// cancel again (larry#242): it bounds Esc-to-kill latency for a running
