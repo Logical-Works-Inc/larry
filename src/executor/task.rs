@@ -152,17 +152,13 @@ impl Task {
         let acceptance_value = object
             .get("acceptance")
             .and_then(|entry| entry.as_array())
-            .ok_or(TaskError::WrongType { key: "acceptance" })?;
+            .ok_or(TaskError::AcceptanceNotArgv)?;
         let mut acceptance: Vec<Vec<String>> = Vec::with_capacity(acceptance_value.len());
         for command in acceptance_value {
-            let argv = command
-                .as_array()
-                .ok_or(TaskError::WrongType { key: "acceptance" })?;
+            let argv = command.as_array().ok_or(TaskError::AcceptanceNotArgv)?;
             let mut owned_argv: Vec<String> = Vec::with_capacity(argv.len());
             for item in argv {
-                let text_item = item
-                    .as_str()
-                    .ok_or(TaskError::WrongType { key: "acceptance" })?;
+                let text_item = item.as_str().ok_or(TaskError::AcceptanceNotArgv)?;
                 owned_argv.push(text_item.to_owned());
             }
             acceptance.push(owned_argv);
@@ -328,6 +324,9 @@ pub enum TaskError {
         /// The key with the wrong type.
         key: &'static str,
     },
+    /// `acceptance` was not an array of argv arrays: the form `larry exec`
+    /// takes, one string array per command (larry#228).
+    AcceptanceNotArgv,
     /// The repository path was empty, oversize, or held a NUL byte.
     BadRepo,
     /// The base was empty, oversize, option-like, or held a control character or whitespace.
@@ -391,6 +390,9 @@ impl fmt::Display for TaskError {
             Self::UnknownKey { ref key } => write!(out, "task document has unknown key {key}"),
             Self::MissingKey { key } => write!(out, "task document is missing key {key}"),
             Self::WrongType { key } => write!(out, "task document key {key} has the wrong type"),
+            Self::AcceptanceNotArgv => out.write_str(
+                "task document key acceptance must be an array of argv arrays, one string array per command, such as [[\"true\"]]",
+            ),
             Self::BadRepo => out.write_str("task document repository path is invalid"),
             Self::BadBase => out.write_str("task document base is invalid"),
             Self::TooManyCommands { count } => {
@@ -650,19 +652,19 @@ mod tests {
                 lgwks_std::json::json!({"repo": repo, "base": base, "acceptance": "run"});
             assert!(matches!(
                 Task::parse(wrong_commands.to_string().as_bytes()),
-                Err(TaskError::WrongType { key: "acceptance" })
+                Err(TaskError::AcceptanceNotArgv)
             ));
             let wrong_command =
                 lgwks_std::json::json!({"repo": repo, "base": base, "acceptance": ["run"]});
             assert!(matches!(
                 Task::parse(wrong_command.to_string().as_bytes()),
-                Err(TaskError::WrongType { key: "acceptance" })
+                Err(TaskError::AcceptanceNotArgv)
             ));
             let wrong_item =
                 lgwks_std::json::json!({"repo": repo, "base": base, "acceptance": [[1]]});
             assert!(matches!(
                 Task::parse(wrong_item.to_string().as_bytes()),
-                Err(TaskError::WrongType { key: "acceptance" })
+                Err(TaskError::AcceptanceNotArgv)
             ));
             assert!(matches!(
                 Task::parse(&rendered("", &base, lgwks_std::json::json!([]))),

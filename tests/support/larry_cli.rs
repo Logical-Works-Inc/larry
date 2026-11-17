@@ -18,9 +18,21 @@ pub fn spawn_larry(
     env: &[(&str, &OsStr)],
     input: &[u8],
 ) -> Result<Child, Box<dyn Error>> {
+    spawn_larry_args(&[subcommand], env, input)
+}
+
+/// Starts `larry` with `args`, only PATH and `env` set, writes `input` to its
+/// stdin and closes it. The one-shot children of the executor and CLI journeys
+/// are built here; `larry_child` builds the long-running protocol children
+/// (larry#228).
+pub fn spawn_larry_args(
+    args: &[&str],
+    env: &[(&str, &OsStr)],
+    input: &[u8],
+) -> Result<Child, Box<dyn Error>> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
     command
-        .arg(subcommand)
+        .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .envs(env.iter().copied())
@@ -30,12 +42,17 @@ pub fn spawn_larry(
     let mut child = command.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         // A refused input may exit before it reads stdin; the broken pipe is the refusal itself.
-        stdin.write_all(input).ok();
+        match stdin.write_all(input) {
+            Ok(()) => {}
+            Err(ref cause) if cause.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(cause) => return Err(cause.into()),
+        }
     }
     Ok(child)
 }
 
 /// The child's stderr as text.
+#[must_use]
 pub fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }

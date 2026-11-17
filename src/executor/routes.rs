@@ -54,7 +54,15 @@ impl fmt::Display for RouteCliError {
             Self::BadNumber { flag, ref reason } => {
                 write!(out, "route {flag} is not a number: {reason}")
             }
-            Self::Route(ref cause) => write!(out, "route: {cause}"),
+            // A route field or id refusal already opens with `route`, so this door adds
+            // no second prefix; a refusal that names no field or row keeps the context
+            // (larry#228).
+            Self::Route(
+                ref cause @ (RouteError::NoRoute
+                | RouteError::TableFull { .. }
+                | RouteError::Damaged { .. }),
+            ) => write!(out, "route: {cause}"),
+            Self::Route(ref cause) => write!(out, "{cause}"),
             Self::Exec(ref cause) => write!(out, "route: {cause}"),
             Self::Output(ref cause) => write!(out, "route output unwritable: {cause}"),
         }
@@ -366,5 +374,46 @@ pub fn run(
         ["resolve"] => show(&read, None, out),
         ["resolve", id] => show(&read, Some(id), out),
         _ => Err(RouteCliError::Usage("not a route command")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RouteCliError;
+    use crate::model::RouteError;
+
+    /// The `larry route` text of one refusal.
+    fn said(error: RouteCliError) -> String {
+        error.to_string()
+    }
+
+    /// A field refusal names `route` once; a row that names no field keeps the
+    /// CLI's context prefix once (larry#228).
+    #[test]
+    fn every_route_refusal_names_route_once() {
+        let field = said(RouteCliError::Route(RouteError::BadKeyEnv));
+        assert!(
+            field.starts_with("route key-env must name a variable"),
+            "{field}"
+        );
+        assert_eq!(field.matches("route").count(), 1, "{field}");
+        let outside = said(RouteCliError::Route(RouteError::KeyEnvOutsideNamespace));
+        assert!(outside.starts_with("route key-env must start"), "{outside}");
+        assert_eq!(outside.matches("route").count(), 1, "{outside}");
+        let numbered = said(RouteCliError::Route(RouteError::BadTemperature));
+        assert!(numbered.starts_with("route temperature must"), "{numbered}");
+        assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
+        for row in [
+            RouteError::NoRoute,
+            RouteError::TableFull { limit: 256 },
+            RouteError::Damaged {
+                id: String::from("r1"),
+                cause: None,
+            },
+        ] {
+            let text = said(RouteCliError::Route(row));
+            assert!(text.starts_with("route: "), "{text}");
+            assert!(!text.starts_with("route: route"), "{text}");
+        }
     }
 }
