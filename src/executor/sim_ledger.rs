@@ -13,11 +13,14 @@ use std::fmt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
-use lgwks_std::process::{ProcessIdentity, identify_process};
+use lgwks_bot::clock::{Clock, ClockError};
+use lgwks_std::process::{ProcessIdentity, identify_process, process_group_exists};
 use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
+use super::super::run::await_gone;
 use super::Ledger;
 
 /// A pid no live process holds: the largest positive `i32` less one.
@@ -40,6 +43,10 @@ const SEEDS: [u64; 4] = [
     0x5EED_0000_FFFF_0021,
     0xDEAD_BEEF_CAFE_0021,
 ];
+
+/// The virtual step one group probe takes: never zero, so time always moves, and small
+/// enough that a wait walks the 5 s deadline in a few dozen probes (larry#308).
+const VIRTUAL_STEP: Duration = Duration::from_millis(250);
 
 /// A fresh state directory: empty when it is made and removed when its guard drops, so a
 /// process id the system reuses never lands a simulation in a stale tree (larry#267).
@@ -231,6 +238,8 @@ enum GroupSimError {
     Identity(lgwks_std::process::ProcessIdentityError),
     /// The executor's own group could not be identified.
     GroupDown,
+    /// The virtual clock refused the step this simulation asked of it.
+    Clock(ClockError),
     /// A racing start panicked.
     Racer,
     /// Rows survived the racing starts.
@@ -297,6 +306,7 @@ impl fmt::Display for GroupSimError {
             Self::Int(ref cause) => write!(out, "integer: {cause}"),
             Self::Identity(ref cause) => write!(out, "identity: {cause}"),
             Self::GroupDown => out.write_str("the executor's own group could not be identified"),
+            Self::Clock(ref cause) => write!(out, "the virtual clock refused a step: {cause}"),
             Self::Racer => out.write_str("a racing start panicked"),
             Self::Survivors { seed, count } => {
                 write!(
@@ -355,6 +365,7 @@ impl std::error::Error for GroupSimError {
             Self::Draw(ref cause) => Some(cause),
             Self::Int(ref cause) => Some(cause),
             Self::Identity(ref cause) => Some(cause),
+            Self::Clock(ref cause) => Some(cause),
             Self::GroupDown
             | Self::Racer
             | Self::Survivors { .. }
@@ -377,6 +388,12 @@ impl From<crate::sim_error::SimError> for GroupSimError {
 impl From<ExecError> for GroupSimError {
     fn from(cause: ExecError) -> Self {
         Self::Exec(cause)
+    }
+}
+
+impl From<ClockError> for GroupSimError {
+    fn from(cause: ClockError) -> Self {
+        Self::Clock(cause)
     }
 }
 
@@ -410,10 +427,21 @@ impl From<lgwks_std::process::ProcessIdentityError> for GroupSimError {
     }
 }
 
+/// Whether the group is gone within the deadline on a virtual clock this probe advances: one
+/// step per probe, so the 5 s deadline passes with no real time and the seed replays the same
+/// trace (larry#308, larry#268).
+fn virtual_group_gone(clock: &Clock, pgid: i32) -> Result<bool, GroupSimError> {
+    await_gone(clock, || -> Result<bool, GroupSimError> {
+        clock.advance(VIRTUAL_STEP)?;
+        Ok(process_group_exists(pgid)?)
+    })
+}
+
 /// One start's reap, run on its own ledger handle: the rows it settled.
 fn racing_start(directory: &Path) -> Result<usize, GroupSimError> {
     let ledger = Ledger::open(directory)?;
-    Ok(ledger.reap()?)
+    let clock = Clock::virtual_at(Duration::ZERO);
+    ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))
 }
 
 /// The racing starts scenario for one seed: `rows` dead rows, then `starts` handles reap
@@ -593,8 +621,9 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
             lgwks_deps::storefront::rusqlite::params!["damaged", pid, started],
         )?;
     }
-    let first = ledger.reap()?;
-    let stranger_up = lgwks_std::process::process_group_exists(stranger_pid)?;
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let first = ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))?;
+    let stranger_up = process_group_exists(stranger_pid)?;
     let trace = format!("damaged={damage} reap1={first} stranger_up_after_reap1={stranger_up}");
     if !stranger_up {
         return Err(GroupSimError::Stranger { seed });
@@ -607,10 +636,10 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
         });
     }
     owned.wait()?;
-    let second = ledger.reap()?;
+    let second = ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))?;
     stranger.kill()?;
     stranger.wait()?;
-    let third = ledger.reap()?;
+    let third = ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))?;
     let rows = ledger.live_tasks()?;
     if second != 1 || third != 1 || !rows.is_empty() {
         return Err(GroupSimError::Final {

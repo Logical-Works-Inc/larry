@@ -7,12 +7,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use lgwks_bot::clock::Clock;
 use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
 use lgwks_std::process::{ProcessIdentity, reap_orphaned_group};
 use lgwks_std::sign::SecretKey;
 
 use super::ExecError;
-use super::run::await_group_gone;
+use super::run::await_gone;
 
 /// The longest `open` waits for another executor's lock on the state directory (larry#214).
 /// Past it the open is refused with [`ExecError::LedgerLockTimeout`], never a wait forever.
@@ -289,15 +290,32 @@ impl Ledger {
 
     /// Settles every recorded group: a damaged row is dropped, a live group is reaped and
     /// its row dropped. Returns how many rows were dropped.
-    pub(crate) fn reap(&self) -> Result<usize, ExecError> {
+    ///
+    /// The group waits read one deadline from `clock`, the caller's, so one clock covers
+    /// this reap and no wait is decided by a count of yields (larry#268). The run path
+    /// builds it with [`larry_runtime::live_clock`], the way the gate builds its own; a
+    /// simulation passes a virtual clock so the deadline passes with no real time
+    /// (larry#308).
+    pub(crate) fn reap(&self, clock: &Clock) -> Result<usize, ExecError> {
+        self.reap_with(|pgid| {
+            await_gone(clock, || {
+                lgwks_std::process::process_group_exists(pgid).map_err(ExecError::Reap)
+            })
+        })
+    }
+
+    /// The row loop over a group-gone answer: `true` when the group is gone, `false` when it
+    /// outlived the caller's deadline. A row is dropped only once its group is gone, so a
+    /// surviving group keeps its row and the next start tries again (INVARIANTS, larry#214).
+    /// The probe is the caller's, so the simulation drives the same loop on a clock it moves.
+    fn reap_with<E>(&self, mut group_gone: impl FnMut(i32) -> Result<bool, E>) -> Result<usize, E>
+    where
+        E: From<ExecError>,
+    {
         let rows = self.rows()?;
         if rows.is_empty() {
             return Ok(0);
         }
-        // The group waits read one deadline from the runtime's live clock, built the way the
-        // gate builds its own; no wait is decided by a count of yields (larry#268). One clock
-        // covers this reap, so every row it settles shares one timeline.
-        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
         let mut settled = 0_usize;
         for (pid, started) in rows {
             // A row no identity can be rebuilt from was damaged or written by something
@@ -318,12 +336,8 @@ impl Ledger {
                 }
             };
             reap_orphaned_group(&identity).map_err(ExecError::Reap)?;
-            // The row goes only once the group is gone (INVARIANTS): a group that
-            // survives its bounded wait keeps its row, and the next start tries again.
-            match await_group_gone(&clock, identity.pid()) {
-                Ok(()) => {}
-                Err(ExecError::GroupSurvived { .. }) => continue,
-                Err(other) => return Err(other),
+            if !group_gone(identity.pid())? {
+                continue;
             }
             self.forget(pid, &started)?;
             settled = settled.saturating_add(1);
@@ -459,8 +473,9 @@ mod tests {
             "INSERT INTO live_groups (task_id, pid, started) VALUES (?1, ?2, ?3)",
             rusqlite::params!["task-c", DEAD_PID, "zzz"],
         )?;
+        let clock = larry_runtime::live_clock()?;
         assert_eq!(
-            ledger.reap()?,
+            ledger.reap(&clock)?,
             2,
             "the dead-leader row and the damaged row are both settled"
         );
@@ -483,7 +498,8 @@ mod tests {
         let pid = i32::try_from(survivor.id())?;
         let stranger = ProcessIdentity::new(pid, PLATFORM_START)?;
         ledger.insert("task-s", &stranger)?;
-        let settled = ledger.reap();
+        let clock = larry_runtime::live_clock()?;
+        let settled = ledger.reap(&clock);
         let group_up = lgwks_std::process::process_group_exists(pid);
         drop(survivor.kill());
         drop(survivor.wait());
