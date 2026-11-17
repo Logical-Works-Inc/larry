@@ -83,33 +83,39 @@ where
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<Option<EffectOutcome>, RuntimeError> {
-        Ok(match live.intent.strategy.reconciliation_action() {
-            larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
-                let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
-                let authority_live =
-                    self.fence.authorize(key, &live.intent).is_ok() && live.proof.check().is_ok();
-                let decision = retry::decide(live, max_attempts, at, authority_live)?;
-                let authority_only = decision.refusals() == [RetryRefusal::AuthorityNotLive];
-                if decision.permits_retry() || authority_only {
-                    self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
-                } else {
-                    // The estate rule refused the retry. The effect stays
-                    // visibly unresolved, and the budget is spent so it leaves
-                    // reconciliation rather than being re-asked every tick.
-                    if let Some(open) = self.live.get_mut(&operation) {
-                        open.dispatches = max_attempts;
+        Ok(
+            match live
+                .intent
+                .strategy
+                .reconciliation_action(self.settings.max_effect_attempts)
+            {
+                larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
+                    let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
+                    let authority_live = self.fence.authorize(key, &live.intent).is_ok()
+                        && live.proof.check().is_ok();
+                    let decision = retry::decide(live, max_attempts, at, authority_live)?;
+                    let authority_only = decision.refusals() == [RetryRefusal::AuthorityNotLive];
+                    if decision.permits_retry() || authority_only {
+                        self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
+                    } else {
+                        // The estate rule refused the retry. The effect stays
+                        // visibly unresolved, and the budget is spent so it leaves
+                        // reconciliation rather than being re-asked every tick.
+                        if let Some(open) = self.live.get_mut(&operation) {
+                            open.dispatches = max_attempts;
+                        }
+                        Some(EffectOutcome::Unknown { operation })
                     }
+                }
+                larry_contracts::effect::ReconciliationAction::Observe => {
+                    self.reach_owner(live.intent, OwnerReach::Observe, at, report)?
+                }
+                larry_contracts::effect::ReconciliationAction::LeaveUnknown => {
                     Some(EffectOutcome::Unknown { operation })
                 }
-            }
-            larry_contracts::effect::ReconciliationAction::Observe => {
-                self.reach_owner(live.intent, OwnerReach::Observe, at, report)?
-            }
-            larry_contracts::effect::ReconciliationAction::LeaveUnknown => {
-                Some(EffectOutcome::Unknown { operation })
-            }
-            other => return Err(RuntimeError::UnsupportedReconciliationAction(other)),
-        })
+                other => return Err(RuntimeError::UnsupportedReconciliationAction(other)),
+            },
+        )
     }
 
     /// Whether an effect is still open *and* still within its interaction
@@ -128,7 +134,7 @@ where
         if live.dispatched_at_tick >= self.tick_count {
             return false;
         }
-        if live.reconciliations >= larry_contracts::effect::MAX_EFFECT_ATTEMPTS {
+        if live.reconciliations >= self.settings.max_effect_attempts {
             return false;
         }
         let open = match self.projection.effect_phase(operation) {
@@ -157,7 +163,11 @@ where
         // no owner and writes nothing, and keeps the refusal visible on every
         // tick until the host either re-authenticates or gives up on the
         // effect deliberately.
-        match live.intent.strategy.reconciliation_action() {
+        match live
+            .intent
+            .strategy
+            .reconciliation_action(self.settings.max_effect_attempts)
+        {
             larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
                 live.dispatches < max_attempts
             }

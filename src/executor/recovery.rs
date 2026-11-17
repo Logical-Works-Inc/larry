@@ -29,7 +29,7 @@ use larry_runtime::runtime::restore;
 use lgwks_bot::journal::JournalError;
 
 use super::ExecError;
-use super::gate::{lease_end, task_settings};
+use super::gate::{task_settings, with_expiry};
 
 /// The directory under the state directory that holds the task journals.
 pub(super) const JOURNALS_DIR: &str = "journals";
@@ -63,7 +63,8 @@ pub(super) fn journal_path(state: &Path, task_id: &str) -> PathBuf {
 ///
 /// # Errors
 ///
-/// [`ExecError::Gate`] when the lease instant cannot be read.
+/// [`ExecError::Gate`] when the journal cannot be opened for a reason other
+/// than liveness.
 pub(super) fn journal_live(
     state: &Path,
     policy: &BTreeSet<Scope>,
@@ -73,7 +74,7 @@ pub(super) fn journal_live(
     if !path.exists() {
         return Ok(false);
     }
-    let capacity = task_settings(policy, lease_end(SystemTime::now())?).journal_capacity;
+    let capacity = task_settings(policy).journal_capacity;
     match Journal::open(&path, capacity) {
         Ok(_) => Ok(false),
         Err(RuntimeError::Durable(JournalError::Locked { .. })) => Ok(true),
@@ -130,7 +131,7 @@ const fn unknown(intent: &EffectIntent) -> EffectOutcome {
 /// Replays, restores and ticks one journal a dead executor left, so the
 /// reservation it proves is recorded as settled before the file is set aside.
 fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError> {
-    let run_settings = task_settings(policy, lease_end(SystemTime::now())?);
+    let run_settings = with_expiry(task_settings(policy), SystemTime::now())?;
     let journal = Journal::open(path, run_settings.journal_capacity)?;
     let mut runtime = restore::<FoldProjection, _>(
         run_settings,

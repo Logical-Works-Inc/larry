@@ -9,14 +9,13 @@
 //! are not. One seed drives every draw, so a failing seed replays exactly.
 
 use std::collections::BTreeSet;
-use std::time::SystemTime;
 
 use larry_contracts::authority::Scope;
 use larry_runtime::journal::Journal;
 use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
-use super::super::gate::{lease_end, policy, task_settings};
+use super::super::gate::{policy, task_settings};
 use super::{JOURNALS_DIR, journal_live, journal_path, recover};
 
 /// What every simulation here returns.
@@ -30,10 +29,6 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE_0031,
 ];
 
-/// The sim's pinned instant: only the journal capacity is read from the lease, so a fixed reading
-/// keeps every seed replaying the same trace (larry#267).
-const PINNED_INSTANT: SystemTime = SystemTime::UNIX_EPOCH;
-
 /// A fresh state directory: empty when it is made and removed when its guard drops, so a
 /// process id the system reuses never lands a simulation in a stale tree (larry#267).
 fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_error::SimError> {
@@ -43,8 +38,7 @@ fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_
 /// The policy an unset `LARRY_POLICY` yields, and the journal capacity it sets.
 fn settings() -> Result<(BTreeSet<Scope>, usize), ExecError> {
     let scopes = policy(&|_name: &str| None)?;
-    let expiry = lease_end(PINNED_INSTANT).map_err(ExecError::Gate)?;
-    let capacity = task_settings(&scopes, expiry).journal_capacity;
+    let capacity = task_settings(&scopes).journal_capacity;
     Ok((scopes, capacity))
 }
 

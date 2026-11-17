@@ -31,11 +31,6 @@ use crate::owner::EffectOwner;
 use crate::payload::WorkProposal;
 use crate::projection::ProjectionBackend;
 
-/// Most questions one runtime holds pending at once (Cell 05 bounds). A scope
-/// set needs no bound of its own: `Scope` is closed, so a set holds at most
-/// its five variants.
-const MAX_PENDING_QUESTIONS: usize = 256;
-
 /// The exact effect a question is about: its run, its operation, the content
 /// digest of the `Submit` that carries it, and the answer schema revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,7 +165,7 @@ enum QuestionStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum QuestionError {
-    /// The runtime's bound of pending questions (256) is reached.
+    /// The runtime's configured bound of pending questions is reached.
     PendingFull {
         /// The bound.
         capacity: usize,
@@ -420,11 +415,9 @@ where
             }
             .into());
         }
-        if self.pending_questions(at) >= MAX_PENDING_QUESTIONS {
-            return Err(QuestionError::PendingFull {
-                capacity: MAX_PENDING_QUESTIONS,
-            }
-            .into());
+        let capacity = self.settings.max_pending_questions;
+        if self.pending_questions(at) >= capacity {
+            return Err(QuestionError::PendingFull { capacity }.into());
         }
         Ok(())
     }

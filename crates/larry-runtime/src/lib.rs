@@ -108,6 +108,29 @@ pub const MAX_JOURNAL_ENTRIES: usize = 65_536;
 /// Maximum runs the projection tracks.
 pub const MAX_TRACKED_RUNS: usize = 1_024;
 
+/// The default ceiling on pending questions (Cell 05 bounds), and the largest
+/// value a host may configure: a question is a journaled command, so the
+/// journal's own entry ceiling is the hard bound above it.
+pub(crate) const MAX_PENDING_QUESTIONS: usize = 256;
+
+/// The default ceiling on the grants one display may offer, and the most a
+/// host may configure: the scan is a declared work bound, so a setting can
+/// lower it and never raise it.
+pub(crate) const MAX_DISPLAY_GRANTS: usize = 64;
+
+/// The most a host may declare two honest clocks to disagree. A declaration
+/// longer than this would outlive the leases it judges.
+pub(crate) const MAX_SKEW_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The default admission lease: how long authority minted at one instant
+/// stands. Admission and dispatch happen inside one owner call, so the lease
+/// only has to outlive the tick (larry#164, larry#212).
+pub(crate) const DEFAULT_ADMISSION_LEASE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The longest admission lease a host may configure: one hour, so a lease can
+/// never stand in for a standing entitlement.
+pub(crate) const MAX_ADMISSION_LEASE: std::time::Duration = std::time::Duration::from_secs(3_600);
+
 /// Maximum ready commands one tick may admit, so a single tick is bounded
 /// work regardless of queue depth.
 pub const MAX_RUNS_PER_TICK: usize = 64;
@@ -134,9 +157,15 @@ mod tests {
     #[test]
     fn bounds_match_the_specification_cell_05() {
         // Retyping the Cell 05 numbers here is deliberate: if a bound moves,
-        // this test is the place the change has to be justified.
+        // this test is the place the change has to be justified. These are the
+        // defaults of `RuntimeSettings`, and a host may lower them (larry#212).
         assert_eq!(MAX_READY_WORK, 256);
         assert_eq!(MAX_RUNS_PER_TICK, 64);
+        assert_eq!(MAX_PENDING_QUESTIONS, 256);
+        assert_eq!(MAX_DISPLAY_GRANTS, 64);
+        assert_eq!(MAX_SKEW_BOUND, std::time::Duration::from_secs(60));
+        assert_eq!(DEFAULT_ADMISSION_LEASE, std::time::Duration::from_secs(60));
+        assert_eq!(MAX_ADMISSION_LEASE, std::time::Duration::from_secs(3_600));
         assert_eq!(
             usize::try_from(MAX_OFFLINE_DISPATCHES),
             Ok(MAX_RUNS_PER_TICK)

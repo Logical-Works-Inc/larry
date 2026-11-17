@@ -58,6 +58,15 @@ pub enum EffectPhase {
 
 /// The read-only view the runtime and its callers use.
 pub trait ProjectionBackend {
+    /// An empty view bounded to `capacity` runs.
+    ///
+    /// The runtime builds its projection through this, never `Default::default()`,
+    /// so the view's own ceiling is the run table's (larry#212). A backend that
+    /// keeps no capacity answers with its empty view.
+    fn with_capacity(capacity: usize) -> Self
+    where
+        Self: Sized;
+
     /// Discards the current view and re-derives it from the whole journal.
     ///
     /// # Errors
@@ -328,6 +337,10 @@ impl FoldProjection {
 }
 
 impl ProjectionBackend for FoldProjection {
+    fn with_capacity(capacity: usize) -> Self {
+        Self::new(capacity)
+    }
+
     fn rebuild(&mut self, journal: &Journal) -> Result<(), RuntimeError> {
         self.runs.clear();
         self.receipts.clear();

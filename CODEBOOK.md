@@ -44,7 +44,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `owner` | The effect-owner trait; test doubles under `fixture` only |
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
 | `error` | Every refused runtime operation |
-| `runtime` | Settings, `TickReport`, stage 2 (admit, reserve, dispatch), `restore` |
+| `runtime` | `TickReport`, stage 2 (admit, reserve, dispatch), `restore`; `runtime::settings` the `RuntimeSettings` every capacity, payload ceiling, skew bound, attempt bound, protocol range and lease, with their Cell 05 defaults and the one validation `Runtime::new` and `restore` apply (larry#212, ADR 0056) |
 | `runtime::instant` | The tick's one pinned instant and the live clock's epoch anchor (`live_clock`): `lgwks_bot::clock` read as time since the Unix epoch (larry#74, #182) |
 | `runtime::admission` | E28 durable admission before the acknowledgement, the pending set, safe-boundary promotion, nothing in memory before the sync (ADR 0025, ADR 0036) |
 | `runtime::approval` | E30 durable questions and answers, the question book folded from the journal, the approval gate (ADR 0027) |

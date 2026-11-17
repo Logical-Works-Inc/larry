@@ -36,10 +36,7 @@ use larry_runtime::journal::Journal;
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
-use larry_runtime::protocol::{
-    MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, ProtocolCapability, ProtocolOffer,
-    ProtocolVersionRange,
-};
+use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 
 use super::ExecError;
@@ -49,16 +46,16 @@ use super::Task;
 use super::identity;
 use super::recovery::{JOURNALS_DIR, journal_path, recovered_evidence};
 
-/// How long admission authority runs: admission and dispatch happen inside one
-/// call, so the lease only has to outlive the tick.
-const GATE_LEASE: Duration = Duration::from_secs(60);
-
-/// The policy revision this build pins; a decision is only comparable inside
-/// one revision.
-const POLICY_REVISION: u64 = 1;
+/// The prefix every policy revision digest carries, so a revision computed here
+/// can never collide with a digest computed for another purpose.
+const POLICY_REVISION_TAG: &[u8] = b"larry/executor/policy-revision/v1\0";
 
 /// The request each task costs against its one-run budget.
 const TASK_COST: u64 = 1;
+
+/// The schema version of the executor's own adapter contract, which a resolved
+/// effect records.
+const ADAPTER_SCHEMA: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
@@ -105,16 +102,51 @@ pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
 /// The prefix the estate capability names carry and a policy name omits.
 const CAPABILITY_PREFIX: &str = "larry.";
 
-/// The runtime settings one task runs under: this build's policy revision,
-/// the executor's capabilities, the lease ending at `expiry`, one request.
-pub(super) fn task_settings(policy: &BTreeSet<Scope>, expiry: SystemTime) -> RuntimeSettings {
+/// The runtime settings one task runs under: the revision of the policy record
+/// it runs under, the executor's capabilities, one request, and the runtime's
+/// own default lease.
+///
+/// The revision is derived from the record itself, so the same `LARRY_POLICY`
+/// always names the same revision and a changed policy names a different one,
+/// rather than a constant only this build knows (larry#212).
+pub(super) fn task_settings(policy: &BTreeSet<Scope>) -> RuntimeSettings {
     RuntimeSettings::with_defaults(
-        PolicySnapshot::new(POLICY_REVISION, policy.clone()),
+        PolicySnapshot::new(policy_revision(policy), policy.clone()),
         CapabilitySnapshot::new(EXECUTOR_CAPABILITIES.iter().copied().collect()),
-        ValiditySnapshot::new(expiry),
+        ValiditySnapshot::new(SystemTime::UNIX_EPOCH),
         BudgetUnit::Requests,
         TASK_COST,
     )
+}
+
+/// The revision of one policy record: a digest over the policy's own scope
+/// names, in `Scope` order, so the same admitted set always yields the same
+/// revision and a decision is only ever comparable inside one (larry#212).
+fn policy_revision(policy: &BTreeSet<Scope>) -> u64 {
+    let mut record = String::new();
+    for scope in policy {
+        record.push_str(&scope_name(*scope));
+        record.push('\n');
+    }
+    let digest =
+        larry_contracts::ids::ContentDigest::over(&[POLICY_REVISION_TAG, record.as_bytes()]);
+    let mut revision = 0u64;
+    for byte in digest.as_bytes().iter().take(8) {
+        revision = (revision << 8) | u64::from(*byte);
+    }
+    revision
+}
+
+/// `settings` with its validity pinned to the admission lease that starts at
+/// `now`: the lease length is the runtime's own setting, so the executor keeps
+/// no clock constant of its own (larry#212).
+pub(super) fn with_expiry(
+    settings: RuntimeSettings,
+    now: SystemTime,
+) -> Result<RuntimeSettings, RuntimeError> {
+    let mut settings = settings;
+    settings.validity = ValiditySnapshot::new(lease_end(now, settings.lease)?);
+    Ok(settings)
 }
 
 /// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
@@ -227,14 +259,14 @@ fn denied_report(
     )
 }
 
-/// `now + GATE_LEASE` as an instant, or the typed refusal when the platform
-/// cannot hold the reading.
-pub(super) fn lease_end(now: SystemTime) -> Result<SystemTime, RuntimeError> {
+/// `now + lease` as an instant, or the typed refusal when the platform cannot
+/// hold the reading.
+pub(super) fn lease_end(now: SystemTime, lease: Duration) -> Result<SystemTime, RuntimeError> {
     let elapsed = match now.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(elapsed) => elapsed,
         Err(_) => Duration::ZERO,
     };
-    let total = elapsed.saturating_add(GATE_LEASE);
+    let total = elapsed.saturating_add(lease);
     SystemTime::UNIX_EPOCH
         .checked_add(total)
         .ok_or(RuntimeError::ClockOutOfRange { elapsed: total })
@@ -254,6 +286,10 @@ where
     repo: &'a std::path::Path,
     /// The tenant the run belongs to; one state directory is one tenant.
     tenant: TenantId,
+    /// The security generation the runtime's fence starts at: the epoch a
+    /// resolved effect names, read from the runtime's own settings rather than
+    /// a constant (larry#212).
+    epoch: SecurityEpoch,
     /// The task document bytes the effect's payload binds to.
     task_bytes: &'a [u8],
     /// The gated body, held until the bound reach runs it once.
@@ -284,8 +320,12 @@ where
             b"larry.executor/v1",
         )?;
         // The schema version of the executor's own adapter contract, and the
-        // epoch the runtime's fence starts at under the default settings.
-        Ok(Some(ResolvedEffect::new(target, 1, SecurityEpoch::INITIAL)))
+        // generation the runtime's fence was built at.
+        Ok(Some(ResolvedEffect::new(
+            target,
+            ADAPTER_SCHEMA,
+            self.epoch,
+        )))
     }
 
     fn dispatch_bound(
@@ -374,7 +414,11 @@ pub(super) fn admit_and_run(
     // of: the display's cover check needs one grant that stands alone.
     let granted: BTreeSet<Scope> = policy.intersection(&capabilities).copied().collect();
     let now = SystemTime::now();
-    let expiry = lease_end(now).map_err(ExecError::Gate)?;
+    // One settings record decides the policy revision, the admission lease and
+    // the security generation the fence starts at, so the executor keeps no
+    // copy of any of them (larry#212).
+    let run_settings = with_expiry(task_settings(policy), now).map_err(ExecError::Gate)?;
+    let expiry = run_settings.validity.valid_until;
     let tenant = identity::tenant_of(&settings.state_dir);
     let holder = identity::worker_of(&settings.state_dir);
     let (run_id, operation, command_id) = identity::ids_of(task_id);
@@ -410,13 +454,13 @@ pub(super) fn admit_and_run(
     let owner = TaskOwner {
         repo: subject.path,
         tenant,
+        epoch: run_settings.security_epoch,
         task_bytes: subject.bytes,
         run: Some(run),
         slot: Rc::clone(&slot),
     };
     std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
     let path = journal_path(&settings.state_dir, task_id);
-    let run_settings = task_settings(policy, expiry);
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     let opened = Journal::open(&path, run_settings.journal_capacity)
         .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
@@ -524,13 +568,13 @@ fn drive<O: EffectOwner>(
         Err(other) => return Err(ExecError::Gate(other)),
     };
     // The ingress negotiates before the command is queued (E47): the
-    // executor offers the runtime's own version range and the SubmitCommand
-    // capability only, and it is headless — a task's question can wait for
-    // no human here.
+    // executor offers the runtime's own configured version range and the
+    // SubmitCommand capability only, and it is headless — a task's question can
+    // wait for no human here.
     let offered = BTreeSet::from([ProtocolCapability::SubmitCommand]);
     let offer = ProtocolOffer::new(
         tenant,
-        ProtocolVersionRange::new(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION),
+        runtime.settings().protocol_range(),
         offered,
         true,
         false,
@@ -612,11 +656,14 @@ where
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use super::{GATE_LEASE, lease_end};
+    use larry_contracts::authority::Scope;
 
-    /// The executor's lease and the runtime's tick are one timeline: the live clock the executor
-    /// passes reads after 2023, not 1970, and the expiry sits one lease after that reading
-    /// (larry#182).
+    use super::{default_policy, policy_revision, task_settings, with_expiry};
+
+    /// The executor's lease and the runtime's tick are one timeline: the live
+    /// clock the executor passes reads after 2023, not 1970, and the validity
+    /// the runtime is built with sits exactly one configured lease after that
+    /// reading (larry#182, larry#212).
     #[test]
     fn the_executors_lease_and_the_runtimes_tick_share_one_timeline()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -631,9 +678,29 @@ mod tests {
             tick > anchored,
             "the live clock is anchored after 2023, not at 1970: {tick:?}"
         );
-        let expiry = lease_end(tick)?;
-        let gap = expiry.duration_since(tick)?;
-        assert_eq!(gap, GATE_LEASE, "the expiry sits one lease after the tick");
+        let run_settings = with_expiry(task_settings(&default_policy()), tick)?;
+        let gap = run_settings.validity.valid_until.duration_since(tick)?;
+        assert_eq!(
+            gap, run_settings.lease,
+            "the validity sits one configured lease after the tick"
+        );
         Ok(())
+    }
+
+    /// The policy revision is a fact about the policy record, not a constant:
+    /// the same admitted set yields the same revision, and one more scope
+    /// yields a different one (larry#212).
+    #[test]
+    fn task_settings_derive_the_revision_from_the_policy_record() {
+        let first = task_settings(&default_policy());
+        let again = task_settings(&default_policy());
+        assert_eq!(first.policy.revision, again.policy.revision);
+
+        let mut widened = default_policy();
+        widened.insert(Scope::NetworkEgress);
+        assert_ne!(
+            policy_revision(&default_policy()),
+            policy_revision(&widened)
+        );
     }
 }
