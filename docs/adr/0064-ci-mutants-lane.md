@@ -36,9 +36,9 @@ self-hosted Mac, larry#116), with the one-run-per-ref cancel of ADR 0060.
   (no build), and emits `count`, `shards` and a matrix. `shards = min(16, ceil(count / K))`, so zero
   mutants is zero shards. It uploads `pr.diff` once: every shard reads that one diff, because shards
   that disagree on the mutant list or on `n` give meaningless results (mutants.rs/shards).
-- `shard` (matrix, `fail-fast: false`, 10 minute timeout): restores the cache, then runs
+- `shard` (matrix, `fail-fast: false`, 15 minute timeout): restores the cache, then runs
   `cargo mutants --workspace --in-diff pr.diff --shard k/n --in-place --baseline skip --test-tool
-  nextest --no-shuffle --timeout 240 --cargo-arg=--locked`. Shards are numbered from 0. Exit codes
+  nextest --no-shuffle --timeout 300 --cargo-arg=--locked`. Shards are numbered from 0. Exit codes
   0 (all caught), 2 (a miss) and 3 (a timeout) are data; any other code fails the shard. It uploads
   `mutants.out/outcomes.json` as `mutants-outcomes-<k>`.
 - `verdict` (`needs: [plan, shard]`, `if: always()`): merges every `outcomes.json` with `jq` and
@@ -55,8 +55,10 @@ self-hosted Mac, larry#116), with the one-run-per-ref cancel of ADR 0060.
   ADR 0060 gives each job its own key, but this workflow never runs on main, so a key of its own
   would never be written. It reads the test lane's key and saves nothing; a PR still never writes
   what main restores.
-- K, mutants per shard, is 3: ESTIMATE, set from the model setup plus (incremental build plus
-  package test run) times K. The measured shard times are in the Consequences below.
+- K, mutants per shard, is 2. MEASURED on larry#310: on a cold cache (the shard's cache paths
+  missed the test lane's key) one shard of 3 mutants took 7m18s and its pair hit a 10 minute
+  timeout; on the restored cache 4 shards of 2 took 4m03s to 5m18s, and the lane 5m43s
+  (runs 44197696481 red at 50% naming 4 missed lines, 44198842255 green at 100%).
 
 ## Consequences
 
@@ -67,7 +69,7 @@ self-hosted Mac, larry#116), with the one-run-per-ref cancel of ADR 0060.
 - `--workspace` mutates every crate in the diff, and each mutant runs only its own package's tests
   (cargo-mutants' default), not the workspace suite. A mutant in `larry-contracts` that only a root
   journey catches counts as missed. That is deliberate: the floor measures a crate's own tests.
-- Above 16 shards' worth of mutants a shard holds more than K mutants and may reach its 10 minute
+- Above 16 shards' worth of mutants a shard holds more than K mutants and may reach its 15 minute
   timeout, which turns the verdict red. A large PR is expected to split, or to raise the cap with a
   measurement.
 - A PR of only test code, or only deleted lines, lists no mutants and passes with `no mutants`.

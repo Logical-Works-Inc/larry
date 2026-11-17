@@ -205,8 +205,6 @@ pub enum Rejected {
     NoteBound,
     /// `feedback` carried no text.
     EmptyFeedback,
-    /// `clear` arrived with no note to drop.
-    NothingToClear,
 }
 
 impl std::fmt::Display for Rejected {
@@ -235,7 +233,6 @@ impl Demo {
             "folders" => self.folders = !self.folders,
             "agents" => self.agents = !self.agents,
             "continue" => self.resume()?,
-            "clear" => self.clear()?,
             "reset" | "scenario change" => *self = Self::default(),
             "scenario empty" => {
                 *self = Self {
@@ -304,38 +301,6 @@ impl Demo {
             anchor: index.saturating_add(1),
         };
         Ok(())
-    }
-
-    /// Drop every session note and lift the hold they set, or refuse when there is none.
-    fn clear(&mut self) -> Result<(), Rejected> {
-        if self.notes.is_empty() {
-            return Err(Rejected::NothingToClear);
-        }
-        self.drop_notes();
-        self.lift_hold();
-        self.forget_selection();
-        self.rewind();
-        Ok(())
-    }
-
-    /// Forget which change is selected.
-    fn forget_selection(&mut self) {
-        self.selected = None;
-    }
-
-    /// Hide every revealed change again.
-    fn rewind(&mut self) {
-        self.cursor = 0;
-    }
-
-    /// Forget the session's notes.
-    fn drop_notes(&mut self) {
-        self.notes.clear();
-    }
-
-    /// Let the held owner advance again.
-    fn lift_hold(&mut self) {
-        self.work = Work::Ready;
     }
 
     /// Release an existing fixture hold without dispatching any real work.
