@@ -60,16 +60,18 @@ enum SourceRead {
 
 /// Every refusal the rule raises over the repository at `root`, sorted, in path and line order.
 pub(crate) fn errors(root: &Path) -> Result<Vec<String>, GovernanceError> {
-    let pending = pending(root)?;
-    Ok(judge(&pending, lane_count(pending.len())))
+    let mut walk = Vec::new();
+    let pending = pending(root, &mut walk)?;
+    Ok(judge(&pending, lane_count(pending.len()), walk))
 }
 
 /// Every refusal over `root` parsed on at most `lanes` threads: the control names the lane count
 /// so it can prove one worker and many give byte-identical refusals (larry#316).
 #[cfg(test)]
 pub(super) fn errors_on(root: &Path, lanes: usize) -> Result<Vec<String>, GovernanceError> {
-    let pending = pending(root)?;
-    Ok(judge(&pending, lanes))
+    let mut walk = Vec::new();
+    let pending = pending(root, &mut walk)?;
+    Ok(judge(&pending, lanes, walk))
 }
 
 /// The lanes one whole-tree check may use: the host's available parallelism and never more than
@@ -83,9 +85,9 @@ fn lane_count(files: usize) -> usize {
     cores.clamp(1, files.max(1))
 }
 
-/// The sources the rule reads under `root`, in path order, with the guards and repeats removed.
-fn pending(root: &Path) -> Result<Vec<Source>, GovernanceError> {
-    let mut errors = Vec::new();
+/// The sources the rule reads under `root`, in path order, with the guards and repeats removed;
+/// a walk refusal lands in `errors` with the file it names.
+fn pending(root: &Path, errors: &mut Vec<String>) -> Result<Vec<Source>, GovernanceError> {
     let mut queue: VecDeque<Source> = VecDeque::new();
     for directory in ROOTS {
         let relative = String::from(directory);
@@ -98,7 +100,7 @@ fn pending(root: &Path) -> Result<Vec<Source>, GovernanceError> {
                 });
             }
             Ok(metadata) if metadata.is_dir() => {
-                collect(&path, &relative, 0, &mut queue, &mut errors)?;
+                collect(&path, &relative, 0, &mut queue, errors)?;
             }
             Ok(_) => {
                 return Err(GovernanceError::Unreadable {
@@ -122,9 +124,8 @@ fn pending(root: &Path) -> Result<Vec<Source>, GovernanceError> {
         .collect())
 }
 
-/// The refusals every pending source raises, sorted and deduplicated.
-fn judge(pending: &[Source], lanes: usize) -> Vec<String> {
-    let mut errors = Vec::new();
+/// The refusals every pending source raises, sorted and deduplicated, after the walk's own.
+fn judge(pending: &[Source], lanes: usize, mut errors: Vec<String>) -> Vec<String> {
     for scanned in scan_all(pending, lanes) {
         errors.extend(scanned);
     }

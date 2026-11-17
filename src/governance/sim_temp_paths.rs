@@ -514,6 +514,20 @@ fn trace_of(roots: &[Root]) -> Result<String, SimError> {
     Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
 }
 
+/// The walk's own refusal survives the pool (larry#316): a source whose name is not UTF-8 is
+/// named by its directory, never skipped and never passed.
+#[test]
+fn sim_a_non_utf8_source_name_is_refused() -> SimResult {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let tree = fixture("temp-nonutf8", "tests/plain.rs", "fn plain() {}\n")?;
+    let name = std::ffi::OsString::from_vec(b"bad\xff.rs".to_vec());
+    std::fs::write(tree.path().join("tests").join(name), b"fn bad() {}\n")?;
+    let errors = refusals(&tree)?;
+    assert_reason(&errors, "tests", "not UTF-8");
+    Ok(())
+}
+
 /// The worker-count proof (larry#316): one tree checked on 1, 0, 2, 3, 8 and the host's own lane
 /// count gives byte-identical refusals, because every answer lands at its path's index.
 #[test]
