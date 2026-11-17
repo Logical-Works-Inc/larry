@@ -61,6 +61,18 @@ pub(crate) enum GovernanceError {
         /// The file, relative to the root.
         relative: String,
     },
+    /// A workspace member's source root is missing, named so a missing root cannot pass with zero
+    /// files read (larry#311).
+    MissingRoot {
+        /// The directory, relative to the root.
+        relative: String,
+    },
+    /// The root manifest refused the workspace read: a symlink, an unsupported member form, or
+    /// bytes that are not UTF-8 (larry#311).
+    Workspace {
+        /// The cause the reader reported.
+        cause: String,
+    },
     /// A checker pattern did not compile.
     Pattern {
         /// The pattern.
@@ -115,6 +127,10 @@ impl fmt::Display for GovernanceError {
             Self::SourceNotUtf8 { ref relative } => {
                 write!(out, "source file is not UTF-8: {relative}")
             }
+            Self::MissingRoot { ref relative } => {
+                write!(out, "source tree is missing: {relative}")
+            }
+            Self::Workspace { ref cause } => write!(out, "workspace refused: {cause}"),
             Self::Pattern {
                 ref pattern,
                 ref cause,
@@ -142,6 +158,8 @@ impl std::error::Error for GovernanceError {
             | Self::NotUtf8 { .. }
             | Self::SourceTooLarge { .. }
             | Self::SourceNotUtf8 { .. }
+            | Self::MissingRoot { .. }
+            | Self::Workspace { .. }
             | Self::InvalidIpv6Url
             | Self::InvalidIpvFuture
             | Self::BracketedIpv4

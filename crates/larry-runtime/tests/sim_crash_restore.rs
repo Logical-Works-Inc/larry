@@ -486,7 +486,7 @@ fn tenant_of(entry: &JournalEntry) -> Option<TenantId> {
 #[test]
 fn sim_crash_restore_from_the_file_after_a_drop_keeps_every_acknowledged_entry() -> Outcome {
     replay(160_u64..168, |seed| -> Sim<ContentDigest> {
-        let path = fresh_journal("drop", seed)?;
+        let (_guard, path) = fresh_journal("drop", seed)?;
         let mut runtime = durable(ScriptedOwner::scripted([unknown(operation(24))]), &path)?;
         let strat = ReconciliationStrategy::Queryable;
         dispatch(&mut runtime, 24, 24, &[Scope::FileRead], 5, strat)?;
@@ -521,7 +521,7 @@ fn sim_crash_restore_from_the_file_after_a_drop_keeps_every_acknowledged_entry()
 #[test]
 fn sim_a_torn_tail_is_taken_back_and_the_run_restores() -> Outcome {
     replay(168_u64..176, |seed| -> Sim<(ContentDigest, u64)> {
-        let path = fresh_journal("torn", seed)?;
+        let (_guard, path) = fresh_journal("torn", seed)?;
         let mut runtime = durable(ScriptedOwner::scripted([unknown(operation(25))]), &path)?;
         let strat = ReconciliationStrategy::Queryable;
         dispatch(&mut runtime, 25, 25, &[Scope::FileRead], 5, strat)?;
@@ -560,10 +560,10 @@ fn sim_a_torn_tail_is_taken_back_and_the_run_restores() -> Outcome {
 #[test]
 fn sim_two_tenants_journals_stay_separate_across_a_crash() -> Outcome {
     replay(176_u64..184, |seed| -> Sim<Vec<ContentDigest>> {
-        let paths = [
-            fresh_journal("tenant-1", seed)?,
-            fresh_journal("tenant-2", seed)?,
-        ];
+        let (first_guard, first_path) = fresh_journal("tenant-1", seed)?;
+        let (second_guard, second_path) = fresh_journal("tenant-2", seed)?;
+        let paths = [first_path, second_path];
+        let _guards = [first_guard, second_guard];
         let strat = ReconciliationStrategy::IdempotentRetrySafe;
         for (n, path) in (1_u8..).zip(&paths) {
             let mut runtime = durable(ScriptedOwner::scripted([succeeded(operation(n))]), path)?;
@@ -602,7 +602,7 @@ fn sim_two_tenants_journals_stay_separate_across_a_crash() -> Outcome {
 #[test]
 fn sim_a_second_opener_is_refused_while_the_first_holds_the_file() -> Outcome {
     replay(184_u64..192, |seed| -> Sim<usize> {
-        let path = fresh_journal("locked", seed)?;
+        let (_guard, path) = fresh_journal("locked", seed)?;
         let owner = ScriptedOwner::scripted([succeeded(operation(26)), succeeded(operation(27))]);
         let mut first = durable(owner, &path)?;
         let strat = ReconciliationStrategy::IdempotentRetrySafe;

@@ -213,7 +213,7 @@ fn is_tmpdir_call(node: &AstNode<'_>) -> bool {
 }
 
 /// The content of the first string literal in `node`, if it holds one.
-fn first_literal(node: &AstNode<'_>) -> Option<String> {
+pub(super) fn first_literal(node: &AstNode<'_>) -> Option<String> {
     node.dfs().find_map(|child| {
         if matches!(
             child.kind().as_ref(),
@@ -368,5 +368,88 @@ fn bound_names(function: &AstNode<'_>) -> BTreeSet<String> {
             }
         }
     }
+    names
+}
+
+/// One source path a tree names, with the inline module names a `#[path]` attribute is rooted
+/// through. An `include!` file is always read beside its file, so it carries no module names.
+pub(super) struct Named {
+    /// The path the source names.
+    pub(super) name: String,
+    /// The inline modules around the name, outermost first.
+    pub(super) inline: Vec<String>,
+}
+
+/// Whether `relative` is a crate root, where an inline module's directory starts at the file's own
+/// directory rather than one named for its stem (The Rust Reference, "Modules").
+pub(super) fn crate_root(relative: &str) -> bool {
+    let mut parts = relative.rsplit('/');
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    let stem = match name.strip_suffix(".rs") {
+        Some(stem) => stem,
+        None => name,
+    };
+    matches!(stem, "lib" | "main" | "mod")
+        || matches!(parts.next(), Some("tests" | "benches" | "examples" | "bin"))
+}
+
+/// Every source path `tree` names through a `#[path = "..."]` attribute or an `include!("...")`.
+pub(super) fn follow_names(tree: &Parsed) -> Vec<Named> {
+    let root = tree.root();
+    let mut names = Vec::new();
+    for node in root.dfs() {
+        match node.kind().as_ref() {
+            "attribute_item" => {
+                let text = node.text();
+                let trimmed = text.as_ref().trim_start();
+                if let Some(rest) = trimmed.strip_prefix("#[path")
+                    && rest.trim_start().starts_with('=')
+                    && let Some(name) = first_literal(&node)
+                {
+                    names.push(Named {
+                        name,
+                        inline: inline_modules(&node),
+                    });
+                }
+            }
+            "macro_invocation" => {
+                let mut children = node.named_children();
+                let is_include = match children.next() {
+                    Some(name) => collect_scoped(&name) == Some(vec![String::from("include")]),
+                    None => false,
+                };
+                if is_include && let Some(name) = first_literal(&node) {
+                    names.push(Named {
+                        name,
+                        inline: Vec::new(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The inline module names `node` sits inside, outermost first: every `mod_item` above it whose
+/// body is the container `node` reached it through. The module an attribute annotates is never
+/// counted, so a `#[path]` on `mod x;` carries no name of its own.
+fn inline_modules(node: &AstNode<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut below = String::from(node.kind().as_ref());
+    let mut cursor = node.parent();
+    while let Some(ancestor) = cursor {
+        if ancestor.kind() == "mod_item"
+            && below == "declaration_list"
+            && let Some(name) = ancestor.field("name")
+        {
+            names.push(String::from(name.text().as_ref()));
+        }
+        below = String::from(ancestor.kind().as_ref());
+        cursor = ancestor.parent();
+    }
+    names.reverse();
     names
 }

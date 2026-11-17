@@ -505,15 +505,10 @@ fn sim_replay_from_the_file_matches_the_memory_trace_for_every_seed() -> Outcome
         offer_runs(&mut memory, &runs, 1, strategy)?;
         memory.tick()?;
 
-        let path = std::env::temp_dir().join(format!(
-            "larry-sim-{}-replay-{seed}.journal",
-            std::process::id()
-        ));
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        let guard = support::temp_dir::TempDir::new()?;
+        let path = guard
+            .path()
+            .join(format!("larry-sim-replay-{seed}.journal"));
         let open = |owner| -> Sim<TestRuntime> {
             let settings = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
             let journal = Journal::open(&path, settings.journal_capacity)?;

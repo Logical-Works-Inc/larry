@@ -191,6 +191,12 @@ fn missing_reranker_receipt_is_rejected() -> Result<(), Box<dyn std::error::Erro
 fn a_pid_temp_path_in_test_code_is_refused_and_the_guard_passes()
 -> Result<(), Box<dyn std::error::Error>> {
     let tree = Scratch::new("temp-paths")?;
+    tree.write(
+        "Cargo.toml",
+        b"[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    tree.write("src/lib.rs", b"pub fn present() {}\n")?;
+    tree.write("tests/keep.rs", b"fn keep() {}\n")?;
     let fixture = "tests/old_fixture.rs";
     tree.write(
         fixture,
@@ -246,17 +252,33 @@ fn a_pid_temp_path_in_test_code_is_refused_and_the_guard_passes()
 /// The number of live-tree checks the cost control runs.
 const CHECKS: usize = 100;
 
+/// The rule reads every workspace member (larry#311): the live tree names the root package and its
+/// two crates, so `crates/*` is scanned and a member's test code cannot hide.
+#[test]
+fn governance_names_every_workspace_member() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        super::temp_paths::Workspace::read(root())?.members(),
+        ["", "crates/larry-contracts", "crates/larry-runtime"],
+        "the root manifest names the root package and both members"
+    );
+    Ok(())
+}
+
 /// Cost, measured not gated (ADR 0053): 100 checks of the live tree print p50, p95 and p99, and
-/// every one of them passes, so the walk and the parse stay in budget (larry#293).
+/// every one of them passes, so the walk and the parse stay in budget (larry#293). The workspace
+/// is read once for the member list and that read is printed too (larry#311).
 #[test]
 fn a_hundred_checks_of_the_tree_print_their_percentiles() -> Result<(), Box<dyn std::error::Error>>
 {
     use std::io::Write as _;
 
+    let started = std::time::Instant::now();
+    let workspace = super::temp_paths::Workspace::read(root())?;
+    let membership = started.elapsed();
     let mut samples = Vec::with_capacity(CHECKS);
     for _ in 0..CHECKS {
         let started = std::time::Instant::now();
-        let errors = super::temp_paths::errors(root())?;
+        let errors = super::temp_paths::rule_errors(root(), &workspace)?;
         samples.push(started.elapsed());
         assert!(errors.is_empty(), "the live tree passes: {errors:?}");
     }
@@ -269,7 +291,7 @@ fn a_hundred_checks_of_the_tree_print_their_percentiles() -> Result<(), Box<dyn 
         }
     };
     let line = format!(
-        "larry governance temp-path rule over {CHECKS} checks: p50 {:?} p95 {:?} p99 {:?}\n",
+        "larry governance temp-path rule over {CHECKS} checks: p50 {:?} p95 {:?} p99 {:?} (workspace read {membership:?})\n",
         nearest(50),
         nearest(95),
         nearest(99)

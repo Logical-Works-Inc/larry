@@ -21,6 +21,9 @@ use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::runtime::{Runtime, RuntimeSettings};
 use lgwks_bot::clock::Clock;
 
+#[path = "../../../../tests/support/temp_dir.rs"]
+pub mod temp_dir;
+
 /// The alias the tests use for the concrete runtime under test.
 pub type TestRuntime = Runtime<FoldProjection, ScriptedOwner>;
 
