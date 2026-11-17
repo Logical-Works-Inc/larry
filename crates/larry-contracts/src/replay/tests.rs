@@ -24,6 +24,7 @@ fn pinned_inputs(
         },
         validity: ValiditySnapshot {
             valid_until: instant(1_000),
+            skew_bound: std::time::Duration::ZERO,
         },
     }
 }
@@ -64,6 +65,7 @@ fn decide_read_only(request: &EffectRequest) -> Decision {
         },
         &ValiditySnapshot {
             valid_until: instant(1_000),
+            skew_bound: std::time::Duration::ZERO,
         },
     )
 }
@@ -89,6 +91,60 @@ fn e30_an_expired_approval_is_a_typed_denial_never_consent_from_timeout() {
 }
 
 #[test]
+fn a_pinned_skew_bound_admits_a_lease_just_past_expiry_and_zero_does_not() {
+    // The expiry ends at 1,000 s. An observer 10 s past it is refused at zero skew,
+    // the one-host default, and admitted inside a 30 s allowance (larry#212).
+    let request = EffectRequest {
+        observed_at: instant(1_010),
+        ..allowed_request(10)
+    };
+    let decide_with = |skew: std::time::Duration| {
+        decide(
+            &request,
+            &open_policy(),
+            &budget(50),
+            &CapabilitySnapshot {
+                capabilities: scopes(&[Scope::FileRead]),
+            },
+            &ValiditySnapshot::with_skew(instant(1_000), skew),
+        )
+    };
+    assert_eq!(
+        decide_with(std::time::Duration::ZERO),
+        Decision::Denied {
+            reason: DenialReason::AuthorityExpired
+        }
+    );
+    assert_eq!(
+        decide_with(std::time::Duration::from_secs(30)),
+        Decision::Authorized
+    );
+    // An expiry before the pinned instant leaves nothing to judge; the same allowance
+    // carries that reading too, which is the no-remaining branch of the reducer.
+    let decide_at = |valid_until: std::time::SystemTime, skew: std::time::Duration| {
+        decide(
+            &request,
+            &open_policy(),
+            &budget(50),
+            &CapabilitySnapshot {
+                capabilities: scopes(&[Scope::FileRead]),
+            },
+            &ValiditySnapshot::with_skew(valid_until, skew),
+        )
+    };
+    assert_eq!(
+        decide_at(instant(1_005), std::time::Duration::ZERO),
+        Decision::Denied {
+            reason: DenialReason::AuthorityExpired
+        }
+    );
+    assert_eq!(
+        decide_at(instant(1_005), std::time::Duration::from_secs(30)),
+        Decision::Authorized
+    );
+}
+
+#[test]
 fn denial_checks_run_in_a_fixed_deterministic_order() {
     // Expired AND policy-refused AND capability-missing AND overspent:
     // the reported reason is validity first.
@@ -109,6 +165,7 @@ fn denial_checks_run_in_a_fixed_deterministic_order() {
             },
             &ValiditySnapshot {
                 valid_until: instant(1_000),
+                skew_bound: std::time::Duration::ZERO,
             },
         )
     };

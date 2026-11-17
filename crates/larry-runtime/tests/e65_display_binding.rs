@@ -402,7 +402,9 @@ fn e65_bounds_epochs_and_integrity() -> Result {
     assert!(
         matches!(
             runtime.display(&command, holder(), &vec![grant.clone(); 65]),
-            Err(RuntimeError::Binding(BindingError::TooManyGrants))
+            Err(RuntimeError::Binding(BindingError::TooManyGrants {
+                capacity: 64
+            }))
         ),
         "grant scan is bounded"
     );

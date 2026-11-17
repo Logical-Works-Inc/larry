@@ -43,7 +43,7 @@ where
         command: Command,
         display: Option<DisplayedEffect>,
     ) -> Result<(CommandAcceptance, u16), RuntimeError> {
-        let negotiated = negotiate(offer)?;
+        let negotiated = negotiate(offer, self.settings.protocol_range())?;
         if matches!(
             command.content().kind(),
             CommandKind::Ask | CommandKind::Answer

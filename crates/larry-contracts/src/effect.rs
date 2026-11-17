@@ -57,18 +57,18 @@ pub enum ReconciliationStrategy {
 }
 
 impl ReconciliationStrategy {
-    /// The declared reconciliation action for this strategy.
+    /// The declared reconciliation action for this strategy, with `max_attempts`
+    /// as the retry bound the runtime's settings declare (default
+    /// [`MAX_EFFECT_ATTEMPTS`], larry#212).
     ///
     /// `RequiresHuman` and `AlwaysCompensate` never retry: an unknown
     /// outcome for them is permanent, and retry eligibility is impossible
     /// for non-idempotent effects whose outcome is unknown (Cell 04, E56).
     #[must_use]
-    pub const fn reconciliation_action(self) -> ReconciliationAction {
+    pub const fn reconciliation_action(self, max_attempts: u8) -> ReconciliationAction {
         match self {
             Self::Queryable => ReconciliationAction::Observe,
-            Self::IdempotentRetrySafe => ReconciliationAction::RetryBounded {
-                max_attempts: MAX_EFFECT_ATTEMPTS,
-            },
+            Self::IdempotentRetrySafe => ReconciliationAction::RetryBounded { max_attempts },
             Self::RequiresHuman | Self::AlwaysCompensate => ReconciliationAction::LeaveUnknown,
         }
     }
@@ -471,7 +471,11 @@ mod tests {
             ),
         ];
         for (strategy, retry, permanent) in cases {
-            assert_eq!(strategy.reconciliation_action(), retry, "{strategy:?}");
+            assert_eq!(
+                strategy.reconciliation_action(MAX_EFFECT_ATTEMPTS),
+                retry,
+                "{strategy:?}"
+            );
             assert_eq!(
                 strategy.unknown_outcome_is_permanent(),
                 permanent,
@@ -489,7 +493,7 @@ mod tests {
         );
         // It is a terminal disposition, not a retry authorization.
         assert_eq!(
-            ReconciliationStrategy::RequiresHuman.reconciliation_action(),
+            ReconciliationStrategy::RequiresHuman.reconciliation_action(MAX_EFFECT_ATTEMPTS),
             ReconciliationAction::LeaveUnknown
         );
     }

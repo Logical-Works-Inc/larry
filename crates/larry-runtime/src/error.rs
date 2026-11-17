@@ -56,6 +56,32 @@ pub enum RuntimeError {
         /// The configured ceiling.
         capacity: usize,
     },
+    /// A configuration bound is zero or outside the range its meaning allows
+    /// (larry#212). The runtime is not built: a bad setting is refused, never
+    /// clamped into something the host did not ask for.
+    BadSetting {
+        /// The setting's name.
+        name: &'static str,
+        /// The value supplied and the range it must fall in.
+        range: Box<SettingRange>,
+    },
+    /// A setting's value cannot be read in the unit its range is declared in,
+    /// so no bound can judge it (larry#212).
+    SettingUnreadable {
+        /// The setting's name.
+        name: &'static str,
+        /// Why the reading failed.
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// An admitted command's payload is past the configured byte ceiling
+    /// (larry#212). The check runs before the payload is decoded or
+    /// journalled, so nothing hostile is held or recorded.
+    PayloadTooLarge {
+        /// The payload's length in bytes.
+        bytes: usize,
+        /// The configured ceiling.
+        ceiling: usize,
+    },
     /// Per-run event sequencing was violated.
     Sequence(SequenceError),
     /// A command or event violated an ordering constraint.
@@ -168,6 +194,21 @@ pub enum RuntimeError {
     },
 }
 
+/// A setting's value and the range its meaning allows.
+///
+/// Boxed inside [`RuntimeError::BadSetting`] so one refused setting does not
+/// widen every result that can carry a runtime error (larry#212).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SettingRange {
+    /// The value supplied.
+    pub value: u128,
+    /// The smallest value the setting accepts.
+    pub min: u128,
+    /// The largest value the setting accepts.
+    pub max: u128,
+}
+
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -204,6 +245,17 @@ impl fmt::Display for RuntimeError {
                     "run {run} already holds the maximum of {capacity} recorded effects"
                 )
             }
+            Self::BadSetting { name, ref range } => {
+                let SettingRange { value, min, max } = **range;
+                write!(f, "runtime setting {name}={value} is outside {min}..={max}")
+            }
+            Self::SettingUnreadable { name, ref cause } => {
+                write!(f, "runtime setting {name} cannot be read: {cause}")
+            }
+            Self::PayloadTooLarge { bytes, ceiling } => write!(
+                f,
+                "command payload of {bytes} bytes exceeds the {ceiling}-byte ceiling"
+            ),
             Self::Sequence(ref err) => write!(f, "event sequencing refused: {err}"),
             Self::Ordering(ref err) => write!(f, "record ordering refused: {err}"),
             Self::Command(ref err) => write!(f, "command refused: {err}"),
@@ -287,6 +339,7 @@ impl std::error::Error for RuntimeError {
             Self::Durable(ref err) => Some(err),
             Self::Fence(ref err) => Some(err),
             Self::ClockBeforeEpoch(ref cause) => Some(cause),
+            Self::SettingUnreadable { ref cause, .. } => Some(cause.as_ref()),
             Self::DurableRepeat { .. } | Self::DurabilityShort { .. } => None,
             Self::UnsupportedDecision(_)
             | Self::UnsupportedCommand(_)
@@ -297,6 +350,8 @@ impl std::error::Error for RuntimeError {
             | Self::RunLimitReached { .. }
             | Self::ReadyWorkFull { .. }
             | Self::EffectLimitReached { .. }
+            | Self::BadSetting { .. }
+            | Self::PayloadTooLarge { .. }
             | Self::Denied { .. }
             | Self::RunNotTracked { .. }
             | Self::RunTenantMismatch { .. }

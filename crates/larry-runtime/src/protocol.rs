@@ -40,6 +40,18 @@ impl ProtocolVersionRange {
     pub const fn new(minimum: u16, maximum: u16) -> Self {
         Self(minimum, maximum)
     }
+
+    /// The inclusive lower bound.
+    #[must_use]
+    pub(crate) const fn minimum(self) -> u16 {
+        self.0
+    }
+
+    /// The inclusive upper bound.
+    #[must_use]
+    pub(crate) const fn maximum(self) -> u16 {
+        self.1
+    }
 }
 
 /// Tenant-scoped protocol range and request requirements.
@@ -202,6 +214,9 @@ impl std::error::Error for ProtocolError {}
 
 /// Selects the highest overlapping protocol version without mutating state.
 ///
+/// `supported` is the range the runtime's settings name, so a host that pins a
+/// narrower or wider range negotiates it rather than a constant (larry#212).
+///
 /// Crate-internal: external callers negotiate through
 /// [`Runtime::submit_protocol`](crate::runtime::Runtime::submit_protocol),
 /// which also applies the tenant and overload checks a bare negotiation
@@ -210,11 +225,16 @@ impl std::error::Error for ProtocolError {}
 /// # Errors
 /// Returns typed errors for unsupported bounds, missing capabilities, and a
 /// human question that cannot be answered headlessly.
-pub(crate) fn negotiate(offer: &ProtocolOffer) -> Result<NegotiatedProtocol, ProtocolError> {
+pub(crate) fn negotiate(
+    offer: &ProtocolOffer,
+    supported: ProtocolVersionRange,
+) -> Result<NegotiatedProtocol, ProtocolError> {
     let &ProtocolOffer(tenant_id, ref range, ref capabilities, headless, needs_answer) = offer;
     let &ProtocolVersionRange(offered_min, offered_max) = range;
-    let lower = offered_min.max(MIN_PROTOCOL_VERSION);
-    let upper = offered_max.min(MAX_PROTOCOL_VERSION);
+    let supported_min = supported.minimum();
+    let supported_max = supported.maximum();
+    let lower = offered_min.max(supported_min);
+    let upper = offered_max.min(supported_max);
     if offered_min > offered_max {
         return Err(ProtocolError::InvalidVersionRange {
             min: offered_min,
@@ -225,8 +245,8 @@ pub(crate) fn negotiate(offer: &ProtocolOffer) -> Result<NegotiatedProtocol, Pro
         return Err(ProtocolError::UnsupportedVersion {
             offered_min,
             offered_max,
-            supported_min: MIN_PROTOCOL_VERSION,
-            supported_max: MAX_PROTOCOL_VERSION,
+            supported_min,
+            supported_max,
         });
     }
     if !capabilities.contains(&ProtocolCapability::SubmitCommand) {

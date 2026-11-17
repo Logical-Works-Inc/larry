@@ -168,6 +168,14 @@ where
         command: Command,
         display: Option<DisplayedEffect>,
     ) -> Result<CommandAcceptance, RuntimeError> {
+        // The ceiling is checked before the payload is decoded or journalled:
+        // an oversized command costs one length read and leaves nothing held
+        // (larry#212).
+        let bytes = command.content().payload().len();
+        let ceiling = self.settings.max_payload_bytes;
+        if bytes > ceiling {
+            return Err(RuntimeError::PayloadTooLarge { bytes, ceiling });
+        }
         let run = target(&command)?;
         if display.is_some() && command.content().kind() != CommandKind::Submit {
             // A display is only ever made for a submission (E65).

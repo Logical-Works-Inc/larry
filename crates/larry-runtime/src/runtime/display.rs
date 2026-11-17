@@ -73,7 +73,8 @@ where
     ///
     /// # Errors
     /// Refuses unsupported owners, malformed/oversized commands, non-submit
-    /// commands, more than 64 grants, and lack of any single covering grant.
+    /// commands, more grants than `max_grants`, and lack of any single
+    /// covering grant.
     pub fn display(
         &mut self,
         command: &Command,
@@ -86,8 +87,11 @@ where
         let digest = command_digest(command)?;
         let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
         self.ensure_run_tenant(proposal.run, command.tenant())?;
-        if grants.len() > 64 {
-            return Err(BindingError::TooManyGrants.into());
+        if grants.len() > self.settings.max_grants {
+            return Err(BindingError::TooManyGrants {
+                capacity: self.settings.max_grants,
+            }
+            .into());
         }
         let at = super::sample(&self.clock)?;
         let grant = grants

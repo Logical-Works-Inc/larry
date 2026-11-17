@@ -65,8 +65,11 @@ pub enum BindingError {
     #[error("no single grant covers this tenant, holder, scopes, cost, unit and expiry")]
     NoCoveringGrant,
     /// Bound limits apply before scanning the grant list.
-    #[error("grant list exceeds the bound of 64")]
-    TooManyGrants,
+    #[error("grant list exceeds the bound of {capacity}")]
+    TooManyGrants {
+        /// The configured bound the list passed.
+        capacity: usize,
+    },
     /// A displayed grant has expired by the time of admission or dispatch.
     #[error("display authority expired; obtain current authority and display again")]
     Expired,

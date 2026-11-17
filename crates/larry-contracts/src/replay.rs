@@ -20,7 +20,7 @@
 //! surface the proof will attach to.
 
 use std::collections::BTreeSet;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::authority::{BudgetUnit, Scope};
 use lgwks_bot::BotError;
@@ -110,7 +110,8 @@ impl CapabilitySnapshot {
 }
 
 /// The pinned authority-validity snapshot: the instant the backing grant
-/// stops being valid. Authority-supplied, never worker-supplied (Cell 04).
+/// stops being valid, and how far two honest clocks may disagree about it.
+/// Authority-supplied, never worker-supplied (Cell 04).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(crate = "lgwks_std::json::serde"))]
@@ -118,13 +119,27 @@ impl CapabilitySnapshot {
 pub struct ValiditySnapshot {
     /// The instant validity ends; `observed_at >= valid_until` is expired.
     pub valid_until: SystemTime,
+    /// The largest disagreement the deployment tolerates between the clock
+    /// that granted the lease and the one judging it. Zero for one host.
+    /// Pinned with the expiry so a replay re-derives the same decision.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub skew_bound: Duration,
 }
 
 impl ValiditySnapshot {
-    /// Pins the exclusive authority expiry instant.
+    /// Pins the exclusive authority expiry instant, with no skew allowance.
     #[must_use]
     pub const fn new(valid_until: SystemTime) -> Self {
-        Self { valid_until }
+        Self::with_skew(valid_until, Duration::ZERO)
+    }
+
+    /// Pins the expiry and the allowance the judging clock gets against it.
+    #[must_use]
+    pub const fn with_skew(valid_until: SystemTime, skew_bound: Duration) -> Self {
+        Self {
+            valid_until,
+            skew_bound,
+        }
     }
 }
 
@@ -281,17 +296,17 @@ pub fn decide(
 ) -> Decision {
     let denied = |reason: DenialReason| Decision::Denied { reason };
     // The lease is judged by its estate owner (larry#74): the expiry as a reading on the
-    // observer's own timeline, whose origin is the pinned instant, so no epoch is assumed. One
-    // host, so no skew allowance.
-    let holds = match validity.valid_until.duration_since(request.observed_at) {
-        Ok(remaining) => lgwks_bot::skew::lease_holds(
-            remaining,
-            std::time::Duration::ZERO,
-            lgwks_bot::skew::SkewBound::ZERO.get(),
-        ),
-        // The expiry precedes the pinned instant: there is no remaining lease to judge.
-        Err(_) => false,
+    // observer's own timeline, whose origin is the pinned instant, so no epoch is assumed.
+    // The pinned validity carries the deployment's skew allowance (larry#212), so a foreign
+    // clock within the bound still holds; zero is one host, where any disagreement is a defect.
+    let remaining = match validity.valid_until.duration_since(request.observed_at) {
+        Ok(remaining) => remaining,
+        // The expiry precedes the pinned instant: nothing remains. The judge below
+        // reads that against the bound, which is a typed denial at zero and the
+        // declared allowance on an ahead clock.
+        Err(_) => Duration::ZERO,
     };
+    let holds = lgwks_bot::skew::lease_holds(remaining, Duration::ZERO, validity.skew_bound);
     if !holds {
         return denied(DenialReason::AuthorityExpired);
     }

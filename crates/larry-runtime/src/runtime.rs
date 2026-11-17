@@ -49,7 +49,10 @@ mod live;
 mod reach;
 mod reconcile;
 mod retry;
+mod settings;
 mod writers;
+
+pub use settings::RuntimeSettings;
 
 use admission::Admitted;
 use instant::sample;
@@ -64,11 +67,10 @@ use std::time::SystemTime;
 
 use lgwks_bot::clock::Clock;
 
-use larry_contracts::authority::{BudgetUnit, SecurityEpoch};
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
-use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
+use larry_contracts::replay::DenialReason;
 use larry_contracts::state::{RunState, TransitionEvent};
 
 use crate::error::RuntimeError;
@@ -77,67 +79,7 @@ use crate::journal::Journal;
 use crate::owner::EffectOwner;
 use crate::payload::WorkProposal;
 use crate::projection::{EffectPhase, ProjectionBackend};
-use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK, MAX_RUNS_PER_TICK, MAX_TRACKED_RUNS};
-
-/// The runtime's configuration: the pinned snapshots and the bounds.
-///
-/// The policy, capability and validity snapshots are host-supplied and pinned
-/// for the runtime's lifetime in this slice. A later work package replaces
-/// them with live, versioned snapshots activated at safe boundaries (D26);
-/// the runtime already threads them as inputs rather than reading them from
-/// ambient state, so that change is a wiring change and not a rewrite.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct RuntimeSettings {
-    /// The pinned policy snapshot.
-    pub policy: PolicySnapshot,
-    /// The pinned capability snapshot.
-    pub capabilities: CapabilitySnapshot,
-    /// The pinned authority-validity snapshot.
-    pub validity: ValiditySnapshot,
-    /// The unit the run budget is denominated in.
-    pub unit: BudgetUnit,
-    /// The initially reserved budget.
-    pub initial_budget: u64,
-    /// The security generation the fence starts at (R87, D48). Host-supplied
-    /// like the snapshots above, and for the same reason: it is a fact about
-    /// authority, not about this process.
-    pub security_epoch: SecurityEpoch,
-    /// How many mutating reaches the fence permits before the authority
-    /// source must be re-contacted.
-    pub offline_dispatch_bound: u32,
-    /// The journal entry ceiling.
-    pub journal_capacity: usize,
-    /// The run-table ceiling.
-    pub run_capacity: usize,
-    /// How many ready commands one tick may admit.
-    pub max_runs_per_tick: usize,
-}
-
-impl RuntimeSettings {
-    /// Settings with the specification's Cell 05 default bounds.
-    #[must_use]
-    pub fn with_defaults(
-        policy: PolicySnapshot,
-        capabilities: CapabilitySnapshot,
-        validity: ValiditySnapshot,
-        unit: BudgetUnit,
-        initial_budget: u64,
-    ) -> Self {
-        Self {
-            policy,
-            capabilities,
-            validity,
-            unit,
-            initial_budget,
-            security_epoch: SecurityEpoch::INITIAL,
-            offline_dispatch_bound: crate::MAX_OFFLINE_DISPATCHES,
-            journal_capacity: crate::MAX_JOURNAL_ENTRIES,
-            run_capacity: MAX_TRACKED_RUNS,
-            max_runs_per_tick: MAX_RUNS_PER_TICK,
-        }
-    }
-}
+use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK};
 
 /// What one tick did, in stage order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -278,14 +220,18 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError::RunLimitReached`] when the run capacity is
-    /// zero, which would make every run untrackable.
+    /// [`RuntimeError::BadSetting`] when any bound is zero or out of range
+    /// (larry#212), and [`RuntimeError::JournalFull`] when the journal entry
+    /// ceiling is zero.
     pub fn new(settings: RuntimeSettings, owner: O, clock: Clock) -> Result<Self, RuntimeError> {
-        let projection = P::default();
+        let settings = settings.pinned();
+        settings.validate()?;
+        // The projection is built at the configured capacity, never its own
+        // default: the run table refuses past `run_capacity`, so a projection
+        // bounded below it would refuse a run the runtime already tracks
+        // (larry#212).
+        let projection = P::with_capacity(settings.run_capacity);
         let journal = Journal::new(settings.journal_capacity)?;
-        if settings.run_capacity == 0 {
-            return Err(RuntimeError::RunLimitReached { capacity: 0 });
-        }
         let fence = RevocationFence::new(settings.security_epoch, settings.offline_dispatch_bound)?;
         Ok(Self {
             journal,
@@ -358,6 +304,13 @@ where
     #[must_use]
     pub const fn fence(&self) -> &RevocationFence {
         &self.fence
+    }
+
+    /// The configuration this runtime was built with, for the host that built
+    /// it: its lease, its protocol range and every bound it enforces.
+    #[must_use]
+    pub const fn settings(&self) -> &RuntimeSettings {
+        &self.settings
     }
 
     /// The fence, mutably, for the authority layer that owns it.
@@ -708,9 +661,14 @@ where
     // The recorded history is kept as it is; only the ceiling moves, so a
     // journal that filled up mid-effect can still record the reconciliation it
     // exists to perform.
+    let settings = settings.pinned();
+    settings.validate()?;
     let journal = journal.reopen(settings.journal_capacity)?;
 
-    let mut projection = P::default();
+    // The projection is rebuilt at the configured capacity, not `P::default()`:
+    // a host set above 1,024 runs writes a journal its own default projection
+    // could not reopen (larry#212).
+    let mut projection = P::with_capacity(settings.run_capacity);
     projection.rebuild(&journal)?;
     // Admitted commands the journal holds no acceptance for are pending again,
     // in journal order (E28): the record says so, never the dead process.
@@ -771,7 +729,7 @@ where
             Some(EffectPhase::Observed { .. } | EffectPhase::Reconciled { .. }) => {
                 projection.dispatches(intent.operation)
             }
-            Some(EffectPhase::Reserved) | None => larry_contracts::effect::MAX_EFFECT_ATTEMPTS,
+            Some(EffectPhase::Reserved) | None => settings.max_effect_attempts,
         };
         live.insert(
             intent.operation,
