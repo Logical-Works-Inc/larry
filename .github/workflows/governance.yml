@@ -1,11 +1,19 @@
 name: Repository governance
 on:
+  # One copy of the governance steps: this workflow owns them, and `push` means
+  # a landed commit, not every branch (larry#307).
   push:
+    branches: [main]
   pull_request:
     # `edited` reruns the issue link when only the body changes.
     types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
+# One run per workflow and ref: a second push to a pull request cancels the run
+# its first push started. A push to main never cancels (larry#307).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Every PR closes at least one issue through `Closes #N` in its body
   # (Director 2026-11-03, larry#103). GitHub's own link, not a regex over the
@@ -42,11 +50,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: stable
-      # The e2e job's cache already holds the `larry` binary's dependencies.
+      # Its own key, saved only from main (larry#307): this is the one
+      # governance build per run, and a PR never writes the cache main uses.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
-          save-if: false
+          shared-key: governance-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build the larry binary
         run: cargo build --locked --bin larry
       # `larry governance` replaced tools/check_governance.py (larry#53, ADR 0010).
@@ -60,7 +69,7 @@ jobs:
         if: always()
         run: target/debug/larry mascot --check
       # The governance and reranker controls (larry#150, ADR 0013) run with the
-      # workspace tests (ci.yml, rust); `larry governance` above admits the
+      # workspace tests (ci.yml, test); `larry governance` above admits the
       # BLAKE3 receipts `larry-rerank` writes.
       - name: Check whitespace
         if: always()

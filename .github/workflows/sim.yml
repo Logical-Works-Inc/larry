@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# One run per workflow and ref: a second push to a pull request cancels the run
+# its first push started. A push to main never cancels (larry#307).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Runner by visibility (larry#116): while this repository is private every job
 # runs on the self-hosted Mac (this org's hosted runners refuse to start for
 # billing); once it is public every job runs on GitHub-hosted ubuntu-latest,
@@ -19,7 +25,7 @@ permissions:
 jobs:
   # The seeded simulation suites (`crates/larry-runtime/tests/sim_*.rs`) as a
   # check of their own, so a PR shows its deterministic-simulation verdict by
-  # name instead of inside the whole-workspace `rust` lane.
+  # name instead of inside the whole-workspace `test` lane.
   simulation:
     name: simulation (${{ github.event.repository.private && 'self-hosted' || 'ubuntu-latest' }})
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
@@ -29,10 +35,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: stable
+      # Its own key, saved only from main (larry#307): the e2e journey's warm
+      # build no longer shares this job's cache, and a PR never writes it.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          shared-key: simulation-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
           cache-bin: ${{ github.event.repository.private && 'false' || 'true' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # A hung tool download once ate the whole job (PR #165): the install is
       # bounded, and a lane without nextest runs the same tests with cargo test.
       - if: ${{ !github.event.repository.private }}
@@ -58,10 +67,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: stable
+      # Its own key, saved only from main (larry#307), so the simulation lane's
+      # cache growth never evicts this job's warm build.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          shared-key: journey-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
           cache-bin: ${{ github.event.repository.private && 'false' || 'true' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: ${{ !github.event.repository.private }}
         id: nextest
         continue-on-error: true
