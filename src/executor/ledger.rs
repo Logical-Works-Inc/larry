@@ -291,6 +291,13 @@ impl Ledger {
     /// its row dropped. Returns how many rows were dropped.
     pub(crate) fn reap(&self) -> Result<usize, ExecError> {
         let rows = self.rows()?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        // The group waits read one deadline from the runtime's live clock, built the way the
+        // gate builds its own; no wait is decided by a count of yields (larry#268). One clock
+        // covers this reap, so every row it settles shares one timeline.
+        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
         let mut settled = 0_usize;
         for (pid, started) in rows {
             // A row no identity can be rebuilt from was damaged or written by something
@@ -313,7 +320,7 @@ impl Ledger {
             reap_orphaned_group(&identity).map_err(ExecError::Reap)?;
             // The row goes only once the group is gone (INVARIANTS): a group that
             // survives its bounded wait keeps its row, and the next start tries again.
-            match await_group_gone(identity.pid()) {
+            match await_group_gone(&clock, identity.pid()) {
                 Ok(()) => {}
                 Err(ExecError::GroupSurvived { .. }) => continue,
                 Err(other) => return Err(other),

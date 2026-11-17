@@ -23,10 +23,11 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
+use exec_cli::deadline::await_fifo_writer;
 use exec_cli::{
-    POLL_LIMIT, TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of,
-    live_group_pid, make_fifo, millis, number_of, percentile, report_of, result_at, run_exec,
-    spawn_exec, spawn_larry, task_json, text_of,
+    TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid, make_fifo,
+    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry,
+    task_json, text_of,
 };
 use lgwks_std::json::{self, Value};
 
@@ -226,43 +227,25 @@ fn a_killed_run_with_a_key_answers_from_its_recovered_journal_and_runs_nothing()
     // journal as evidence (larry#182 defect 3).
     let (state, origin) = fixture()?;
     let scratch = TempDir::new()?;
-    let ready = scratch.path().join("ready");
     let hold = scratch.path().join("hold");
     let count = scratch.path().join("runs");
-    make_fifo(&ready)?;
     make_fifo(&hold)?;
     let document = lgwks_std::json::json!({
         "repo": origin.path().to_string_lossy(),
         "base": "HEAD",
         "idempotency_key": "killed-1",
         "acceptance": [["sh", "-c", format!(
-            "echo ran >> {}; echo up > {}; cat < {}",
+            "echo ran >> {}; cat < {}",
             count.display(),
-            ready.display(),
             hold.display()
         )]],
     })
     .to_string();
     let mut child = spawn_exec(Some(state.path()), None, &document)?;
-    // Wait until the command is running: it writes the marker before it blocks
-    // on the fifo. A document the parser refuses exits at once with nothing run.
-    let mut probes = 0_u32;
-    loop {
-        match fs::read_to_string(&count) {
-            Ok(ref text) if text == "ran\n" => break,
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(format!("the killed run was refused before it ran: {status}").into());
-        }
-        probes = probes.saturating_add(1);
-        if probes >= POLL_LIMIT {
-            return Err("the killed run's command never started".into());
-        }
-        std::thread::yield_now();
-    }
+    // The command writes its marker before it opens the fifo's read end, and the write end
+    // opens only once that read end is open: the marker is on disk when this returns, and a
+    // document the parser refuses fails this wait inside one deadline (larry#268).
+    let _hold = await_fifo_writer(&hold)?;
     // The ledger names the group the command runs in, so the kill -9 has one to reap.
     let pgid = live_group_pid(&state.path().join("executor.db"))?;
     assert!(pgid > 0, "the running command holds a recorded group");

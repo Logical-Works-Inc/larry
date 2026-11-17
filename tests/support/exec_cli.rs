@@ -18,10 +18,8 @@ use lgwks_std::json::Value;
 /// What every test here returns.
 pub type TestResult = Result<(), Box<dyn Error>>;
 
-/// Polls a condition at most this many times before the journey gives up. The
-/// gates run every journey binary at once, so a child's clone and its first
-/// command can wait seconds for a core before it writes its first marker.
-pub const POLL_LIMIT: u32 = 2_000_000;
+#[path = "deadline.rs"]
+pub mod deadline;
 
 #[path = "origin.rs"]
 mod origin;
@@ -133,23 +131,19 @@ pub fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-/// Opens the executor's ledger read-only and polls it until a live group is recorded;
-/// returns that group's pid.
+/// Opens the executor's ledger read-only and waits for a live group to be recorded, within one
+/// failure deadline; returns that group's pid. The row appears as the executor inserts it, so
+/// the wait is on the row and its deadline only bounds a failure (larry#268).
 pub fn live_group_pid(db: &Path) -> Result<i32, Box<dyn Error>> {
     let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut attempts: u32 = 0;
-    loop {
-        match connection.query_row("SELECT pid FROM live_groups", [], |row| {
+    deadline::await_event(
+        "a live group was recorded in the ledger",
+        || match connection.query_row("SELECT pid FROM live_groups", [], |row| {
             row.get::<_, i64>(0)
         }) {
-            Ok(pid) => return Ok(i32::try_from(pid)?),
-            Err(error) => {
-                attempts = attempts.saturating_add(1);
-                if attempts >= POLL_LIMIT {
-                    return Err(error.into());
-                }
-                std::thread::yield_now();
-            }
-        }
-    }
+            Ok(pid) => Ok(Some(i32::try_from(pid)?)),
+            Err(lgwks_deps::storefront::rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(cause) => Err(cause.into()),
+        },
+    )
 }

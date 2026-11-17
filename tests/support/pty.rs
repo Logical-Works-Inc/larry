@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 /// Failures propagate instead of panicking.
 pub type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// Upper bound on each wait; it only bounds a failure, never orders events.
-const PATIENCE: Duration = Duration::from_secs(30);
+#[path = "deadline.rs"]
+pub mod deadline;
+
 /// The PATH every terminal's shell gets: the directories the journeys' tools live in, never the
 /// host's PATH (larry#269). `script`, `sh`, `stty`, `git`, `cp` and `sleep` live under one of
 /// these on macOS and Linux, so the frame behaves the same on any host that runs the suite.
@@ -271,7 +272,7 @@ impl<'scope> Pty<'scope> {
     /// must not have been on screen when those keys were typed.
     pub fn wait_for(&mut self, text: &str) -> Journey {
         let deadline = Instant::now()
-            .checked_add(PATIENCE)
+            .checked_add(deadline::PATIENCE)
             .ok_or("deadline overflows")?;
         let before = self.before.take();
         while !(self.answered && replied(before.as_deref(), &self.screen.text(), text)?) {
@@ -322,7 +323,7 @@ impl<'scope> Pty<'scope> {
     /// exit status and the whole transcript.
     pub fn finish(mut self) -> Journey<(ExitStatus, Vec<u8>)> {
         let deadline = Instant::now()
-            .checked_add(PATIENCE)
+            .checked_add(deadline::PATIENCE)
             .ok_or("deadline overflows")?;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());

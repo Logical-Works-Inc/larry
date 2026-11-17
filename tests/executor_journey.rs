@@ -30,12 +30,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
+use exec_cli::deadline::{await_fifo_writer, await_group_exit};
 use exec_cli::{
-    POLL_LIMIT, TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, make_fifo,
-    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry,
-    task_json, text_of,
+    TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, make_fifo, millis,
+    number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry, task_json,
+    text_of,
 };
-use held_group::{group_exits, ledger_rows, spawn_held_command};
+use held_group::{ledger_rows, spawn_held_command};
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 
@@ -70,7 +71,7 @@ fn sim_a_kill_at_every_point_between_spawn_and_insert_leaves_no_group_after_rest
         let yields = seeded.index(MAX_KILL_YIELDS)?;
         let (state, origin) = fixture()?;
         let scratch = TempDir::new()?;
-        let (mut child, pid, _ready_open) =
+        let (mut child, pid, _hold) =
             spawn_held_command(state.path(), origin.path(), scratch.path())?;
         for _ in 0..yields {
             std::thread::yield_now();
@@ -79,10 +80,7 @@ fn sim_a_kill_at_every_point_between_spawn_and_insert_leaves_no_group_after_rest
         child.wait()?;
         let next = task_json(origin.path(), "HEAD", "[]");
         report_of(&run_exec(state.path(), &next, None)?)?;
-        assert!(
-            group_exits(pid)?,
-            "seed {seed:#x}: no live group {pid} after a kill at yield {yields}"
-        );
+        await_group_exit(pid).map_err(|cause| format!("seed {seed:#x}: {cause}"))?;
         let rows = ledger_rows(&state.path().join("executor.db"))?;
         assert_eq!(
             rows, 0,
@@ -131,19 +129,6 @@ fn tree_digest(dir: &Path) -> Result<String, Box<dyn Error>> {
 /// Whether any member of process group `pgid` is still alive.
 fn group_alive(pgid: i32) -> Result<bool, Box<dyn Error>> {
     Ok(lgwks_std::process::process_group_exists(pgid)?)
-}
-
-/// Polls until process group `pgid` is gone; killed members may linger briefly as zombies.
-fn wait_for_group_exit(pgid: i32) -> Result<bool, Box<dyn Error>> {
-    let mut attempts: u32 = 0;
-    while group_alive(pgid)? {
-        attempts = attempts.saturating_add(1);
-        if attempts >= POLL_LIMIT {
-            return Ok(false);
-        }
-        std::thread::yield_now();
-    }
-    Ok(true)
 }
 
 #[test]
@@ -351,10 +336,7 @@ fn a_kill_9_of_the_executor_is_reaped_by_the_next_start() -> TestResult {
 
     let next = task_json(origin.path(), "HEAD", "[]");
     report_of(&run_exec(state.path(), &next, None)?)?;
-    assert!(
-        wait_for_group_exit(pid)?,
-        "the next start must reap process group {pid}"
-    );
+    await_group_exit(pid)?;
     let rows = ledger_rows(&state.path().join("executor.db"))?;
     assert_eq!(
         rows, 0,
@@ -395,20 +377,19 @@ fn a_kill_9_mid_task_leaves_a_journal_the_next_start_restores_without_rerunning(
 
     let (state, origin) = fixture()?;
     let scratch = TempDir::new()?;
-    let ready = scratch.path().join("ready");
     let hold = scratch.path().join("hold");
     let marker = scratch.path().join("ran");
-    make_fifo(&ready)?;
     make_fifo(&hold)?;
     let acceptance = format!(
-        r#"[["sh","-c","echo ran >> {}; echo up > {}; cat < {}"]]"#,
+        r#"[["sh","-c","echo ran >> {}; cat < {}"]]"#,
         marker.display(),
-        ready.display(),
         hold.display()
     );
     let task = task_json(origin.path(), "HEAD", &acceptance);
     let mut child = spawn_exec(Some(state.path()), None, &task)?;
-    let _ready_open = fs::File::open(&ready)?;
+    // The command opens the fifo's read end only after it writes the marker, and the write end
+    // opens only once that read end is open: the marker is on disk when this returns (larry#268).
+    let _hold = await_fifo_writer(&hold)?;
     child.kill()?;
     child.wait()?;
 
