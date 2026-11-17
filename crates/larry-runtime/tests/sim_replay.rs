@@ -405,7 +405,11 @@ fn sim_replay_holds_each_decision_to_own_snapshot() -> Outcome {
             records[1].pinned.budget.remaining, 70,
             "second sees remainder"
         );
-        assert_eq!(runtime.remaining_budget(), 50, "both reservations held");
+        assert_eq!(
+            runtime.remaining_budget(tenant(1)),
+            50,
+            "both reservations held"
+        );
         let report = replay_authorizations(runtime.projection());
         assert!(report.is_bit_identical(), "snapshots replay exactly");
         Ok(trace(runtime.journal()))

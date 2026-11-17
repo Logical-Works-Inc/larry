@@ -458,9 +458,10 @@ pub fn attenuate(
 /// This function enforces only that a *single* effect's cost fits inside
 /// the grant ceiling. It never enforces cumulative spend: this crate is
 /// stateless and owns no ledger (D39 places the budget ledger with the
-/// owner scheduler). Calling this per effect does not bound total spend —
-/// use [`validate_at_effect_boundary_with_ledger`] with the remaining
-/// balance from the owner ledger to bound cumulative consumption.
+/// owner scheduler). Cumulative consumption has one home already, the pure
+/// authorization reducer [`replay::decide`](crate::replay::decide), which
+/// denies a cost past the `BudgetSnapshot::remaining` balance the runtime
+/// folded per tenant and pinned with the decision (larry#208).
 ///
 /// # Errors
 ///
@@ -492,41 +493,6 @@ pub fn validate_at_effect_boundary(
         return Err(AuthorityError::BudgetExhausted {
             required: cost,
             available: grant.budget.limit,
-            unit: grant.budget.unit,
-        });
-    }
-    Ok(())
-}
-
-/// Re-validates a grant at the effect boundary against the remaining
-/// balance reported by the owner budget ledger, bounding *cumulative*
-/// spend across effects and not just each effect against the ceiling.
-///
-/// `remaining` is the ledger's authoritative remaining balance for this
-/// grant at validation time; the effect is admitted only when its cost
-/// fits in `remaining` and inside the grant ceiling. Reservation of the
-/// spend is the caller's atomic compare-and-set against the same ledger
-/// (Cell 04 ordering); this check and the reservation must share one
-/// ledger observation or the bound is advisory.
-///
-/// # Errors
-///
-/// Same conditions as [`validate_at_effect_boundary`], plus
-/// [`AuthorityError::BudgetExhausted`] when `cost` exceeds `remaining`
-/// even though it may fit the ceiling.
-pub fn validate_at_effect_boundary_with_ledger(
-    grant: &Grant,
-    required: Scope,
-    cost: u64,
-    remaining: u64,
-    policy: &ResourcePolicy,
-    now: SystemTime,
-) -> Result<(), AuthorityError> {
-    validate_at_effect_boundary(grant, required, cost, policy, now)?;
-    if cost > remaining {
-        return Err(AuthorityError::BudgetExhausted {
-            required: cost,
-            available: remaining,
             unit: grant.budget.unit,
         });
     }

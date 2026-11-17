@@ -97,7 +97,7 @@ fn sim_duplicates_next_tick_suppressed() -> Outcome {
         assert_eq!(second.duplicates(), &[command_id(2)], "resubmit dedupes");
         assert!(second.admitted().is_empty(), "resubmit admits nothing");
         assert_eq!(rt.owner().dispatched().len(), 1, "no second dispatch");
-        assert_eq!(rt.remaining_budget(), 98, "no second reservation");
+        assert_eq!(rt.remaining_budget(tenant(1)), 98, "no second reservation");
         Ok(trace(rt.journal()))
     })
 }
@@ -169,7 +169,11 @@ fn sim_duplicates_conflicting_cost_refused() -> Outcome {
             ),
             Err(other) => return Err(other.into()),
         }
-        assert_eq!(rt.remaining_budget(), 96, "original reservation stands");
+        assert_eq!(
+            rt.remaining_budget(tenant(1)),
+            96,
+            "original reservation stands"
+        );
         Ok(trace(rt.journal()))
     })
 }
@@ -318,11 +322,15 @@ fn sim_duplicates_hold_budget_constant() -> Outcome {
             7,
             ReconciliationStrategy::IdempotentRetrySafe,
         )?;
-        let before = rt.remaining_budget();
+        let before = rt.remaining_budget(tenant(1));
         let body = read_work(10, 7, ReconciliationStrategy::IdempotentRetrySafe);
         rt.offer(10, &body)?;
         rt.tick()?;
-        assert_eq!(rt.remaining_budget(), before, "duplicate reserves nothing");
+        assert_eq!(
+            rt.remaining_budget(tenant(1)),
+            before,
+            "duplicate reserves nothing"
+        );
         let (first_budget, first_fp) = (before, trace(rt.journal()));
         assert_eq!(first_budget, 93, "seed {seed}: one reservation");
         Ok((first_budget, first_fp))

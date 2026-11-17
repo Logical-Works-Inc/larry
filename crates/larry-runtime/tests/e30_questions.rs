@@ -443,7 +443,11 @@ fn e30_an_approval_covers_only_its_exact_content() -> Outcome {
         "{tick:?}"
     );
     assert_eq!(rt.owner().dispatched(), &[]);
-    assert_eq!(rt.remaining_budget(), 100, "a denied swap reserves nothing");
+    assert_eq!(
+        rt.remaining_budget(t1),
+        100,
+        "a denied swap reserves nothing"
+    );
     Ok(())
 }
 

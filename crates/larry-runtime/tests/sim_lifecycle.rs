@@ -102,7 +102,7 @@ fn success_journey(seed: u64) -> Result<(Trace, u64), Box<dyn std::error::Error>
         "the receipt records success"
     );
     assert_state(runtime.projection(), run(1), RunState::Completed)?;
-    let remaining = runtime.remaining_budget();
+    let remaining = runtime.remaining_budget(tenant(1));
     assert_eq!(
         remaining,
         100_u64.saturating_sub(cost),
@@ -149,7 +149,6 @@ fn sim_lifecycle_failed_outcome_is_terminal() -> Outcome {
                 rt.owner().dispatched().contains(&operation(2)),
                 "seed {seed}: owner saw it"
             );
-            let _ = seed;
             Ok(trace_of(rt.journal()))
         };
         assert_eq!(drive(seed)?, drive(seed)?, "seed {seed}: journal replay");
@@ -278,7 +277,7 @@ fn sim_lifecycle_two_effects_single_tick() -> Outcome {
             "both authorize in order"
         );
         assert_eq!(tick.receipts().len(), 2, "both effects receipt");
-        assert_eq!(rt.remaining_budget(), 94, "both reservations held");
+        assert_eq!(rt.remaining_budget(tenant(1)), 94, "both reservations held");
         assert_state(rt.projection(), run(7), RunState::Completed)?;
         assert_state(rt.projection(), run(8), RunState::Completed)?;
         Ok(trace_of(rt.journal()))
@@ -304,7 +303,7 @@ fn sim_lifecycle_sequential_ticks_accumulate() -> Outcome {
             assert_eq!(tick.receipts().len(), 1, "each tick receipts once");
         }
         assert_eq!(rt.projection().receipts().len(), 2, "receipts accumulate");
-        assert_eq!(rt.remaining_budget(), 92, "both costs reserved");
+        assert_eq!(rt.remaining_budget(tenant(1)), 92, "both costs reserved");
         Ok(trace_of(rt.journal()))
     })
 }
@@ -378,7 +377,7 @@ fn sim_lifecycle_budget_denial_holds_no_reservation() -> Outcome {
         assert_eq!(tick.authorized().len(), 0, "over-budget authorizes nothing");
         assert_eq!(tick.denied().len(), 1, "over-budget denies once");
         assert_state(rt.projection(), run(13), RunState::Failed)?;
-        let (first_budget, first_fp) = (rt.remaining_budget(), trace_of(rt.journal()));
+        let (first_budget, first_fp) = (rt.remaining_budget(tenant(1)), trace_of(rt.journal()));
         assert_eq!(first_budget, 10, "denial reserves nothing");
         Ok((first_budget, first_fp))
     })
@@ -444,7 +443,7 @@ fn sim_lifecycle_completed_run_survives_restore() -> Outcome {
         let restored = reopen(journal, 100)?;
         assert_state(restored.projection(), run(16), RunState::Completed)?;
         assert_eq!(
-            restored.remaining_budget(),
+            restored.remaining_budget(tenant(1)),
             94,
             "reservation survives restore"
         );

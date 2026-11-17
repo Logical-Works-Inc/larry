@@ -152,7 +152,11 @@ fn sim_crash_new_run_after_restore_completes() -> Outcome {
         let tick = dispatch(&mut restored, 5, 5, &[Scope::FileRead], 20, strat)?;
         assert_eq!(tick.receipts().len(), 1, "post-restore run receipts");
         assert_state(restored.projection(), run(5), RunState::Completed)?;
-        assert_eq!(restored.remaining_budget(), 70, "both reservations held");
+        assert_eq!(
+            restored.remaining_budget(tenant(1)),
+            70,
+            "both reservations held"
+        );
         Ok(trace(restored.journal()))
     })
 }
@@ -191,7 +195,7 @@ fn sim_crash_open_reservation_holds_budget() -> Outcome {
         dispatch(&mut runtime, 7, 7, &[Scope::FileRead], 30, strat)?;
         let restored = reopen(runtime.into_journal(), 100)?;
         assert_state(restored.projection(), run(7), RunState::Reconciling)?;
-        Ok(restored.remaining_budget())
+        Ok(restored.remaining_budget(tenant(1)))
     })
 }
 
@@ -205,7 +209,11 @@ fn sim_crash_denied_run_stays_failed() -> Outcome {
         dispatch(&mut runtime, 8, 8, &[Scope::FileRead], 11, strat)?;
         let restored = reopen(runtime.into_journal(), 10)?;
         assert_state(restored.projection(), run(8), RunState::Failed)?;
-        assert_eq!(restored.remaining_budget(), 10, "denial reserves nothing");
+        assert_eq!(
+            restored.remaining_budget(tenant(1)),
+            10,
+            "denial reserves nothing"
+        );
         Ok(trace(restored.journal()))
     })
 }
@@ -280,7 +288,7 @@ fn sim_crash_resubmit_after_restore_is_duplicate() -> Outcome {
             "duplicate dispatches none"
         );
         assert_eq!(
-            restored.remaining_budget(),
+            restored.remaining_budget(tenant(1)),
             99,
             "duplicate reserves nothing"
         );

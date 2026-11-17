@@ -274,6 +274,16 @@ fn sim_multitenant_denial_is_per_tenant() -> Outcome {
         )?;
         assert_state(rt.projection(), run(10), RunState::Failed)?;
         assert_state(rt.projection(), run(11), RunState::Completed)?;
+        assert_eq!(
+            rt.remaining_budget(tenant(1)),
+            100_u64,
+            "the denial reserves nothing from tenant 1"
+        );
+        assert_eq!(
+            rt.remaining_budget(tenant(2)),
+            99_u64,
+            "tenant 2 spends only its own"
+        );
         Ok(tenant_tally(&rt))
     })
 }
@@ -331,31 +341,14 @@ fn sim_multitenant_five_tenants_complete_together() -> Outcome {
         }
         let tick = rt.tick()?;
         assert_eq!(tick.receipts().len(), 5, "every tenant receipts");
-        assert_eq!(rt.remaining_budget(), 95, "five reservations held");
+        for (_, ten) in [(14_u8, 1_u8), (15, 2), (16, 3), (17, 4), (18, 5)] {
+            assert_eq!(
+                rt.remaining_budget(tenant(ten)),
+                99_u64,
+                "tenant {ten} keeps its own counter"
+            );
+        }
         Ok((tick.receipts().len(), tenant_tally(&rt)))
-    })
-}
-
-/// E37: reservations draw from one pool across tenants.
-#[test]
-fn sim_multitenant_reservations_share_one_pool() -> Outcome {
-    replay(60_u64..66, |seed| -> Sim<(u64, TenantTally)> {
-        let mut rt = mk_tenant(ScriptedOwner::scripted([succeeded(operation(19))]))?;
-        tender(
-            &mut rt,
-            19,
-            1,
-            &[Scope::FileRead],
-            90,
-            ReconciliationStrategy::IdempotentRetrySafe,
-        )?;
-        let second = work(20, 2, 20, 20, ReconciliationStrategy::Queryable);
-        rt.offer(20, &second)?;
-        let tick = rt.tick()?;
-        assert_eq!(tick.authorized().len(), 0, "the pool is spent");
-        let (first_budget, first_fp) = (rt.remaining_budget(), tenant_tally(&rt));
-        assert_eq!(first_budget, 10, "seed {seed}: ten units remain");
-        Ok((first_budget, first_fp))
     })
 }
 

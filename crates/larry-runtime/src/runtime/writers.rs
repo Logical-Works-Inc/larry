@@ -34,6 +34,13 @@ where
             });
         }
         self.runs.entry(run).or_insert(RunLive { tenant });
+        // One budget per tenant (larry#208): a tenant enters the budget map
+        // only through a tracked run, so the map holds at most the run table's
+        // capacity of counters, and a restored tenant keeps the remainder the
+        // fold gave it.
+        self.budgets
+            .entry(tenant)
+            .or_insert(self.settings.initial_budget);
         Ok(())
     }
 
@@ -56,7 +63,15 @@ where
     }
 
     /// Captures exactly the inputs used by the authorization reducer.
-    pub(super) fn pinned_inputs(&self, proposal: &WorkProposal, at: SystemTime) -> PinnedInputs {
+    ///
+    /// The budget snapshot is `tenant`'s own remainder (larry#208), so the
+    /// decision bounds that tenant's cumulative spend and no other tenant's.
+    pub(super) fn pinned_inputs(
+        &self,
+        tenant: TenantId,
+        proposal: &WorkProposal,
+        at: SystemTime,
+    ) -> PinnedInputs {
         PinnedInputs::new(
             EffectRequest::new(
                 proposal.operation,
@@ -66,7 +81,7 @@ where
                 at,
             ),
             self.settings.policy.clone(),
-            BudgetSnapshot::new(self.remaining_budget, self.settings.unit),
+            BudgetSnapshot::new(self.remaining_budget(tenant), self.settings.unit),
             self.settings.capabilities.clone(),
             self.settings.validity,
         )

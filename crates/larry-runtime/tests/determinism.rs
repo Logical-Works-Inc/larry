@@ -333,7 +333,7 @@ fn replay_holds_each_decision_against_its_own_budget_snapshot()
     // final 20, which is what a naive "replay against current state" would do.
     assert_eq!(records[0].pinned.budget.remaining, 100);
     assert_eq!(records[1].pinned.budget.remaining, 60);
-    assert_eq!(rt.remaining_budget(), 20);
+    assert_eq!(rt.remaining_budget(tenant(1)), 20);
 
     // Replaying against a *decision-changing* mutation must diverge
     // explicitly rather than pass silently. Draining the recorded budget below

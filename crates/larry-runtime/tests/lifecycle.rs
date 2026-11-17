@@ -62,7 +62,7 @@ fn authorized_effect_runs_to_a_terminal_receipt() -> Result<(), Box<dyn std::err
     assert_eq!(tick.receipts()[0].operation(), operation(1));
     assert_state(rt.projection(), run(1), RunState::Completed)?;
     // Reservation spent exactly the declared cost.
-    assert_eq!(rt.remaining_budget(), 95);
+    assert_eq!(rt.remaining_budget(tenant(1)), 95);
     Ok(())
 }
 
@@ -207,7 +207,7 @@ fn duplicate_submission_is_suppressed_by_identity() -> Result<(), Box<dyn std::e
     assert_eq!(second.duplicates(), &[command_id(1)]);
     assert!(second.admitted().is_empty());
     assert_eq!(rt.owner().dispatched().len(), 1);
-    assert_eq!(rt.remaining_budget(), 99);
+    assert_eq!(rt.remaining_budget(tenant(1)), 99);
     Ok(())
 }
 
