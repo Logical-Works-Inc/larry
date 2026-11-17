@@ -13,6 +13,7 @@ mod pyjson;
 mod pystr;
 pub(crate) mod receipts;
 mod temp_paths;
+mod tokens;
 
 #[cfg(test)]
 mod fixture;
@@ -24,6 +25,8 @@ mod sim_markdown;
 mod sim_parsers;
 #[cfg(test)]
 pub(crate) mod sim_support;
+#[cfg(test)]
+mod sim_temp_paths;
 #[cfg(test)]
 mod sim_tracker;
 #[cfg(test)]

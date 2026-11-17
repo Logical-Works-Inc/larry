@@ -248,6 +248,39 @@ fn a_pid_temp_path_in_test_code_is_refused_and_the_guard_passes()
     Ok(())
 }
 
+/// Cost, measured not gated (ADR 0053): 100 checks of the live tree print p50, p95 and p99, and
+/// every one of them passes, so the walk reads each file once per check and stays in budget
+/// (larry#293).
+#[test]
+fn a_hundred_checks_of_the_tree_print_their_percentiles() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::io::Write as _;
+
+    let mut samples = Vec::with_capacity(100);
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        let errors = super::temp_paths::errors(root());
+        samples.push(started.elapsed());
+        assert!(errors.is_empty(), "the live tree passes: {errors:?}");
+    }
+    samples.sort_unstable();
+    let nearest = |per_cent: usize| {
+        let rank = samples.len().saturating_mul(per_cent).div_ceil(100);
+        match samples.get(rank.saturating_sub(1)) {
+            Some(sample) => *sample,
+            None => std::time::Duration::ZERO,
+        }
+    };
+    let line = format!(
+        "larry governance temp-path rule over 100 checks: p50 {:?} p95 {:?} p99 {:?}\n",
+        nearest(50),
+        nearest(95),
+        nearest(99)
+    );
+    std::io::stderr().lock().write_all(line.as_bytes())?;
+    Ok(())
+}
+
 /// Every version `Cargo.lock` text locks for `name`: a `version` line counts only
 /// when it directly follows that package's `name` line, so a dependency list or a
 /// comment that mentions the name never does.
