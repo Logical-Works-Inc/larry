@@ -15,6 +15,8 @@
 //! (larry#86); `report_of` checks that it agrees with the sealed verdict.
 //! The fixture origin runs no background git maintenance, so nothing but the
 //! executor can change the tree a journey hashes (git-maintenance, larry#138).
+//! The busy-ledger sim proves the ledger reader's retry on its own, once, in
+//! this binary (larry#309).
 
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
@@ -28,15 +30,16 @@ use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use exec_cli::deadline::{await_fifo_writer, await_group_exit};
 use exec_cli::{
-    TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, make_fifo, millis,
-    number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry, task_json,
-    text_of,
+    TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid_through,
+    make_fifo, millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec,
+    spawn_larry, task_json, text_of,
 };
 use held_group::{ledger_rows, spawn_held_command};
+use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 
@@ -56,6 +59,9 @@ const KILL_SEEDS: [u64; 4] = [
 
 /// Most yields a seeded kill point waits after the group is recorded.
 const MAX_KILL_YIELDS: usize = 64;
+
+/// Seeds the busy-ledger simulation sweeps (larry#309).
+const BUSY_SEEDS: u64 = 8;
 
 /// For every seed, a kill -9 of the shipped executor at the seeded point, while its command's
 /// group runs, leaves no live group after the next start and no ledger row once it has
@@ -85,6 +91,60 @@ fn sim_a_kill_at_every_point_between_spawn_and_insert_leaves_no_group_after_rest
         assert_eq!(
             rows, 0,
             "seed {seed:#x}: the ledger holds no row after the reap"
+        );
+    }
+    Ok(())
+}
+
+/// A ledger read refused with `SQLITE_BUSY` twice is retried inside the deadline and answers
+/// the pid once the writer releases its lock, for every seed: a row is read after the lock is
+/// released, never instead of it (larry#294). The reader takes no busy timeout, so each refusal
+/// answers at once instead of after rusqlite's 5 s default, and the deadline alone bounds the
+/// wait; the sim lives here so it runs once, not once per binary that includes the fixture
+/// (larry#309).
+#[test]
+fn sim_live_group_pid_answers_after_two_busy_reads() -> TestResult {
+    for seed in 0..BUSY_SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let pid = i32::try_from(rng.below(60_000)?.saturating_add(1))?;
+        let dir = TempDir::new()?;
+        let db = dir.join("ledger.db");
+        // The writer holds the database exclusively, so the reader's own query is refused with
+        // SQLITE_BUSY until the third attempt releases it.
+        let writer = Connection::open(&db)?;
+        writer.execute_batch(&format!(
+            "CREATE TABLE live_groups (pid INTEGER); INSERT INTO live_groups VALUES ({pid}); BEGIN EXCLUSIVE;"
+        ))?;
+        let reader = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        reader.busy_timeout(Duration::ZERO)?;
+        let mut attempts = 0_u64;
+        let mut first_refusal = String::new();
+        let answered = live_group_pid_through("a live group was recorded in the ledger", || {
+            attempts = attempts.saturating_add(1);
+            if attempts == 3 {
+                writer.execute_batch("ROLLBACK")?;
+            }
+            match reader.query_row("SELECT pid FROM live_groups", [], |row| {
+                row.get::<_, i64>(0)
+            }) {
+                Ok(pid) => Ok(Some(i32::try_from(pid)?)),
+                Err(lgwks_deps::storefront::rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(cause) => {
+                    if attempts == 1 {
+                        first_refusal = cause.to_string();
+                    }
+                    Err(cause.into())
+                }
+            }
+        })?;
+        assert!(
+            first_refusal.contains("database is locked"),
+            "seed {seed}: the first read is refused because the writer holds the lock: {first_refusal}"
+        );
+        assert_eq!(answered, pid, "seed {seed}: the pid the row holds");
+        assert_eq!(
+            attempts, 3,
+            "seed {seed}: two busy reads are retried, then the released row answers"
         );
     }
     Ok(())
