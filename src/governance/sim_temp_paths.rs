@@ -12,45 +12,67 @@ use super::sim_support::{Scratch, SimError, SimResult};
 use super::temp_paths;
 
 /// The refusal the rule writes for `relative` at `line`.
-fn refusal(relative: &str, line: usize) -> String {
+pub(super) fn refusal(relative: &str, line: usize) -> String {
     format!("a process id names a temp directory outside the guard: {relative}:{line}")
 }
 
-/// A fresh fixture holding `source` at `name`.
-fn fixture(tag: &str, name: &str, source: &str) -> Result<Scratch, SimError> {
+/// The smallest manifest that makes a scratch tree a package (larry#311): the root package is a
+/// workspace member, so its `src` and `tests` are the roots.
+pub(super) const MANIFEST: &str =
+    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n";
+
+/// The source a case refuses: a temp directory reached on line 2 with the process id.
+pub(super) const LEAK: &str = "fn state() -> std::path::PathBuf {\n    std::env::temp_dir().join(format!(\"x-{}\", std::process::id()))\n}\n";
+
+/// The source a case passes: a temp directory with no process id.
+pub(super) const CLEAN: &str =
+    "fn state() -> std::path::PathBuf {\n    std::env::temp_dir().join(\"x\")\n}\n";
+
+/// A fresh fixture holding a package: a manifest, `src/lib.rs` and `tests/keep.rs`, so every
+/// member root the rule reads exists (larry#311).
+pub(super) fn package(tag: &str) -> Result<Scratch, SimError> {
     let tree = Scratch::new(tag)?;
-    tree.write(name, source.as_bytes())?;
+    named(&tree, "Cargo.toml", MANIFEST)?;
+    named(&tree, "src/lib.rs", "pub fn present() {}\n")?;
+    named(&tree, "tests/keep.rs", "fn keep() {}\n")?;
+    Ok(tree)
+}
+
+/// A fresh package fixture holding `source` at `name`.
+fn fixture(tag: &str, name: &str, source: &str) -> Result<Scratch, SimError> {
+    let tree = package(tag)?;
+    named(&tree, name, source)?;
     Ok(tree)
 }
 
 /// Writes `source` at `name` in `tree`.
-fn named(tree: &Scratch, name: &str, source: &str) -> Result<(), SimError> {
+pub(super) fn named(tree: &Scratch, name: &str, source: &str) -> Result<(), SimError> {
     tree.write(name, source.as_bytes())
 }
 
 /// Every refusal the rule raises over `tree`, or the typed error that stopped it.
-fn refusals(tree: &Scratch) -> Result<Vec<String>, SimError> {
+pub(super) fn refusals(tree: &Scratch) -> Result<Vec<String>, SimError> {
     Ok(temp_paths::errors(tree.path())?)
 }
 
 /// Asserts that `tree` draws exactly `wanted`.
-fn assert_all(tree: &Scratch, wanted: &[String], why: &str) -> SimResult {
+pub(super) fn assert_all(tree: &Scratch, wanted: &[String], why: &str) -> SimResult {
     assert_eq!(refusals(tree)?, wanted, "{why}");
     Ok(())
 }
 
 /// Asserts that `tree` draws exactly one refusal, for `name` at `line`.
-fn assert_one(tree: &Scratch, name: &str, line: usize, why: &str) -> SimResult {
+pub(super) fn assert_one(tree: &Scratch, name: &str, line: usize, why: &str) -> SimResult {
     assert_all(tree, &[refusal(name, line)], why)
 }
 
 /// Asserts that `tree` draws no refusal.
-fn assert_none(tree: &Scratch, why: &str) -> SimResult {
+pub(super) fn assert_none(tree: &Scratch, why: &str) -> SimResult {
     assert_all(tree, &[], why)
 }
 
 /// Asserts that `errors` names `file` and `reason` together.
-fn assert_reason(errors: &[String], file: &str, reason: &str) {
+pub(super) fn assert_reason(errors: &[String], file: &str, reason: &str) {
     assert!(
         errors
             .iter()
@@ -60,7 +82,7 @@ fn assert_reason(errors: &[String], file: &str, reason: &str) {
 }
 
 /// The message of the one typed error that stopped the rule over `tree`.
-fn stopped(tree: &Scratch) -> Result<String, SimError> {
+pub(super) fn stopped(tree: &Scratch) -> Result<String, SimError> {
     match temp_paths::errors(tree.path()) {
         Ok(errors) => Err(SimError::Absent(format!(
             "a refusal, but the rule answered {errors:?}"
@@ -514,17 +536,53 @@ fn trace_of(roots: &[Root]) -> Result<String, SimError> {
     Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
 }
 
+/// The bytes of a source name no UTF-8 text holds.
+const BAD_NAME: &[u8] = b"bad\xff.rs";
+
+/// The error number macOS answers when asked to create a file whose name is not UTF-8 (`EILSEQ`):
+/// APFS holds no such name, so the walk can never meet one there.
+const MACOS_ILLEGAL_SEQUENCE: i32 = 92;
+
 /// The walk's own refusal survives the pool (larry#316): a source whose name is not UTF-8 is
-/// named by its directory, never skipped and never passed.
+/// named by its directory, never skipped and never passed. A host that cannot create the name
+/// (macOS) is held to the same refusal by the control below, over the same bytes.
 #[test]
 fn sim_a_non_utf8_source_name_is_refused() -> SimResult {
     use std::os::unix::ffi::OsStringExt as _;
 
     let tree = fixture("temp-nonutf8", "tests/plain.rs", "fn plain() {}\n")?;
-    let name = std::ffi::OsString::from_vec(b"bad\xff.rs".to_vec());
-    std::fs::write(tree.path().join("tests").join(name), b"fn bad() {}\n")?;
-    let errors = refusals(&tree)?;
-    assert_reason(&errors, "tests", "not UTF-8");
+    let name = std::ffi::OsString::from_vec(BAD_NAME.to_vec());
+    match std::fs::write(tree.path().join("tests").join(name), b"fn bad() {}\n") {
+        Ok(()) => {
+            let errors = refusals(&tree)?;
+            assert_reason(&errors, "tests", "not UTF-8");
+        }
+        Err(cause)
+            if cfg!(target_os = "macos")
+                && cause.raw_os_error() == Some(MACOS_ILLEGAL_SEQUENCE) => {}
+        Err(cause) => return Err(cause.into()),
+    }
+    Ok(())
+}
+
+/// The refusal on every host (larry#316): the entry name the walk reads is refused as not UTF-8,
+/// while a UTF-8 name is returned as it is.
+#[test]
+fn sim_a_non_utf8_entry_name_is_refused_on_every_host() -> SimResult {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let bad = std::path::PathBuf::from(std::ffi::OsString::from_vec(BAD_NAME.to_vec()));
+    assert_eq!(
+        temp_paths::entry_name(&bad),
+        Err(temp_paths::EntryError::NotUtf8),
+        "a name that is not UTF-8 is refused"
+    );
+    let good = std::path::PathBuf::from("tests/good.rs");
+    assert_eq!(
+        temp_paths::entry_name(&good),
+        Ok("good.rs"),
+        "a UTF-8 name passes through"
+    );
     Ok(())
 }
 
@@ -533,7 +591,7 @@ fn sim_a_non_utf8_source_name_is_refused() -> SimResult {
 #[test]
 fn sim_one_worker_and_many_workers_give_the_same_report() -> SimResult {
     const FILES: usize = 48;
-    let tree = Scratch::new("temp-workers")?;
+    let tree = package("temp-workers")?;
     let mut rng = Seeded::from_seed(0x316);
     let mut wanted = Vec::new();
     for file in 0..FILES {

@@ -27,6 +27,8 @@ pub(crate) mod sim_support;
 #[cfg(test)]
 mod sim_temp_paths;
 #[cfg(test)]
+mod sim_temp_workspace;
+#[cfg(test)]
 mod sim_tracker;
 #[cfg(test)]
 mod tests;

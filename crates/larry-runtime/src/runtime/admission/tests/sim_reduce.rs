@@ -264,7 +264,7 @@ fn sim_a_reduce_failure_then_retry_is_never_a_silent_duplicate() -> Outcome {
 /// One kill after the failed reduce: the file holds A's command unreduced, the
 /// restore reduces it once with room for it, and B keeps running beside it.
 fn killed_after_a_failed_reduce(seed: u64) -> Result<u64, Box<dyn std::error::Error>> {
-    let path = journal_file("reducefail", seed)?;
+    let (_guard, path) = journal_file("reducefail", seed)?;
     let case = drive_to_failure(seed, durable_with(&path, ceiling(seed)?)?)?;
     let Case {
         runtime,

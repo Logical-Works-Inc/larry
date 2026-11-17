@@ -17,6 +17,7 @@ use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::runtime::{TickReport, restore};
 
+use crate::support::temp_dir::TempDir;
 use crate::support::{
     TestRuntime, clock, command_id, operation, proposal, run, runtime_with, seeded, settings,
     submit, tenant,
@@ -66,19 +67,20 @@ pub fn trace(journal: &Journal) -> ContentDigest {
     )
 }
 
-/// A journal file for `name` and `seed` in the OS temporary directory, absent
-/// when the drive starts so both replays of a seed start from nothing.
+/// A journal file for `name` and `seed` inside a fresh shared guard directory, absent
+/// when the drive starts so both replays of a seed start from nothing. The caller
+/// holds the returned guard, so the directory and its journal are removed when it
+/// drops (larry#311).
 ///
 /// # Errors
 ///
-/// Propagates a refusal to remove a file the previous run left.
-pub fn fresh_journal(name: &str, seed: u64) -> Sim<PathBuf> {
-    let path = std::env::temp_dir().join(format!(
-        "larry-sim-{}-{name}-{seed}.journal",
-        std::process::id()
-    ));
-    remove(&path)?;
-    Ok(path)
+/// Propagates a refusal to make the guard directory.
+pub fn fresh_journal(name: &str, seed: u64) -> Sim<(TempDir, PathBuf)> {
+    let guard = TempDir::new()?;
+    let path = guard
+        .path()
+        .join(format!("larry-sim-{name}-{seed}.journal"));
+    Ok((guard, path))
 }
 
 /// Removes `path` if it exists.
@@ -267,7 +269,7 @@ fn sim_kit_replay_and_trace_contract() -> Sim<()> {
     );
     // A fresh file starts absent, and removing one that is already gone is not
     // a refusal: the durable suites depend on both halves of this.
-    let path = fresh_journal("kit", 0)?;
+    let (_guard, path) = fresh_journal("kit", 0)?;
     assert!(!path.exists(), "a fresh journal path names no file yet");
     remove(&path)?;
     remove(&path)?;

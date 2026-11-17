@@ -233,6 +233,10 @@ impl Backing {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/support/temp_dir.rs"]
+mod temp_dir;
+
+#[cfg(test)]
 mod tests {
     use larry_contracts::command::{Command, CommandContent, CommandKind};
     use larry_contracts::event::{Event, EventKind, EventSequence};
@@ -246,6 +250,8 @@ mod tests {
 
     /// Fallible test outcome.
     type Outcome = Result<(), Box<dyn std::error::Error>>;
+
+    use super::temp_dir::TempDir;
 
     /// One command and one event over identities derived from `seed`.
     fn pair(seed: u8) -> Result<[JournalEntry; 2], RuntimeError> {
@@ -312,22 +318,22 @@ mod tests {
         )?)
     }
 
-    /// A journal file for `name` and `seed`, absent when the drive starts.
-    fn fresh(name: &str, seed: u8) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "larry-durable-{}-{name}-{seed}.journal",
-            std::process::id()
-        ));
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
-            Err(error) => Err(error.into()),
-        }
+    /// A journal file for `name` and `seed` inside a fresh guard directory, which the caller holds
+    /// so the whole tree is removed when it drops (larry#311).
+    fn fresh(
+        name: &str,
+        seed: u8,
+    ) -> Result<(TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
+        let guard = TempDir::new()?;
+        let path = guard
+            .path()
+            .join(format!("larry-durable-{name}-{seed}.journal"));
+        Ok((guard, path))
     }
 
     /// One seeded drive of the ceiling, staging and corruption rules.
     fn ceiling_drive(seed: u8) -> Result<(u64, usize), Box<dyn std::error::Error>> {
-        let path = fresh("ceiling", seed)?;
+        let (_guard, path) = fresh("ceiling", seed)?;
         let mut journal = Journal::open(&path, 1)?;
         assert!(journal.is_durable(), "open attaches the file");
         assert!(!journal.clone().is_durable(), "a clone is memory-only");

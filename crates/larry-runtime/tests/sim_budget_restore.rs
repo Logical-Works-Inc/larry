@@ -52,7 +52,7 @@ fn ticks(runtime: &mut TestRuntime, count: usize) -> Result<usize, Box<dyn std::
 #[test]
 fn sim_a_restart_spends_the_recorded_dispatch_budget() -> Outcome {
     replay(0_u64..8, |seed| -> Sim<(usize, usize)> {
-        let path = fresh_journal("budget", seed)?;
+        let (_guard, path) = fresh_journal("budget", seed)?;
         // Process 1: submit one retry-safe effect and drain its budget. Four
         // ticks is more than the three attempts, so the effect leaves
         // reconciliation with its dispatch budget spent and its outcome unknown.

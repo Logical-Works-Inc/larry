@@ -3,7 +3,6 @@
 //! correction promoted only at a safe boundary.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::{BudgetUnit, Scope};
@@ -29,6 +28,10 @@ use crate::protocol::{
 use crate::runtime::{Runtime, RuntimeSettings, restore};
 
 mod sim_reduce;
+
+// The shared temp guard of the repository's tests (larry#311), included as source so this crate
+// loads it once as a module (the journal's tests) and once as an include.
+include!("../../../../../tests/support/temp_dir.rs");
 
 type Outcome = Result<(), Box<dyn std::error::Error>>;
 type Rt = Runtime<FoldProjection, ScriptedOwner>;
@@ -71,15 +74,12 @@ fn durable(owner: ScriptedOwner, path: &Path) -> Result<Rt, Box<dyn std::error::
     Ok(restore(settings, owner, clock(), journal)?)
 }
 
-fn journal_file(name: &str, seed: u64) -> Result<PathBuf, std::io::Error> {
-    let path = std::env::temp_dir().join(format!(
-        "larry-e28-{}-{name}-{seed}.journal",
-        std::process::id()
-    ));
-    match std::fs::remove_file(&path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-        _ => Ok(path),
-    }
+fn journal_file(name: &str, seed: u64) -> Result<(TempDir, PathBuf), std::io::Error> {
+    let guard = TempDir::new()?;
+    let path = guard
+        .path()
+        .join(format!("larry-e28-{name}-{seed}.journal"));
+    Ok((guard, path))
 }
 
 /// A unit of work: one `FileRead` effect costing one request.
@@ -155,13 +155,13 @@ fn pending(runtime: &Rt) -> Vec<CommandId> {
         .collect()
 }
 
-/// A seeded submit: its journal file, the `Submit` command's identity, and the
-/// command itself, so the seeded admission cases share one fixture.
+/// A seeded submit: the guard holding its journal directory, the journal file, the `Submit`
+/// command's identity, and the command itself, so the seeded admission cases share one fixture.
 fn seeded_submit(
     seed: u64,
     name: &str,
-) -> Result<(PathBuf, CommandId, Command), Box<dyn std::error::Error>> {
-    let path = journal_file(name, seed)?;
+) -> Result<(TempDir, PathBuf, CommandId, Command), Box<dyn std::error::Error>> {
+    let (guard, path) = journal_file(name, seed)?;
     let (run, tenant) = (
         RunId::from_bytes(ids(1, seed)),
         TenantId::from_bytes(ids(2, seed)),
@@ -169,7 +169,7 @@ fn seeded_submit(
     let body = work_body(run, tenant, OperationId::from_bytes(ids(3, seed)));
     let id = CommandId::from_bytes(ids(4, seed));
     let command = command(id, CommandKind::Submit, &body)?;
-    Ok((path, id, command))
+    Ok((guard, path, id, command))
 }
 
 /// R44/E28: for every seed, an acknowledged admission survives the runtime's
@@ -178,7 +178,7 @@ fn seeded_submit(
 #[test]
 fn sim_an_acknowledged_admission_survives_a_crash_and_is_reduced_once() -> Outcome {
     for seed in 0..32_u64 {
-        let (path, id, first) = seeded_submit(seed, "ack")?;
+        let (_guard, path, id, first) = seeded_submit(seed, "ack")?;
         let body = work_body(
             RunId::from_bytes(ids(1, seed)),
             TenantId::from_bytes(ids(2, seed)),
@@ -477,7 +477,7 @@ fn a_held_queued_correction_lets_the_next_run_pass() -> Outcome {
 #[test]
 fn sim_a_sync_refusal_admits_nothing_and_a_restore_admits_once() -> Outcome {
     for seed in 0..8_u64 {
-        let (path, id, command) = seeded_submit(seed, "admitsync")?;
+        let (_guard, path, id, command) = seeded_submit(seed, "admitsync")?;
         // The journal refuses the acknowledgment of its own append, as a store
         // whose confirmation was lost does: the bytes landed, the caller was
         // told nothing was durable.
@@ -548,7 +548,7 @@ fn sync_refused<T>(result: &Result<T, RuntimeError>) -> bool {
 #[test]
 fn sim_a_retry_after_a_sync_refusal_is_refused_and_a_restore_admits_once() -> Outcome {
     for seed in 0..64_u64 {
-        let (path, id, first) = seeded_submit(seed, "retrysync")?;
+        let (_guard, path, id, first) = seeded_submit(seed, "retrysync")?;
         let tenant = first.tenant();
         assert!(
             offer(tenant).serves_questions().is_err(),
@@ -578,7 +578,7 @@ fn sim_a_retry_after_a_sync_refusal_is_refused_and_a_restore_admits_once() -> Ou
         );
 
         // Another tenant's journal, opened while this one is refused, admits.
-        let (other_path, _, other) = seeded_submit(seed + 1_000, "retryother")?;
+        let (_guard, other_path, _, other) = seeded_submit(seed + 1_000, "retryother")?;
         let mut elsewhere = durable(ScriptedOwner::new(), &other_path)?;
         assert_eq!(
             elsewhere.ack(other)?,
@@ -633,7 +633,7 @@ fn sim_a_retry_after_a_sync_refusal_is_refused_and_a_restore_admits_once() -> Ou
 #[test]
 fn sim_a_submit_retry_after_a_sync_refusal_is_refused_and_a_restore_admits_once() -> Outcome {
     for seed in 0..64_u64 {
-        let (path, id, first) = seeded_submit(seed, "queuesync")?;
+        let (_guard, path, id, first) = seeded_submit(seed, "queuesync")?;
         let settings = settings()?;
         let journal = Journal::open(&path, settings.journal_capacity)?.lost_acknowledgement();
         let mut runtime: Rt = restore(settings, ScriptedOwner::new(), clock(), journal)?;

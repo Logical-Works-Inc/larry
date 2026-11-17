@@ -29,6 +29,7 @@ use larry_runtime::runtime::{
 };
 use lgwks_bot::clock::Clock;
 
+use support::temp_dir::TempDir;
 use support::{
     TestRuntime, cancel, clock, command_id, epoch, operation, proposal, run, seeded, settings,
     submit, succeeded, tenant,
@@ -517,13 +518,10 @@ fn wide(index: usize, lead: u8) -> [u8; 16] {
     bytes
 }
 
-fn journal_file(seed: u64) -> Result<PathBuf, std::io::Error> {
-    let path =
-        std::env::temp_dir().join(format!("larry-e30-{}-{seed}.journal", std::process::id()));
-    match std::fs::remove_file(&path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-        _ => Ok(path),
-    }
+fn journal_file(seed: u64) -> Result<(TempDir, PathBuf), std::io::Error> {
+    let guard = TempDir::new()?;
+    let path = guard.path().join(format!("larry-e30-{seed}.journal"));
+    Ok((guard, path))
 }
 
 fn reopen(
@@ -546,7 +544,7 @@ fn reopen(
 fn sim_e30_a_question_and_its_answer_survive_a_crash() -> Outcome {
     for seed in 0..32_u64 {
         seeded(seed, || -> Outcome {
-            let path = journal_file(seed)?;
+            let (_guard, path) = journal_file(seed)?;
             let t1 = tenant(1);
             let item = work(10, t1, run(1), 1, 1)?;
             let subject = subject_of(&item, run(1), 1);
