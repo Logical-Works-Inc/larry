@@ -58,6 +58,10 @@ lgwks_bot = { version = "=8.4.0", default-features = false }
 # published storefront owns that dependency and its transitive admission. 7.2.0 (larry#189)
 # is a major release; the ledger's `sqlite::open` and `sqlite::migrate` calls take its API.
 lgwks_deps = { version = "=7.2.0", default-features = false }
+# The estate's one Rust reader (larry#293, ADR 0061). The governance temp-path rule parses
+# test sources with its tree-sitter grammar and takes its byte, node, depth and time bounds;
+# 6.0.3 is the newest release. `lang-rust` selects the Rust grammar and the parser it needs.
+lgwks_ast = { version = "=6.0.3", default-features = false }
 thiserror = "=2.0.21"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # The runtime gate (larry#164): the executor submits every task through it, so
 # a task body runs only inside the runtime's authorized owner call.
@@ -78,6 +82,9 @@ lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "
 # the estate lacks are logicalworks-crates#1075.
 lgwks_bot = { workspace = true, features = ["edge", "signal", "process"] }
 lgwks_deps = { workspace = true, features = ["sqlite"] }
+# The one Rust reader of `larry governance`'s temp-path rule (larry#293, ADR 0061): the crate's
+# tree-sitter grammar and its `try_parse` bounds replace the deleted hand-written lexer.
+lgwks_ast = { workspace = true, features = ["lang-rust"] }
 # The terminal frontend (larry#239, ADR 0045): raw mode, keys, bracketed paste and resize. It was in
 # the tree under AppCUI already, so the direct edge adds no crate; AppCUI and its subtree leave.
 crossterm = { version = "=0.29.0", default-features = false, features = ["events", "bracketed-paste"] }  # gap: Logical-Works-Inc/logicalworks-crates#1067

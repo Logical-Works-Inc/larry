@@ -184,82 +184,79 @@ fn missing_reranker_receipt_is_rejected() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// The temp-path rule (larry#267): the old `<label>-<pid>` fixture is refused with its file and
-/// line, while the guard route, the guard file itself, and a process id that names something other
-/// than a temp path pass.
+/// The temp-path rule (larry#267, larry#293): a fixture that splits a temp directory from the
+/// process id is refused with its file and line, while the guard route, the guard file itself, and
+/// a process id that names something other than a temp path pass.
 #[test]
 fn a_pid_temp_path_in_test_code_is_refused_and_the_guard_passes()
 -> Result<(), Box<dyn std::error::Error>> {
     let tree = Scratch::new("temp-paths")?;
-    let tests = tree.path().join("tests");
-    std::fs::create_dir_all(&tests)?;
-    let fixture = tests.join("old_fixture.rs");
-    std::fs::write(
-        &fixture,
-        "fn state() -> std::path::PathBuf {\n    \
-         std::env::temp_dir().join(format!(\"larry-old-{}\", std::process::id()))\n}\n",
+    let fixture = "tests/old_fixture.rs";
+    tree.write(
+        fixture,
+        b"fn state() -> std::path::PathBuf {\n    \
+          let base = std::env::temp_dir();\n    \
+          base.join(format!(\"x-{}\", std::process::id()))\n}\n",
     )?;
     assert_eq!(
-        super::temp_paths::errors(tree.path()),
+        super::temp_paths::errors(tree.path())?,
         [String::from(
             "a process id names a temp directory outside the guard: tests/old_fixture.rs:2"
         )],
-        "the old fixture is refused, naming its file and line"
+        "the split binding is refused, naming its file and line"
     );
-    std::fs::write(
-        &fixture,
-        "fn state() -> origin::TempDir {\n    origin::TempDir::new()\n}\n",
+    tree.write(
+        fixture,
+        b"fn state() -> origin::TempDir {\n    origin::TempDir::new()\n}\n",
     )?;
     assert!(
-        super::temp_paths::errors(tree.path()).is_empty(),
+        super::temp_paths::errors(tree.path())?.is_empty(),
         "the guard route passes"
     );
-    let naming = concat!(
-        "const DEAD_PID: i32 = 2_147_483_646;\n",
-        "fn name() -> String {\n",
-        "    format!(\"origin-{DEAD_PID}-0\", DEAD_PID)\n",
-        "}\n"
-    );
-    std::fs::write(&fixture, naming)?;
+    tree.write(
+        fixture,
+        b"const DEAD_PID: i32 = 2_147_483_646;\n\
+          fn name() -> String {\n    format!(\"origin-{DEAD_PID}-0\", DEAD_PID)\n}\n",
+    )?;
     assert!(
-        super::temp_paths::errors(tree.path()).is_empty(),
+        super::temp_paths::errors(tree.path())?.is_empty(),
         "a process id that names no temp directory passes"
     );
-    let guard = tree.path().join("src/executor/sim_tree.rs");
-    std::fs::create_dir_all(tree.path().join("src/executor"))?;
-    std::fs::write(
-        &guard,
-        "fn scratch_name() -> std::path::PathBuf {\n    \
-         std::env::temp_dir().join(format!(\"x-{}\", std::process::id()))\n}\n",
+    tree.write(
+        "src/executor/sim_tree.rs",
+        b"fn scratch_name() -> std::path::PathBuf {\n    \
+          std::env::temp_dir().join(format!(\"x-{}\", std::process::id()))\n}\n",
     )?;
     assert!(
-        super::temp_paths::errors(tree.path()).is_empty(),
+        super::temp_paths::errors(tree.path())?.is_empty(),
         "the guard that empties and removes is the one temp path a process id may name"
     );
-    std::fs::write(
-        tree.path().join("src/production.rs"),
-        "fn report() -> std::path::PathBuf {\n    \
-         std::env::temp_dir().join(format!(\"a-{}\", std::process::id()))\n}\n",
+    tree.write(
+        "src/production.rs",
+        b"fn report() -> std::path::PathBuf {\n    \
+          std::env::temp_dir().join(format!(\"a-{}\", std::process::id()))\n}\n",
     )?;
     assert!(
-        super::temp_paths::errors(tree.path()).is_empty(),
+        super::temp_paths::errors(tree.path())?.is_empty(),
         "a production file is not test code, so the rule does not reach it"
     );
     Ok(())
 }
 
+/// The number of live-tree checks the cost control runs.
+const CHECKS: usize = 100;
+
 /// Cost, measured not gated (ADR 0053): 100 checks of the live tree print p50, p95 and p99, and
-/// every one of them passes, so the walk reads each file once per check and stays in budget
-/// (larry#293).
+/// every one of them passes, so the walk and the parse stay in budget (larry#293).
 #[test]
 fn a_hundred_checks_of_the_tree_print_their_percentiles() -> Result<(), Box<dyn std::error::Error>>
 {
     use std::io::Write as _;
 
-    let mut samples = Vec::with_capacity(100);
-    for _ in 0..100 {
+    let mut samples = Vec::with_capacity(CHECKS);
+    for _ in 0..CHECKS {
         let started = std::time::Instant::now();
-        let errors = super::temp_paths::errors(root());
+        let errors = super::temp_paths::errors(root())?;
         samples.push(started.elapsed());
         assert!(errors.is_empty(), "the live tree passes: {errors:?}");
     }
@@ -272,7 +269,7 @@ fn a_hundred_checks_of_the_tree_print_their_percentiles() -> Result<(), Box<dyn 
         }
     };
     let line = format!(
-        "larry governance temp-path rule over 100 checks: p50 {:?} p95 {:?} p99 {:?}\n",
+        "larry governance temp-path rule over {CHECKS} checks: p50 {:?} p95 {:?} p99 {:?}\n",
         nearest(50),
         nearest(95),
         nearest(99)

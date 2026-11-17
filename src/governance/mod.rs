@@ -13,7 +13,6 @@ mod pyjson;
 mod pystr;
 pub(crate) mod receipts;
 mod temp_paths;
-mod tokens;
 
 #[cfg(test)]
 mod fixture;
@@ -121,7 +120,7 @@ fn run(root: &Path) -> Result<Value, GovernanceError> {
     let patterns = Patterns::new()?;
     let mut errors = Vec::new();
     let mut report = validate(&documents, &patterns, &mut errors)?;
-    errors.extend(temp_paths::errors(root));
+    errors.extend(temp_paths::errors(root)?);
     errors.extend(receipts::receipt_errors(root));
     errors.extend(tracker::drift_errors(
         root,

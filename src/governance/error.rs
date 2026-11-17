@@ -4,6 +4,7 @@
 use std::fmt;
 use std::io;
 
+use lgwks_ast::ParseError;
 use lgwks_std::pattern::PatternError;
 
 /// A refusal that stops the whole check before or while it reads the documents.
@@ -40,6 +41,25 @@ pub(crate) enum GovernanceError {
     NotUtf8 {
         /// CPython's `UnicodeDecodeError` text for it.
         codec: String,
+    },
+    /// A Rust source is past the reader's byte bound.
+    SourceTooLarge {
+        /// The file, relative to the root.
+        relative: String,
+        /// The bytes the file holds.
+        bytes: usize,
+    },
+    /// The estate reader refused a Rust source (larry#293, ADR 0058).
+    Source {
+        /// The file, relative to the root.
+        relative: String,
+        /// The reader's typed refusal.
+        cause: ParseError,
+    },
+    /// A Rust source is not UTF-8.
+    SourceNotUtf8 {
+        /// The file, relative to the root.
+        relative: String,
     },
     /// A checker pattern did not compile.
     Pattern {
@@ -79,6 +99,22 @@ impl fmt::Display for GovernanceError {
                 ref cause,
             } => write!(out, "cannot read {relative}: {cause}"),
             Self::NotUtf8 { ref codec } => out.write_str(codec),
+            Self::SourceTooLarge {
+                ref relative,
+                bytes,
+            } => {
+                write!(
+                    out,
+                    "source file exceeds byte limit: {relative} ({bytes} bytes)"
+                )
+            }
+            Self::Source {
+                ref relative,
+                ref cause,
+            } => write!(out, "source file refused: {relative}: {cause}"),
+            Self::SourceNotUtf8 { ref relative } => {
+                write!(out, "source file is not UTF-8: {relative}")
+            }
             Self::Pattern {
                 ref pattern,
                 ref cause,
@@ -98,11 +134,14 @@ impl std::error::Error for GovernanceError {
         match *self {
             Self::Unreadable { ref cause, .. } => Some(cause),
             Self::Pattern { ref cause, .. } => Some(cause),
+            Self::Source { ref cause, .. } => Some(cause),
             Self::Symlink { .. }
             | Self::IsDirectory { .. }
             | Self::TooLarge { .. }
             | Self::TooMany { .. }
             | Self::NotUtf8 { .. }
+            | Self::SourceTooLarge { .. }
+            | Self::SourceNotUtf8 { .. }
             | Self::InvalidIpv6Url
             | Self::InvalidIpvFuture
             | Self::BracketedIpv4
