@@ -10,9 +10,11 @@ on:
 permissions:
   contents: read
 # One run per workflow and ref: a second push to a pull request cancels the run
-# its first push started. A push to main never cancels (larry#307).
+# its first push started. A push to main never cancels (larry#307). A body edit
+# runs in a group of its own, so it never cancels the code checks of the same
+# commit (PRs #317, #318 and #320 each showed a CANCELLED docs-check, larry#310).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'edited' && '-body' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Every PR closes at least one issue through `Closes #N` in its body
@@ -40,6 +42,8 @@ jobs:
           fi
           echo "PR #$PR closes $closes"
   docs-check:
+    # A body edit changes no file, so only issue-link re-runs on it.
+    if: github.event.action != 'edited'
     # Runner by visibility (larry#116, see sim.yml).
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
     timeout-minutes: 5

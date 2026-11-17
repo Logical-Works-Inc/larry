@@ -93,12 +93,51 @@ fn workflows() -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
 #[test]
 fn every_workflow_cancels_a_superseded_pull_request_run_only() -> Check {
     for (name, text) in workflows()? {
+        // governance.yml alone listens on `edited`, and puts those runs in a group of their own.
+        let suffix = if name == "governance.yml" {
+            "${{ github.event.action == 'edited' && '-body' || '' }}"
+        } else {
+            ""
+        };
         assert!(
-            text.contains(
-                "concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"
-            ),
+            text.contains(&format!(
+                "concurrency:\n  group: ${{{{ github.workflow }}}}-${{{{ github.ref }}}}{suffix}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n"
+            )),
             "{name}: one concurrency group per workflow and ref, cancelled for pull requests only \
              (a main run is the proof of the landed commit)"
+        );
+    }
+    Ok(())
+}
+
+/// Source: PRs #317, #318 and #320 (2026-11-17), where a body edit on an unchanged commit
+/// cancelled the running docs-check and left it CANCELLED; GitHub Actions concurrency docs (runs
+/// in one group cancel each other). Requirement: a body edit re-checks only the issue link.
+#[test]
+fn a_body_edit_never_cancels_the_code_checks() -> Check {
+    let text = workflow("governance.yml")?;
+    assert!(
+        text.contains("types: [opened, synchronize, reopened, edited]"),
+        "a body fix still re-runs the issue link"
+    );
+    assert!(
+        text.contains("group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'edited' && '-body' || '' }}\n"),
+        "an edited run joins its own group, so it cannot cancel a code run"
+    );
+    let docs = job(&text, "docs-check")?;
+    assert!(
+        docs.contains("if: github.event.action != 'edited'"),
+        "a body edit changes no file, so docs-check does not run on it"
+    );
+    assert_eq!(
+        text.matches("action != 'edited'").count(),
+        1,
+        "only docs-check skips an edit; issue-link runs on every pull request event"
+    );
+    for name in ["ci.yml", "sim.yml", "mutants.yml"] {
+        assert!(
+            !workflow(name)?.contains("edited"),
+            "{name} never starts on a body edit"
         );
     }
     Ok(())

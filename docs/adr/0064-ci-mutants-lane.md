@@ -72,6 +72,9 @@ self-hosted Mac, larry#116), with the one-run-per-ref cancel of ADR 0060.
 - Above 16 shards' worth of mutants a shard holds more than K mutants and may reach its 15 minute
   timeout, which turns the verdict red. A large PR is expected to split, or to raise the cap with a
   measurement.
+- governance.yml puts a body-edit run in its own concurrency group and runs only issue-link on it.
+  Before, an edit on an unchanged commit cancelled the running docs-check (PRs #317, #318, #320),
+  and a CANCELLED check is not green. Test: `a_body_edit_never_cancels_the_code_checks`.
 - A PR of only test code, or only deleted lines, lists no mutants and passes with `no mutants`.
   cargo-mutants matches the diff against code under test, not test code (mutants.rs/in-diff).
 
