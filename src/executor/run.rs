@@ -520,8 +520,9 @@ pub(super) fn await_group_gone(clock: &Clock, pgid: i32) -> Result<(), ExecError
 /// `process_group_exists` and a `true` keeps waiting (larry#268); both decisions are the
 /// probe's and one clock reading, so the seeded sim can drive them to the deadline and
 /// before it on a virtual clock. The error type is the probe's, so a sim can report a
-/// refused clock advance as itself.
-fn await_gone<E>(
+/// refused clock advance as itself. Visible to the executor so the ledger's reap and its
+/// simulation share this one wait instead of a second copy (larry#308).
+pub(super) fn await_gone<E>(
     clock: &Clock,
     mut still_there: impl FnMut() -> Result<bool, E>,
 ) -> Result<bool, E> {
