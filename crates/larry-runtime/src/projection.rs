@@ -122,6 +122,15 @@ pub trait ProjectionBackend {
     /// pinned inputs (R71, E55).
     fn authorizations(&self) -> &[ReplayRecord];
 
+    /// Every recorded intent's cost, summed for the tenant its recorded event
+    /// named (larry#208).
+    ///
+    /// The runtime keeps one budget per tenant, so `restore` re-derives each
+    /// counter from these sums rather than from one pooled total. The tenant
+    /// is the one the run's event carried, never the one the intent declared.
+    /// This allocates and is called on the recovery path only.
+    fn reserved_by_tenant(&self) -> BTreeMap<TenantId, u64>;
+
     /// Every reserved intent, in reservation order. Restoration rebuilds the
     /// live effect table from this, which is why recovery needs no side
     /// channel beyond the journal.
@@ -210,6 +219,8 @@ pub struct FoldProjection {
     receipts: Vec<TerminalReceipt>,
     /// Pinned decisions in recorded order.
     authorizations: Vec<ReplayRecord>,
+    /// Recorded spend per tenant, in deterministic tenant order (larry#208).
+    reserved: BTreeMap<TenantId, u64>,
     /// Reservations in recorded order.
     intents: Vec<EffectIntent>,
     /// Maximum number of tracked run views.
@@ -230,6 +241,7 @@ impl FoldProjection {
             runs: BTreeMap::new(),
             receipts: Vec::new(),
             authorizations: Vec::new(),
+            reserved: BTreeMap::new(),
             intents: Vec::new(),
             capacity,
         }
@@ -278,6 +290,10 @@ impl FoldProjection {
         let operation = payload.intent.operation;
         let view = self.entry(event.run(), event)?;
         view.effects.insert(operation, EffectPhase::Reserved);
+        // The cost is charged to the tenant the recorded event named, never to
+        // the tenant the intent declared (D42, larry#208).
+        let spent = self.reserved.entry(event.tenant()).or_insert(0);
+        *spent = spent.saturating_add(payload.authorization.pinned.request.cost);
         self.authorizations.push(payload.authorization);
         self.intents.push(payload.intent);
         Ok(())
@@ -326,11 +342,22 @@ impl FoldProjection {
             });
         }
         let view = self.runs.entry(run).or_default();
-        // First-wins: the run's tenant is the one its earliest recorded event
-        // carried. A later event cannot re-attribute a run that is already
-        // known, so a journal that names two tenants for one run keeps the one
-        // the run was created under rather than flipping to the newest claim.
-        view.tenant.get_or_insert(event.tenant());
+        // A run's tenant is the one its earliest recorded event carried. A
+        // later event naming another tenant is a forged or corrupted journal,
+        // so the fold refuses it rather than keeping either answer: first-wins
+        // would silently restore a run under one tenant while its later facts
+        // claim another (D42, larry#208).
+        match view.tenant {
+            Some(expected) if expected != event.tenant() => {
+                return Err(RuntimeError::RunTenantMismatch {
+                    run,
+                    expected,
+                    got: event.tenant(),
+                });
+            }
+            Some(_) => {}
+            None => view.tenant = Some(event.tenant()),
+        }
         view.last_sequence = Some(event.sequence());
         Ok(view)
     }
@@ -345,6 +372,7 @@ impl ProjectionBackend for FoldProjection {
         self.runs.clear();
         self.receipts.clear();
         self.authorizations.clear();
+        self.reserved.clear();
         self.intents.clear();
         for entry in journal.entries() {
             if let JournalEntry::Event(ref event) = *entry {
@@ -410,6 +438,10 @@ impl ProjectionBackend for FoldProjection {
 
     fn authorizations(&self) -> &[ReplayRecord] {
         &self.authorizations
+    }
+
+    fn reserved_by_tenant(&self) -> BTreeMap<TenantId, u64> {
+        self.reserved.clone()
     }
 
     fn intents(&self) -> &[EffectIntent] {

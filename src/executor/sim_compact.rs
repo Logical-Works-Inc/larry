@@ -4,8 +4,9 @@
 //! Framework's `ToolResultCompactionStrategy` define it (old tool output dropped,
 //! the call kept), and RFC 9110 15.5.14 (413 Content Too Large). Requirement
 //! proved: every request a session sends fits its window, the head turns never
-//! change, no step disappears without being counted, a refused window shrinks
-//! and stops after its bound, and one seed replays one conversation.
+//! change, no step disappears without being counted, and one seed replays one
+//! conversation. The window a gateway's refusal names is `sim_refusal`'s
+//! (larry#236).
 
 use std::error::Error;
 use std::fmt;
@@ -16,11 +17,11 @@ use lgwks_std::json;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::super::session::sim::text;
-use super::{
-    Answer, Conversation, KEEP_EXCHANGES, MAX_RECORD_LINES, MAX_SHRINKS, Overflow, quarters,
-};
+use super::{Answer, Conversation, KEEP_EXCHANGES, MAX_RECORD_LINES, Overflow, quarters};
 use crate::eval::percentile;
-use crate::model::{MAX_MESSAGES, Message, ModelClient, ModelError, Request, Role, sim_config};
+use crate::model::{
+    MAX_MESSAGES, Message, ModelClient, ModelError, Request, Role, WindowRefusal, sim_config,
+};
 use crate::sim_error::SimError;
 
 /// What every simulation returns.
@@ -139,7 +140,7 @@ fn drive(
         check(&conversation, &request)?;
         let refused = quarters(request.bytes(), 3) >= 16_384 && conversation.tally.shrinks < 2;
         if rng.below(16)? == 0 && refused {
-            conversation.shrink(request.bytes())?;
+            conversation.shrink(request.bytes(), WindowRefusal::default())?;
             let shorter = conversation.prepare(&model)?;
             check(&conversation, &shorter)?;
         }
@@ -248,34 +249,6 @@ fn sim_same_seed_same_render_hash() -> TestResult {
             "seed {seed} differs"
         );
     }
-    Ok(())
-}
-
-/// Each refusal shrinks the window to three quarters of the refused request, and
-/// the ninth is refused typed, with the window left where the eighth put it.
-#[test]
-fn a_refused_window_shrinks_to_three_quarters_and_stops_after_eight() -> TestResult {
-    let mut conversation = Conversation::new(SYSTEM, String::from("task"), 1_048_576);
-    let mut len = 1_048_576_usize;
-    for _ in 0..MAX_SHRINKS {
-        conversation.shrink(len)?;
-        assert_eq!(
-            conversation.window,
-            quarters(len, 3),
-            "three quarters of {len}"
-        );
-        len = conversation.window;
-    }
-    assert_eq!(
-        conversation.shrink(len),
-        Err(Overflow::Shrinks),
-        "the ninth"
-    );
-    assert_eq!(conversation.window, len, "unchanged by the refusal");
-    assert_eq!(conversation.tally.shrinks, MAX_SHRINKS, "counted");
-    let mut fresh = Conversation::new(SYSTEM, String::from("task"), 4096);
-    fresh.shrink(1_048_576)?;
-    assert_eq!(fresh.window, 4096, "a refusal never grows the window");
     Ok(())
 }
 
@@ -471,38 +444,6 @@ fn an_irreducible_conversation_is_refused_typed() -> TestResult {
         other => return Err(format!("expected Irreducible, got {other:?}").into()),
     }
     Ok(())
-}
-
-/// A 413, or a 400 naming the context window in any provider's words, is an
-/// overflow; any other refusal, and the same words on a 5xx, are not.
-#[test]
-fn context_overflow_is_a_413_or_a_400_naming_the_window() {
-    let client_error = |status: u16, detail: &str| ModelError::Client {
-        status,
-        detail: detail.to_owned(),
-    };
-    for detail in [
-        "This model's maximum context length is 128000 tokens. However, your messages resulted in 130112 tokens.",
-        "prompt is too long: 210000 tokens > 200000 maximum",
-        "The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).",
-        "context_length_exceeded",
-        "Input exceeds the Context Window of this model",
-    ] {
-        assert!(client_error(400, detail).is_context_overflow(), "{detail}");
-    }
-    assert!(client_error(413, "").is_context_overflow(), "413");
-    for refusal in [
-        client_error(400, "temperature must be at most 1"),
-        client_error(401, "context length"),
-        ModelError::Server {
-            status: 500,
-            detail: String::from("maximum context length"),
-        },
-        ModelError::BodyTooLarge,
-        ModelError::Timeout,
-    ] {
-        assert!(!refusal.is_context_overflow(), "{refusal:?}");
-    }
 }
 
 /// Two tenants' sessions compact at once on two threads; neither conversation

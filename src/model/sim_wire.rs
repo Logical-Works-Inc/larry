@@ -11,8 +11,13 @@ use std::error::Error;
 use lgwks_std::json::{Map, Value, json};
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::{parse_completion, request_body};
-use crate::model::{MAX_MESSAGES, Message, ModelClient, ModelError, Role, Usage, sim_config};
+use super::{
+    MAX_CODE_CHARS, MAX_DETAIL_CHARS, MAX_ERROR_BODY, parse_completion, refusal_detail,
+    request_body,
+};
+use crate::model::{
+    MAX_MESSAGES, Message, ModelClient, ModelError, Role, Usage, WindowRefusal, sim_config,
+};
 
 /// What every test returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -147,6 +152,71 @@ fn cached_tokens_are_read_from_every_usage_shape_and_sse() -> TestResult {
         "a usage that is no object is ignored"
     );
     Ok(())
+}
+
+/// A structured refusal carries its `error.code` before its message, so a
+/// translated message still says what the refusal is, a code alone is the whole
+/// reason, control characters never reach an operator, and a body past the read
+/// bound is not parsed as a document at all (larry#236).
+#[test]
+fn a_refusal_keeps_the_gateways_code_and_reads_a_bounded_body() {
+    assert_eq!(
+        refusal_detail(
+            br#"{"error":{"code":"context_length_exceeded","message":"the prompt is too long"}}"#
+        ),
+        "context_length_exceeded: the prompt is too long"
+    );
+    assert_eq!(
+        refusal_detail(br#"{"error":{"code":"context_length_exceeded"}}"#),
+        "context_length_exceeded",
+        "a code alone is the reason"
+    );
+    assert_eq!(
+        refusal_detail(br#"{"error":{"message":"out of memory"}}"#),
+        "out of memory"
+    );
+    assert_eq!(refusal_detail(b"plain refusal"), "plain refusal");
+    assert_eq!(
+        refusal_detail(br#"{"error":{"message":"a\nb\tc"}}"#),
+        "a b c",
+        "a control character is blanked"
+    );
+    let long_code = format!(r#"{{"error":{{"code":"{}"}}}}"#, "c".repeat(100));
+    assert_eq!(
+        refusal_detail(long_code.as_bytes()).chars().count(),
+        MAX_CODE_CHARS,
+        "a code past its bound is cut"
+    );
+    let long = format!(
+        r#"{{"error":{{"message":"{}"}}}}"#,
+        "x".repeat(MAX_ERROR_BODY)
+    );
+    let detail = refusal_detail(long.as_bytes());
+    assert_eq!(
+        detail.chars().count(),
+        MAX_DETAIL_CHARS,
+        "the reason is bounded"
+    );
+    assert!(
+        detail.starts_with("{\"error\""),
+        "a body past the read bound is not parsed as a document: {detail:.20}"
+    );
+    let hostile = refusal_detail(
+        br#"{"error":{"message":"maximum context length is 99999999999999999999999999 tokens"}}"#,
+    );
+    let refusal = ModelError::Client {
+        status: 400,
+        detail: hostile,
+    };
+    assert!(
+        refusal.is_context_overflow(),
+        "the words still name the window"
+    );
+    assert_eq!(
+        refusal.window(),
+        WindowRefusal::default(),
+        "a 26 digit count is no number and the body is no panic"
+    );
 }
 
 /// One seeded reply: the counts a gateway reports and how it dresses them.

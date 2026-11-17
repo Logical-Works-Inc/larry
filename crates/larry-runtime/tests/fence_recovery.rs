@@ -247,14 +247,14 @@ fn e71_a_restart_recharges_no_offline_authority_and_old_settings_revive_nothing(
 fn e71_a_fenced_effect_keeps_its_reservation_and_that_is_a_known_limit()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut rt = runtime()?;
-    assert_eq!(rt.remaining_budget(), 100);
+    assert_eq!(rt.remaining_budget(tenant(1)), 100);
     rt.submit(work(1, operation(1), ReconciliationStrategy::Queryable)?)?;
     assert!(rt.fence_mut().revoke(operation(1))?);
     let tick = rt.tick()?;
 
     assert_eq!(tick.fenced().len(), 1);
     assert_eq!(
-        rt.remaining_budget(),
+        rt.remaining_budget(tenant(1)),
         95,
         "budget is reserved at admission, before the fence runs, so a fenced \
          effect holds its reservation; releasing it would need a journal fact \
@@ -481,6 +481,13 @@ fn a_fenced_effect_leaves_the_run_visibly_unfinished() -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// The epoch space's last generation and the one below it. These are the
+/// exhaustion edge, not chosen bounds: at the top the fence answers
+/// `EpochExhausted` (refuse the next generation), and the test below drives it.
+const LAST_EPOCH: u64 = u64::MAX;
+/// The newest generation a broker can name, one below the exhausted top.
+const LAST_BROKER_EPOCH: u64 = LAST_EPOCH - 1;
+
 /// Epoch exhaustion refuses rather than wrapping, because a wrapped epoch would
 /// alias a withdrawn generation with a live one. `u64::MAX` has no broker
 /// generation, so the top a fence stands at is the epoch below it (larry#76).
@@ -488,12 +495,12 @@ fn a_fenced_effect_leaves_the_run_visibly_unfinished() -> Result<(), Box<dyn std
 fn e71_epoch_exhaustion_refuses_at_the_runtime_boundary() -> Result<(), Box<dyn std::error::Error>>
 {
     assert!(matches!(
-        RevocationFence::new(SecurityEpoch::new(u64::MAX), 64),
+        RevocationFence::new(SecurityEpoch::new(LAST_EPOCH), 64),
         Err(FenceError::EpochExhausted)
     ));
-    let mut fence = RevocationFence::new(SecurityEpoch::new(u64::MAX - 1), 64)?;
+    let mut fence = RevocationFence::new(SecurityEpoch::new(LAST_BROKER_EPOCH), 64)?;
     assert_eq!(fence.advance_epoch(), Err(FenceError::EpochExhausted));
-    assert_eq!(fence.epoch()?, SecurityEpoch::new(u64::MAX - 1));
+    assert_eq!(fence.epoch()?, SecurityEpoch::new(LAST_BROKER_EPOCH));
     Ok(())
 }
 
