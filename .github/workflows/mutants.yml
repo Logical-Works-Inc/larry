@@ -43,10 +43,11 @@ jobs:
         id: plan
         env:
           BASE_REF: ${{ github.base_ref }}
-          # K: mutants per shard. A shard pays about 1.5 minutes of setup, then
-          # one incremental build and one package test run per mutant, so K = 3
-          # is the ESTIMATE that ends a shard inside 5 minutes (ADR 0064).
-          MUTANTS_PER_SHARD: 3
+          # K: mutants per shard. A shard pays its setup, then one incremental
+          # build and one run of the root package's tests per surviving mutant
+          # (about 2.5 minutes measured on a cold cache), so K = 2 is the
+          # ESTIMATE that ends a shard inside 5 minutes warm (ADR 0064).
+          MUTANTS_PER_SHARD: 2
           # Past 16 shards a shard holds more than K mutants and runs longer;
           # the shard timeout, not a silent drop, is the overflow answer.
           MUTANTS_MAX_SHARDS: 16
@@ -86,7 +87,7 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.shards != '0' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -97,11 +98,13 @@ jobs:
           toolchain: stable
       # This workflow never runs on main, so a key of its own would never be
       # written. It restores the test lane's key and saves nothing (larry#307):
-      # a pull request still never writes what main restores.
+      # a pull request still never writes what main restores. The cache paths
+      # must equal the test job's, `cache-bin` included, or GitHub keys the two
+      # caches apart: the first run with `cache-bin: false` found no cache and
+      # paid a cold build (ADR 0064).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           shared-key: test-hosted
-          cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - timeout-minutes: 3
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
@@ -121,7 +124,7 @@ jobs:
           # and not on every shard. --timeout bounds a mutant that loops.
           cargo mutants --workspace --in-diff pr.diff --shard "${SHARD_K}/${SHARD_N}" \
             --in-place --baseline skip --test-tool nextest --no-shuffle \
-            --timeout 240 --cargo-arg=--locked || rc=$?
+            --timeout 300 --cargo-arg=--locked || rc=$?
           case "$rc" in
             0 | 2 | 3) echo "cargo mutants exited $rc: the outcomes are the verdict's" ;;
             *)

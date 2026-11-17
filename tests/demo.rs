@@ -158,6 +158,6 @@ fn unicode_notes_have_finite_capacity_and_other_sessions_are_isolated()
 fn clear_with_no_notes_is_refused() {
     let mut demo = Demo::default();
     let other = Demo::default();
-    assert_eq!(demo.command("clear"), Err(Rejected::NoNotes));
+    assert_eq!(demo.command("clear"), Err(Rejected::NothingToClear));
     assert_eq!(demo, other);
 }

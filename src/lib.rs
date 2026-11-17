@@ -206,7 +206,7 @@ pub enum Rejected {
     /// `feedback` carried no text.
     EmptyFeedback,
     /// `clear` arrived with no note to drop.
-    NoNotes,
+    NothingToClear,
 }
 
 impl std::fmt::Display for Rejected {
@@ -309,11 +309,23 @@ impl Demo {
     /// Drop every session note and lift the hold they set, or refuse when there is none.
     fn clear(&mut self) -> Result<(), Rejected> {
         if self.notes.is_empty() {
-            return Err(Rejected::NoNotes);
+            return Err(Rejected::NothingToClear);
         }
         self.drop_notes();
         self.lift_hold();
+        self.forget_selection();
+        self.rewind();
         Ok(())
+    }
+
+    /// Forget which change is selected.
+    fn forget_selection(&mut self) {
+        self.selected = None;
+    }
+
+    /// Hide every revealed change again.
+    fn rewind(&mut self) {
+        self.cursor = 0;
     }
 
     /// Forget the session's notes.

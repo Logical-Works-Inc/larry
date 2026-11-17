@@ -218,11 +218,11 @@ fn the_mutants_lane_caps_its_shards_and_bounds_each_one() -> Check {
     );
     let shard = job(&text, "shard")?;
     assert!(
-        shard.contains("timeout-minutes: 10\n    strategy:\n      fail-fast: false\n"),
+        shard.contains("timeout-minutes: 15\n    strategy:\n      fail-fast: false\n"),
         "an overrunning shard ends at its timeout and never stops its siblings"
     );
     assert!(
-        shard.contains("--timeout 240"),
+        shard.contains("--timeout 300"),
         "a mutant that loops is a timeout outcome, not a held job"
     );
     Ok(())
