@@ -185,8 +185,14 @@ enum TaskError {
     UnknownArgument,
     /// A required argument is absent.
     Missing(&'static str),
-    /// An argument has the wrong JSON type.
-    WrongType(&'static str),
+    /// An argument has the wrong JSON type; the refusal names the form this
+    /// door reads, so a client that sent the other door's shape learns it.
+    WrongType {
+        /// The argument.
+        key: &'static str,
+        /// The form the argument must take.
+        form: &'static str,
+    },
     /// A string is empty or blank.
     Empty(&'static str),
     /// A string exceeds its byte bound.
@@ -211,7 +217,7 @@ impl std::fmt::Display for TaskError {
                 )
             }
             Self::Missing(key) => write!(out, "`{key}` is required"),
-            Self::WrongType(key) => write!(out, "`{key}` has the wrong type"),
+            Self::WrongType { key, form } => write!(out, "`{key}` must be {form}"),
             Self::Empty(key) => write!(out, "`{key}` must not be empty"),
             Self::TooLong(key, max) => write!(out, "`{key}` exceeds {max} bytes"),
             Self::Nul(key) => write!(out, "`{key}` contains a NUL byte"),
@@ -250,7 +256,14 @@ fn validate_task(arguments: &Map) -> Result<Checked<'_>, TaskError> {
     }
     let goal = text(arguments, "goal", MAX_GOAL_BYTES)?;
     let repo = text(arguments, "repo", MAX_REPO_BYTES)?;
-    let files = text_list(arguments, "files", 1, MAX_FILES, MAX_PATH_BYTES)?;
+    let files = text_list(
+        arguments,
+        "files",
+        1,
+        MAX_FILES,
+        MAX_PATH_BYTES,
+        "an array of repo-relative path strings",
+    )?;
     if !files.iter().all(|path| is_repo_relative(path)) {
         return Err(TaskError::NotRepoRelative);
     }
@@ -260,11 +273,15 @@ fn validate_task(arguments: &Map) -> Result<Checked<'_>, TaskError> {
         1,
         MAX_ACCEPTANCE,
         MAX_COMMAND_BYTES,
+        "an array of shell command strings, one per command, such as [\"cargo nextest run --locked\"]",
     )?;
     let route = match arguments.get("route") {
         None => None,
         Some(value) => {
-            let named = value.as_str().ok_or(TaskError::WrongType("route"))?;
+            let named = value.as_str().ok_or(TaskError::WrongType {
+                key: "route",
+                form: "a string naming a route id",
+            })?;
             if !is_route_id(named) {
                 return Err(TaskError::BadRoute);
             }
@@ -286,7 +303,10 @@ fn text<'a>(arguments: &'a Map, key: &'static str, max: usize) -> Result<&'a str
         return Err(TaskError::Missing(key));
     };
     let Some(string) = value.as_str() else {
-        return Err(TaskError::WrongType(key));
+        return Err(TaskError::WrongType {
+            key,
+            form: "a string",
+        });
     };
     check_text(key, string, max)?;
     Ok(string)
@@ -306,19 +326,21 @@ fn check_text(key: &'static str, string: &str, max: usize) -> Result<(), TaskErr
     Ok(())
 }
 
-/// A required array of `text`-valid strings holding `min..=max_items` entries.
+/// A required array of `text`-valid strings holding `min..=max_items` entries,
+/// each at most `max_len` bytes; `form` names the shape its refusal asks for.
 fn text_list<'a>(
     arguments: &'a Map,
     key: &'static str,
     min: usize,
     max_items: usize,
     max_len: usize,
+    form: &'static str,
 ) -> Result<Vec<&'a str>, TaskError> {
     let Some(value) = arguments.get(key) else {
         return Err(TaskError::Missing(key));
     };
     let Some(items) = value.as_array() else {
-        return Err(TaskError::WrongType(key));
+        return Err(TaskError::WrongType { key, form });
     };
     if items.len() < min || items.len() > max_items {
         return Err(TaskError::Count(key, min, max_items));
@@ -326,7 +348,7 @@ fn text_list<'a>(
     let mut checked = Vec::with_capacity(items.len());
     for item in items {
         let Some(entry) = item.as_str() else {
-            return Err(TaskError::WrongType(key));
+            return Err(TaskError::WrongType { key, form });
         };
         check_text(key, entry, max_len)?;
         checked.push(entry);

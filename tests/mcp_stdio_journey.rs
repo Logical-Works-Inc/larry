@@ -687,3 +687,38 @@ fn a_rejected_or_refused_task_is_a_failed_tool_result_never_success() -> TestRes
     assert!(message.contains("could not clone"), "{message}");
     Ok(())
 }
+
+/// A call that sends `acceptance` in `larry exec`'s shape is an
+/// `invalid_arguments` tool error whose message names this door's form, an
+/// array of shell command strings, with an example (larry#228). The refusal
+/// comes before any executor setting is read, so no state directory is needed.
+#[test]
+fn submit_task_names_its_acceptance_form() -> TestResult<()> {
+    let mut session = ready()?;
+    let reply = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+    "params":{"name":"larry_submit_task","arguments":{
+        "goal": "bound the retry loop",
+        "repo": "Logical-Works-Inc/larry",
+        "files": ["src/retry.rs"],
+        "acceptance": "run"
+    }}}))?;
+    let result = &reply["result"];
+    assert_eq!(result["isError"], true, "a refusal is never a success");
+    assert_eq!(
+        result["structuredContent"]["error"]["code"], "invalid_arguments",
+        "the refusal keeps its typed code"
+    );
+    let message = result["structuredContent"]["error"]["message"]
+        .as_str()
+        .ok_or("the refusal carries a message")?;
+    assert!(
+        message.contains("shell command strings"),
+        "the message names the expected form: {message}"
+    );
+    assert!(
+        message.contains("cargo nextest run --locked"),
+        "the message shows an example: {message}"
+    );
+    assert_eq!(session.finish()?.code(), Some(0), "clean exit");
+    Ok(())
+}

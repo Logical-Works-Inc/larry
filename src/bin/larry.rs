@@ -7,7 +7,9 @@
 //! `larry eval`, one priced arm over the matched task set (larry#87), and
 //! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010), and
 //! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014), and
-//! `larry serve`, the HTTP host on lgwks_bot's app edge (larry#88, ADR 0021).
+//! `larry serve`, the HTTP host on lgwks_bot's app edge (larry#88, ADR 0021), and
+//! `larry help`, `--help` and `-h`, the one table every subcommand and the
+//! `LARRY_*` variables it reads are printed from (larry#228, ADR 0054).
 //! The frontend runs real terminal sessions and asks before every command; it
 //! exits 0 when the person quits.
 use std::ffi::OsString;
@@ -67,6 +69,134 @@ const _: () = assert!(
 /// gateway's refusal (with its `Retry-After`) at once.
 const fn pause(wait: Duration) -> bool {
     wait.is_zero()
+}
+
+/// One subcommand: the word the first argument must be, its one-line summary
+/// and the `LARRY_*` variables it reads (larry#228). `larry help`, `--help`
+/// and `-h` render this one table, so the help a first-time user reads cannot
+/// drift from the arms below.
+struct Subcommand {
+    /// The first argument that selects the command.
+    name: &'static str,
+    /// The one-line summary help prints.
+    summary: &'static str,
+    /// The `LARRY_*` variables the command reads, in a phrase, or `none`.
+    env: &'static str,
+}
+
+/// The variables a command reads that runs a task through the executor: the
+/// state directory, the policy, the command timeout and the model settings.
+const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
+
+/// The variables `larry model` reads: one gateway, one key and the retry knobs.
+const MODEL_ENV: &str = "LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY, LARRY_MODEL_TIMEOUT_MS, LARRY_MODEL_ATTEMPTS, LARRY_MODEL_BACKOFF_MS, LARRY_MODEL_DEADLINE_MS";
+
+/// The phrase a command that reads no variable of its own prints.
+const NO_ENV: &str = "none";
+
+/// Every subcommand the dispatcher handles, in help order.
+const COMMANDS: [Subcommand; 13] = [
+    Subcommand {
+        name: "help",
+        summary: "print this help and exit",
+        env: NO_ENV,
+    },
+    Subcommand {
+        name: "mcp",
+        summary: "serve MCP over stdin and stdout",
+        env: EXECUTOR_ENV,
+    },
+    Subcommand {
+        name: "acp",
+        summary: "serve the Agent Client Protocol on stdin and stdout",
+        env: EXECUTOR_ENV,
+    },
+    Subcommand {
+        name: "model",
+        summary: "send stdin to the model gateway and print one reply",
+        env: MODEL_ENV,
+    },
+    Subcommand {
+        name: "exec",
+        summary: "run a task document from stdin",
+        env: EXECUTOR_ENV,
+    },
+    Subcommand {
+        name: "verify",
+        summary: "check a sealed report from stdin",
+        env: "LARRY_RECEIPT_KEY, LARRY_STATE_DIR",
+    },
+    Subcommand {
+        name: "key",
+        summary: "print the receipt public key",
+        env: "LARRY_STATE_DIR",
+    },
+    Subcommand {
+        name: "route",
+        summary: "add, list, remove, default or resolve the model routes",
+        env: "LARRY_STATE_DIR, LARRY_KEY_*, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY",
+    },
+    Subcommand {
+        name: "eval",
+        summary: "run a matched task set as one priced arm",
+        env: "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_*, LARRY_KEY_*, LARRY_EVAL_PRICE_IN, LARRY_EVAL_PRICE_OUT, LARRY_EVAL_PRICE_CACHED, LARRY_EVAL_PRICE_CACHE_WRITE",
+    },
+    Subcommand {
+        name: "governance",
+        summary: "check the document structure and inventory",
+        env: NO_ENV,
+    },
+    Subcommand {
+        name: "tracker",
+        summary: "write or check tools/tracker/index.html",
+        env: NO_ENV,
+    },
+    Subcommand {
+        name: "mascot",
+        summary: "draw the pixel mascot's SVG, preview and pet package",
+        env: NO_ENV,
+    },
+    Subcommand {
+        name: "serve",
+        summary: "serve the HTTP edge; `serve key <tenant>` and `serve revoke <tenant>` manage its keys",
+        env: "LARRY_SERVE_ADDR, LARRY_SERVE_PLAINTEXT, LARRY_STATE_DIR",
+    },
+];
+
+/// The help a first-time user reads: what a bare `larry` does, then every
+/// subcommand with its one-line summary and the `LARRY_*` variables it reads.
+fn help_text() -> String {
+    let mut text = String::from(
+        "larry: the always-on harness of Logic OS\n\
+         \n\
+         usage: larry [<subcommand> [args...]]\n\
+         \n\
+         With no subcommand, larry runs the terminal session and asks before every command\n\
+         (env: LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_*, LARRY_KEY_*).\n\
+         \n\
+         subcommands:\n",
+    );
+    let width = COMMANDS
+        .iter()
+        .fold(0, |widest, command| widest.max(command.name.len()));
+    for command in &COMMANDS {
+        let line = format!(
+            "  {:<width$}  {} (env: {})\n",
+            command.name,
+            command.summary,
+            command.env,
+            width = width
+        );
+        text.push_str(&line);
+    }
+    text
+}
+
+/// `larry help`, `larry --help` and `larry -h`: print the help and exit 0.
+fn help_once() -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    out.write_all(help_text().as_bytes())
+        .and_then(|()| out.flush())
 }
 
 /// Why `larry model` failed; each variant keeps its cause.
@@ -430,12 +560,29 @@ fn verdict_status(accepted: bool) -> ExitCode {
     }
 }
 
+/// The refusal for arguments `larry help` does not describe.
+const UNKNOWN: &str =
+    "larry: unknown arguments; run `larry help` for every subcommand and its LARRY_* variables";
+
+/// Whether `word` is a subcommand `COMMANDS` names, or one of the three help
+/// spellings. The first arm of `main`'s match refuses every word this refuses,
+/// so an arm for a word no help row names is unreachable at run time and the
+/// table is the list (larry#228).
+fn listed(word: &str) -> bool {
+    matches!(word, "help" | "--help" | "-h") || COMMANDS.iter().any(|command| command.name == word)
+}
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).take(MAX_ARGUMENTS).collect();
     let outcome = match *args.as_slice() {
+        // A bare `larry` is the terminal session; help's first paragraph names it.
         [] => larry_demo::tui::run()
             .map(|()| ExitCode::SUCCESS)
             .map_err(|error| format!("larry: {error}")),
+        // Every word that reaches an arm below is one help names (larry#228).
+        [ref command, ..] if !listed(command.to_string_lossy().as_ref()) => {
+            Err(String::from(UNKNOWN))
+        }
         [ref command] if command == "mcp" => {
             larry_demo::mcp::serve(io::stdin().lock(), io::stdout().lock())
                 .map(|()| ExitCode::SUCCESS)
@@ -488,9 +635,12 @@ fn main() -> ExitCode {
                 .map(|()| ExitCode::SUCCESS)
                 .map_err(|error| error.to_string())
         }
-        _ => Err(String::from(
-            "DEMO: no arguments supported except `mcp`, `acp`, `model`, `exec`, `verify`, `key`, `route`, `eval`, `governance`, `tracker`, `mascot` and `serve`; F1 opens native help",
-        )),
+        [ref command, ..] if command == "help" || command == "--help" || command == "-h" => {
+            help_once()
+                .map(|()| ExitCode::SUCCESS)
+                .map_err(|error| format!("larry help: {error}"))
+        }
+        _ => Err(String::from(UNKNOWN)),
     };
     match outcome {
         Ok(status) => status,
@@ -499,6 +649,81 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{COMMANDS, help_text, listed};
+
+    /// Every word an arm of `main`'s match handles, beside the arms (larry#228).
+    /// `listed` is what stops a word no help row names before any arm runs, so
+    /// this list and `COMMANDS` must hold the same names.
+    const DISPATCHED: [&str; 13] = [
+        "help",
+        "mcp",
+        "acp",
+        "model",
+        "exec",
+        "verify",
+        "key",
+        "route",
+        "eval",
+        "governance",
+        "tracker",
+        "mascot",
+        "serve",
+    ];
+
+    /// Every dispatched word appears in help once with its variables, and every
+    /// help row is a dispatched word: the table and the arms cannot drift.
+    #[test]
+    fn every_dispatch_arm_is_in_help() {
+        let help = help_text();
+        let rows: Vec<&str> = COMMANDS.iter().map(|command| command.name).collect();
+        for name in DISPATCHED {
+            assert!(
+                rows.contains(&name),
+                "{name} dispatches but has no help row"
+            );
+            let found: Vec<&str> = help
+                .lines()
+                .filter(|line| line.trim_start().starts_with(&format!("{name} ")))
+                .collect();
+            assert_eq!(found.len(), 1, "{name} appears once in help: {found:?}");
+            for line in &found {
+                assert!(
+                    line.contains("(env: "),
+                    "{name} names the LARRY_* variables it reads: {line}"
+                );
+            }
+        }
+        assert_eq!(
+            rows.len(),
+            DISPATCHED.len(),
+            "every help row is a dispatch arm"
+        );
+        assert!(help.contains("serve"), "help names the last subcommand");
+        assert_eq!(
+            help.lines().filter(|line| line.starts_with("  ")).count(),
+            COMMANDS.len(),
+            "help prints one line per subcommand"
+        );
+    }
+
+    /// The gate admits every table row and the help spellings, and refuses
+    /// every other word, so an arm no row names never runs (larry#228).
+    #[test]
+    fn only_listed_words_dispatch() {
+        for command in &COMMANDS {
+            assert!(listed(command.name), "{} is listed", command.name);
+        }
+        for spelling in ["help", "--help", "-h"] {
+            assert!(listed(spelling), "{spelling} is listed");
+        }
+        for word in ["", "doctor", "--verbose", "HELP", "help me"] {
+            assert!(!listed(word), "{word:?} is not listed");
         }
     }
 }

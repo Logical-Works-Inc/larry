@@ -1,0 +1,213 @@
+//! The first user's journey through the shipped `larry` binary (larry#228): the
+//! help he reads before he knows a subcommand, the refusal he gets when a task
+//! document carries `acceptance` in the other door's shape, and the route error
+//! that names its field once.
+//!
+//! Source: POSIX exit status (0 for a request answered, 1 for a refusal) and the
+//! executor's own task document, which reads `acceptance` as argv arrays
+//! (larry#85). Every case starts the real binary with a cleared environment, so
+//! no developer variable reaches it and no case makes a paid model call.
+//! Requirement proved: `larry help`, `--help` and `-h` exit 0 and print every
+//! subcommand with the `LARRY_*` variables it reads; a wrong-typed `acceptance`
+//! names the argv-array form with an example; `route add` errors carry one
+//! `route` word. The MCP door's own form is proved in `tests/mcp_stdio_journey.rs`.
+
+#[path = "support/larry_cli.rs"]
+pub mod larry_cli;
+#[path = "support/temp_dir.rs"]
+mod temp_dir;
+
+use std::error::Error;
+use std::process::Output;
+
+use larry_cli::{spawn_larry_args, stderr_of};
+use temp_dir::TempDir;
+
+/// What every journey returns.
+type TestResult = Result<(), Box<dyn Error>>;
+
+/// Every subcommand the binary dispatches, as its arms name them (larry#228).
+/// A new arm that help forgets fails `help_lists_every_subcommand_with_its_env`.
+const SUBCOMMANDS: [&str; 13] = [
+    "help",
+    "mcp",
+    "acp",
+    "model",
+    "exec",
+    "verify",
+    "key",
+    "route",
+    "eval",
+    "governance",
+    "tracker",
+    "mascot",
+    "serve",
+];
+
+/// The `LARRY_*` variables a user must be able to find in help: one per command
+/// that reads one, and the two wildcards the executor and the routes use.
+const VARIABLES: [&str; 11] = [
+    "LARRY_STATE_DIR",
+    "LARRY_POLICY",
+    "LARRY_EXEC_TIMEOUT_MS",
+    "LARRY_MODEL_URL",
+    "LARRY_MODEL_KEY",
+    "LARRY_RECEIPT_KEY",
+    "LARRY_SERVE_ADDR",
+    "LARRY_SERVE_PLAINTEXT",
+    "LARRY_EVAL_PRICE_IN",
+    "LARRY_EVAL_PRICE_OUT",
+    "LARRY_KEY_*",
+];
+
+/// Runs `larry <word>` to its end with no environment beyond PATH.
+fn run_word(word: &str) -> Result<Output, Box<dyn Error>> {
+    Ok(spawn_larry_args(&[word], &[], b"")?.wait_with_output()?)
+}
+
+/// The first word of each help line indented by two spaces, in order.
+fn help_rows(help: &str) -> Vec<&str> {
+    help.lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter_map(|rest| rest.split_once(' ').map(|(name, _)| name))
+        .collect()
+}
+
+/// `help`, `--help` and `-h` each exit 0 and print every subcommand once with
+/// the `LARRY_*` variables it reads.
+#[test]
+fn help_lists_every_subcommand_with_its_env() -> TestResult {
+    for spelling in ["help", "--help", "-h"] {
+        let output = run_word(spelling)?;
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{spelling} exits 0: {}",
+            stderr_of(&output)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{spelling} writes nothing to stderr: {output:?}"
+        );
+        let help = String::from_utf8(output.stdout)?;
+        let rows = help_rows(&help);
+        for name in SUBCOMMANDS {
+            assert!(
+                rows.contains(&name),
+                "{spelling} names {name} on its own line: {help}"
+            );
+        }
+        for variable in VARIABLES {
+            assert!(
+                help.contains(variable),
+                "{spelling} names {variable}: {help}"
+            );
+        }
+        for line in help.lines().filter(|line| line.starts_with("  ")) {
+            assert!(
+                line.contains("(env: "),
+                "every subcommand line names its env: {line}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// An argument that is no subcommand exits 1 and points at help, so a
+/// first-time user with a typo is never left without a next step.
+#[test]
+fn an_unknown_word_is_refused_and_names_help() -> TestResult {
+    let output = run_word("nonsense")?;
+    assert_eq!(output.status.code(), Some(1), "a refusal exits 1");
+    let stderr = stderr_of(&output);
+    assert_eq!(stderr.lines().count(), 1, "one refusal line: {stderr:?}");
+    assert!(
+        stderr.contains("larry help"),
+        "the refusal names `larry help`: {stderr:?}"
+    );
+    Ok(())
+}
+
+/// `larry exec` reads `acceptance` as argv arrays. A document that sends a
+/// string, a bare string per command, or a non-string item is refused with the
+/// form and an example, never with a bare "wrong type" (larry#228).
+#[test]
+fn exec_a_wrong_typed_acceptance_names_argv_arrays() -> TestResult {
+    let state = TempDir::new()?;
+    // The repository path is the test's own temp directory: no document that reaches
+    // further than the parser ever names a host path.
+    let repo = state.path().display();
+    let malformed = [
+        format!(r#"{{"repo":"{repo}","base":"HEAD","acceptance":"run"}}"#),
+        format!(r#"{{"repo":"{repo}","base":"HEAD","acceptance":["run"]}}"#),
+        format!(r#"{{"repo":"{repo}","base":"HEAD","acceptance":[["ok"],7]}}"#),
+    ];
+    for task in malformed {
+        let output = spawn_larry_args(
+            &["exec"],
+            &[("LARRY_STATE_DIR", state.path().as_os_str())],
+            task.as_bytes(),
+        )?
+        .wait_with_output()?;
+        assert_eq!(output.status.code(), Some(1), "a refusal exits 1: {task}");
+        let stderr = stderr_of(&output);
+        assert_eq!(stderr.lines().count(), 1, "one refusal line: {stderr:?}");
+        assert!(
+            stderr.contains("argv arrays"),
+            "the refusal names the expected form: {stderr:?}"
+        );
+        assert!(
+            stderr.contains(r#"[["true"]]"#),
+            "the refusal shows an example: {stderr:?}"
+        );
+    }
+    Ok(())
+}
+
+/// `route add` errors name the field once: the route check already says
+/// `route`, so the CLI adds no second prefix (larry#228).
+#[test]
+fn route_add_errors_name_the_field_once() -> TestResult {
+    let state = TempDir::new()?;
+    let cases: [(&str, &str); 2] = [
+        ("bad", "route key-env must name a variable"),
+        ("OTHER_KEY", "route key-env must start with LARRY_KEY_"),
+    ];
+    for (key_env, expected) in cases {
+        let output = spawn_larry_args(
+            &[
+                "route",
+                "add",
+                "r1",
+                "--url",
+                "http://gateway.test:8443/v1",
+                "--model",
+                "model-1",
+                "--key-env",
+                key_env,
+                "--residency",
+                "CA",
+            ],
+            &[("LARRY_STATE_DIR", state.path().as_os_str())],
+            b"",
+        )?
+        .wait_with_output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "a refusal exits 1: {key_env}"
+        );
+        let stderr = stderr_of(&output);
+        assert_eq!(stderr.lines().count(), 1, "one refusal line: {stderr:?}");
+        assert!(
+            stderr.contains(expected),
+            "the refusal names the field once: {stderr:?}"
+        );
+        assert_eq!(
+            stderr.matches("route").count(),
+            1,
+            "the refusal carries one `route` word: {stderr:?}"
+        );
+    }
+    Ok(())
+}
