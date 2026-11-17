@@ -153,3 +153,11 @@ fn unicode_notes_have_finite_capacity_and_other_sessions_are_isolated()
     assert_eq!(view(&demo)?["feedback"][0]["text"], "préserver 日本語");
     Ok(())
 }
+
+#[test]
+fn clear_with_no_notes_is_refused() {
+    let mut demo = Demo::default();
+    let other = Demo::default();
+    assert_eq!(demo.command("clear"), Err(Rejected::NoNotes));
+    assert_eq!(demo, other);
+}
