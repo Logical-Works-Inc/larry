@@ -514,6 +514,53 @@ fn trace_of(roots: &[Root]) -> Result<String, SimError> {
     Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
 }
 
+/// The worker-count proof (larry#316): one tree checked on 1, 0, 2, 3, 8 and the host's own lane
+/// count gives byte-identical refusals, because every answer lands at its path's index.
+#[test]
+fn sim_one_worker_and_many_workers_give_the_same_report() -> SimResult {
+    const FILES: usize = 48;
+    let tree = Scratch::new("temp-workers")?;
+    let mut rng = Seeded::from_seed(0x316);
+    let mut wanted = Vec::new();
+    for file in 0..FILES {
+        let relative = format!("tests/workers/f{file:02}.rs");
+        if rng.below(2)? == 0 {
+            named(
+                &tree,
+                &relative,
+                "fn state() -> std::path::PathBuf {\n    let base = std::env::temp_dir();\n    base.join(format!(\"x-{}\", std::process::id()))\n}\n",
+            )?;
+            wanted.push(refusal(&relative, 2));
+        } else {
+            named(
+                &tree,
+                &relative,
+                "fn state() -> std::path::PathBuf {\n    origin::TempDir::new().path().to_path_buf()\n}\n",
+            )?;
+        }
+    }
+    assert!(wanted.len() > 1, "the tree holds refusals in several lanes");
+    let single = temp_paths::errors_on(tree.path(), 1)?;
+    assert_eq!(single, wanted, "one lane gives the reference answer");
+    let zero = temp_paths::errors_on(tree.path(), 0)?;
+    assert_eq!(zero, single, "zero lanes is one lane in path order");
+    let eight = temp_paths::errors_on(tree.path(), 8)?;
+    assert_eq!(eight, single, "eight lanes give the same report");
+    for lanes in [2_usize, 3, FILES] {
+        assert_eq!(
+            temp_paths::errors_on(tree.path(), lanes)?,
+            single,
+            "lanes = {lanes} gives the same report"
+        );
+    }
+    assert_eq!(
+        temp_paths::errors(tree.path())?,
+        single,
+        "the host's own lane count gives the same report"
+    );
+    Ok(())
+}
+
 /// The many-root proof, seeded: 512 generated sources across 4 roots are each refused or passed,
 /// each root names only its own files, and one seed gives one trace hash. The generated sources
 /// split the temp binding from the pid, so the text rule of larry#267 passes this test and this

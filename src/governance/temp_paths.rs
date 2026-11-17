@@ -11,8 +11,10 @@
 //! value, through any `use` path, alias, `self` import, glob or `::std` prefix, is refused at its
 //! first use. Patterns, closure arguments, method calls and a shadowing local are not the process
 //! id. The rule reads the root's `src` and `tests` (larry#311 widens this to every workspace
-//! member and follows `#[path]` and `include!` modules). The directory walk never follows a
-//! symlink (CWE-59).
+//! member and follows `#[path]` and `include!` modules). The sources are parsed once each on a
+//! scoped pool of at most the host's available cores, and each answer is stored at its path's
+//! index, so the count of workers can never change the report (larry#316). The directory walk
+//! never follows a symlink (CWE-59).
 //!
 //! Source: The Rust Reference on path expressions, use declarations and macros-by-example; POSIX
 //! `mkstemp(3)` (a temporary name must be unique and owned by its maker); CWE-377 (insecure
@@ -24,6 +26,7 @@ mod uses;
 use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lgwks_ast::{Language, MAX_SOURCE_BYTES, Parsed, try_parse};
 
@@ -44,10 +47,6 @@ const ROOTS: [&str; 2] = ["src", "tests"];
 /// overflow.
 const MAX_DEPTH: usize = 64;
 
-/// The most lanes one check scans its sources on. A check reads one source per file, and the
-/// parse is the cost, so a few lanes cut a whole-tree check without holding more than this many.
-const LANES: usize = 4;
-
 /// A source the rule reads: its path on disk and its root-relative name.
 type Source = (PathBuf, String);
 
@@ -61,6 +60,31 @@ enum SourceRead {
 
 /// Every refusal the rule raises over the repository at `root`, sorted, in path and line order.
 pub(crate) fn errors(root: &Path) -> Result<Vec<String>, GovernanceError> {
+    let pending = pending(root)?;
+    Ok(judge(&pending, lane_count(pending.len())))
+}
+
+/// Every refusal over `root` parsed on at most `lanes` threads: the control names the lane count
+/// so it can prove one worker and many give byte-identical refusals (larry#316).
+#[cfg(test)]
+pub(super) fn errors_on(root: &Path, lanes: usize) -> Result<Vec<String>, GovernanceError> {
+    let pending = pending(root)?;
+    Ok(judge(&pending, lanes))
+}
+
+/// The lanes one whole-tree check may use: the host's available parallelism and never more than
+/// its pending files, and never fewer than one, so a host that cannot report its cores still
+/// checks every file in path order.
+fn lane_count(files: usize) -> usize {
+    let cores = match std::thread::available_parallelism() {
+        Ok(count) => count.get(),
+        Err(_) => 1,
+    };
+    cores.clamp(1, files.max(1))
+}
+
+/// The sources the rule reads under `root`, in path order, with the guards and repeats removed.
+fn pending(root: &Path) -> Result<Vec<Source>, GovernanceError> {
     let mut errors = Vec::new();
     let mut queue: VecDeque<Source> = VecDeque::new();
     for directory in ROOTS {
@@ -89,67 +113,81 @@ pub(crate) fn errors(root: &Path) -> Result<Vec<String>, GovernanceError> {
         }
     }
     let mut seen = BTreeSet::new();
-    let pending: Vec<Source> = queue
+    Ok(queue
         .into_iter()
         .filter(|entry| {
             let relative = &entry.1;
             seen.insert(relative.clone()) && !GUARDS.contains(&relative.as_str())
         })
-        .collect();
-    for scanned in scan_all(&pending) {
+        .collect())
+}
+
+/// The refusals every pending source raises, sorted and deduplicated.
+fn judge(pending: &[Source], lanes: usize) -> Vec<String> {
+    let mut errors = Vec::new();
+    for scanned in scan_all(pending, lanes) {
         errors.extend(scanned);
     }
     sort_by_file_and_line(&mut errors);
     errors.dedup();
-    Ok(errors)
+    errors
 }
 
-/// Scans every pending source and returns each file's result in the order the walk found it, so a
-/// report never depends on which lane finished first.
-fn scan_all(pending: &[Source]) -> Vec<Vec<String>> {
-    let lanes = match std::thread::available_parallelism() {
-        Ok(count) => count.get(),
-        Err(_) => 1,
-    }
-    .min(LANES)
-    .min(pending.len());
-    if lanes <= 1 {
-        return pending
-            .iter()
-            .map(|source| scan(&source.0, &source.1))
-            .collect();
-    }
-    let chunk = pending.len().div_ceil(lanes);
-    std::thread::scope(|scope| {
-        let mut starts: Vec<(usize, usize)> = Vec::with_capacity(lanes);
-        let mut start: usize = 0;
-        let mut handles = Vec::with_capacity(lanes);
-        for slice in pending.chunks(chunk) {
-            starts.push((start, slice.len()));
-            start = start.saturating_add(slice.len());
-            handles.push(scope.spawn(move || {
-                slice
-                    .iter()
-                    .map(|source| scan(&source.0, &source.1))
-                    .collect::<Vec<Vec<String>>>()
-            }));
+/// Scans every pending source on at most `lanes` scoped threads: one cursor hands each thread the
+/// next path, each answer lands at its path's index, and the answers are read back in path order,
+/// so the report never depends on which lane finished first.
+fn scan_all(pending: &[Source], lanes: usize) -> Vec<Vec<String>> {
+    let lanes = lanes.clamp(1, pending.len().max(1));
+    let mut scanned: Vec<Option<Vec<String>>> = pending.iter().map(|_| None).collect();
+    if lanes == 1 {
+        for (slot, source) in scanned.iter_mut().zip(pending) {
+            *slot = Some(scan(&source.0, &source.1));
         }
-        let mut scanned = Vec::with_capacity(pending.len());
-        for (handle, &(start, len)) in handles.into_iter().zip(&starts) {
-            match handle.join() {
-                Ok(lane) => scanned.extend(lane),
-                Err(_) => {
-                    for source in &pending[start..start.saturating_add(len)] {
-                        let relative = &source.1;
-                        scanned.push(vec![format!(
-                            "a source scan stopped without answering: {relative}"
-                        )]);
-                    }
+    } else {
+        let cursor = AtomicUsize::new(0);
+        let answers: Vec<(usize, Vec<String>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..lanes)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut mine: Vec<(usize, Vec<String>)> = Vec::new();
+                        loop {
+                            let at = cursor.fetch_add(1, Ordering::Relaxed);
+                            let Some(source) = pending.get(at) else {
+                                break;
+                            };
+                            mine.push((at, scan(&source.0, &source.1)));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            let mut all = Vec::with_capacity(pending.len());
+            for handle in handles {
+                // A lane that panicked reports nothing; every file it took keeps an empty slot
+                // below and is refused by name, never passed.
+                if let Ok(mine) = handle.join() {
+                    all.extend(mine);
                 }
             }
+            all
+        });
+        for (at, messages) in answers {
+            if let Some(slot) = scanned.get_mut(at) {
+                *slot = Some(messages);
+            }
         }
-        scanned
-    })
+    }
+    scanned
+        .into_iter()
+        .zip(pending)
+        .map(|(slot, source)| match slot {
+            Some(messages) => messages,
+            None => vec![format!(
+                "a source scan stopped without answering: {}",
+                source.1
+            )],
+        })
+        .collect()
 }
 
 /// The order the rule reports in: by the file, then by the line inside it, so a report reads in
