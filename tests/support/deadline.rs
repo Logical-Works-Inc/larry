@@ -3,9 +3,11 @@
 //! A wait ends when the event it needs arrives: a pipe a command opens, a row the executor
 //! inserts, a file a command writes. A count of yields is not that bound, because on a
 //! loaded host it ends early and on an idle host it ends late; a wait that never gets its
-//! event fails inside [`PATIENCE`], naming what it waited for. Included by path into
-//! `tests/support/exec_cli.rs` and `tests/support/pty.rs`, and every helper here is
-//! exercised by the tests at the end of this file.
+//! event fails inside [`PATIENCE`], naming what it waited for. A read refused by the wait's own
+//! transient condition, such as a database lock, is retried inside the same bound so the last
+//! cause is reported when it passes (larry#294). Included by path into
+//! `tests/support/exec_cli.rs`, `tests/support/pty.rs` and `tests/governance_journey.rs`, and
+//! every helper here is exercised by the tests at the end of this file.
 
 use std::error::Error;
 use std::fs::File;
@@ -47,6 +49,34 @@ pub fn await_event<T>(
     probe: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
 ) -> Result<T, Box<dyn Error>> {
     await_until(what, PATIENCE, probe)
+}
+
+/// Waits until `probe` answers `Some`, retrying a refusal inside `within` and returning its
+/// answer. A read of a database another writer holds the lock on answers `SQLITE_BUSY` for a
+/// moment, so that refusal is the wait's own condition and not a failed journey (larry#294). A
+/// probe that never answers fails at the deadline, naming the event, the bound and the last
+/// refusal, so a permanent fault is reported rather than retried away.
+pub fn await_retrying<T>(
+    what: &str,
+    within: Duration,
+    mut probe: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
+) -> Result<T, Box<dyn Error>> {
+    let started = Instant::now();
+    let mut last: Option<Box<dyn Error>> = None;
+    loop {
+        match probe() {
+            Ok(Some(value)) => return Ok(value),
+            Ok(None) => {}
+            Err(cause) => last = Some(cause),
+        }
+        if started.elapsed() >= within {
+            return Err(match last {
+                Some(cause) => format!("{what} did not happen within {within:?}: {cause}").into(),
+                None => format!("{what} did not happen within {within:?}").into(),
+            });
+        }
+        std::thread::yield_now();
+    }
 }
 
 /// Waits until process group `pgid` is gone, within [`PATIENCE`]. Killed members may linger
@@ -143,5 +173,24 @@ fn every_wait_answers_on_its_event_or_fails_by_name() -> Result<(), Box<dyn Erro
     );
 
     await_group_exit(DEAD_PID)?;
+    Ok(())
+}
+
+/// A read refused every time fails the wait at its deadline naming the last refusal: a refusal
+/// the wait's own writer causes is retried, and a permanent one is reported, never swallowed
+/// (larry#294).
+#[test]
+fn a_wait_whose_reads_keep_failing_names_the_last_cause() -> Result<(), Box<dyn Error>> {
+    let bound = Duration::from_millis(50);
+    let message = match await_retrying::<u32>("the ledger row", bound, || {
+        Err("database is locked".into())
+    }) {
+        Ok(value) => return Err(format!("a wait whose reads all failed answered {value}").into()),
+        Err(cause) => cause.to_string(),
+    };
+    assert!(
+        message.contains("did not happen within") && message.contains("database is locked"),
+        "the failure names the wait, its bound and the last refusal: {message}"
+    );
     Ok(())
 }

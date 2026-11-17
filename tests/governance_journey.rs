@@ -10,6 +10,8 @@
 //! the governed documents; a stale page is refused until regenerated; a kill -9 mid-write
 //! leaves a whole page; the checker never writes; local-ci runs no Python governance lane.
 
+#[path = "support/deadline.rs"]
+mod deadline;
 #[path = "../src/governance/fixture.rs"]
 mod fixture;
 #[path = "support/ps.rs"]
@@ -20,12 +22,15 @@ mod temp_dir;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use lgwks_bot::clock::Clock;
 use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
+use lgwks_std::seeded::Seeded;
 use temp_dir::TempDir;
 
 /// What every journey returns.
@@ -440,13 +445,51 @@ fn percentile(sorted: &[Duration], per_cent: usize) -> Duration {
     }
 }
 
-/// Probes the peak-RSS sampler makes before it calls one check runaway; each probe is one `ps`.
-const RSS_PROBES: u32 = 100_000;
+/// What one sampled wait saw.
+enum Sampled {
+    /// The check exited with this status, and the peak RSS some probe caught, if any.
+    Exited {
+        /// The check's exit status.
+        status: ExitStatus,
+        /// The peak RSS in KiB, `None` when the check was too short to catch a sample.
+        peak: Option<u64>,
+    },
+    /// The failure deadline passed with the check still running.
+    Runaway {
+        /// The peak RSS in KiB, `None` when no probe answered.
+        peak: Option<u64>,
+    },
+}
+
+/// Samples `probe` while `exited` answers `None`, and answers as soon as the check exits; once
+/// [`deadline::PATIENCE`] has passed on `clock` it reports a runaway instead. The wait is the
+/// check's exit, and the bound is one reading of the injected clock, never a count of probes
+/// (larry#294, ADR 0053).
+fn sample_until_exit<E>(
+    clock: &Clock,
+    mut probe: impl FnMut(&mut Option<u64>),
+    mut exited: impl FnMut() -> Result<Option<ExitStatus>, E>,
+) -> Result<Sampled, E> {
+    let started = clock.now();
+    let mut peak = None;
+    loop {
+        probe(&mut peak);
+        if let Some(status) = exited()? {
+            return Ok(Sampled::Exited { status, peak });
+        }
+        if clock.now().saturating_sub(started) >= deadline::PATIENCE {
+            return Ok(Sampled::Runaway { peak });
+        }
+        std::thread::yield_now();
+    }
+}
 
 /// The peak RSS in KiB of one check of `root`, sampled from `ps` while it runs: the PTY probe's
 /// own read, never `/usr/bin/time` (larry#269), so a host without that tool still measures it.
-/// `None` when the check was too short to catch a sample.
+/// `None` when the check was too short to catch a sample. A check that outlasts
+/// [`deadline::PATIENCE`] is a runaway named with that bound, not a probe count (larry#294).
 fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
+    let clock = larry_runtime::live_clock()?;
     let mut child = Command::new(LARRY)
         .args(["governance", "--root"])
         .arg(root)
@@ -457,32 +500,110 @@ fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
         .stderr(Stdio::null())
         .spawn()?;
     let pid = child.id().to_string();
-    let mut peak: Option<u64> = None;
-    let mut probes: u32 = 0;
-    let status = loop {
-        if let Some((_, kib)) = ps::sample(&pid) {
-            peak = Some(match peak {
-                Some(seen) => seen.max(kib),
-                None => kib,
-            });
+    let sampled = sample_until_exit(
+        &clock,
+        |peak| {
+            if let Some((_, kib)) = ps::sample(&pid) {
+                *peak = Some(match *peak {
+                    Some(seen) => seen.max(kib),
+                    None => kib,
+                });
+            }
+        },
+        || child.try_wait(),
+    )?;
+    match sampled {
+        Sampled::Exited { status, peak } if status.success() => Ok(peak),
+        Sampled::Exited { status, .. } => {
+            Err(format!("the sampled governance check failed: {status}").into())
         }
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        probes = probes.saturating_add(1);
-        if probes >= RSS_PROBES {
+        Sampled::Runaway { peak } => {
             drop(child.kill());
             drop(child.wait());
-            return Err(
-                format!("one governance check did not exit within {RSS_PROBES} probes").into(),
-            );
+            Err(format!(
+                "one governance check did not exit within {:?}; its peak RSS was {peak:?} KiB",
+                deadline::PATIENCE
+            )
+            .into())
         }
-        std::thread::yield_now();
-    };
-    if !status.success() {
-        return Err(format!("the sampled governance check failed: {status}").into());
     }
-    Ok(peak)
+}
+
+/// Seeds the sampler simulation sweeps.
+const SAMPLER_SEEDS: u64 = 64;
+
+/// The largest virtual step a seed draws, in milliseconds.
+const SAMPLER_STEP_MAX_MS: u64 = 100;
+
+/// The most probes a seed's check stays running.
+const SAMPLER_PROBES_MAX: u64 = 800;
+
+/// The sampler ends on the injected clock, never on a count of probes: for every seed, a check
+/// that exits inside the bound is answered, and one still running at the bound is a runaway at
+/// the first reading past it (larry#294, ADR 0053).
+#[test]
+fn sim_the_rss_sampler_ends_on_the_deadline_not_a_probe_count() -> TestResult {
+    let bound_ms = u64::try_from(deadline::PATIENCE.as_millis())?;
+    for seed in 0..SAMPLER_SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let step_ms = rng.below(SAMPLER_STEP_MAX_MS)?.saturating_add(1);
+        let runs_for = rng.below(SAMPLER_PROBES_MAX)?;
+        let step = Duration::from_millis(step_ms);
+        let elapsed_ms = runs_for
+            .checked_mul(step_ms)
+            .ok_or("the drawn time overflowed")?;
+        let inside = elapsed_ms < bound_ms;
+        let clock = Clock::virtual_at(Duration::ZERO);
+        let mut probes = 0_u64;
+        let sampled = sample_until_exit(
+            &clock,
+            |peak| *peak = Some(step_ms),
+            || -> Result<Option<ExitStatus>, Box<dyn Error>> {
+                probes = probes.saturating_add(1);
+                clock.advance(step)?;
+                Ok((probes > runs_for).then_some(ExitStatus::from_raw(0)))
+            },
+        )?;
+        let reached = step
+            .checked_mul(u32::try_from(probes)?)
+            .ok_or("the sampled time overflowed")?;
+        assert_eq!(
+            clock.now(),
+            reached,
+            "seed {seed}: the sampler read the clock once per probe"
+        );
+        match sampled {
+            Sampled::Exited { peak, .. } => {
+                assert!(
+                    inside,
+                    "seed {seed}: {runs_for} probes of {step_ms} ms is past the bound, yet the check exited"
+                );
+                assert_eq!(
+                    peak,
+                    Some(step_ms),
+                    "seed {seed}: the sampler kept the peak"
+                );
+                assert_eq!(
+                    probes,
+                    runs_for.saturating_add(1),
+                    "seed {seed}: the wait ends on the probe that finds the exit"
+                );
+            }
+            Sampled::Runaway { .. } => {
+                assert!(
+                    !inside,
+                    "seed {seed}: {runs_for} probes of {step_ms} ms is inside the bound, yet the sampler gave up"
+                );
+                let before = clock.now().saturating_sub(step);
+                assert!(
+                    clock.now() >= deadline::PATIENCE && before < deadline::PATIENCE,
+                    "seed {seed}: the sampler stops at the first reading past the bound, read {:?}",
+                    clock.now()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The check's own budget: a wall-clock figure other tests must not decide, so this test runs

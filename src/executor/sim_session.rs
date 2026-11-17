@@ -14,13 +14,13 @@ use std::io;
 use std::mem::discriminant;
 use std::num::TryFromIntError;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::{CommandResult, Place, clip, run_command};
+use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, clip, run_command};
 use super::{
     ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
     check, parse_reply,
@@ -286,16 +286,37 @@ fn scratch(tag: &str) -> Result<crate::executor::sim_tree::Scratch, SimError> {
     crate::executor::sim_tree::scratch(&format!("larry-esc-{tag}"))
 }
 
+/// Sets the witness's `finished` flag when it drops, so the watcher ends even when
+/// `run_command` unwinds: without it a panic leaves the watcher spinning and the scope can
+/// never join (larry#294).
+struct FinishedOnDrop<'a> {
+    /// The flag the ledger witness reads.
+    finished: &'a AtomicBool,
+}
+
+impl Drop for FinishedOnDrop<'_> {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Release);
+    }
+}
+
 /// Whether the ledger under `state` lists a group before the run finished: the wait is the
-/// ledger's own row, a data witness, and `finished` ends it so a witness that never arrives
-/// cannot outlive the command whose deadline already bounds the run (larry#268).
+/// ledger's own row, a data witness, and it ends when the row appears, when the run drops its
+/// [`FinishedOnDrop`] guard, or at [`GROUP_PROBE_DEADLINE`] past the first reading of the
+/// runtime's live clock, so a witness that never arrives cannot outlive the run (larry#268,
+/// larry#294).
 fn group_is_listed(state: &Path, finished: &AtomicBool) -> Result<bool, ExecError> {
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let started = clock.now();
     let ledger = Ledger::open(state)?;
     loop {
         if !ledger.live_tasks()?.is_empty() {
             return Ok(true);
         }
         if finished.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if clock.now().saturating_sub(started) >= GROUP_PROBE_DEADLINE {
             return Ok(false);
         }
         std::thread::yield_now();
@@ -419,15 +440,22 @@ fn drive(
         |scope| -> Result<(CommandResult, Option<bool>), CancelSimError> {
             let watcher = matches!(when, When::During)
                 .then(|| scope.spawn(|| flip_when_listed(state, &cancel, &finished)));
-            let result = run_command(
-                &argv,
-                Place::Open(work),
-                path_env,
-                COMMAND_TIMEOUT,
-                &ledger,
-                &task_id,
-                &|| cancel.load(Ordering::Acquire),
-            );
+            // The guard sets `finished` on unwind too, so a panic inside `run_command` ends the
+            // watcher instead of leaving the scope waiting on it for good (larry#294).
+            let result = {
+                let _finished = FinishedOnDrop {
+                    finished: &finished,
+                };
+                run_command(
+                    &argv,
+                    Place::Open(work),
+                    path_env,
+                    COMMAND_TIMEOUT,
+                    &ledger,
+                    &task_id,
+                    &|| cancel.load(Ordering::Acquire),
+                )
+            };
             finished.store(true, Ordering::Release);
             cancel.store(true, Ordering::Release);
             let witnessed = match watcher {
@@ -589,4 +617,80 @@ fn sim_esc_before_during_after_command() -> TestResult {
         "each seed's marker gives its own trace"
     );
     Ok(())
+}
+
+/// The seed the panic simulation draws its marker and poll from.
+const PANIC_SEED: u64 = 0;
+
+/// Drives one run whose cancel closure fails inside `run_command` while the ledger witness is
+/// still waiting for its row: the watcher ends when the run unwinds, so the scope joins and the
+/// panic reaches the caller instead of hanging it (larry#294). The witness reads its own empty
+/// ledger, which is the window where the run unwinds before any row is listed.
+fn panic_inside_run(seed: u64) -> Result<(), CancelSimError> {
+    let run_state = scratch("panic-run")?;
+    let watch_state = scratch("panic-watch")?;
+    let work = scratch("panic-work")?;
+    let path_env = std::env::var("PATH").map_err(io::Error::other)?;
+    let mut rng = Seeded::from_seed(seed.wrapping_add(5 << 32));
+    let marker_len = usize::try_from(rng.below(48)?)?.saturating_add(1);
+    let marker = text(&mut rng, marker_len)?.replace('\n', " ");
+    let fails_at = rng.below(3)?.saturating_add(1);
+    let argv = [
+        String::from("sh"),
+        String::from("-c"),
+        format!("sleep 1 # seed {seed} {marker}"),
+    ];
+    let ledger = Ledger::open(&run_state)?;
+    let cancel = AtomicBool::new(false);
+    let finished = AtomicBool::new(false);
+    let polls = AtomicU64::new(0);
+    std::thread::scope(|scope| -> Result<(), CancelSimError> {
+        let watcher = scope.spawn(|| flip_when_listed(&watch_state, &cancel, &finished));
+        let result = {
+            let _finished = FinishedOnDrop {
+                finished: &finished,
+            };
+            run_command(
+                &argv,
+                Place::Open(&work),
+                &path_env,
+                COMMAND_TIMEOUT,
+                &ledger,
+                "sim-panic",
+                &|| {
+                    let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+                    assert!(
+                        poll > fails_at,
+                        "seed {seed}: the injected fault inside run_command"
+                    );
+                    false
+                },
+            )
+        };
+        // Only a run that never reached its cancel poll gets here: end the watcher, then say
+        // the run did not panic, so the test fails instead of passing on a fault it missed.
+        finished.store(true, Ordering::Release);
+        cancel.store(true, Ordering::Release);
+        drop(watcher.join());
+        drop(result?);
+        Err(CancelSimError::Missing("the panic inside run_command"))
+    })
+}
+
+/// A seeded run panics inside `run_command` while its witness is still waiting for a row: the
+/// scope joins and the test reports the panic, never a hang (larry#294).
+#[test]
+#[should_panic(expected = "the injected fault inside run_command")]
+fn sim_a_panic_inside_run_command_ends_the_witness_and_reports_the_panic() {
+    let driven = panic_inside_run(PANIC_SEED);
+    assert!(
+        driven.is_err(),
+        "the injected fault inside run_command never fired: the run returned instead of unwinding"
+    );
+    if let Err(cause) = driven {
+        assert!(
+            cause.to_string().is_empty(),
+            "the run must reach the injected fault inside run_command, not fail at setup: {cause}"
+        );
+    }
 }

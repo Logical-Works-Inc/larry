@@ -56,8 +56,10 @@ bounded ledger lock, origin liveness by lock) stand unchanged.
   an event, but neither covers a group, and `unsafe` FFI is forbidden workspace-wide.
 - A wait that fails now costs its failure deadline (30 s in a journey, 120 s for one worker event)
   instead of an arbitrary number of yields. `esc_to_interrupted_ms` no longer fails a journey.
-- The during-schedule cancel witness in `executor::sim_session` stops when `run_command` returns, so its
-  wait is bounded by the command's own timeout and the sim reads no clock at all.
+- The during-schedule cancel witness in `executor::sim_session` ends when its run drops its
+  guard, on unwind too, and at `GROUP_PROBE_DEADLINE` on the runtime's live clock; a journey's
+  ledger read is retried inside its failure deadline and reports the last cause, and the
+  governance RSS sampler ends on that same deadline (larry#294).
 
 ## Rejected
 
