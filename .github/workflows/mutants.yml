@@ -1,0 +1,232 @@
+name: mutants
+# Pull requests only: the lane judges a diff, and a push to main has none
+# (larry#310, ADR 0064). Hosted only, like the macOS journey lane in ci.yml: a
+# public repository never runs on the self-hosted Mac (larry#116), and a lane
+# that installs cargo-mutants must not install it into that shared machine.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+# One run per workflow and ref: a second push to a pull request cancels the run
+# its first push started. A push to main never cancels (larry#307).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Lists the mutants on the lines this PR changed, builds nothing, and sizes the
+  # shard matrix. Zero Rust lines changed is zero shards and a passing verdict.
+  plan:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      shards: ${{ steps.plan.outputs.shards }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: stable
+      # Bounded and not allowed to fail: with no cargo-mutants there is no plan,
+      # and no plan is no verdict (fail closed).
+      - timeout-minutes: 3
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: List the mutants on the changed lines
+        id: plan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # K: mutants per shard. A shard pays its setup, then one incremental
+          # build and one run of the root package's tests per surviving mutant
+          # (about 2.5 minutes measured on a cold cache), so K = 2 is the
+          # ESTIMATE that ends a shard inside 5 minutes warm (ADR 0064).
+          MUTANTS_PER_SHARD: 2
+          # Past 16 shards a shard holds more than K mutants and runs longer;
+          # the shard timeout, not a silent drop, is the overflow answer.
+          MUTANTS_MAX_SHARDS: 16
+        run: |
+          set -euo pipefail
+          git diff --no-color --no-ext-diff --no-renames "origin/${BASE_REF}...HEAD" -- '*.rs' > pr.diff
+          cargo mutants --workspace --in-diff pr.diff --list --json --cargo-arg=--locked > list.json
+          # An empty diff prints nothing, not `[]`; both mean zero mutants.
+          count="$(jq -s '(.[0] // []) | length' list.json)"
+          shards=$(( (count + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
+          if [ "$shards" -gt "$MUTANTS_MAX_SHARDS" ]; then
+            shards="$MUTANTS_MAX_SHARDS"
+          fi
+          matrix="$(jq -cn --argjson n "$shards" '{include: [range(0; $n) | {k: ., n: $n}]}')"
+          echo "mutants on the changed lines: $count in $shards shard(s)"
+          jq -sr '(.[0] // [])[] | .name' list.json
+          {
+            echo "count=$count"
+            echo "shards=$shards"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+      # Every shard reads this one diff, so they agree on the mutants and on n.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutants-diff
+          path: pr.diff
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # One slice of the mutant list on a warm build. A caught or missed mutant is
+  # data, not a failure: cargo-mutants exits 2 for a missed one and 3 for a
+  # timeout, and the verdict job owns the floor. Any other exit code is a shard
+  # that did not run.
+  shard:
+    name: shard ${{ matrix.k }}/${{ matrix.n }}
+    needs: plan
+    if: ${{ needs.plan.outputs.shards != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: stable
+      # This workflow never runs on main, so a key of its own would never be
+      # written. It restores the test lane's key and saves nothing (larry#307):
+      # a pull request still never writes what main restores. The cache paths
+      # must equal the test job's, `cache-bin` included, or GitHub keys the two
+      # caches apart: the first run with `cache-bin: false` found no cache and
+      # paid a cold build (ADR 0064).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: test-hosted
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - timeout-minutes: 3
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-mutants@27.1.0,nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mutants-diff
+      - name: Run this shard
+        env:
+          SHARD_K: ${{ matrix.k }}
+          SHARD_N: ${{ matrix.n }}
+        run: |
+          set -uo pipefail
+          rc=0
+          # --baseline skip: ci.yml's test lane is the baseline, run once there
+          # and not on every shard. --timeout bounds a mutant that loops.
+          cargo mutants --workspace --in-diff pr.diff --shard "${SHARD_K}/${SHARD_N}" \
+            --in-place --baseline skip --test-tool nextest --no-shuffle \
+            --timeout 300 --cargo-arg=--locked || rc=$?
+          case "$rc" in
+            0 | 2 | 3) echo "cargo mutants exited $rc: the outcomes are the verdict's" ;;
+            *)
+              echo "::error::cargo mutants exited $rc on shard ${SHARD_K}/${SHARD_N}: it did not judge its mutants"
+              exit "$rc"
+              ;;
+          esac
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutants-outcomes-${{ matrix.k }}
+          path: mutants.out/outcomes.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # The one check a worker reads. It fails closed: a plan that did not finish, a
+  # shard that did not run, a missing outcomes file, a mutant with no outcome and
+  # an outcome it does not know are each a red verdict, never a pass.
+  verdict:
+    needs: [plan, shard]
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A missing artifact is judged below by count, so a download that finds
+      # nothing is not allowed to hide behind its own error here.
+      - if: ${{ needs.plan.outputs.shards != '' && needs.plan.outputs.shards != '0' }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mutants-outcomes-*
+          path: outcomes
+      - name: Judge the mutants
+        env:
+          PLAN: ${{ needs.plan.result }}
+          SHARD: ${{ needs.shard.result }}
+          COUNT: ${{ needs.plan.outputs.count }}
+          SHARDS: ${{ needs.plan.outputs.shards }}
+          FLOOR: 60
+        run: |
+          set -uo pipefail
+          if [ "$PLAN" != success ] || [ -z "$SHARDS" ]; then
+            echo "::error::the plan job ended '$PLAN': there is no verdict (fail closed)"
+            exit 1
+          fi
+          if [ "$SHARDS" = 0 ]; then
+            echo "no mutants: this PR changes no Rust line cargo-mutants can mutate"
+            echo "mutants: no mutants" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bad=0
+          if [ "$SHARD" != success ]; then
+            echo "::error::a shard ended '$SHARD': its mutants are not judged (fail closed)"
+            bad=1
+          fi
+          files=()
+          for f in outcomes/*/outcomes.json; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
+          if [ "${#files[@]}" -ne "$SHARDS" ]; then
+            echo "::error::${#files[@]} outcomes files for $SHARDS shards (fail closed)"
+            exit 1
+          fi
+          # Baseline entries are strings; a mutant's scenario is {"Mutant": {...}}.
+          jq -s '[.[] | .outcomes[]
+                  | select(.scenario | type == "object" and has("Mutant"))
+                  | .scenario.Mutant as $m
+                  | {file: $m.file, line: $m.span.start.line, replacement: $m.replacement,
+                     name: $m.name, summary: .summary}]' "${files[@]}" > merged.json || exit 1
+          count_of() { jq --arg s "$1" '[.[] | select(.summary == $s)] | length' merged.json; }
+          total="$(jq length merged.json)"
+          caught="$(count_of CaughtMutant)"
+          missed="$(count_of MissedMutant)"
+          unviable="$(count_of Unviable)"
+          timeouts="$(count_of Timeout)"
+          unknown=$(( total - caught - missed - unviable - timeouts ))
+          viable=$(( caught + missed ))
+          echo "planned $COUNT mutants, judged $total in $SHARDS shard(s)"
+          echo "viable $viable = caught $caught + missed $missed"
+          echo "left out of the denominator: unviable $unviable, timeout $timeouts"
+          if [ "$total" -ne "$COUNT" ]; then
+            echo "::error::$total mutants have an outcome but the plan listed $COUNT (fail closed)"
+            bad=1
+          fi
+          if [ "$unknown" -ne 0 ]; then
+            echo "::error::$unknown mutants have an outcome this verdict does not know (fail closed)"
+            bad=1
+          fi
+          jq -r '.[] | select(.summary == "MissedMutant")
+                 | "missed \(.file):\(.line): \(.replacement)  (\(.name | sub("^.*?:[0-9]+:[0-9]+: "; "")))"' merged.json
+          if [ "$viable" -eq 0 ]; then
+            echo "no viable mutant: nothing to hold against the floor"
+            echo "mutants: no viable mutant, unviable $unviable, timeout $timeouts" >> "$GITHUB_STEP_SUMMARY"
+          else
+            tenths=$(( caught * 1000 / viable ))
+            line="caught $caught of $viable viable = $(( tenths / 10 )).$(( tenths % 10 ))%, floor ${FLOOR}% (unviable $unviable and timeout $timeouts excluded)"
+            echo "$line"
+            echo "mutants: $line" >> "$GITHUB_STEP_SUMMARY"
+            if [ $(( caught * 100 )) -lt $(( FLOOR * viable )) ]; then
+              echo "::error::mutation score under the ${FLOOR}% floor: $missed missed mutant(s) listed above"
+              bad=1
+            fi
+          fi
+          exit "$bad"

@@ -154,8 +154,8 @@ fn governance_pushes_check_main_only() -> Check {
         "a push is a landed commit, not every branch"
     );
     assert!(
-        text.contains("concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
-        "a superseded pull request run is cancelled and a main run is not"
+        text.contains("concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'edited' && '-body' || '' }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
+        "a superseded pull request run is cancelled, a main run is not, and a body edit has its own group"
     );
     Ok(())
 }
