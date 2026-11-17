@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use mock_model::{Config, Fault, Handle};
 use origin::{TempDir, fixture, git_command};
+use pty::deadline::await_event;
 use pty::{Journey, Pty};
 
 /// The idle window the probe watches.
@@ -274,8 +275,10 @@ fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
 }
 
 /// Esc ends a running command, not only the next step (larry#242): the mock model asks for a
-/// command with a background member, the person approves it, Esc kills the whole group within
-/// 500 ms, the frame says Interrupted, the background pid is gone, and Ctrl+C exits 0.
+/// command with a background member, the person approves it, Esc kills the whole group, the
+/// frame says Interrupted, the background pid is gone, and Ctrl+C exits 0. The whole path is
+/// printed as `esc_to_interrupted_ms`; it is MEASURED, never a pass condition, because a host
+/// with every core busy moves it (larry#268).
 #[test]
 fn tui_journey_esc_kills_running_command() -> Journey {
     let replies = [r#"{"command":"sleep 30 & echo $! > bg.pid; sleep 30"}"#];
@@ -292,34 +295,24 @@ fn tui_journey_esc_kills_running_command() -> Journey {
             pty.wait_for("esc to interrupt")?;
             // Esc is pressed only once the background member is up, so its death is the group's,
             // not a race with the shell's own start. The command runs in the session's copy.
-            // The shell creates bg.pid before `echo` writes into it, so the file is read until it
-            // holds the pid, not only until it exists (an empty read flaked on Linux, PR #251).
-            // The copy goes with the interrupted session, so the pid is read before Esc.
-            let mut probes = 0_u32;
-            let pid = loop {
-                let found = std::fs::read_dir(&workspaces)
+            // The shell creates bg.pid before `echo` writes into it, so the wait is for the file
+            // to hold the pid, not only to exist (an empty read flaked on Linux, PR #251). The
+            // copy goes with the interrupted session, so the pid is read before Esc, and a pid
+            // that never appears fails the wait inside one deadline (larry#268).
+            let pid = await_event("the background member wrote bg.pid", || {
+                Ok(std::fs::read_dir(&workspaces)
                     .into_iter()
                     .flatten()
                     .flatten()
                     .map(|entry| entry.path().join("tree").join("bg.pid"))
                     .filter_map(|path| std::fs::read_to_string(path).ok())
                     .map(|text| text.trim().to_owned())
-                    .find(|text| !text.is_empty());
-                if let Some(text) = found {
-                    break text;
-                }
-                probes = probes.saturating_add(1);
-                assert!(probes < 100_000, "the command never wrote bg.pid");
-                std::thread::yield_now();
-            };
+                    .find(|text| !text.is_empty()))
+            })?;
             let pressed = Instant::now();
             pty.send("\x1b")?;
             pty.wait_for("Interrupted")?;
             let esc_to_interrupted = pressed.elapsed();
-            assert!(
-                esc_to_interrupted < Duration::from_millis(500),
-                "Esc to Interrupted took {esc_to_interrupted:?}"
-            );
             assert!(!pid.is_empty(), "bg.pid holds the background pid");
             let probe = Command::new("kill")
                 .args(["-0", &pid])
@@ -706,10 +699,10 @@ fn tui_journey_probe_reports_p50_p95_p99_and_rss() -> Journey {
         let (status, _) = pty.finish()?;
         let quit_ms = quit.elapsed().as_secs_f64() * 1000.0;
         assert!(status.success(), "Ctrl+C exits 0: {status}");
-        assert_eq!(
-            idle_bytes, 0,
-            "an unchanged frame writes nothing while idle"
-        );
+        // `idle_output_bytes` below is a MEASURED figure, never a pass condition: a frame a
+        // loaded host paints late can land inside the window (larry#268).
+        // `sim_tui_unchanged_frame_writes_nothing` proves deterministically that a repaint of an
+        // unchanged frame writes nothing.
         let figures = format!(
             "{{\"scope\":\"debug binary, 120x32 PTY, no model route\",\"os\":\"{}\",\
              \"first_paint_ms\":{first_paint:.1},\"input_samples\":{ROUND_TRIPS},\

@@ -244,11 +244,6 @@ const CANCEL_SEEDS: u64 = 32;
 /// run that failed to be cancelled, and the failure then reports itself.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Ledger probes the during schedule makes before it gives up and cancels anyway: a
-/// bound on failure, never a decision, which the ledger's own rows make. A count and
-/// not a deadline, because a simulation reads no clock.
-const WITNESS_PROBES: u32 = 200_000;
-
 /// When the person's cancel lands against the command (larry#242).
 #[derive(Debug, Clone, Copy)]
 enum When {
@@ -291,25 +286,31 @@ fn scratch(tag: &str) -> Result<crate::executor::sim_tree::Scratch, SimError> {
     crate::executor::sim_tree::scratch(&format!("larry-esc-{tag}"))
 }
 
-/// Whether the ledger under `state` lists a group before the probe bounds run out.
-fn group_is_listed(state: &Path) -> Result<bool, ExecError> {
+/// Whether the ledger under `state` lists a group before the run finished: the wait is the
+/// ledger's own row, a data witness, and `finished` ends it so a witness that never arrives
+/// cannot outlive the command whose deadline already bounds the run (larry#268).
+fn group_is_listed(state: &Path, finished: &AtomicBool) -> Result<bool, ExecError> {
     let ledger = Ledger::open(state)?;
-    let mut probes = 0_u32;
-    while probes < WITNESS_PROBES {
+    loop {
         if !ledger.live_tasks()?.is_empty() {
             return Ok(true);
         }
-        probes = probes.saturating_add(1);
+        if finished.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         std::thread::yield_now();
     }
-    Ok(false)
 }
 
 /// Flips `cancel` once the ledger lists the command's group (a data witness) and
 /// says whether it did. The flag flips on every path out, so a witness that fails
 /// ends the command at once and the run reports the failure.
-fn flip_when_listed(state: &Path, cancel: &AtomicBool) -> Result<bool, ExecError> {
-    let listed = group_is_listed(state);
+fn flip_when_listed(
+    state: &Path,
+    cancel: &AtomicBool,
+    finished: &AtomicBool,
+) -> Result<bool, ExecError> {
+    let listed = group_is_listed(state, finished);
     cancel.store(true, Ordering::Release);
     listed
 }
@@ -410,11 +411,14 @@ fn drive(
     ];
     let ledger = Ledger::open(state)?;
     let cancel = AtomicBool::new(matches!(when, When::Before));
+    // Set once `run_command` returns, so the data witness stops with the run: its wait is
+    // bounded by the command's own deadline and reads no clock of its own (larry#268).
+    let finished = AtomicBool::new(false);
     let task_id = format!("sim-esc-{seed}-{at}");
     let (result, witnessed) = std::thread::scope(
         |scope| -> Result<(CommandResult, Option<bool>), CancelSimError> {
             let watcher = matches!(when, When::During)
-                .then(|| scope.spawn(|| flip_when_listed(state, &cancel)));
+                .then(|| scope.spawn(|| flip_when_listed(state, &cancel, &finished)));
             let result = run_command(
                 &argv,
                 Place::Open(work),
@@ -424,6 +428,7 @@ fn drive(
                 &task_id,
                 &|| cancel.load(Ordering::Acquire),
             );
+            finished.store(true, Ordering::Release);
             cancel.store(true, Ordering::Release);
             let witnessed = match watcher {
                 Some(watcher) => match watcher.join() {

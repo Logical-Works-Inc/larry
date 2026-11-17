@@ -341,6 +341,27 @@ fn sim_tui_esc_answers_a_question_with_decline() {
     }
 }
 
+/// The bound one worker event wait may take before the session is called broken (larry#268):
+/// the event ends the wait, and a session that sends nothing fails by name instead of ending
+/// the loop early and reporting the wrong last event. This file reads no clock; the wait is
+/// the channel's own, and the bound only turns a session that never answers into a failure.
+const WORKER_PATIENCE: Duration = Duration::from_secs(120);
+
+/// Every event the worker sends, up to and including its `Ended`; `None` when the session sent
+/// nothing inside [`WORKER_PATIENCE`], so a caller fails the run by name instead of ending the
+/// loop early.
+fn every_event(worker: &super::worker::Worker) -> Option<Vec<Event>> {
+    let mut seen = Vec::new();
+    loop {
+        let event = worker.wait(WORKER_PATIENCE)?;
+        let last = matches!(event, Event::Ended(_));
+        seen.push(event);
+        if last {
+            return Some(seen);
+        }
+    }
+}
+
 /// Settings over `root` with a model route to the discard port, which nothing serves: a
 /// session that reaches the model fails loudly, and these sims never let it.
 fn unreachable_model(
@@ -383,14 +404,7 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         Isolation::Host,
         false,
     )?;
-    let mut seen = Vec::new();
-    while let Some(event) = worker.wait(Duration::from_secs(30)) {
-        let last = matches!(event, Event::Ended(_));
-        seen.push(event);
-        if last {
-            break;
-        }
-    }
+    let seen = every_event(&worker).ok_or("the session sent no event inside its bound")?;
     assert_eq!(seen.last(), Some(&Event::Ended(Ended::Refused)), "{seen:?}");
     // The sealed refusal reaches the frame as a receipt: not accepted, nothing ran.
     let Some(before_end) = seen.iter().rev().nth(1) else {
@@ -445,14 +459,7 @@ fn sim_tui_worker_refused_confinement_ends_failed_with_the_reason()
         isolation,
         false,
     )?;
-    let mut seen = Vec::new();
-    while let Some(event) = worker.wait(Duration::from_secs(30)) {
-        let last = matches!(event, Event::Ended(_));
-        seen.push(event);
-        if last {
-            break;
-        }
-    }
+    let seen = every_event(&worker).ok_or("the session sent no event inside its bound")?;
     match seen.last() {
         Some(&Event::Ended(Ended::Failed(ref why))) => {
             assert!(why.contains("no kernel confinement"), "{why}");

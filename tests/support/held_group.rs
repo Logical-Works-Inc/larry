@@ -1,7 +1,7 @@
 //! Fixtures for the journeys that kill the shipped `larry exec` while its acceptance
-//! command's process group is running (larry#85, larry#214): the held command, the probe
-//! that waits for a group to end, and the ledger's row count. `tests/executor_journey.rs`
-//! and `tests/sim_orphan_groups.rs` call every helper here.
+//! command's process group is running (larry#85, larry#214): the held command and the
+//! ledger's row count. `tests/executor_journey.rs` calls every helper here, so a held group
+//! is started and read one way.
 
 use std::error::Error;
 use std::fs::File;
@@ -10,46 +10,30 @@ use std::process::Child;
 
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
 
-use crate::exec_cli::{POLL_LIMIT, live_group_pid, make_fifo, spawn_exec, task_json};
+use crate::exec_cli::deadline::await_fifo_writer;
+use crate::exec_cli::{live_group_pid, make_fifo, spawn_exec, task_json};
 
-/// Starts `larry exec` on a task whose one acceptance command holds its process group
-/// open on a fifo under `scratch`, and returns the executor with that group's pid once
-/// the group is recorded and running. The `ready` reader comes back open too: dropping it
-/// early would let the command's first write die of `SIGPIPE` and end the group.
+/// Starts `larry exec` on a task whose one acceptance command holds its process group open on
+/// a fifo under `scratch`, and returns the executor, that group's pid, and the fifo's write
+/// handle. The command is already blocked on the read end when this returns, and the handle
+/// must stay alive: it is the reader that keeps the command running.
+///
+/// The open of the write end blocks until the command opens the read end, so the pipe is the
+/// event that says the command started; a command that never starts fails that wait inside
+/// one deadline instead of hanging the journey (larry#268).
 pub fn spawn_held_command(
     state: &Path,
     origin: &Path,
     scratch: &Path,
 ) -> Result<(Child, i32, File), Box<dyn Error>> {
-    let ready = scratch.join("ready");
     let hold = scratch.join("hold");
-    make_fifo(&ready)?;
     make_fifo(&hold)?;
-    let acceptance = format!(
-        r#"[["sh","-c","echo up > {}; cat < {}"]]"#,
-        ready.display(),
-        hold.display()
-    );
+    let acceptance = format!(r#"[["sh","-c","cat < {}"]]"#, hold.display());
     let task = task_json(origin, "HEAD", &acceptance);
     let child = spawn_exec(Some(state), None, &task)?;
-    // This open blocks until the acceptance command opens the fifo, so the command is running.
-    let reader = File::open(&ready)?;
+    let writer = await_fifo_writer(&hold)?;
     let pid = live_group_pid(&state.join("executor.db"))?;
-    Ok((child, pid, reader))
-}
-
-/// Polls until process group `pgid` is gone, at most `POLL_LIMIT` probes; killed members
-/// may linger briefly as zombies. `false` when the group outlives every probe.
-pub fn group_exits(pgid: i32) -> Result<bool, Box<dyn Error>> {
-    let mut attempts: u32 = 0;
-    while lgwks_std::process::process_group_exists(pgid)? {
-        attempts = attempts.saturating_add(1);
-        if attempts >= POLL_LIMIT {
-            return Ok(false);
-        }
-        std::thread::yield_now();
-    }
-    Ok(true)
+    Ok((child, pid, writer))
 }
 
 /// The number of rows the executor's ledger holds, read through a read-only open.

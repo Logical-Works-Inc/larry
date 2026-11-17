@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, RecvError, RecvTimeoutError};
 use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
+use lgwks_bot::clock::Clock;
 use lgwks_std::process::{identify_process, kill_process_group, process_group_exists};
 
 use super::ExecError;
@@ -36,19 +37,17 @@ const ESRCH: i32 = 3;
 /// The kernel's error number for "operation not permitted", the same on Linux and Darwin.
 const EPERM: i32 = 1;
 
-/// Probes of a process group before it counts as surviving: a second cap behind
-/// [`GROUP_PROBE_DEADLINE`], so a fast loop cannot spin past the deadline's intent.
-const GROUP_PROBES: u32 = 10_000;
-
-/// Time a process group is probed before it counts as surviving (larry#214). Killed
-/// members are briefly zombies, so the probes yield between checks; the bound is the
-/// elapsed time, which a count of yields never measured.
+/// Time a process group is given before it counts as surviving (larry#214, larry#268).
+/// Killed members are briefly zombies, so the probes yield between checks, and both group
+/// waits end on this one bound read from the clock their caller injected: a count of yields
+/// measured the scheduler, so a loaded host ended it early and an idle one late.
 const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Longest one slice of the command wait sleeps before it checks the person's
 /// cancel again (larry#242): it bounds Esc-to-kill latency for a running
-/// command. `tui_journey_esc_kills_running_command` measures the whole path
-/// (`esc_to_interrupted_ms`, under 500 ms) against this 25 ms slice.
+/// command. `tui_journey_esc_kills_running_command` prints the whole path
+/// (`esc_to_interrupted_ms`) against this 25 ms slice; the figure is
+/// MEASURED, never a pass condition, because a loaded host moves it (larry#268).
 const CANCEL_POLL: Duration = Duration::from_millis(25);
 
 /// One captured stream: its first bytes, its last bytes, and how many bytes fell between them.
@@ -204,7 +203,9 @@ pub(crate) enum Place<'a> {
 /// PATH, HOME (the workspace), and LANG=C. The leader's exit, a timeout, or the person's
 /// cancel (`cancelled`, polled at most [`CANCEL_POLL`] apart, larry#242) kills the whole
 /// group; a timeout and an interrupt are reported as `timed_out` and `interrupted`,
-/// never both at once.
+/// never both at once. The group waits read one deadline from the live clock this
+/// builds (`larry_runtime::live_clock`, larry#268), so no wait is decided by a count of
+/// yields.
 pub(crate) fn run_command(
     argv: &[String],
     place: Place<'_>,
@@ -215,6 +216,10 @@ pub(crate) fn run_command(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CommandResult, ExecError> {
     let started_at = Instant::now();
+    // The one timeline the group waits read, built the way the gate builds its own (the
+    // runtime's `live_clock`, larry#268), so a host whose clock reads before the epoch
+    // refuses with nothing run.
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     if argv.is_empty() {
         return Err(spawn_failure(
             "",
@@ -275,6 +280,7 @@ pub(crate) fn run_command(
     };
     let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(abandon(
+            &clock,
             &mut child,
             pgid,
             spawn_failure(program, io::Error::other("piped output is missing")),
@@ -284,6 +290,7 @@ pub(crate) fn run_command(
         Ok(Some(identity)) => identity,
         Ok(None) => {
             return Err(abandon(
+                &clock,
                 &mut child,
                 pgid,
                 spawn_failure(
@@ -292,10 +299,17 @@ pub(crate) fn run_command(
                 ),
             ));
         }
-        Err(source) => return Err(abandon(&mut child, pgid, spawn_failure(program, source))),
+        Err(source) => {
+            return Err(abandon(
+                &clock,
+                &mut child,
+                pgid,
+                spawn_failure(program, source),
+            ));
+        }
     };
     if let Err(error) = ledger.insert(task_id, &identity) {
-        return Err(abandon(&mut child, pgid, error));
+        return Err(abandon(&clock, &mut child, pgid, error));
     }
 
     let (status_sender, status_receiver) = mpsc::sync_channel::<io::Result<ExitStatus>>(1);
@@ -305,17 +319,17 @@ pub(crate) fn run_command(
             let stderr_reader = scope.spawn(move || capture(stderr_pipe));
             scope.spawn(move || drop(status_sender.send(child.wait())));
             let (status, timed_out, interrupted) =
-                wait_for_status(&status_receiver, pgid, deadline, cancelled)?;
+                wait_for_status(&clock, &status_receiver, pgid, deadline, cancelled)?;
             // The leader is gone; a background member still holding the pipes must die too,
             // or the readers below would block forever.
-            settle_group(pgid)?;
+            settle_group(&clock, pgid)?;
             let stdout = join_reader(stdout_reader, program)?;
             let stderr = join_reader(stderr_reader, program)?;
             Ok((status, timed_out, interrupted, stdout, stderr))
         },
     )?;
     let status = status.map_err(|source| spawn_failure(program, source))?;
-    await_group_gone(pgid)?;
+    await_group_gone(&clock, pgid)?;
     ledger.remove(&identity)?;
     let (stdout_text, stdout_dropped) = stdout.into_text();
     let (stderr_text, stderr_dropped) = stderr.into_text();
@@ -346,6 +360,7 @@ pub(crate) fn run_command(
 /// `interrupted` and `timed_out` is set; a waiter that ends without a status is
 /// the fault it always was.
 fn wait_for_status(
+    clock: &Clock,
     receiver: &mpsc::Receiver<io::Result<ExitStatus>>,
     pgid: i32,
     deadline: Instant,
@@ -354,14 +369,14 @@ fn wait_for_status(
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            settle_group(pgid)?;
+            settle_group(clock, pgid)?;
             return Ok((flatten(receiver.recv()), true, false));
         }
         match receiver.recv_timeout(CANCEL_POLL.min(left)) {
             Ok(status) => return Ok((status, false, false)),
             Err(RecvTimeoutError::Timeout) => {
                 if cancelled() {
-                    settle_group(pgid)?;
+                    settle_group(clock, pgid)?;
                     return Ok((flatten(receiver.recv()), false, true));
                 }
             }
@@ -440,10 +455,17 @@ fn spawn_failure(argv0: &str, source: io::Error) -> ExecError {
 }
 
 /// Kills the group and the leader of a child that could not be tracked, then returns the error.
-fn abandon(child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
-    drop(settle_group(pgid));
+fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
+    drop(settle_group(clock, pgid));
     drop(child.wait());
     error
+}
+
+/// Whether `clock` has reached [`GROUP_PROBE_DEADLINE`] past the wait's one start reading.
+/// This is the only bound either group wait reads (larry#268): one reading of the injected
+/// clock, never a count of yields.
+fn past_deadline(clock: &Clock, started: Duration) -> bool {
+    clock.now().saturating_sub(started) >= GROUP_PROBE_DEADLINE
 }
 
 /// SIGKILLs a process group; a group that is already gone is settled.
@@ -452,24 +474,28 @@ fn abandon(child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
 /// `EPERM` (openvax/mhctools#620), and BSD `kill(2)` sends nothing to any member
 /// when one target fails the check, so one refusal can leave live members
 /// unsignalled. The kill is therefore repeated while `EPERM` persists, until
-/// [`GROUP_PROBE_DEADLINE`] has passed or [`GROUP_PROBES`] yields, so it lands once
-/// the zombie is reaped; refusing at the
-/// first `EPERM` failed 7 of 24 parallel runs of the timeout journey (MEASURED,
-/// larry#131). A refusal that outlasts the probes is handed to
+/// [`GROUP_PROBE_DEADLINE`] has passed on `clock`, so it lands once the zombie is
+/// reaped; refusing at the first `EPERM` failed 7 of 24 parallel runs of the timeout
+/// journey (MEASURED, larry#131). A refusal that outlasts the bound is handed to
 /// [`await_group_gone`], which never presumes the group gone and ends a member
 /// that really refuses in [`ExecError::GroupSurvived`].
-fn settle_group(pgid: i32) -> Result<(), ExecError> {
-    let started = Instant::now();
-    let mut refusals = 0_u32;
+fn settle_group(clock: &Clock, pgid: i32) -> Result<(), ExecError> {
+    settle_with(clock, || kill_process_group(pgid))
+}
+
+/// [`settle_group`] over a signal the caller supplies, so the refusal schedule can be
+/// driven: an `EPERM` is repeated until [`GROUP_PROBE_DEADLINE`] has passed on `clock`, a
+/// group the kernel says is gone settles at once, and any other refusal is typed.
+fn settle_with(clock: &Clock, mut signal: impl FnMut() -> io::Result<()>) -> Result<(), ExecError> {
+    let started = clock.now();
     loop {
-        match kill_process_group(pgid) {
+        match signal() {
             Ok(()) => return Ok(()),
             Err(error) if error.raw_os_error() == Some(ESRCH) => return Ok(()),
             Err(error) if error.raw_os_error() == Some(EPERM) => {
-                if refusals >= GROUP_PROBES || started.elapsed() >= GROUP_PROBE_DEADLINE {
+                if past_deadline(clock, started) {
                     return Ok(());
                 }
-                refusals = refusals.saturating_add(1);
                 std::thread::yield_now();
             }
             Err(error) => return Err(ExecError::Reap(error)),
@@ -478,21 +504,43 @@ fn settle_group(pgid: i32) -> Result<(), ExecError> {
 }
 
 /// Probes the group until it is gone, yielding between probes; fails once
-/// [`GROUP_PROBE_DEADLINE`] or [`GROUP_PROBES`] runs out first.
-pub(super) fn await_group_gone(pgid: i32) -> Result<(), ExecError> {
-    let started = Instant::now();
-    let mut probes = 0_u32;
-    while process_group_exists(pgid).map_err(ExecError::Reap)? {
-        if probes >= GROUP_PROBES || started.elapsed() >= GROUP_PROBE_DEADLINE {
-            return Err(ExecError::GroupSurvived { pgid });
+/// [`GROUP_PROBE_DEADLINE`] has passed on `clock` with the group still there.
+pub(super) fn await_group_gone(clock: &Clock, pgid: i32) -> Result<(), ExecError> {
+    if await_gone(clock, || {
+        process_group_exists(pgid).map_err(ExecError::Reap)
+    })? {
+        return Ok(());
+    }
+    Err(ExecError::GroupSurvived { pgid })
+}
+
+/// Waits for `still_there` to answer that the group is gone, yielding between probes, and
+/// answers whether it did: `false` once [`GROUP_PROBE_DEADLINE`] has passed on `clock` with
+/// the group still there. `still_there` is the probe's own answer, so the caller passes
+/// `process_group_exists` and a `true` keeps waiting (larry#268); both decisions are the
+/// probe's and one clock reading, so the seeded sim can drive them to the deadline and
+/// before it on a virtual clock. The error type is the probe's, so a sim can report a
+/// refused clock advance as itself.
+fn await_gone<E>(
+    clock: &Clock,
+    mut still_there: impl FnMut() -> Result<bool, E>,
+) -> Result<bool, E> {
+    let started = clock.now();
+    while still_there()? {
+        if past_deadline(clock, started) {
+            return Ok(false);
         }
-        probes = probes.saturating_add(1);
         std::thread::yield_now();
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Seeded simulations of the bounded capture (larry#206).
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
+
+/// Seeded simulations of the group wait's one deadline, on a virtual clock (larry#268).
+#[cfg(test)]
+#[path = "sim_group.rs"]
+mod sim_group;
