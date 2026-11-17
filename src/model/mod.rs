@@ -29,16 +29,34 @@ pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resol
 
 /// Most messages one completion request carries.
 pub(crate) const MAX_MESSAGES: usize = 256;
+/// `error.code` a gateway's structured refusal uses when a request is past the
+/// model's context window (larry#236). The code is read before the reason's
+/// words, which a gateway may translate or soften.
+const CONTEXT_CODES: [&str; 1] = ["context_length_exceeded"];
 /// Phrases a gateway's 400 uses, lowercased, when a request is past the model's
-/// context window (larry#235): OpenAI and vLLM ("maximum context length"), the
-/// `context_length_exceeded` code some gateways copy into the message, Anthropic
-/// ("prompt is too long") and Gemini ("exceeds the maximum number of tokens").
-const CONTEXT_OVERFLOW: [&str; 5] = [
+/// context window (larry#235): OpenAI and vLLM ("maximum context length"),
+/// Anthropic ("prompt is too long") and Gemini ("exceeds the maximum number of
+/// tokens"). Read only when no code says it (larry#236).
+const CONTEXT_OVERFLOW: [&str; 4] = [
     "context length",
-    "context_length",
     "context window",
     "prompt is too long",
     "maximum number of tokens",
+];
+/// Words a refusal puts the refused request's own token count after (larry#236):
+/// Anthropic, OpenAI, vLLM and Gemini.
+const COUNTED_MARKERS: [&str; 4] = [
+    "prompt is too long: ",
+    "resulted in ",
+    "you requested ",
+    "input token count (",
+];
+/// Words a refusal puts the model's own limit after (larry#236): OpenAI and
+/// vLLM, then Gemini's parenthesis. Anthropic's "N tokens > M maximum" is read
+/// by [`number_before`].
+const LIMIT_MARKERS: [&str; 2] = [
+    "maximum context length is ",
+    "maximum number of tokens allowed (",
 ];
 /// Largest reply body the client reads, in bytes.
 const MAX_REPLY_BYTES: usize = 4_194_304;
@@ -153,23 +171,100 @@ impl fmt::Display for ModelError {
 
 impl ModelError {
     /// Whether the gateway refused the request as too large for the model: a 413,
-    /// or a 400 whose reason names the context window (larry#235). A terminal
-    /// session compacts and sends again; nothing else retries on it.
+    /// or a 400 whose `error.code` or reason names the context window (larry#235,
+    /// larry#236). A terminal session compacts, shrinks its window to what the
+    /// refusal names and sends again; nothing else retries on it.
     pub(crate) fn is_context_overflow(&self) -> bool {
-        match *self {
-            Self::Client { status: 413, .. } => true,
-            Self::Client {
-                status: 400,
-                ref detail,
-            } => {
+        let Self::Client { status, ref detail } = *self else {
+            return false;
+        };
+        match status {
+            413 => true,
+            400 => {
                 let reason = detail.to_ascii_lowercase();
-                CONTEXT_OVERFLOW
+                CONTEXT_CODES
                     .iter()
-                    .any(|phrase| reason.contains(phrase))
+                    .chain(CONTEXT_OVERFLOW.iter())
+                    .any(|marker| reason.contains(marker))
             }
             _ => false,
         }
     }
+
+    /// The model's window as this refusal names it, in tokens; read it only after
+    /// [`ModelError::is_context_overflow`] says the refusal is one (larry#236).
+    /// The reason it reads is bounded to the 512 characters a refusal carries,
+    /// so no hostile body reaches this parse whole.
+    pub(crate) fn window(&self) -> WindowRefusal {
+        let Self::Client { ref detail, .. } = *self else {
+            return WindowRefusal::default();
+        };
+        WindowRefusal::parse(&detail.to_ascii_lowercase())
+    }
+}
+
+/// The model's context window as a gateway's refusal names it, in tokens
+/// (larry#236). Either number may be absent: vLLM names only the limit and a
+/// gateway that gives no number says neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WindowRefusal {
+    /// Prompt tokens the gateway counted for the refused request, when it said.
+    pub(crate) counted: Option<u64>,
+    /// The model's limit, when the gateway said it.
+    pub(crate) limit: Option<u64>,
+}
+
+impl WindowRefusal {
+    /// The numbers a lowercased refusal `reason` names.
+    fn parse(reason: &str) -> Self {
+        let limit = match LIMIT_MARKERS
+            .iter()
+            .find_map(|marker| number_after(reason, marker))
+        {
+            Some(limit) => Some(limit),
+            None => number_before(reason, " maximum"),
+        };
+        Self {
+            counted: COUNTED_MARKERS
+                .iter()
+                .find_map(|marker| number_after(reason, marker)),
+            limit,
+        }
+    }
+}
+
+/// The whole number that begins just after the spaces at byte `from`, checked:
+/// digits that do not fit a `u64` are no number, never a wrapped one, and a
+/// word where a number should be is no number either.
+fn number_at(text: &str, from: usize) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let start = (from..bytes.len()).find(|&index| bytes[index] != b' ')?;
+    if !bytes[start].is_ascii_digit() {
+        return None;
+    }
+    let end = match (start..bytes.len()).find(|&index| !bytes[index].is_ascii_digit()) {
+        Some(index) => index,
+        None => bytes.len(),
+    };
+    text.get(start..end)?.parse::<u64>().ok()
+}
+
+/// The first whole number in `text` after `marker`'s first occurrence.
+fn number_after(text: &str, marker: &str) -> Option<u64> {
+    number_at(text, text.find(marker)?.checked_add(marker.len())?)
+}
+
+/// The whole number that ends just before `marker`'s first occurrence, with
+/// spaces between them allowed.
+fn number_before(text: &str, marker: &str) -> Option<u64> {
+    let head = text.get(..text.find(marker)?)?.trim_end();
+    let bytes = head.as_bytes();
+    let end = bytes.len();
+    let start = match (0..end).rev().find(|&index| !bytes[index].is_ascii_digit()) {
+        Some(index) => index.saturating_add(1),
+        None => 0,
+    };
+    head.get(start..end)?.parse::<u64>().ok()
 }
 
 /// Append the gateway's reason after a status, when it gave one.
