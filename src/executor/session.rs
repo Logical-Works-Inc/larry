@@ -559,11 +559,9 @@ impl Turn<'_> {
                 .map_err(|overflow| self.refuse(format!("model: {overflow}")))?;
             match self.client.send(&request) {
                 Ok(completion) => return Ok(completion),
-                Err(cause) if cause.is_context_overflow() => {
-                    conversation
-                        .shrink(request.bytes())
-                        .map_err(|overflow| self.refuse(format!("model: {cause}; {overflow}")))?
-                }
+                Err(cause) if cause.is_context_overflow() => conversation
+                    .shrink(request.bytes(), cause.window())
+                    .map_err(|overflow| self.refuse(format!("model: {cause}; {overflow}")))?,
                 Err(cause) => return Err(self.refuse(format!("model: {cause}"))),
             }
         }

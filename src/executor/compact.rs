@@ -7,8 +7,10 @@
 //! the command and its exit status stay, so the model can run it again. Then it
 //! folds the oldest steps into one record, one line per step, until the request
 //! fits. The window starts at the route's request bound. A gateway that refuses
-//! a request as past the model's context window shrinks it to three quarters of
-//! that request, so a model smaller than its route says still finishes.
+//! a request as past the model's context window shrinks it to the model's own
+//! limit when the refusal names one, sized by the rate that refusal shows, and
+//! to three quarters of the request otherwise (larry#236), so a model smaller
+//! than its route says still finishes.
 //!
 //! The system turn and the task turn never change, so a provider's prefix cache
 //! holds across every compaction, and the record turns change only when a
@@ -21,7 +23,7 @@ use std::fmt;
 use lgwks_std::json::{Value, json};
 
 use super::run::clip;
-use crate::model::{MAX_MESSAGES, Message, ModelClient, Request, Role};
+use crate::model::{MAX_MESSAGES, Message, ModelClient, Request, Role, WindowRefusal};
 
 /// Observations kept whole at the tail; older ones keep their status line only.
 const KEEP_OBSERVED: usize = 4;
@@ -66,6 +68,46 @@ const _: () = assert!(
 /// `parts` quarters of `whole`, rounded down.
 const fn quarters(whole: usize, parts: usize) -> usize {
     whole.div_euclid(4).saturating_mul(parts)
+}
+
+/// Nine tenths of `bytes`: the room a next request keeps for its text encoded
+/// denser than the refused request's (larry#236).
+fn margin(bytes: usize) -> usize {
+    bytes.saturating_sub(bytes.div_euclid(10))
+}
+
+/// The bytes `limit` tokens hold at the rate the refused request shows: `len`
+/// bytes carried `counted` tokens, so the model's limit holds `len` times
+/// `limit` over `counted` bytes, less the margin. `None` when a length does not
+/// fit, so a hostile number falls back rather than wrapping.
+fn sized(len: usize, counted: u64, limit: u64) -> Option<usize> {
+    if counted == 0 {
+        return None;
+    }
+    let len = u64::try_from(len).ok()?;
+    let bytes = len.checked_mul(limit)?.checked_div(counted)?;
+    let bytes = usize::try_from(bytes).ok()?;
+    Some(margin(bytes))
+}
+
+/// The window one refusal leaves: the model's own limit when the gateway names
+/// one, sized by the rate the refusal shows or, when it names only the limit,
+/// at one byte a token; else three quarters of the refused request as before
+/// (larry#236).
+fn shrunk(len: usize, refused: WindowRefusal) -> usize {
+    let Some(limit) = refused.limit else {
+        return quarters(len, 3);
+    };
+    match refused.counted {
+        Some(counted) if counted > 0 => match sized(len, counted, limit) {
+            Some(bytes) => bytes,
+            None => quarters(len, 3),
+        },
+        _ => match usize::try_from(limit) {
+            Ok(tokens) => margin(tokens),
+            Err(_too_wide) => quarters(len, 3),
+        },
+    }
 }
 
 /// The user turn that answered one reply.
@@ -271,17 +313,17 @@ impl Conversation {
     }
 
     /// The gateway refused a request of `len` bytes as past the model's window:
-    /// the window becomes three quarters of it.
+    /// the window becomes [`shrunk`], unless it was already smaller.
     ///
     /// # Errors
     ///
     /// [`Overflow::Shrinks`] once the window has shrunk [`MAX_SHRINKS`] times.
-    pub(super) fn shrink(&mut self, len: usize) -> Result<(), Overflow> {
+    pub(super) fn shrink(&mut self, len: usize, refused: WindowRefusal) -> Result<(), Overflow> {
         if self.tally.shrinks >= MAX_SHRINKS {
             return Err(Overflow::Shrinks);
         }
         self.tally.shrinks = self.tally.shrinks.saturating_add(1);
-        self.window = self.window.min(quarters(len, 3));
+        self.window = self.window.min(shrunk(len, refused));
         Ok(())
     }
 
@@ -417,3 +459,6 @@ impl Conversation {
 #[cfg(test)]
 #[path = "sim_compact.rs"]
 mod sim;
+#[cfg(test)]
+#[path = "sim_refusal.rs"]
+mod sim_refusal;

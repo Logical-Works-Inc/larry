@@ -149,21 +149,49 @@ mod sim;
 /// Most characters of a gateway's own refusal message an error carries.
 const MAX_DETAIL_CHARS: usize = 512;
 
-/// The gateway's reason for a refusal: `error.message` when the body is an
-/// OpenAI-shaped error, else the body text. Bounded, and with every control
-/// character replaced, so an upstream cannot write into an operator's terminal.
+/// Most bytes of a refusal body the client reads (larry#236): a gateway's error
+/// document is a few hundred bytes, and nothing past this is its reason.
+const MAX_ERROR_BODY: usize = 65_536;
+
+/// Most characters of a gateway's own `error.code` a refusal carries.
+const MAX_CODE_CHARS: usize = 64;
+
+/// The gateway's reason for a refusal: its `error.code` and `error.message`
+/// when the body is an OpenAI-shaped error, else the body text. Bounded, and
+/// with every control character replaced, so an upstream cannot write into an
+/// operator's terminal. The code leads, so a translated message still says what
+/// the refusal is (larry#236).
 fn refusal_detail(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let trimmed = text.trim();
-    let message = json::from_str::<Value>(trimmed)
-        .ok()
-        .and_then(|document| document["error"]["message"].as_str().map(str::to_owned));
-    let reason = match message {
-        Some(message) => message,
-        None => trimmed.to_owned(),
+    let head = match body.get(..MAX_ERROR_BODY) {
+        Some(head) => head,
+        None => body,
     };
-    reason
-        .chars()
+    let text = String::from_utf8_lossy(head);
+    let trimmed = text.trim();
+    let document = json::from_str::<Value>(trimmed);
+    let code = document
+        .as_ref()
+        .ok()
+        .and_then(|document| document["error"]["code"].as_str())
+        .map(|code| bounded(code, MAX_CODE_CHARS));
+    let message = document
+        .as_ref()
+        .ok()
+        .and_then(|document| document["error"]["message"].as_str())
+        .map(str::to_owned);
+    let reason = match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code,
+        (None, Some(message)) => message,
+        (None, None) => trimmed.to_owned(),
+    };
+    bounded(&reason, MAX_DETAIL_CHARS)
+}
+
+/// `text` with every control character replaced by a space, at most `most`
+/// characters long.
+fn bounded(text: &str, most: usize) -> String {
+    text.chars()
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -171,7 +199,7 @@ fn refusal_detail(body: &[u8]) -> String {
                 character
             }
         })
-        .take(MAX_DETAIL_CHARS)
+        .take(most)
         .collect()
 }
 
