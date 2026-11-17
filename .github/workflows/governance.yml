@@ -69,7 +69,7 @@ jobs:
         if: always()
         run: target/debug/larry mascot --check
       # The governance and reranker controls (larry#150, ADR 0013) run with the
-      # workspace tests (ci.yml, rust); `larry governance` above admits the
+      # workspace tests (ci.yml, test); `larry governance` above admits the
       # BLAKE3 receipts `larry-rerank` writes.
       - name: Check whitespace
         if: always()
