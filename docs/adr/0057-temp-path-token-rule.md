@@ -6,14 +6,16 @@ resource: /docs/adr/0057-temp-path-token-rule.md
 tags: [larry, adr, governance, tests, syntax]
 generated: {by: claude-code, at: 2026-11-17}
 verified: {by: claude-code, method: larry-oracle all on the larry#293 branch, 2026-11-17}
-status: accepted
+status: superseded
 stale_after: 2027-02-17
 sources: [larry#293, larry#267, The Rust Reference path expressions and use declarations, CWE-59, /docs/adr/0051-temp-path-guard.md]
 ---
 
 # 0057: the temp-path rule reads names, not text
 
-Status: accepted, 2026-11-17 (larry#293)
+Status: superseded by ADR 0061, 2026-11-17 (larry#293): the hand-written token reader it chose
+passed five audited forms and read only the root's `src` and `tests`; the rule now parses with the
+estate reader `lgwks_ast`.
 
 ## Context
 

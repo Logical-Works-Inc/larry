@@ -31,6 +31,7 @@ owns nothing; any other crate only with a `gap` issue on its manifest line. Labe
 | `rmcp =3.8.0` (`server`, `transport-io`), deps at `opt-level 3` | 62 | 69.5 s | 545 MB | resolves |
 | Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.2.0 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
 | Larry's branch for larry#88 on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | resolves |
+| Larry's branch for larry#293 on `lgwks_ast =6.0.3` (`lang-rust`), `env -u CARGO_BUILD_BUILD_DIR cargo build --bins --locked --target-dir <fresh>`, 2026-11-17; the tree without the edge measured 230.8 s on 214 crates the same day | 228 (214 without) | 406.7 s, load 5.75 to 10.55 on 4 cores (73% CPU) | 598 MB | resolves; `larry governance`'s temp-path rule p50 279.5 ms, p95 282.8 ms, p99 356.1 ms per check over the root's `src` and `tests` (ADR 0061) |
 
 Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u | wc -l`,
 `/usr/bin/time -l cargo build --locked` into a fresh target directory after one warm-up fetch, sccache on
@@ -50,7 +51,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Receipts signed (larry#86, ADR 0006) | `lgwks_std::sign` (ed25519), seed in `lgwks_deps` `sqlite` | forge's SipHash audit chain: a MAC, no offline check |
 | Sealed records at rest | `lgwks_bot::sealed` | none needed |
 | Model client on the tenant route table (ADR 0039) | `lgwks_std::http` + `json` + `retry`, ported from forge-providers | `async-openai`: a second client, more crates |
-| Code reading, diffs | `lgwks_ast` | `syn`: the estate has one reader |
+| Code reading, diffs | `lgwks_ast`, whose checked parse now judges the temp-path rule (ADR 0058) | `syn`: the estate has one reader |
 | Prompt-injection screen (larry#37) | `lgwks_deps` `llm-guard` | a classifier of our own first |
 | Rerank port (larry#53) | `lgwks_deps` `ml-candle`, `ml-tokenizers` | Python reranker: banned |
 | Terminal UI (larry#239, ADR 0045) | Larry's own cell frame on `crossterm` =0.29.0 and `unicode-width` =0.2.3, gap crates#1067 | AppCUI: bold lost its colour, 82 crates; cursive, iocraft, ratatui: see ADR 0045 |
