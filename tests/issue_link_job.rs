@@ -145,6 +145,22 @@ fn the_job_reruns_on_every_event_that_can_change_the_link() -> Check {
 }
 
 #[test]
+fn governance_pushes_check_main_only() -> Check {
+    // One governance lane (larry#307): the steps run on a pull request and on a
+    // push to main, never twice for one PR and never for a branch push.
+    let text = workflow()?;
+    assert!(
+        text.contains("  push:\n    branches: [main]\n"),
+        "a push is a landed commit, not every branch"
+    );
+    assert!(
+        text.contains("concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
+        "a superseded pull request run is cancelled and a main run is not"
+    );
+    Ok(())
+}
+
+#[test]
 fn sim_any_closed_issue_list_passes_and_is_named() -> Check {
     let script = issue_link_script(&workflow()?)?;
     for seed in 0..SEEDS {

@@ -7,22 +7,34 @@ on:
 permissions:
   contents: read
 
+# One run per workflow and ref: a second push to a pull request cancels the run
+# its first push started, so the PR shows one current verdict. A push to main
+# never cancels, because that run is the proof of the landed commit (larry#307).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # The Rust lanes, carried over from the larry-runtime workflow, widened to
-  # the merged workspace: `--workspace` now covers larry-demo and
-  # larry-contracts together.
-  rust:
+  # The lint half of the old `rust` lane, split out so rustfmt and both clippy
+  # calls report in parallel with the tests instead of after them (larry#307).
+  lint:
     # Runner by visibility (larry#116, see sim.yml): the self-hosted Mac while
     # private, GitHub-hosted ubuntu-latest once public; never self-hosted on a
     # public repository.
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      # Its own key, saved only from main (larry#307): a pull request restores
+      # this job's warm cache and never writes what main restores.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: lint-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       # `--locked --all-targets` match the lane set AGENTS.md declares and
       # `.wwfd/local-ci.sh` mirrors. They were missing here, which mattered
@@ -33,7 +45,23 @@ jobs:
       # The reranker engine is feature-gated (larry#150, ADR 0013): lint the
       # binary with it on, so the gated path never rots unbuilt.
       - run: cargo clippy --locked --features rerank --bin larry-rerank -- -D warnings
-      # The test lane AGENTS.md declares and `cargo local-ci` runs (larry#154).
+
+  # The test half of the old `rust` lane: the workspace suite AGENTS.md
+  # declares and `cargo local-ci` runs (larry#154).
+  test:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: stable
+      # Its own key, saved only from main (larry#307), so a cold clippy build in
+      # the lint job never evicts the compiled test lane.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: test-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Hosted legs install nextest; the self-hosted leg keeps `cargo test` so
       # a job never installs tools into the shared machine (see sim.yml).
       # The install is bounded and may fail; without nextest the same lane runs
@@ -69,6 +97,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           shared-key: journey-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - id: nextest
         continue-on-error: true
         timeout-minutes: 3
@@ -83,55 +112,3 @@ jobs:
       # captured, so they run again uncaptured for the log (same build).
       - name: Print the journey probes
         run: cargo test --locked -p larry-demo --test e2e_journey -- --nocapture --test-threads 1 probe
-
-  # The specification and governance lanes, carried over from Larry's
-  # workflow. Action SHAs are pinned here because this job ran that way
-  # before the merge; the rust job above keeps its tag refs for the same
-  # reason. Neither convention was changed by merging the two files.
-  governance:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    # The same steps as governance.yml's docs-check.
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
-        with:
-          toolchain: stable
-      # The e2e job's cache already holds the `larry` binary's dependencies.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          shared-key: sim-${{ github.event.repository.private && 'self-hosted' || 'hosted' }}
-          save-if: false
-      - name: Build the larry binary
-        run: cargo build --locked --bin larry
-      # `larry governance` replaced tools/check_governance.py (larry#53, ADR 0010);
-      # its controls and the reranker's (larry#150, ADR 0013) run in the rust
-      # job's workspace tests.
-      - name: Check specification and governance
-        run: target/debug/larry governance --report > "$RUNNER_TEMP/larry-governance.json"
-      - name: Check the tracker render
-        if: always()
-        run: target/debug/larry tracker --check
-      # `larry mascot` replaced tools/rocco_pixel.py (larry#152, ADR 0014).
-      - name: Check the mascot render
-        if: always()
-        run: target/debug/larry mascot --check
-      - name: Check whitespace
-        if: always()
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            BASE_SHA="$(git hash-object -t tree /dev/null)"
-          fi
-          git diff --check "$BASE_SHA" HEAD
-      - name: Retain structural evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: larry-governance-${{ github.sha }}
-          path: ${{ runner.temp }}/larry-governance.json
-          if-no-files-found: error
-          retention-days: 30
