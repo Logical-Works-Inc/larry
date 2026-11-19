@@ -69,10 +69,14 @@ jobs:
             echo "::error::$count mutants on the changed lines exceed the lane's capacity of $capacity ($MUTANTS_MAX_SHARDS shards of $MUTANTS_SHARD_CAPACITY): split the pull request"
             exit 1
           fi
-          shards=$(( (count + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
-          if [ "$shards" -gt "$MUTANTS_MAX_SHARDS" ]; then
-            shards="$MUTANTS_MAX_SHARDS"
+          # cargo-mutants hands shard k the k-th run of ceil(count / n) mutants,
+          # so n is sized from that run: 266 mutants in 96 shards left shards
+          # 89 to 95 empty, with no outcomes file (run 44638202506).
+          per=$(( (count + MUTANTS_MAX_SHARDS - 1) / MUTANTS_MAX_SHARDS ))
+          if [ "$per" -lt "$MUTANTS_PER_SHARD" ]; then
+            per="$MUTANTS_PER_SHARD"
           fi
+          shards=$(( (count + per - 1) / per ))
           matrix="$(jq -cn --argjson n "$shards" '{include: [range(0; $n) | {k: ., n: $n}]}')"
           echo "mutants on the changed lines: $count in $shards shard(s)"
           jq -sr '(.[0] // [])[] | .name' list.json

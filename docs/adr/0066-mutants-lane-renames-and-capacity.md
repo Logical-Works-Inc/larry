@@ -37,6 +37,10 @@ about 10 s, and every shard that held 4 or more mutants was cut at the timeout.
   15-minute timeout.
 - A plan past 96 times 3 (288 mutants) fails in the plan job and names the count and the
   capacity. It no longer runs shards that the timeout will cut.
+- cargo-mutants hands shard k the k-th run of `ceil(count / n)` mutants. So the plan sets
+  `per = max(2, ceil(count / 96))` and `n = ceil(count / per)`, and no shard is empty. With
+  `n = 96`, PR #342's 266 mutants filled shards 0 to 88 only, and 89 to 95 wrote no outcomes
+  file (run 44638202506). That run judged all 266: 102 caught of 139 viable, 73.4%.
 
 ## Consequences
 
