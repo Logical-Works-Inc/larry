@@ -15,7 +15,6 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -25,8 +24,12 @@ use larry_demo::executor::{
     ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, process_env,
     state_public_key, trusted_key, verify,
 };
-use larry_demo::governance;
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
+
+/// `larry governance` and `larry tracker`, split out by responsibility (ADR 0065).
+#[path = "larry/governance_cli.rs"]
+mod governance_cli;
+use governance_cli::{governance_once, tracker_once};
 
 /// Arguments read from the command line; `larry route add` takes the most: a
 /// subcommand, an id and eight flags with their values.
@@ -71,10 +74,15 @@ const fn pause(wait: Duration) -> bool {
     wait.is_zero()
 }
 
-/// One subcommand: the word the first argument must be, its one-line summary
-/// and the `LARRY_*` variables it reads (larry#228). `larry help`, `--help`
-/// and `-h` render this one table, so the help a first-time user reads cannot
-/// drift from the arms below.
+/// What a subcommand does with the arguments after its word: its exit status, or
+/// the refusal `main` prints as one line on standard error before exiting 1.
+type Handler = fn(&[OsString]) -> Result<ExitCode, Refusal>;
+
+/// One subcommand: the word the first argument must be, its one-line summary,
+/// the `LARRY_*` variables it reads (larry#228) and the handler that runs it
+/// (larry#295). `larry help`, `--help` and `-h` render this one table and `main`
+/// dispatches by looking the word up in it, so the help a first-time user reads
+/// cannot drift from what runs.
 struct Subcommand {
     /// The first argument that selects the command.
     name: &'static str,
@@ -82,6 +90,8 @@ struct Subcommand {
     summary: &'static str,
     /// The `LARRY_*` variables the command reads, in a phrase, or `none`.
     env: &'static str,
+    /// Runs the command on the arguments after its word; it refuses any it does not take.
+    run: Handler,
 }
 
 /// The variables a command reads that runs a task through the executor: the
@@ -94,72 +104,98 @@ const MODEL_ENV: &str = "LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MO
 /// The phrase a command that reads no variable of its own prints.
 const NO_ENV: &str = "none";
 
-/// Every subcommand the dispatcher handles, in help order.
-const COMMANDS: [Subcommand; 13] = [
+/// Every subcommand the dispatcher handles, in help order. A `static`, so a
+/// lookup hands out a `'static` row.
+static COMMANDS: [Subcommand; 13] = [
     Subcommand {
         name: "help",
         summary: "print this help and exit",
         env: NO_ENV,
+        // Words after it still get the help, so `larry help me` helps.
+        run: |_rest| ran("larry help", help_once()),
     },
     Subcommand {
         name: "mcp",
         summary: "serve MCP over stdin and stdout",
         env: EXECUTOR_ENV,
+        run: |rest| {
+            bare(rest)?;
+            let served = larry_demo::mcp::serve(io::stdin().lock(), io::stdout().lock());
+            ran("MCP server failed", served)
+        },
     },
     Subcommand {
         name: "acp",
         summary: "serve the Agent Client Protocol on stdin and stdout",
         env: EXECUTOR_ENV,
+        run: |rest| {
+            bare(rest)?;
+            let stdin = io::BufReader::new(io::stdin());
+            ran(
+                "ACP agent failed",
+                larry_demo::acp::serve(stdin, io::stdout().lock()),
+            )
+        },
     },
     Subcommand {
         name: "model",
         summary: "send stdin to the model gateway and print one reply",
         env: MODEL_ENV,
+        run: |rest| bare(rest).and_then(|()| ran("", model_once())),
     },
     Subcommand {
         name: "exec",
         summary: "run a task document from stdin",
         env: EXECUTOR_ENV,
+        run: |rest| bare(rest).and_then(|()| judged(exec_once())),
     },
     Subcommand {
         name: "verify",
         summary: "check a sealed report from stdin",
         env: "LARRY_RECEIPT_KEY, LARRY_STATE_DIR",
+        run: |rest| bare(rest).and_then(|()| judged(verify_once())),
     },
     Subcommand {
         name: "key",
         summary: "print the receipt public key",
         env: "LARRY_STATE_DIR",
+        run: |rest| bare(rest).and_then(|()| ran("", key_once())),
     },
     Subcommand {
         name: "route",
         summary: "add, list, remove, default or resolve the model routes",
         env: "LARRY_STATE_DIR, LARRY_KEY_*, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY",
+        run: |rest| ran("", route_once(rest)),
     },
     Subcommand {
         name: "eval",
         summary: "run a matched task set as one priced arm",
         env: "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_*, LARRY_KEY_*, LARRY_EVAL_PRICE_IN, LARRY_EVAL_PRICE_OUT, LARRY_EVAL_PRICE_CACHED, LARRY_EVAL_PRICE_CACHE_WRITE",
+        run: |rest| bare(rest).and_then(|()| ran("", eval_once())),
     },
     Subcommand {
         name: "governance",
         summary: "check the document structure and inventory",
         env: NO_ENV,
+        run: |rest| governance_once(rest).map_err(failed("")),
     },
     Subcommand {
         name: "tracker",
         summary: "write or check tools/tracker/index.html",
         env: NO_ENV,
+        run: |rest| tracker_once(rest).map_err(failed("")),
     },
     Subcommand {
         name: "mascot",
         summary: "draw the pixel mascot's SVG, preview and pet package",
         env: NO_ENV,
+        run: |rest| ran("", larry_demo::mascot::run(rest, &mut io::stdout().lock())),
     },
     Subcommand {
         name: "serve",
         summary: "serve the HTTP edge; `serve key <tenant>` and `serve revoke <tenant>` manage its keys",
         env: "LARRY_SERVE_ADDR, LARRY_SERVE_PLAINTEXT, LARRY_STATE_DIR",
+        run: run_serve,
     },
 ];
 
@@ -228,6 +264,8 @@ impl fmt::Display for ModelCheck {
         }
     }
 }
+
+impl std::error::Error for ModelCheck {}
 
 /// `larry model`: send standard input as one user turn to the gateway that
 /// `LARRY_MODEL_*` names and print the reply. The operator's check that a key
@@ -335,6 +373,8 @@ impl<E: fmt::Display> fmt::Display for Failed<E> {
     }
 }
 
+impl<E: fmt::Debug + fmt::Display> std::error::Error for Failed<E> {}
+
 /// `larry key`: print the state directory's receipt public key as 64 hex characters,
 /// the value an offline verifier sets as `LARRY_RECEIPT_KEY`.
 fn key_once() -> Result<(), ExecError> {
@@ -363,6 +403,8 @@ impl fmt::Display for EvalRun {
     }
 }
 
+impl std::error::Error for EvalRun {}
+
 /// `larry eval`: run every task of the matched set on standard input as one arm (the
 /// model `LARRY_MODEL_*` pins, priced by `LARRY_EVAL_PRICE_IN`/`_OUT`) and print its
 /// scorecard. Prices and the set are checked before the first model call (larry#87).
@@ -374,129 +416,6 @@ fn eval_once() -> Result<(), EvalRun> {
     let card: Scorecard =
         larry_demo::eval::run(&bytes, &settings, prices).map_err(EvalRun::Eval)?;
     print_line(card.json()).map_err(EvalRun::Exec)
-}
-
-/// Why `larry governance` or `larry tracker` stopped without its verdict; each keeps its cause.
-#[derive(Debug)]
-enum GovernanceRun {
-    /// The arguments were not `[FLAG] [--root DIR]`.
-    Usage(Vec<OsString>),
-    /// No root was given and the working directory is unreadable.
-    NoDirectory(io::Error),
-    /// Standard output could not be written.
-    Stdout(io::Error),
-    /// Standard error could not be written.
-    Stderr(io::Error),
-    /// `--check` found the committed page differs from the render.
-    Stale,
-    /// The tracker could not read, render or write.
-    Tracker(governance::TrackerError),
-}
-
-impl fmt::Display for GovernanceRun {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Usage(ref rest) => write!(
-                out,
-                "usage: larry governance [--report] [--root DIR] | larry tracker [--check] [--root DIR] (got {rest:?})"
-            ),
-            Self::NoDirectory(ref cause) => {
-                write!(out, "governance: no working directory: {cause}")
-            }
-            Self::Stdout(ref cause) => write!(out, "governance: stdout unwritable: {cause}"),
-            Self::Stderr(ref cause) => write!(out, "governance: stderr unwritable: {cause}"),
-            Self::Stale => {
-                out.write_str("FAIL: tools/tracker/index.html is stale — run `larry tracker`")
-            }
-            Self::Tracker(ref cause) => write!(out, "FAIL: {cause}"),
-        }
-    }
-}
-
-/// The root and flag `larry governance` and `larry tracker` take: `[FLAG] [--root DIR]`, in any
-/// order, the root defaulting to the working directory.
-fn governance_args(rest: &[OsString], flag: &str) -> Result<(bool, PathBuf), GovernanceRun> {
-    let usage = || GovernanceRun::Usage(rest.to_vec());
-    let mut set = false;
-    let mut root: Option<PathBuf> = None;
-    let mut items = rest.iter();
-    while let Some(item) = items.next() {
-        if item == flag && !set {
-            set = true;
-        } else if item == "--root" && root.is_none() {
-            let Some(directory) = items.next() else {
-                return Err(usage());
-            };
-            root = Some(PathBuf::from(directory));
-        } else {
-            return Err(usage());
-        }
-    }
-    let root = match root {
-        Some(root) => root,
-        None => std::env::current_dir().map_err(GovernanceRun::NoDirectory)?,
-    };
-    Ok((set, root))
-}
-
-/// Writes each line to standard output and flushes.
-fn print_lines(lines: &[&str]) -> Result<(), GovernanceRun> {
-    let mut out = io::stdout().lock();
-    for line in lines {
-        out.write_all(line.as_bytes())
-            .and_then(|()| out.write_all(b"\n"))
-            .map_err(GovernanceRun::Stdout)?;
-    }
-    out.flush().map_err(GovernanceRun::Stdout)
-}
-
-/// `larry governance [--report] [--root DIR]`: the structural checker (ADR 0010). Prints the
-/// PASS block or the JSON report, or each error as a `FAIL:` line on standard error; exits 1
-/// on any error.
-fn governance_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
-    let (report_wanted, root) = governance_args(rest, "--report")?;
-    let report: governance::Report = governance::check(&root);
-    if report_wanted {
-        print_lines(&[&report.pretty()])?;
-    } else if report.ok() {
-        print_lines(&[
-            "PASS: document structure and governance inventory",
-            &report.counts_line(),
-            "NOT CHECKED BY THIS GATE: Mermaid rendering",
-            "NOT RUN: runtime, model evaluations, hardware and human trials",
-        ])?;
-    } else {
-        for error in report.errors() {
-            diagnose(&format!("FAIL: {error}")).map_err(GovernanceRun::Stderr)?;
-        }
-    }
-    Ok(if report.ok() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
-}
-
-/// `larry tracker [--check] [--root DIR]`: writes `tools/tracker/index.html` atomically, or with
-/// `--check` exits 1 unless the committed page equals the render.
-fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
-    let (check_only, root) = governance_args(rest, "--check")?;
-    if check_only {
-        let current: Result<bool, governance::TrackerError> =
-            governance::tracker::is_current(&root);
-        return match current {
-            Ok(true) => print_lines(&["PASS: tools/tracker/index.html is current"])
-                .map(|()| ExitCode::SUCCESS),
-            Ok(false) => Err(GovernanceRun::Stale),
-            Err(error) => Err(GovernanceRun::Tracker(error)),
-        };
-    }
-    let written: Result<usize, governance::TrackerError> = governance::tracker::write(&root);
-    match written {
-        Ok(bytes) => print_lines(&[&format!("wrote tools/tracker/index.html ({bytes} bytes)")])
-            .map(|()| ExitCode::SUCCESS),
-        Err(error) => Err(GovernanceRun::Tracker(error)),
-    }
 }
 
 /// `larry serve`: bind `LARRY_SERVE_ADDR` (loopback by default), print one JSON line naming
@@ -564,88 +483,101 @@ fn verdict_status(accepted: bool) -> ExitCode {
 const UNKNOWN: &str =
     "larry: unknown arguments; run `larry help` for every subcommand and its LARRY_* variables";
 
-/// Whether `word` is a subcommand `COMMANDS` names, or one of the three help
-/// spellings. The first arm of `main`'s match refuses every word this refuses,
-/// so an arm for a word no help row names is unreachable at run time and the
-/// table is the list (larry#228).
-fn listed(word: &str) -> bool {
-    matches!(word, "help" | "--help" | "-h") || COMMANDS.iter().any(|command| command.name == word)
+/// Why a subcommand exited 1 without its result.
+#[derive(Debug)]
+enum Refusal {
+    /// Arguments `larry help` does not describe: an unknown word, or a listed
+    /// word with arguments it does not take.
+    Unknown,
+    /// The subcommand ran and failed; the cause keeps its type and source.
+    Failed {
+        /// The words that name the command, or empty when the cause names it.
+        context: &'static str,
+        /// What failed.
+        cause: Box<dyn std::error::Error>,
+    },
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Unknown => out.write_str(UNKNOWN),
+            Self::Failed {
+                context: "",
+                ref cause,
+            } => write!(out, "{cause}"),
+            Self::Failed { context, ref cause } => write!(out, "{context}: {cause}"),
+        }
+    }
+}
+
+/// The failure of a command that ran, under the words that name it.
+fn failed<E: std::error::Error + 'static>(context: &'static str) -> impl FnOnce(E) -> Refusal {
+    move |cause| Refusal::Failed {
+        context,
+        cause: Box::new(cause),
+    }
+}
+
+/// Exit 0 once a command ran to its end, else its failure.
+fn ran<E: std::error::Error + 'static>(
+    context: &'static str,
+    outcome: Result<(), E>,
+) -> Result<ExitCode, Refusal> {
+    outcome.map(|()| ExitCode::SUCCESS).map_err(failed(context))
+}
+
+/// A sealed verdict's exit status, else the failure that stopped the run.
+fn judged(outcome: Result<bool, ExecError>) -> Result<ExitCode, Refusal> {
+    outcome.map(verdict_status).map_err(failed(""))
+}
+
+/// Refuses any argument after a word that takes none.
+fn bare(rest: &[OsString]) -> Result<(), Refusal> {
+    if rest.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::Unknown)
+    }
+}
+
+/// `larry serve`, `larry serve key <tenant>` and `larry serve revoke <tenant>`; any other
+/// shape is refused before anything binds or writes.
+fn run_serve(rest: &[OsString]) -> Result<ExitCode, Refusal> {
+    let outcome = match *rest {
+        [] => serve_once(),
+        [ref sub, ref tenant] if sub == "key" => serve_key_once(&tenant.to_string_lossy()),
+        [ref sub, ref tenant] if sub == "revoke" => serve_revoke_once(&tenant.to_string_lossy()),
+        _ => return Err(Refusal::Unknown),
+    };
+    ran("", outcome)
+}
+
+/// The row `word` selects: a table name, or `--help` and `-h` for help's row. A word
+/// no row names finds nothing, so it runs nothing (larry#228, larry#295).
+fn find(word: &str) -> Option<&'static Subcommand> {
+    let name = match word {
+        "--help" | "-h" => "help",
+        other => other,
+    };
+    COMMANDS.iter().find(|command| command.name == name)
 }
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).take(MAX_ARGUMENTS).collect();
-    let outcome = match *args.as_slice() {
+    let outcome = match args.split_first() {
         // A bare `larry` is the terminal session; help's first paragraph names it.
-        [] => larry_demo::tui::run()
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| format!("larry: {error}")),
-        // Every word that reaches an arm below is one help names (larry#228).
-        [ref command, ..] if !listed(command.to_string_lossy().as_ref()) => {
-            Err(String::from(UNKNOWN))
-        }
-        [ref command] if command == "mcp" => {
-            larry_demo::mcp::serve(io::stdin().lock(), io::stdout().lock())
-                .map(|()| ExitCode::SUCCESS)
-                .map_err(|error| format!("MCP server failed: {error}"))
-        }
-        [ref command] if command == "acp" => {
-            larry_demo::acp::serve(io::BufReader::new(io::stdin()), io::stdout().lock())
-                .map(|()| ExitCode::SUCCESS)
-                .map_err(|error| format!("ACP agent failed: {error}"))
-        }
-        [ref command] if command == "model" => model_once()
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| error.to_string()),
-        [ref command] if command == "exec" => exec_once()
-            .map(verdict_status)
-            .map_err(|error| error.to_string()),
-        [ref command] if command == "verify" => verify_once()
-            .map(verdict_status)
-            .map_err(|error| error.to_string()),
-        [ref command] if command == "key" => key_once()
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| error.to_string()),
-        [ref command, ref rest @ ..] if command == "route" => route_once(rest)
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| error.to_string()),
-        [ref command] if command == "eval" => eval_once()
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| error.to_string()),
-        [ref command, ref rest @ ..] if command == "governance" => {
-            governance_once(rest).map_err(|error: GovernanceRun| error.to_string())
-        }
-        [ref command, ref rest @ ..] if command == "tracker" => {
-            tracker_once(rest).map_err(|error: GovernanceRun| error.to_string())
-        }
-        [ref command, ref rest @ ..] if command == "mascot" => {
-            larry_demo::mascot::run(rest, &mut io::stdout().lock())
-                .map(|()| ExitCode::SUCCESS)
-                .map_err(|error: larry_demo::mascot::MascotError| error.to_string())
-        }
-        [ref command] if command == "serve" => serve_once()
-            .map(|()| ExitCode::SUCCESS)
-            .map_err(|error| error.to_string()),
-        [ref command, ref sub, ref tenant] if command == "serve" && sub == "key" => {
-            serve_key_once(&tenant.to_string_lossy())
-                .map(|()| ExitCode::SUCCESS)
-                .map_err(|error| error.to_string())
-        }
-        [ref command, ref sub, ref tenant] if command == "serve" && sub == "revoke" => {
-            serve_revoke_once(&tenant.to_string_lossy())
-                .map(|()| ExitCode::SUCCESS)
-                .map_err(|error| error.to_string())
-        }
-        [ref command, ..] if command == "help" || command == "--help" || command == "-h" => {
-            help_once()
-                .map(|()| ExitCode::SUCCESS)
-                .map_err(|error| format!("larry help: {error}"))
-        }
-        _ => Err(String::from(UNKNOWN)),
+        None => ran("larry", larry_demo::tui::run()),
+        // The table is the dispatcher: a word runs only through the row help prints.
+        Some((word, rest)) => match word.to_str().and_then(find) {
+            Some(row) => (row.run)(rest),
+            None => Err(Refusal::Unknown),
+        },
     };
     match outcome {
         Ok(status) => status,
-        Err(message) => {
-            if diagnose(&message).is_err() {
+        Err(refusal) => {
+            if diagnose(&refusal.to_string()).is_err() {
                 return ExitCode::FAILURE;
             }
             ExitCode::FAILURE
@@ -655,56 +587,34 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS, help_text, listed};
+    use super::{COMMANDS, find, help_text};
 
-    /// Every word an arm of `main`'s match handles, beside the arms (larry#228).
-    /// `listed` is what stops a word no help row names before any arm runs, so
-    /// this list and `COMMANDS` must hold the same names.
-    const DISPATCHED: [&str; 13] = [
-        "help",
-        "mcp",
-        "acp",
-        "model",
-        "exec",
-        "verify",
-        "key",
-        "route",
-        "eval",
-        "governance",
-        "tracker",
-        "mascot",
-        "serve",
-    ];
-
-    /// Every dispatched word appears in help once with its variables, and every
-    /// help row is a dispatched word: the table and the arms cannot drift.
+    /// Every row is found by its own name and by no other, and help prints it
+    /// once with its variables: the table is the dispatcher, so there is no
+    /// second list of words to drift from it (larry#228, larry#295).
     #[test]
-    fn every_dispatch_arm_is_in_help() {
+    fn every_listed_word_finds_its_own_row() {
         let help = help_text();
-        let rows: Vec<&str> = COMMANDS.iter().map(|command| command.name).collect();
-        for name in DISPATCHED {
-            assert!(
-                rows.contains(&name),
-                "{name} dispatches but has no help row"
+        for command in &COMMANDS {
+            let found = find(command.name).map(|row| row.summary);
+            assert_eq!(
+                found,
+                Some(command.summary),
+                "{} finds its row",
+                command.name
             );
-            let found: Vec<&str> = help
+            let lines: Vec<&str> = help
                 .lines()
-                .filter(|line| line.trim_start().starts_with(&format!("{name} ")))
+                .filter(|line| line.trim_start().starts_with(&format!("{} ", command.name)))
                 .collect();
-            assert_eq!(found.len(), 1, "{name} appears once in help: {found:?}");
-            for line in &found {
-                assert!(
-                    line.contains("(env: "),
-                    "{name} names the LARRY_* variables it reads: {line}"
-                );
-            }
+            assert_eq!(lines.len(), 1, "{} appears once: {lines:?}", command.name);
+            assert!(
+                lines.iter().all(|line| line.contains("(env: ")),
+                "{lines:?}"
+            );
         }
-        assert_eq!(
-            rows.len(),
-            DISPATCHED.len(),
-            "every help row is a dispatch arm"
-        );
-        assert!(help.contains("serve"), "help names the last subcommand");
+        let last = COMMANDS.last().map(|row| row.summary);
+        assert_eq!(find("serve").map(|row| row.summary), last, "serve is last");
         assert_eq!(
             help.lines().filter(|line| line.starts_with("  ")).count(),
             COMMANDS.len(),
@@ -712,18 +622,19 @@ mod tests {
         );
     }
 
-    /// The gate admits every table row and the help spellings, and refuses
-    /// every other word, so an arm no row names never runs (larry#228).
+    /// `--help` and `-h` find help's row and every other word finds none, so a
+    /// word no row names runs nothing (larry#228, larry#295).
     #[test]
     fn only_listed_words_dispatch() {
-        for command in &COMMANDS {
-            assert!(listed(command.name), "{} is listed", command.name);
-        }
         for spelling in ["help", "--help", "-h"] {
-            assert!(listed(spelling), "{spelling} is listed");
+            assert_eq!(
+                find(spelling).map(|row| row.name),
+                Some("help"),
+                "{spelling}"
+            );
         }
         for word in ["", "doctor", "--verbose", "HELP", "help me"] {
-            assert!(!listed(word), "{word:?} is not listed");
+            assert!(find(word).is_none(), "{word:?} is not listed");
         }
     }
 }

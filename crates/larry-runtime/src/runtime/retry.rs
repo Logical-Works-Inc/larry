@@ -32,9 +32,9 @@ pub(super) fn leases<'a>(
     let mut leases = BTreeMap::new();
     for record in records {
         leases.insert(
-            record.pinned.request.operation,
+            record.pinned.request.operation(),
             (
-                record.pinned.request.observed_at,
+                record.pinned.request.observed_at(),
                 record.pinned.validity.valid_until,
             ),
         );
@@ -99,7 +99,7 @@ pub(super) fn decide(
     let mut facts = RetryFacts::new(
         RetryPolicy::new(u32::from(max_attempts), Duration::ZERO, lease),
         u32::from(live.dispatches),
-        lgwks_bot::DispatchCertainty::Unsettled.retry_class(),
+        lgwks_bot::error::DispatchCertainty::Unsettled.retry_class(),
         key,
         key.digest(),
     )
@@ -135,7 +135,7 @@ mod tests {
 
     /// Each all-zero Larry identifier is refused with a typed error naming it.
     #[test]
-    fn an_all_zero_operation_is_a_typed_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    fn an_all_zero_operation_is_a_typed_refusal() {
         let zero_operation = intent(
             OperationId::from_bytes([0; 16]),
             RunId::from_bytes([2; 16]),
@@ -178,7 +178,6 @@ mod tests {
             ),
             "an all-zero tenant names no effect key"
         );
-        Ok(())
     }
 
     /// Two tenants reusing one operation and run never share a key or digest.

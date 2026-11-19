@@ -73,7 +73,7 @@ fn target(command: &Command) -> Result<RunId, RuntimeError> {
         return run;
     }
     let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
-    Ok(proposal.run)
+    Ok(proposal.run())
 }
 
 /// Why a pending command holds the later commands of its run.

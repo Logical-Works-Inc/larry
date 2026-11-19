@@ -48,19 +48,35 @@ jobs:
           # (about 2.5 minutes measured on a cold cache), so K = 2 is the
           # ESTIMATE that ends a shard inside 5 minutes warm (ADR 0064).
           MUTANTS_PER_SHARD: 2
-          # Past 16 shards a shard holds more than K mutants and runs longer;
-          # the shard timeout, not a silent drop, is the overflow answer.
-          MUTANTS_MAX_SHARDS: 16
+          # Past 96 shards a shard holds more than K mutants. A shard of 3 ends
+          # inside its 15-minute timeout: the slowest viable mutant measured
+          # 220 s (PR #342, run 44578190558), and shards of 4 or more were cut
+          # at the timeout. A plan past 96 x 3 fails here, by name, in minutes
+          # (ADR 0066).
+          MUTANTS_MAX_SHARDS: 96
+          MUTANTS_SHARD_CAPACITY: 3
         run: |
           set -euo pipefail
-          git diff --no-color --no-ext-diff --no-renames "origin/${BASE_REF}...HEAD" -- '*.rs' > pr.diff
+          # -M: a moved file plans mutants only on the lines it changed. Without
+          # rename detection, eight mod.rs moves planned 358 mutants on untouched
+          # lines (ADR 0066).
+          git diff --no-color --no-ext-diff -M "origin/${BASE_REF}...HEAD" -- '*.rs' > pr.diff
           cargo mutants --workspace --in-diff pr.diff --list --json --cargo-arg=--locked > list.json
           # An empty diff prints nothing, not `[]`; both mean zero mutants.
           count="$(jq -s '(.[0] // []) | length' list.json)"
-          shards=$(( (count + MUTANTS_PER_SHARD - 1) / MUTANTS_PER_SHARD ))
-          if [ "$shards" -gt "$MUTANTS_MAX_SHARDS" ]; then
-            shards="$MUTANTS_MAX_SHARDS"
+          capacity=$(( MUTANTS_MAX_SHARDS * MUTANTS_SHARD_CAPACITY ))
+          if [ "$count" -gt "$capacity" ]; then
+            echo "::error::$count mutants on the changed lines exceed the lane's capacity of $capacity ($MUTANTS_MAX_SHARDS shards of $MUTANTS_SHARD_CAPACITY): split the pull request"
+            exit 1
           fi
+          # cargo-mutants hands shard k the k-th run of ceil(count / n) mutants,
+          # so n is sized from that run: 266 mutants in 96 shards left shards
+          # 89 to 95 empty, with no outcomes file (run 44638202506).
+          per=$(( (count + MUTANTS_MAX_SHARDS - 1) / MUTANTS_MAX_SHARDS ))
+          if [ "$per" -lt "$MUTANTS_PER_SHARD" ]; then
+            per="$MUTANTS_PER_SHARD"
+          fi
+          shards=$(( (count + per - 1) / per ))
           matrix="$(jq -cn --argjson n "$shards" '{include: [range(0; $n) | {k: ., n: $n}]}')"
           echo "mutants on the changed lines: $count in $shards shard(s)"
           jq -sr '(.[0] // [])[] | .name' list.json

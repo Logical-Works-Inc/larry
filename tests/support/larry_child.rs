@@ -10,7 +10,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 /// Starts `larry <subcommand>` with only PATH and `env` set, stdin and stdout
 /// piped and stderr as given; returns the child with both protocol pipes taken.
-pub fn start(
+pub(super) fn start(
     subcommand: &str,
     env: &[(&str, &OsStr)],
     stderr: Stdio,

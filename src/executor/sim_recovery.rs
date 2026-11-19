@@ -52,18 +52,18 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
     std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     let id = "018f0000-0000-7000-8000-000000000001";
     assert!(
-        !journal_live(&state, &scopes, id)?,
+        !journal_live(&state, &scopes, id),
         "an absent journal is not live"
     );
     let path = journal_path(&state, id);
     let held = Journal::open(&path, capacity)?;
     assert!(
-        journal_live(&state, &scopes, id)?,
+        journal_live(&state, &scopes, id),
         "a journal whose lock is held is live"
     );
     drop(held);
     assert!(
-        !journal_live(&state, &scopes, id)?,
+        !journal_live(&state, &scopes, id),
         "a journal whose lock was released is not live"
     );
     Ok(())

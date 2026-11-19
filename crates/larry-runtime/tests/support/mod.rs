@@ -22,10 +22,10 @@ use larry_runtime::runtime::{Runtime, RuntimeSettings};
 use lgwks_bot::clock::Clock;
 
 #[path = "../../../../tests/support/temp_dir.rs"]
-pub mod temp_dir;
+pub(crate) mod temp_dir;
 
 /// The alias the tests use for the concrete runtime under test.
-pub type TestRuntime = Runtime<FoldProjection, ScriptedOwner>;
+pub(crate) type TestRuntime = Runtime<FoldProjection, ScriptedOwner>;
 
 thread_local! {
     /// The seed every fixture identity and the epoch are drawn under. Zero is
@@ -46,7 +46,7 @@ impl Drop for Restore {
 ///
 /// The scope is synchronous on the caller's thread, so no other test and no
 /// other thread observes the seed.
-pub fn seeded<T>(seed: u64, body: impl FnOnce() -> T) -> T {
+pub(crate) fn seeded<T>(seed: u64, body: impl FnOnce() -> T) -> T {
     let _restore = Restore(SEED.with(|cell| cell.replace(seed)));
     body()
 }
@@ -65,7 +65,7 @@ fn id_bytes(byte: u8) -> [u8; 16] {
 }
 
 /// The pinned instant every test starts from, shifted by the seed in seconds.
-pub fn epoch() -> Result<SystemTime, Box<dyn std::error::Error>> {
+pub(crate) fn epoch() -> Result<SystemTime, Box<dyn std::error::Error>> {
     SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_secs(1_700_000_000))
         .and_then(|base| base.checked_add(Duration::from_secs(SEED.with(Cell::get))))
@@ -74,34 +74,34 @@ pub fn epoch() -> Result<SystemTime, Box<dyn std::error::Error>> {
 
 /// The estate's virtual clock placed at [`epoch`]: the runtime reads it as elapsed time since
 /// the Unix epoch, and nothing moves it but an explicit `advance` (larry#74).
-pub fn clock() -> Result<Clock, Box<dyn std::error::Error>> {
+pub(crate) fn clock() -> Result<Clock, Box<dyn std::error::Error>> {
     Ok(Clock::virtual_at(
         epoch()?.duration_since(SystemTime::UNIX_EPOCH)?,
     ))
 }
 
 /// A run identifier from one byte.
-pub fn run(byte: u8) -> RunId {
+pub(crate) fn run(byte: u8) -> RunId {
     RunId::from_bytes(id_bytes(byte))
 }
 
 /// A tenant identifier from one byte.
-pub fn tenant(byte: u8) -> TenantId {
+pub(crate) fn tenant(byte: u8) -> TenantId {
     TenantId::from_bytes(id_bytes(byte))
 }
 
 /// An operation identifier from one byte.
-pub fn operation(byte: u8) -> OperationId {
+pub(crate) fn operation(byte: u8) -> OperationId {
     OperationId::from_bytes(id_bytes(byte))
 }
 
 /// A command identifier from one byte.
-pub fn command_id(byte: u8) -> CommandId {
+pub(crate) fn command_id(byte: u8) -> CommandId {
     CommandId::from_bytes(id_bytes(byte))
 }
 
 /// The pinned validity window the tests use: valid for an hour from [`epoch`].
-pub fn validity() -> Result<ValiditySnapshot, Box<dyn std::error::Error>> {
+pub(crate) fn validity() -> Result<ValiditySnapshot, Box<dyn std::error::Error>> {
     Ok(ValiditySnapshot::new(
         epoch()?
             .checked_add(Duration::from_secs(3_600))
@@ -111,7 +111,7 @@ pub fn validity() -> Result<ValiditySnapshot, Box<dyn std::error::Error>> {
 
 /// Settings allowing `allowed` under a policy that permits it, with `capable`
 /// as the worker's capabilities and `budget` requests reserved.
-pub fn settings(
+pub(crate) fn settings(
     allowed: &[Scope],
     capable: &[Scope],
     budget: u64,
@@ -131,7 +131,7 @@ pub fn settings(
 ///
 /// Cannot fail for the settings this helper builds, but the constructor is
 /// fallible and the error is propagated rather than discarded.
-pub fn runtime_with(
+pub(crate) fn runtime_with(
     owner: ScriptedOwner,
     allowed: &[Scope],
     capable: &[Scope],
@@ -150,7 +150,7 @@ pub fn runtime_with(
 /// # Errors
 ///
 /// As [`runtime_with`].
-pub fn runtime() -> Result<TestRuntime, Box<dyn std::error::Error>> {
+pub(crate) fn runtime() -> Result<TestRuntime, Box<dyn std::error::Error>> {
     runtime_with(
         ScriptedOwner::new(),
         &[Scope::FileRead],
@@ -160,7 +160,7 @@ pub fn runtime() -> Result<TestRuntime, Box<dyn std::error::Error>> {
 }
 
 /// The proposal body for one unit of work.
-pub fn proposal(
+pub(crate) fn proposal(
     run: RunId,
     tenant: TenantId,
     operation: OperationId,
@@ -179,20 +179,32 @@ pub fn proposal(
     )
 }
 
+/// A command of `kind` carrying `body`, in the tenant the body declares.
+fn command_of(
+    kind: CommandKind,
+    id: CommandId,
+    body: &WorkProposal,
+) -> Result<Command, Box<dyn std::error::Error>> {
+    let payload = lgwks_std::json::to_vec(body)?;
+    Ok(Command::new(
+        id,
+        body.tenant(),
+        Vec::new(),
+        CommandContent::new(kind, payload.into_boxed_slice()),
+    )?)
+}
+
 /// A `Submit` command carrying `body`.
 ///
 /// # Errors
 ///
 /// Returns the contract's ordering error for an over-long causal-parent list,
 /// which cannot happen here but is not silently discarded.
-pub fn submit(id: CommandId, body: &WorkProposal) -> Result<Command, Box<dyn std::error::Error>> {
-    let payload = lgwks_std::json::to_vec(body)?;
-    Ok(Command::new(
-        id,
-        body.tenant,
-        Vec::new(),
-        CommandContent::new(CommandKind::Submit, payload.into_boxed_slice()),
-    )?)
+pub(crate) fn submit(
+    id: CommandId,
+    body: &WorkProposal,
+) -> Result<Command, Box<dyn std::error::Error>> {
+    command_of(CommandKind::Submit, id, body)
 }
 
 /// A `Cancel` command carrying `body`.
@@ -200,23 +212,20 @@ pub fn submit(id: CommandId, body: &WorkProposal) -> Result<Command, Box<dyn std
 /// # Errors
 ///
 /// As [`submit`].
-pub fn cancel(id: CommandId, body: &WorkProposal) -> Result<Command, Box<dyn std::error::Error>> {
-    let payload = lgwks_std::json::to_vec(body)?;
-    Ok(Command::new(
-        id,
-        body.tenant,
-        Vec::new(),
-        CommandContent::new(CommandKind::Cancel, payload.into_boxed_slice()),
-    )?)
+pub(crate) fn cancel(
+    id: CommandId,
+    body: &WorkProposal,
+) -> Result<Command, Box<dyn std::error::Error>> {
+    command_of(CommandKind::Cancel, id, body)
 }
 
 /// A success outcome for `operation`.
-pub fn succeeded(operation: OperationId) -> EffectOutcome {
+pub(crate) fn succeeded(operation: OperationId) -> EffectOutcome {
     EffectOutcome::Succeeded { operation }
 }
 
 /// An ambiguous outcome for `operation`.
-pub fn unknown(operation: OperationId) -> EffectOutcome {
+pub(crate) fn unknown(operation: OperationId) -> EffectOutcome {
     EffectOutcome::Unknown { operation }
 }
 
@@ -226,7 +235,7 @@ pub fn unknown(operation: OperationId) -> EffectOutcome {
 ///
 /// Returns an error when the run is untracked or the state differs, naming
 /// both values.
-pub fn assert_state(
+pub(crate) fn assert_state(
     projection: &impl ProjectionBackend,
     run: RunId,
     expected: RunState,
@@ -252,8 +261,8 @@ fn fixture_contracts() -> Result<(), Box<dyn std::error::Error>> {
         1,
         ReconciliationStrategy::Queryable,
     );
-    assert_eq!(unknown(body.operation).operation(), body.operation);
-    assert_eq!(succeeded(body.operation).operation(), body.operation);
+    assert_eq!(unknown(body.operation()).operation(), body.operation());
+    assert_eq!(succeeded(body.operation()).operation(), body.operation());
     let command = cancel(command_id(1), &body)?;
     assert_eq!(command.id(), command_id(1));
     assert_eq!(command.content().kind(), CommandKind::Cancel);

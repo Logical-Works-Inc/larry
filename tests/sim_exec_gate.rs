@@ -18,19 +18,23 @@ mod larry_cli;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "support/sealed_report.rs"]
+mod sealed_report;
 #[path = "../src/sim_lanes.rs"]
 mod sim_lanes;
 
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
+use std::num::TryFromIntError;
 use std::path::Path;
 
-use larry_cli::{denial_lines, flag_of, report_of, spawn_larry};
+use larry_cli::spawn_larry_args;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
 use mock_model::Config;
 use origin::{TempDir, fixture};
+use sealed_report::{denial_lines, flag_of, report_of};
 
 /// How many cases the simulation drives, each drawn from the one seeded
 /// stream on [`SIM_SEED`], and the whole matrix run twice so both passes must
@@ -124,7 +128,7 @@ fn run_case(
         ("LARRY_MODEL_KEY", OsStr::new("mock-key")),
         ("LARRY_MODEL_URL", OsStr::new(url)),
     ];
-    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
     let report = report_of(&output)?;
     let denials = denial_lines(&report)?;
     if flag_of(&report, "accepted")? {
@@ -149,8 +153,10 @@ enum CaseFault {
     /// The binary could not be spawned or its report not read; the cause as text, because a
     /// boxed error cannot cross a lane.
     Run(String),
-    /// A lane or case index does not fit its type, or names a fixture that is not there.
+    /// A lane or case index names a fixture or case that is not there.
     Index,
+    /// A lane or case index does not fit `usize`.
+    Width(TryFromIntError),
 }
 
 impl fmt::Display for CaseFault {
@@ -158,11 +164,19 @@ impl fmt::Display for CaseFault {
         match *self {
             Self::Run(ref cause) => write!(out, "case run: {cause}"),
             Self::Index => out.write_str("case or lane index out of range"),
+            Self::Width(ref cause) => write!(out, "case or lane index too wide: {cause}"),
         }
     }
 }
 
-impl Error for CaseFault {}
+impl Error for CaseFault {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match *self {
+            Self::Width(ref cause) => Some(cause),
+            Self::Run(_) | Self::Index => None,
+        }
+    }
+}
 
 /// Every case, drawn in order from a fresh stream on [`SIM_SEED`]: the same sequence in both
 /// passes, whatever the lanes.
@@ -193,7 +207,7 @@ fn run_pass(
 ) -> TestResult {
     let count = u64::try_from(cases.len())?;
     let verdicts = sim_lanes::sweep(count, |lane, index| {
-        let at = |position: u64| usize::try_from(position).map_err(|_| CaseFault::Index);
+        let at = |position: u64| usize::try_from(position).map_err(CaseFault::Width);
         let fixture = fixtures.get(at(lane)?).ok_or(CaseFault::Index)?;
         let case = cases.get(at(index)?).ok_or(CaseFault::Index)?;
         run_case(fixture.0.path(), fixture.1.path(), url, &case.0, case.1)

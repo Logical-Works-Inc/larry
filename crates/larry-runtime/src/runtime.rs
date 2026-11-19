@@ -403,7 +403,7 @@ where
             let kind = command.content().kind();
             let payload = command.content().payload().to_vec();
             let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
-            self.ensure_run_tenant(proposal.run, tenant)?;
+            self.ensure_run_tenant(proposal.run(), tenant)?;
 
             if kind == CommandKind::Submit && self.journal.command(id).is_none() {
                 self.validate_display(&command, &proposal, display.as_ref(), at)?;
@@ -420,11 +420,12 @@ where
                 report.duplicates.push(id);
                 continue;
             }
-            let Some(command) = self.hold_or_pass(proposal.run, kept, display.as_ref(), at) else {
+            let Some(command) = self.hold_or_pass(proposal.run(), kept, display.as_ref(), at)
+            else {
                 continue;
             };
             report.admitted.push(id);
-            let held = Admitted::new(proposal.run, command, display);
+            let held = Admitted::new(proposal.run(), command, display);
             // A command that fails to record its acceptance returns to the
             // back of the pending set: it is journaled, so it must be held
             // (larry#219).
@@ -443,7 +444,7 @@ where
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
-        let run = proposal.run;
+        let run = proposal.run();
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection alone: recording the command already
         // created a run view, so a projection-based check would read `Draft`
@@ -466,16 +467,16 @@ where
                 capacity: MAX_EFFECTS_PER_RUN,
             });
         }
-        if self.live.contains_key(&proposal.operation) {
+        if self.live.contains_key(&proposal.operation()) {
             return Err(RuntimeError::DuplicateOperation {
-                operation: proposal.operation,
+                operation: proposal.operation(),
             });
         }
         // A question bound to this effect is the only way past it: an
         // approval covering its exact content and scopes, never a timeout
         // (D25, E30).
         if let Err(reason) = self.approved(tenant, proposal, content, at) {
-            report.denied.push((proposal.operation, reason));
+            report.denied.push((proposal.operation(), reason));
             self.advance(run, TransitionEvent::Fail)?;
             return Ok(());
         }
@@ -493,7 +494,7 @@ where
         if let Some(shown) = display {
             shown.constrain(&mut pinned);
         }
-        let admitted_at = pinned.request.observed_at;
+        let admitted_at = pinned.request.observed_at();
         let valid_until = pinned.validity.valid_until;
         let authorization = match crate::gate::authorize(&pinned) {
             Ok(record) => record,
@@ -521,7 +522,7 @@ where
             .budgets
             .entry(tenant)
             .or_insert(self.settings.initial_budget);
-        *remaining = remaining.saturating_sub(proposal.cost);
+        *remaining = remaining.saturating_sub(proposal.cost());
         report.authorized.push(intent.operation);
         self.live.insert(
             intent.operation,
@@ -708,7 +709,7 @@ where
         .iter()
         .map(|record| {
             let proof = crate::gate::Proof::issue(&record.pinned, &clock);
-            (record.pinned.request.operation, proof)
+            (record.pinned.request.operation(), proof)
         })
         .collect();
     for intent in projection.intents() {

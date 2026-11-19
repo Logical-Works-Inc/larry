@@ -594,7 +594,7 @@ fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), 
     let state = settings.state_dir.as_path();
     let policy = &settings.policy;
     sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
-        recovery::journal_live(state, policy, task)
+        Ok(recovery::journal_live(state, policy, task))
     })?;
     recovery::recover(&settings.state_dir, &settings.policy)?;
     Ok((ledger, key))

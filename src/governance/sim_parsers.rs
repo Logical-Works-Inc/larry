@@ -223,9 +223,7 @@ fn sim_float_repr_round_trips_in_the_python_layout() -> SimResult {
                 continue;
             }
             let shown = pyjson::float_repr(float);
-            let parsed: f64 = shown
-                .parse()
-                .map_err(|_| SimError::Absent(format!("a float in {shown}")))?;
+            let parsed: f64 = shown.parse()?;
             assert_eq!(
                 parsed.to_bits(),
                 float.to_bits(),
@@ -238,9 +236,7 @@ fn sim_float_repr_round_trips_in_the_python_layout() -> SimResult {
                 "seed {seed}: {shown} keeps the shortest digits of {rust}"
             );
             let exponent: i32 = match rust.split_once('e') {
-                Some((_, exponent)) => exponent
-                    .parse()
-                    .map_err(|_| SimError::Absent(String::from("an exponent")))?,
+                Some((_, exponent)) => exponent.parse()?,
                 None => return Err(Box::new(SimError::Absent(String::from("an exponent")))),
             };
             let fixed = (-4..16).contains(&exponent) || parsed.to_bits().trailing_zeros() >= 63;

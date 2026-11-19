@@ -55,11 +55,9 @@ fn authorized_effect_runs_to_a_terminal_receipt() -> Result<(), Box<dyn std::err
     assert_eq!(tick.authorized(), &[operation(1)]);
     assert_eq!(tick.outcomes(), &[(operation(1), succeeded(operation(1)))]);
     assert_eq!(tick.receipts().len(), 1);
-    assert_eq!(
-        tick.receipts()[0].disposition(),
-        TerminalDisposition::Succeeded
-    );
-    assert_eq!(tick.receipts()[0].operation(), operation(1));
+    let receipt = tick.receipts().first().ok_or("tick published no receipt")?;
+    assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
+    assert_eq!(receipt.operation(), operation(1));
     assert_state(rt.projection(), run(1), RunState::Completed)?;
     // Reservation spent exactly the declared cost.
     assert_eq!(rt.remaining_budget(tenant(1)), 95);
@@ -84,10 +82,12 @@ fn intent_is_durable_before_dispatch() -> Result<(), Box<dyn std::error::Error>>
 
     assert_eq!(rt.owner().dispatched(), &[operation(1)]);
     assert_eq!(rt.projection().authorizations().len(), 1);
-    assert_eq!(
-        rt.projection().authorizations()[0].pinned.request.operation,
-        operation(1)
-    );
+    let authorization = rt
+        .projection()
+        .authorizations()
+        .first()
+        .ok_or("projection holds no authorization")?;
+    assert_eq!(authorization.pinned.request.operation(), operation(1));
     Ok(())
 }
 
@@ -250,7 +250,11 @@ fn open_unknown_stays_reconciling_and_is_then_reconciled() -> Result<(), Box<dyn
     assert_eq!(second.reconciled(), &[operation(5)]);
     assert_eq!(second.receipts().len(), 1);
     assert_eq!(
-        second.receipts()[0].disposition(),
+        second
+            .receipts()
+            .first()
+            .ok_or("second tick published no receipt")?
+            .disposition(),
         TerminalDisposition::Succeeded
     );
     assert_state(rt.projection(), run(5), RunState::Completed)?;
@@ -282,7 +286,10 @@ fn permanent_unknown_is_its_own_terminal_disposition() -> Result<(), Box<dyn std
 
     assert_eq!(tick.receipts().len(), 1);
     assert_eq!(
-        tick.receipts()[0].disposition(),
+        tick.receipts()
+            .first()
+            .ok_or("tick published no receipt")?
+            .disposition(),
         TerminalDisposition::UnknownPermanent
     );
     assert_state(rt.projection(), run(6), RunState::OutcomeUnknown)?;
@@ -313,7 +320,10 @@ fn definitive_failure_is_terminal() -> Result<(), Box<dyn std::error::Error>> {
     let tick = rt.tick()?;
 
     assert_eq!(
-        tick.receipts()[0].disposition(),
+        tick.receipts()
+            .first()
+            .ok_or("tick published no receipt")?
+            .disposition(),
         TerminalDisposition::Failed
     );
     assert_state(rt.projection(), run(7), RunState::Failed)?;

@@ -22,7 +22,9 @@ fn run(number: usize) -> RunId {
     let mut bytes = [0; 16];
     let encoded = number.to_be_bytes();
     let offset = 8usize.saturating_sub(encoded.len());
-    bytes[offset..8].copy_from_slice(&encoded);
+    for (slot, byte) in bytes.iter_mut().skip(offset).zip(encoded) {
+        *slot = byte;
+    }
     RunId::from_bytes(bytes)
 }
 

@@ -13,20 +13,20 @@ use lgwks_std::json::{self, Value};
 
 #[path = "temp_dir.rs"]
 mod temp_dir;
-pub use temp_dir::TempDir;
+pub(crate) use temp_dir::TempDir;
 
 /// What every simulation returns.
-pub type TestResult = Result<(), Box<dyn Error>>;
+pub(crate) type TestResult = Result<(), Box<dyn Error>>;
 
 /// A gateway URL no simulation connects to.
-pub const GATEWAY: &str = "http://gateway.test:8443/v1";
+pub(crate) const GATEWAY: &str = "http://gateway.test:8443/v1";
 
 /// Route ids the generated tables draw from.
-pub const POOL: [&str; 6] = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+pub(crate) const POOL: [&str; 6] = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
 
 /// Runs `larry route <args>` against `state` with the extra variables `env`,
 /// and returns what it printed.
-pub fn route_run(
+pub(crate) fn route_run(
     state: &Path,
     env: &[(&str, &str)],
     args: &[&str],
@@ -66,7 +66,7 @@ const DEFAULTS: [(&str, &str); 7] = [
 
 /// `route add <id>` with the default flags, each replaced by the matching
 /// entry of `overrides`, and `extra` flags appended.
-pub fn add(
+pub(crate) fn add(
     state: &Path,
     id: &str,
     overrides: &[(&str, &str)],
@@ -86,24 +86,35 @@ pub fn add(
 }
 
 /// Parses printed JSON.
-pub fn parse(text: &str) -> Result<Value, Box<dyn Error>> {
+pub(crate) fn parse(text: &str) -> Result<Value, Box<dyn Error>> {
     Ok(json::from_str::<Value>(text)?)
 }
 
 /// The ids `route list --json` prints, in order, and the default.
-pub fn listed(state: &Path) -> Result<(Vec<String>, Option<String>), Box<dyn Error>> {
+pub(crate) fn listed(state: &Path) -> Result<(Vec<String>, Option<String>), Box<dyn Error>> {
     let value = parse(&route_run(state, &[], &["list", "--json"])?)?;
-    let routes = value["routes"].as_array().ok_or("a routes array")?;
+    let routes = value
+        .get("routes")
+        .and_then(Value::as_array)
+        .ok_or("a routes array")?;
     let mut ids = Vec::with_capacity(routes.len());
     for route in routes {
-        ids.push(String::from(route["id"].as_str().ok_or("a route id")?));
+        let id = route
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("a route id")?;
+        ids.push(String::from(id));
     }
-    Ok((ids, value["default"].as_str().map(str::to_owned)))
+    let default = value
+        .get("default")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok((ids, default))
 }
 
 /// Joins a scoped thread, a panic being a failure of the case.
-pub fn joined<Out>(handle: ScopedJoinHandle<'_, Out>) -> Result<Out, Box<dyn Error>> {
+pub(crate) fn joined<Out>(handle: ScopedJoinHandle<'_, Out>) -> Result<Out, Box<dyn Error>> {
     handle
         .join()
-        .map_err(|_panicked| "a thread panicked".into())
+        .map_err(|panic| format!("a thread panicked: {panic:?}").into())
 }

@@ -138,7 +138,7 @@ pub struct EffectIntent {
     pub admission_epoch: SecurityEpoch,
     /// Exact displayed target; absent only for effect-free lifecycle fixtures.
     #[cfg_attr(feature = "serde", serde(default))]
-    binding: Option<crate::binding::EffectBinding>,
+    pub binding: Option<crate::binding::EffectBinding>,
 }
 
 impl EffectIntent {

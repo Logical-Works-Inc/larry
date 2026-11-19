@@ -8,7 +8,7 @@ use std::process::Command;
 /// CPU seconds and resident set size in KiB of `pid`, from `ps -p <pid> -o time=,rss=`. `None`
 /// when the process has already gone or `ps` printed no reading, so a sampler can bound a short
 /// run instead of failing on it.
-pub fn sample(pid: &str) -> Option<(f64, u64)> {
+pub(crate) fn sample(pid: &str) -> Option<(f64, u64)> {
     let output = Command::new("ps")
         .args(["-p", pid, "-o", "time=,rss="])
         .output()

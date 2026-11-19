@@ -21,7 +21,7 @@ use crate::exec_cli::{live_group_pid, make_fifo, spawn_exec, task_json};
 /// The open of the write end blocks until the command opens the read end, so the pipe is the
 /// event that says the command started; a command that never starts fails that wait inside
 /// one deadline instead of hanging the journey (larry#268).
-pub fn spawn_held_command(
+pub(crate) fn spawn_held_command(
     state: &Path,
     origin: &Path,
     scratch: &Path,
@@ -37,7 +37,7 @@ pub fn spawn_held_command(
 }
 
 /// The number of rows the executor's ledger holds, read through a read-only open.
-pub fn ledger_rows(db: &Path) -> Result<i64, Box<dyn Error>> {
+pub(crate) fn ledger_rows(db: &Path) -> Result<i64, Box<dyn Error>> {
     let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     Ok(connection.query_row("SELECT COUNT(*) FROM live_groups", [], |row| row.get(0))?)
 }

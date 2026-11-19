@@ -11,14 +11,16 @@
 
 use std::error::Error;
 use std::fs::File;
+use std::io;
 use std::path::Path;
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// The bound a wait may take before the host is called broken: a failure deadline, never
 /// the pace of a working one. The gates run every journey binary at once, so a child's
 /// clone and its first command can wait seconds for a core.
-pub const PATIENCE: Duration = Duration::from_secs(30);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A pid no live process holds: the largest positive `i32` less one, so the group it names
 /// is already gone.
@@ -26,7 +28,7 @@ const DEAD_PID: i32 = 2_147_483_646;
 
 /// Waits until `probe` answers `Some`, yielding between checks, and returns its answer. A
 /// probe that answers `None` for `within` fails with `what` and the bound it passed.
-pub fn await_until<T>(
+pub(crate) fn await_until<T>(
     what: &str,
     within: Duration,
     mut probe: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
@@ -44,7 +46,7 @@ pub fn await_until<T>(
 }
 
 /// [`await_until`] within [`PATIENCE`].
-pub fn await_event<T>(
+pub(crate) fn await_event<T>(
     what: &str,
     probe: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
 ) -> Result<T, Box<dyn Error>> {
@@ -56,7 +58,7 @@ pub fn await_event<T>(
 /// moment, so that refusal is the wait's own condition and not a failed journey (larry#294). A
 /// probe that never answers fails at the deadline, naming the event, the bound and the last
 /// refusal, so a permanent fault is reported rather than retried away.
-pub fn await_retrying<T>(
+pub(crate) fn await_retrying<T>(
     what: &str,
     within: Duration,
     mut probe: impl FnMut() -> Result<Option<T>, Box<dyn Error>>,
@@ -82,7 +84,7 @@ pub fn await_retrying<T>(
 /// Waits until process group `pgid` is gone, within [`PATIENCE`]. Killed members may linger
 /// briefly as zombies, so the group's own exit is the event and the deadline only bounds a
 /// failure.
-pub fn await_group_exit(pgid: i32) -> Result<(), Box<dyn Error>> {
+pub(crate) fn await_group_exit(pgid: i32) -> Result<(), Box<dyn Error>> {
     await_event(&format!("process group {pgid} is gone"), || {
         match lgwks_std::process::process_group_exists(pgid)? {
             true => Ok(None),
@@ -96,31 +98,30 @@ pub fn await_group_exit(pgid: i32) -> Result<(), Box<dyn Error>> {
 /// The open blocks until a reader opens the pipe, so the pipe is the event itself: a command
 /// that runs `cat < fifo` has started, and the handle this returns keeps it blocked until the
 /// caller drops it. A command that never reaches the read fails the wait inside the bound
-/// instead of hanging the journey; on that failure a reader is opened to release the thread.
-pub fn await_fifo_writer(fifo: &Path) -> Result<File, Box<dyn Error>> {
+/// instead of hanging the journey; on that failure a reader is opened to release the thread,
+/// and every failure says how the writer thread ended.
+pub(crate) fn await_fifo_writer(fifo: &Path) -> Result<File, Box<dyn Error>> {
     let path = fifo.to_path_buf();
     let (sender, opened) = sync_channel(1);
+    // The thread hands back an open the waiter no longer took, so no send result is lost.
     let writer = std::thread::Builder::new()
         .name(String::from("fifo-writer"))
         .spawn(move || {
             let handle = File::options().write(true).open(&path);
-            drop(sender.send(handle));
+            sender.send(handle).err().map(|unsent| unsent.0)
         })?;
     match opened.recv_timeout(PATIENCE) {
-        Ok(Ok(handle)) => {
-            writer
-                .join()
-                .map_err(|_| "the fifo writer thread panicked")?;
-            Ok(handle)
-        }
-        Ok(Err(cause)) => {
-            drop(writer.join());
-            Err(format!(
-                "{} could not be opened for writing: {cause}",
-                fifo.display()
-            )
-            .into())
-        }
+        Ok(Ok(handle)) => match writer.join() {
+            Ok(None) => Ok(handle),
+            Ok(Some(late)) => Err(format!("the fifo writer kept an open it sent: {late:?}").into()),
+            Err(panic) => Err(format!("the fifo writer thread panicked: {panic:?}").into()),
+        },
+        Ok(Err(cause)) => Err(format!(
+            "{} could not be opened for writing: {cause}; {}",
+            fifo.display(),
+            joined(writer)
+        )
+        .into()),
         Err(RecvTimeoutError::Timeout) => {
             // A reader unblocks the waiting open, so the thread ends instead of staying parked
             // on a pipe nobody will use; whether that reader opened is part of the failure.
@@ -128,17 +129,30 @@ pub fn await_fifo_writer(fifo: &Path) -> Result<File, Box<dyn Error>> {
                 Ok(release) => format!("a reader released the waiting open: {release:?}"),
                 Err(cause) => format!("the waiting open could not be released: {cause}"),
             };
-            drop(writer.join());
             Err(format!(
-                "no command opened {} for reading within {:?}; {released}",
+                "no command opened {} for reading within {:?}; {released}; {}",
                 fifo.display(),
-                PATIENCE
+                PATIENCE,
+                joined(writer)
             )
             .into())
         }
-        Err(RecvTimeoutError::Disconnected) => {
-            Err(format!("{} never answered its open", fifo.display()).into())
-        }
+        Err(RecvTimeoutError::Disconnected) => Err(format!(
+            "{} never answered its open; {}",
+            fifo.display(),
+            joined(writer)
+        )
+        .into()),
+    }
+}
+
+/// How the fifo writer thread ended, for a failure message: it delivered its open, kept an open
+/// the waiter no longer took, or panicked.
+fn joined(writer: JoinHandle<Option<io::Result<File>>>) -> String {
+    match writer.join() {
+        Ok(None) => String::from("the writer thread delivered its open"),
+        Ok(Some(late)) => format!("the writer thread's open came after the wait ended: {late:?}"),
+        Err(panic) => format!("the fifo writer thread panicked: {panic:?}"),
     }
 }
 

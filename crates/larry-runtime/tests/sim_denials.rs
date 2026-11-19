@@ -451,7 +451,7 @@ fn reference(
 /// Source: the fixed check order of D36 (policy before capability) and the lgwks_bot
 /// `GrantSet::admit` coverage the gate now delegates to (larry#77).
 #[test]
-fn sim_denials_coverage_matches_the_reference_rule_for_every_seed() -> Outcome {
+fn sim_denials_coverage_matches_the_reference_rule_for_every_seed() {
     let mut verdicts = Vec::with_capacity(512);
     for seed in 0..512_u64 {
         let mut state = seed.saturating_add(0x77);
@@ -500,7 +500,6 @@ fn sim_denials_coverage_matches_the_reference_rule_for_every_seed() -> Outcome {
         denied > 0 && denied < verdicts.len(),
         "the seeds cover both verdicts"
     );
-    Ok(())
 }
 
 /// D36: seeded scope and authority sets authorize exactly when allowed.

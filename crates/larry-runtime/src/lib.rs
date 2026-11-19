@@ -109,8 +109,8 @@ pub const MAX_JOURNAL_ENTRIES: usize = 65_536;
 pub const MAX_TRACKED_RUNS: usize = 1_024;
 
 /// The default ceiling on pending questions (Cell 05 bounds), and the largest
-/// value a host may configure: a question is a journaled command, so the
-/// journal's own entry ceiling is the hard bound above it.
+/// value a host may configure: `RuntimeSettings::validate` refuses more with
+/// `BadSetting`, in `Runtime::new` and in `restore` (larry#295).
 pub(crate) const MAX_PENDING_QUESTIONS: usize = 256;
 
 /// The default ceiling on the grants one display may offer, and the most a

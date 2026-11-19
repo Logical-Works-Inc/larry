@@ -195,7 +195,9 @@ fn copy_receipts(root: &Path, retained: &Path) -> io::Result<()> {
     for entry in fs::read_dir(retained)? {
         let entry = entry?;
         let name = entry.file_name();
-        if entry.file_type()?.is_file() && name.to_string_lossy().ends_with(".json") {
+        let kind = entry.file_type()?;
+        // A directory or a link is never a receipt; anything else must copy or fail loudly.
+        if !kind.is_dir() && !kind.is_symlink() && name.to_string_lossy().ends_with(".json") {
             fs::copy(entry.path(), target.join(name))?;
         }
     }

@@ -139,8 +139,9 @@ fn sim_epochs_revoked_stays_fenced_after_advance() -> Outcome {
         let fresh = read_work(6, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(6, &fresh)?;
         let tick = runtime.tick()?;
-        let refusal = format!("{:?}", tick.fenced()[0].1);
         assert_eq!(tick.fenced().len(), 1, "revoked operation still fenced");
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("Revoked"),
             "revocation outranks the new epoch, got {refusal}"
@@ -181,7 +182,8 @@ fn sim_epochs_stranded_stays_stranded_after_reauthenticate() -> Outcome {
         );
         let tick = runtime.tick()?;
         assert_eq!(tick.fenced().len(), 1, "stranded admission still fenced");
-        let refusal = format!("{:?}", tick.fenced()[0].1);
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("StaleEpoch"),
             "re-authentication cannot refresh an old admission, got {refusal}"
@@ -219,7 +221,6 @@ fn sim_epochs_advance_to_max_then_refuses() -> Outcome {
                     "refusal names exhaustion, got {report}"
                 );
             }
-            let _ = seed;
             Ok(true)
         };
         assert!(drive()?, "seed {seed}: maximum refused");
@@ -251,7 +252,7 @@ fn sim_epochs_spent_survives_advance_clears_on_authenticate() -> Outcome {
             0,
             "authentication recharges"
         );
-        let _ = stood;
+        assert_eq!(stood, here, "authenticating at the standing epoch keeps it");
         let (first_fp, first_spent) = (epoch_tally(&runtime)?, runtime.fence().offline_spent()?);
         assert_eq!(first_spent, 0, "seed {seed}: recharged to zero");
         Ok((first_fp, first_spent))
@@ -397,7 +398,6 @@ fn sim_epochs_newer_then_older_keeps_newer() -> Outcome {
             let stood = runtime.fence_mut().authenticate(newer)?;
             assert_eq!(stood, newer, "authentication jumps forward");
             let kept = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
-            let _ = seed;
             Ok(kept == newer && runtime.fence().epoch()? == newer)
         };
         assert!(drive()?, "seed {seed}: newer generation kept");

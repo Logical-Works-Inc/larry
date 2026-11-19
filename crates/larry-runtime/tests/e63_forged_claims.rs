@@ -10,7 +10,7 @@ use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
-use larry_runtime::runtime::{Runtime, RuntimeSettings};
+use larry_runtime::runtime::{Runtime, RuntimeSettings, TickReport};
 
 type TestRuntime = Runtime<larry_runtime::projection::FoldProjection, ScriptedOwner>;
 
@@ -25,7 +25,48 @@ fn run_seed(
     let claimed_tenant = TenantId::from_bytes(id_bytes(seed, 0x51));
     let operation = OperationId::from_bytes(id_bytes(seed, 0x61));
     let command_id = CommandId::from_bytes(id_bytes(seed, 0x71));
-    let (required_scope, cost, expected_denial) = match seed & 0b111 {
+    let (required_scope, cost, expected_denial) = hostile_case(seed);
+    let proposal = larry_runtime::payload::WorkProposal::new(
+        run,
+        claimed_tenant,
+        operation,
+        [required_scope].into_iter().collect(),
+        cost,
+        larry_contracts::authority::BudgetUnit::Requests,
+        ReconciliationStrategy::Queryable,
+    );
+    let serialized = lgwks_std::json::to_vec(&proposal)?;
+    let hostile_payload = add_forged_claims(serialized, seed)?;
+    let command = Command::new(
+        command_id,
+        authenticated_tenant,
+        Vec::new(),
+        CommandContent::new(CommandKind::Submit, hostile_payload.into_boxed_slice()),
+    )?;
+    let mut runtime = runtime_with(operation)?;
+    runtime.submit(command)?;
+
+    let report = runtime.tick()?;
+    let digest = trace_digest(
+        seed,
+        authenticated_tenant,
+        expected_denial.is_none(),
+        &report,
+        &runtime,
+    )?;
+    if let Some(reason) = expected_denial {
+        assert_denied(seed, operation, reason, &report, &runtime);
+        Ok((false, digest))
+    } else {
+        assert_authorized(seed, operation, authenticated_tenant, &report, &runtime)?;
+        Ok((true, digest))
+    }
+}
+
+/// The scope a hostile seed asks for, its declared cost, and the refusal the
+/// runtime owes it (`None` when the request is in scope and affordable).
+fn hostile_case(seed: u64) -> (Scope, u64, Option<DenialReason>) {
+    match seed & 0b111 {
         0 => (Scope::FileRead, 1, None),
         1 => (
             Scope::FileWrite,
@@ -63,147 +104,137 @@ fn run_seed(
                 remaining: 1,
             }),
         ),
-    };
-    let proposal = larry_runtime::payload::WorkProposal::new(
-        run,
-        claimed_tenant,
-        operation,
-        [required_scope].into_iter().collect(),
-        cost,
-        larry_contracts::authority::BudgetUnit::Requests,
-        ReconciliationStrategy::Queryable,
-    );
-    let serialized = lgwks_std::json::to_vec(&proposal)?;
-    let hostile_payload = add_forged_claims(serialized, seed)?;
-    let command = Command::new(
-        command_id,
-        authenticated_tenant,
-        Vec::new(),
-        CommandContent::new(CommandKind::Submit, hostile_payload.into_boxed_slice()),
-    )?;
-    let mut runtime = runtime_with(operation)?;
-    runtime.submit(command)?;
+    }
+}
 
-    let report = runtime.tick()?;
-    let authorized = expected_denial.is_none();
+/// The digest of everything observable about one hostile proposal's tick: the
+/// seed, the envelope tenant, the gate's verdicts and which effect stages ran.
+fn trace_digest(
+    seed: u64,
+    tenant: TenantId,
+    authorized: bool,
+    report: &TickReport,
+    runtime: &TestRuntime,
+) -> Result<larry_contracts::ids::ContentDigest, Box<dyn std::error::Error>> {
     let mut trace = Vec::with_capacity(36);
     trace.extend_from_slice(&seed.to_le_bytes());
-    trace.extend_from_slice(authenticated_tenant.as_bytes());
+    trace.extend_from_slice(tenant.as_bytes());
     trace.extend_from_slice(&lgwks_std::json::to_vec(&(
         report.authorized(),
         report.denied(),
     ))?);
-    trace.push(if authorized { 1 } else { 0 });
-    trace.push(if runtime.projection().intents().is_empty() {
-        0
-    } else {
-        1
-    });
-    trace.push(if runtime.owner().dispatched().is_empty() {
-        0
-    } else {
-        1
-    });
-    trace.push(if runtime.owner().reconciled().is_empty() {
-        0
-    } else {
-        1
-    });
-    trace.push(if runtime.projection().receipts().is_empty() {
-        0
-    } else {
-        1
-    });
-    let digest = larry_contracts::ids::ContentDigest::over(&[&trace]);
+    trace.push(u8::from(authorized));
+    trace.push(u8::from(!runtime.projection().intents().is_empty()));
+    trace.push(u8::from(!runtime.owner().dispatched().is_empty()));
+    trace.push(u8::from(!runtime.owner().reconciled().is_empty()));
+    trace.push(u8::from(!runtime.projection().receipts().is_empty()));
+    Ok(larry_contracts::ids::ContentDigest::over(&[&trace]))
+}
 
-    if let Some(reason) = expected_denial {
-        assert_eq!(
-            report.authorized(),
-            &[],
-            "seed {seed}: denial cannot authorize work"
-        );
-        assert_eq!(
-            report.denied(),
-            &[(operation, reason)],
-            "seed {seed}: the runtime reports the exact effective-authority refusal"
-        );
-        assert!(
-            report.outcomes().is_empty(),
-            "seed {seed}: denied work has no outcome"
-        );
-        assert!(
-            report.receipts().is_empty(),
-            "seed {seed}: denied work has no receipt"
-        );
-        assert!(
-            runtime.projection().intents().is_empty(),
-            "seed {seed}: denied work has no durable intent"
-        );
-        assert!(
-            runtime.projection().receipts().is_empty(),
-            "seed {seed}: denied work has no journal receipt"
-        );
-        assert!(
-            runtime.owner().dispatched().is_empty(),
-            "seed {seed}: denied work never reaches dispatch"
-        );
-        assert!(
-            runtime.owner().reconciled().is_empty(),
-            "seed {seed}: denied work never reaches reconciliation"
-        );
-        Ok((false, digest))
-    } else {
-        assert_eq!(
-            report.authorized(),
-            &[operation],
-            "seed {seed}: an in-scope request remains usable"
-        );
-        assert!(
-            report.denied().is_empty(),
-            "seed {seed}: the allowed request is not denied"
-        );
-        assert_eq!(
-            runtime.projection().intents().len(),
-            1,
-            "seed {seed}: allowed work has one durable intent"
-        );
-        let Some(intent) = runtime.projection().intents().first() else {
-            return Err("authorized proposal did not leave a durable intent".into());
-        };
-        assert_eq!(
-            intent.tenant, authenticated_tenant,
-            "seed {seed}: the intent uses the envelope tenant, not the proposal claim"
-        );
-        assert_eq!(
-            runtime.owner().dispatched(),
-            &[operation],
-            "seed {seed}: only the permitted operation is dispatched"
-        );
-        assert_eq!(
-            report.outcomes(),
-            &[(operation, EffectOutcome::Succeeded { operation })],
-            "seed {seed}: the allowed owner success is reported directly"
-        );
-        assert_eq!(
-            runtime.owner().reconciled(),
-            &[],
-            "seed {seed}: a direct owner success does not call reconciliation"
-        );
-        assert_eq!(
-            runtime.projection().receipts().len(),
-            1,
-            "seed {seed}: the owner-backed permitted effect has one receipt"
-        );
-        let Some(receipt) = runtime.projection().receipts().first() else {
-            return Err("authorized proposal did not publish its owner-backed receipt".into());
-        };
-        assert_eq!(
-            receipt.tenant(),
-            authenticated_tenant,
-            "seed {seed}: the receipt preserves the envelope tenant"
-        );
-        Ok((true, digest))
-    }
+/// A refused proposal authorizes nothing, reports the exact refusal and leaves
+/// no intent, outcome, receipt, dispatch or reconciliation behind.
+fn assert_denied(
+    seed: u64,
+    operation: OperationId,
+    reason: DenialReason,
+    report: &TickReport,
+    runtime: &TestRuntime,
+) {
+    assert_eq!(
+        report.authorized(),
+        &[],
+        "seed {seed}: denial cannot authorize work"
+    );
+    assert_eq!(
+        report.denied(),
+        &[(operation, reason)],
+        "seed {seed}: the runtime reports the exact effective-authority refusal"
+    );
+    assert!(
+        report.outcomes().is_empty(),
+        "seed {seed}: denied work has no outcome"
+    );
+    assert!(
+        report.receipts().is_empty(),
+        "seed {seed}: denied work has no receipt"
+    );
+    assert!(
+        runtime.projection().intents().is_empty(),
+        "seed {seed}: denied work has no durable intent"
+    );
+    assert!(
+        runtime.projection().receipts().is_empty(),
+        "seed {seed}: denied work has no journal receipt"
+    );
+    assert!(
+        runtime.owner().dispatched().is_empty(),
+        "seed {seed}: denied work never reaches dispatch"
+    );
+    assert!(
+        runtime.owner().reconciled().is_empty(),
+        "seed {seed}: denied work never reaches reconciliation"
+    );
+}
+
+/// An in-scope proposal is authorized once, dispatched once, succeeds directly
+/// and records the envelope tenant, never the one the proposal claimed.
+fn assert_authorized(
+    seed: u64,
+    operation: OperationId,
+    authenticated_tenant: TenantId,
+    report: &TickReport,
+    runtime: &TestRuntime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        report.authorized(),
+        &[operation],
+        "seed {seed}: an in-scope request remains usable"
+    );
+    assert!(
+        report.denied().is_empty(),
+        "seed {seed}: the allowed request is not denied"
+    );
+    assert_eq!(
+        runtime.projection().intents().len(),
+        1,
+        "seed {seed}: allowed work has one durable intent"
+    );
+    let Some(intent) = runtime.projection().intents().first() else {
+        return Err("authorized proposal did not leave a durable intent".into());
+    };
+    assert_eq!(
+        intent.tenant, authenticated_tenant,
+        "seed {seed}: the intent uses the envelope tenant, not the proposal claim"
+    );
+    assert_eq!(
+        runtime.owner().dispatched(),
+        &[operation],
+        "seed {seed}: only the permitted operation is dispatched"
+    );
+    assert_eq!(
+        report.outcomes(),
+        &[(operation, EffectOutcome::Succeeded { operation })],
+        "seed {seed}: the allowed owner success is reported directly"
+    );
+    assert_eq!(
+        runtime.owner().reconciled(),
+        &[],
+        "seed {seed}: a direct owner success does not call reconciliation"
+    );
+    assert_eq!(
+        runtime.projection().receipts().len(),
+        1,
+        "seed {seed}: the owner-backed permitted effect has one receipt"
+    );
+    let Some(receipt) = runtime.projection().receipts().first() else {
+        return Err("authorized proposal did not publish its owner-backed receipt".into());
+    };
+    assert_eq!(
+        receipt.tenant(),
+        authenticated_tenant,
+        "seed {seed}: the receipt preserves the envelope tenant"
+    );
+    Ok(())
 }
 
 /// Appends unknown, forged claims without changing the typed proposal fields.

@@ -36,7 +36,7 @@ use exec_cli::deadline::{await_fifo_writer, await_group_exit};
 use exec_cli::{
     TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid_through,
     make_fifo, millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec,
-    spawn_larry, task_json, text_of,
+    spawn_larry_args, task_json, text_of,
 };
 use held_group::{ledger_rows, spawn_held_command};
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
@@ -613,8 +613,12 @@ fn has_entry_named(root: &Path, name: &str) -> Result<bool, Box<dyn Error>> {
 
 /// The verdict `larry verify` printed for `report` bytes, trusting `state`'s key.
 fn verified_verdict(state: &Path, report: &[u8]) -> Result<Value, Box<dyn Error>> {
-    let output = spawn_larry("verify", &[("LARRY_STATE_DIR", state.as_os_str())], report)?
-        .wait_with_output()?;
+    let output = spawn_larry_args(
+        &["verify"],
+        &[("LARRY_STATE_DIR", state.as_os_str())],
+        report,
+    )?
+    .wait_with_output()?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -656,7 +660,7 @@ fn exec_denies_a_brief_task_when_the_policy_lacks_file_write() -> TestResult {
         ("LARRY_MODEL_KEY", OsStr::new("mock-key")),
         ("LARRY_MODEL_URL", OsStr::new(url.as_str())),
     ];
-    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
     assert!(
         endpoint.accept().is_err(),
         "the gate denies before the model step, so no connection may reach the endpoint"
@@ -712,7 +716,7 @@ fn exec_denies_every_command_when_the_policy_is_empty() -> TestResult {
         ("LARRY_STATE_DIR", state.path().as_os_str()),
         ("LARRY_POLICY", OsStr::new("")),
     ];
-    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -751,7 +755,7 @@ fn exec_refuses_an_unknown_policy_name() -> TestResult {
         ("LARRY_STATE_DIR", state.path().as_os_str()),
         ("LARRY_POLICY", OsStr::new("file.read,root")),
     ];
-    let output = spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?;
+    let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
     assert_refused(&output, "root");
     Ok(())
 }

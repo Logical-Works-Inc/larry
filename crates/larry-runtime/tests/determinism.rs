@@ -328,25 +328,31 @@ fn replay_holds_each_decision_against_its_own_budget_snapshot()
     rt.tick()?;
 
     let records = rt.projection().authorizations();
-    assert_eq!(records.len(), 2);
+    let [ref first_record, ref second_record] = *records else {
+        return Err(format!("expected two authorization records, got {}", records.len()).into());
+    };
     // The first saw the full budget; the second saw 60 left. Neither sees the
     // final 20, which is what a naive "replay against current state" would do.
-    assert_eq!(records[0].pinned.budget.remaining, 100);
-    assert_eq!(records[1].pinned.budget.remaining, 60);
+    assert_eq!(first_record.pinned.budget.remaining, 100);
+    assert_eq!(second_record.pinned.budget.remaining, 60);
     assert_eq!(rt.remaining_budget(tenant(1)), 20);
 
     // Replaying against a *decision-changing* mutation must diverge
     // explicitly rather than pass silently. Draining the recorded budget below
     // the declared cost flips the decision from Authorized to BudgetExhausted.
     let mut mutated = records.to_vec();
-    let mut first = mutated[0].clone();
+    let mut first = first_record.clone();
     first.pinned.budget.remaining = 1;
-    mutated[0] = first;
+    let slot = mutated.first_mut().ok_or("no record to mutate")?;
+    *slot = first;
     let report = replay_log(&mutated);
     assert_eq!(report.divergences(), 1);
     assert!(!report.is_bit_identical());
     assert!(matches!(
-        &report.findings()[0],
+        report
+            .findings()
+            .first()
+            .ok_or("replay reported no finding")?,
         larry_contracts::replay::ReplayFinding::Diverged {
             recorded: larry_contracts::replay::Decision::Authorized,
             rederived: larry_contracts::replay::Decision::Denied { .. },

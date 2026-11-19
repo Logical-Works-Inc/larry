@@ -74,10 +74,10 @@ where
     ) -> PinnedInputs {
         PinnedInputs::new(
             EffectRequest::new(
-                proposal.operation,
+                proposal.operation(),
                 proposal.required_scopes().clone(),
-                proposal.cost,
-                proposal.unit,
+                proposal.cost(),
+                proposal.unit(),
                 at,
             ),
             self.settings.policy.clone(),

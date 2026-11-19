@@ -18,10 +18,12 @@ use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::Scope;
 use larry_contracts::replay::{Decision, DenialReason, PinnedInputs, ReplayRecord, capability};
-use lgwks_bot::BotError;
-use lgwks_bot::cap::{Auth, Cap};
-use lgwks_bot::clock::Clock;
-use lgwks_bot::gate::GrantSet;
+// lgwks_bot 9.0.0 exports no root items (crates#1016): the gate's types come through the
+// supported `kernel` surface, and its refusal through the error module.
+use lgwks_bot::error::KernelError;
+use lgwks_bot::kernel::cap::{Auth, Cap};
+use lgwks_bot::kernel::clock::Clock;
+use lgwks_bot::kernel::gate::GrantSet;
 
 use crate::error::RuntimeError;
 
@@ -38,7 +40,7 @@ pub fn authorize(pinned: &PinnedInputs) -> Result<ReplayRecord, RuntimeError> {
     match recorded {
         Decision::Authorized => Ok(ReplayRecord::new(pinned.clone(), recorded)),
         Decision::Denied { reason } => Err(RuntimeError::Denied {
-            operation: pinned.request.operation,
+            operation: pinned.request.operation(),
             reason,
         }),
         other => Err(RuntimeError::UnsupportedDecision(other)),
@@ -124,8 +126,8 @@ impl Proof {
 /// The recorded denial an estate refusal stands for: a deficit names the first
 /// required scope it lacks, and every other refusal, an expired credential among
 /// them, is `AuthorityExpired`, failing closed.
-fn denial(required: &[(Scope, Cap)], refusal: BotError) -> DenialReason {
-    let BotError::CapabilityDenied { deficit } = refusal else {
+fn denial(required: &[(Scope, Cap)], refusal: KernelError) -> DenialReason {
+    let KernelError::CapabilityDenied { deficit } = refusal else {
         return DenialReason::AuthorityExpired;
     };
     let missing = deficit.first().required();

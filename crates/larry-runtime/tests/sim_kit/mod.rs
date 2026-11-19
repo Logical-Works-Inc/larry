@@ -24,7 +24,7 @@ use crate::support::{
 };
 
 /// A fallible simulation step; setup failures propagate instead of panicking.
-pub type Sim<T> = Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Sim<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Runs `drive` twice for every seed in `seeds` and refuses any divergence.
 ///
@@ -36,7 +36,7 @@ pub type Sim<T> = Result<T, Box<dyn std::error::Error>>;
 ///
 /// Propagates the first error `drive` returns, or names the seed whose two
 /// runs disagreed.
-pub fn replay<T: PartialEq + Debug>(
+pub(crate) fn replay<T: PartialEq + Debug>(
     seeds: Range<u64>,
     mut drive: impl FnMut(u64) -> Sim<T>,
 ) -> Sim<()> {
@@ -52,7 +52,7 @@ pub fn replay<T: PartialEq + Debug>(
 
 /// The trace hash of a journal: every command envelope and event payload, in
 /// journal order.
-pub fn trace(journal: &Journal) -> ContentDigest {
+pub(crate) fn trace(journal: &Journal) -> ContentDigest {
     journal.entries().iter().fold(
         ContentDigest::over(&[b"sim-trace"]),
         |digest, entry| match *entry {
@@ -75,7 +75,7 @@ pub fn trace(journal: &Journal) -> ContentDigest {
 /// # Errors
 ///
 /// Propagates a refusal to make the guard directory.
-pub fn fresh_journal(name: &str, seed: u64) -> Sim<(TempDir, PathBuf)> {
+pub(crate) fn fresh_journal(name: &str, seed: u64) -> Sim<(TempDir, PathBuf)> {
     let guard = TempDir::new()?;
     let path = guard
         .path()
@@ -88,7 +88,7 @@ pub fn fresh_journal(name: &str, seed: u64) -> Sim<(TempDir, PathBuf)> {
 /// # Errors
 ///
 /// Propagates any removal refusal other than an absent file.
-pub fn remove(path: &Path) -> Sim<()> {
+pub(crate) fn remove(path: &Path) -> Sim<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -101,7 +101,7 @@ pub fn remove(path: &Path) -> Sim<()> {
 /// # Errors
 ///
 /// As `support::runtime_with`.
-pub fn reader(owner: ScriptedOwner, budget: u64) -> Sim<TestRuntime> {
+pub(crate) fn reader(owner: ScriptedOwner, budget: u64) -> Sim<TestRuntime> {
     runtime_with(owner, &[Scope::FileRead], &[Scope::FileRead], budget)
 }
 
@@ -111,7 +111,7 @@ pub fn reader(owner: ScriptedOwner, budget: u64) -> Sim<TestRuntime> {
 /// # Errors
 ///
 /// Propagates the restore refusal for a journal the runtime cannot fold.
-pub fn reopen(journal: Journal, budget: u64) -> Sim<TestRuntime> {
+pub(crate) fn reopen(journal: Journal, budget: u64) -> Sim<TestRuntime> {
     Ok(restore(
         settings(&[Scope::FileRead], &[Scope::FileRead], budget)?,
         ScriptedOwner::new(),
@@ -122,7 +122,7 @@ pub fn reopen(journal: Journal, budget: u64) -> Sim<TestRuntime> {
 
 /// One `FileRead` unit of work for run `run_n`, tenant `tenant_n` and
 /// operation `op`.
-pub fn work(
+pub(crate) fn work(
     run_n: u8,
     tenant_n: u8,
     op: u8,
@@ -140,7 +140,7 @@ pub fn work(
 }
 
 /// One `FileRead` unit of work for run and operation `n` under tenant 1.
-pub fn read_work(n: u8, cost: u64, strategy: ReconciliationStrategy) -> WorkProposal {
+pub(crate) fn read_work(n: u8, cost: u64, strategy: ReconciliationStrategy) -> WorkProposal {
     work(n, 1, n, cost, strategy)
 }
 
@@ -150,7 +150,7 @@ pub fn read_work(n: u8, cost: u64, strategy: ReconciliationStrategy) -> WorkProp
 /// # Errors
 ///
 /// Propagates the first admission refusal.
-pub fn offer_runs(
+pub(crate) fn offer_runs(
     runtime: &mut TestRuntime,
     runs: &[(u8, u8)],
     cost: u64,
@@ -167,7 +167,7 @@ pub fn offer_runs(
 /// # Errors
 ///
 /// Propagates the admission refusal and the tick's error.
-pub fn dispatch(
+pub(crate) fn dispatch(
     runtime: &mut TestRuntime,
     command: u8,
     run_op: u8,
@@ -188,7 +188,7 @@ pub fn dispatch(
 }
 
 /// Submits a work proposal as a `Submit` command with a one-byte identity.
-pub trait Offer {
+pub(crate) trait Offer {
     /// Submits `body` as command `id`.
     ///
     /// # Errors
@@ -245,7 +245,7 @@ fn sim_kit_replay_and_trace_contract() -> Sim<()> {
         );
         Ok((
             after,
-            work(number, 2, number, 1, ReconciliationStrategy::Queryable).tenant,
+            work(number, 2, number, 1, ReconciliationStrategy::Queryable).tenant(),
         ))
     })?;
     let world = |seed| {

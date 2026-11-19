@@ -9,6 +9,10 @@
 //! trace hash. Every actor is a fool: a double-clicker, a fat-finger and a
 //! saboteur who writes escape bytes.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/route_cli.rs"]
 mod route_cli;
 
@@ -266,13 +270,21 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
             RouteError::BadDescribe,
         ),
     ];
+    each_refused_alone(state.path(), cases)?;
+    refused_flags_name_themselves_and_store_nothing(state.path())?;
+    garbage_agrees_with_the_written_rules(state.path())
+}
+
+/// Each hostile value, alone on an otherwise valid `route add`, draws exactly its own variant,
+/// and none of them stores a route.
+fn each_refused_alone(state: &Path, cases: Vec<(&str, &str, &str, RouteError)>) -> TestResult {
     for (id, flag, value, expected) in cases {
         let overrides: Vec<(&str, &str)> = if flag.is_empty() {
             Vec::new()
         } else {
             vec![(flag, value)]
         };
-        match add(state.path(), id, &overrides, &[]) {
+        match add(state, id, &overrides, &[]) {
             Err(RouteCliError::Route(ref got)) if *got == expected => {}
             other => {
                 return Err(
@@ -281,11 +293,13 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
             }
         }
     }
-    assert_eq!(
-        listed(state.path())?.0.len(),
-        0,
-        "no refusal stored anything"
-    );
+    assert_eq!(listed(state)?.0.len(), 0, "no refusal stored anything");
+    Ok(())
+}
+
+/// A route without a residency, a temperature that is no number, an unknown flag and a
+/// repeated flag are each refused with their own error, and none stores a route.
+fn refused_flags_name_themselves_and_store_nothing(state: &Path) -> TestResult {
     let no_residency = [
         "add",
         "ok",
@@ -298,7 +312,7 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
     ];
     assert!(
         matches!(
-            route_run(state.path(), &[], &no_residency),
+            route_run(state, &[], &no_residency),
             Err(RouteCliError::Missing {
                 flag: "--residency"
             })
@@ -307,7 +321,7 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
     );
     assert!(
         matches!(
-            add(state.path(), "ok", &[("--temperature", "warm")], &[]),
+            add(state, "ok", &[("--temperature", "warm")], &[]),
             Err(RouteCliError::BadNumber {
                 flag: "--temperature",
                 ..
@@ -317,31 +331,32 @@ fn sim_hostile_route_fields_are_typed_refusals() -> TestResult {
     );
     for extra in [["--bogus", "1"], ["--url", GATEWAY]] {
         assert!(
-            matches!(
-                add(state.path(), "ok", &[], &extra),
-                Err(RouteCliError::Usage(_))
-            ),
+            matches!(add(state, "ok", &[], &extra), Err(RouteCliError::Usage(_))),
             "{extra:?}: an unknown or repeated flag is a usage refusal"
         );
     }
-    assert_eq!(
-        listed(state.path())?.0.len(),
-        0,
-        "the refusals stored nothing"
-    );
+    assert_eq!(listed(state)?.0.len(), 0, "the refusals stored nothing");
+    Ok(())
+}
 
+/// 256 seeded garbage values for the id, model, key variable, residency and description
+/// are stored or refused exactly as an independent reading of the rules says.
+fn garbage_agrees_with_the_written_rules(state: &Path) -> TestResult {
     let mut rng = Seeded::from_seed(0xFA7F1);
     let fields = ["id", "--model", "--key-env", "--residency", "--describe"];
     for case in 0..256_usize {
         let mut value = garbage(&mut rng)?;
-        let flag = fields.get(case % fields.len()).ok_or("a field")?;
+        let flag = case
+            .checked_rem(fields.len())
+            .and_then(|slot| fields.get(slot))
+            .ok_or("a field")?;
         if *flag == "--key-env" && rng.below(2)? == 0 {
             value.insert_str(0, "LARRY_KEY_");
         }
         let outcome = if *flag == "id" {
-            add(state.path(), &value, &[], &[])
+            add(state, &value, &[], &[])
         } else {
-            add(state.path(), "fuzzed", &[(flag, value.as_str())], &[])
+            add(state, "fuzzed", &[(flag, value.as_str())], &[])
         };
         match (outcome, reference(flag, &value)) {
             (Ok(_), None) => {}
@@ -403,7 +418,7 @@ fn sim_route_add_replayed_is_one_row() -> TestResult {
         "a replay without --default keeps the default"
     );
     let value = parse(&route_run(state.path(), &[], &["list", "--json"])?)?;
-    let model = value["routes"][0]["model"].as_str().ok_or("a model")?;
+    let model = value.at("/routes/0/model")?.as_str().ok_or("a model")?;
     assert!(
         models.contains(&model),
         "the row holds one writer's whole value: {model}"
@@ -550,7 +565,7 @@ fn sim_monkey_edits_of_a_valid_key_variable_agree_with_the_reference() -> TestRe
     );
     let value = parse(&route_run(state.path(), &[], &["list", "--json"])?)?;
     assert_eq!(
-        value["routes"][0]["key_env"].as_str(),
+        value.at("/routes/0/key_env")?.as_str(),
         last_good.as_deref(),
         "the one row holds the last accepted name"
     );
@@ -606,7 +621,7 @@ fn sim_a_row_edited_outside_the_namespace_fails_its_own_tenant_alone() -> TestRe
     set_key_env(victim.path(), "LARRY_KEY_BACK")?;
     let value = parse(&route_run(victim.path(), &[], &["list", "--json"])?)?;
     assert_eq!(
-        value["routes"][0]["key_env"].as_str(),
+        value.at("/routes/0/key_env")?.as_str(),
         Some("LARRY_KEY_BACK"),
         "a good name back and the victim reads again"
     );
@@ -687,7 +702,7 @@ fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> Test
     let (stored, _) = listed(state.path())?;
     assert_eq!(stored, honest, "exactly the honest ids are stored");
     let value = parse(&route_run(state.path(), &[], &["list", "--json"])?)?;
-    for route in value["routes"].as_array().ok_or("a routes array")? {
+    for route in value.at("/routes")?.as_array().ok_or("a routes array")? {
         let key = route["key_env"].as_str().ok_or("a key variable")?;
         assert!(key.starts_with("LARRY_KEY_T"), "{key} is an honest name");
     }

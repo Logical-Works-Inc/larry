@@ -227,7 +227,7 @@ fn sim_multitenant_revoke_is_per_operation() -> Outcome {
         let tick = rt.tick()?;
         assert_eq!(tick.fenced().len(), 1, "only the named operation fenced");
         assert_eq!(
-            tick.fenced()[0].0,
+            tick.fenced().first().ok_or("tick fenced no reach")?.0,
             operation(8),
             "fence names the operation"
         );
@@ -680,7 +680,7 @@ fn sim_multitenant_fence_names_only_its_operation() -> Outcome {
         let tick = rt.tick()?;
         assert_eq!(tick.fenced().len(), 1, "only one refusal recorded");
         assert_eq!(
-            tick.fenced()[0].0,
+            tick.fenced().first().ok_or("tick fenced no reach")?.0,
             operation(39),
             "fence names its operation"
         );

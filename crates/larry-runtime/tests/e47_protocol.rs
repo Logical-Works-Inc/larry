@@ -25,8 +25,8 @@ use larry_runtime::runtime::Runtime;
 
 use atomic::{AtomicOwner, holder};
 use support::{
-    assert_state, clock, command_id, epoch, operation, proposal, run, runtime, runtime_with,
-    settings, submit, succeeded, tenant,
+    TestRuntime, assert_state, clock, command_id, epoch, operation, proposal, run, runtime,
+    runtime_with, settings, submit, succeeded, tenant,
 };
 
 fn offer(
@@ -61,17 +61,13 @@ fn command_for(
     submit(id, &body)
 }
 
-#[test]
-fn e47_refusals_are_actionable_scoped_and_non_mutating() -> Result<(), Box<dyn std::error::Error>> {
-    let tenant_a = tenant(1);
-    let mut rt = runtime_with(
-        ScriptedOwner::scripted([succeeded(operation(1))]),
-        &[Scope::FileRead],
-        &[Scope::FileRead],
-        100,
-    )?;
-    let command = command_for(tenant_a, command_id(1), run(1))?;
-
+/// A version range the runtime does not speak, and a reversed one, are refused
+/// with an actionable typed error and nothing is queued.
+fn assert_version_ranges_refused(
+    rt: &mut TestRuntime,
+    tenant_a: TenantId,
+    command: &Command,
+) -> Result<(), Box<dyn std::error::Error>> {
     let unsupported = offer(
         tenant_a,
         ProtocolVersionRange::new(3, 5),
@@ -80,14 +76,17 @@ fn e47_refusals_are_actionable_scoped_and_non_mutating() -> Result<(), Box<dyn s
         false,
     );
     let result = rt.submit_protocol(&unsupported, command.clone(), None);
-    assert!(matches!(
-        &result,
-        Err(RuntimeError::Protocol(ProtocolError::UnsupportedVersion {
-            supported_min: MIN_PROTOCOL_VERSION,
-            supported_max: MAX_PROTOCOL_VERSION,
-            ..
-        }))
-    ));
+    assert!(
+        matches!(
+            &result,
+            Err(RuntimeError::Protocol(ProtocolError::UnsupportedVersion {
+                supported_min: MIN_PROTOCOL_VERSION,
+                supported_max: MAX_PROTOCOL_VERSION,
+                ..
+            }))
+        ),
+        "an unsupported range is refused with the supported bounds"
+    );
     let message = result
         .err()
         .ok_or("an unsupported version range must be refused")?
@@ -101,13 +100,30 @@ fn e47_refusals_are_actionable_scoped_and_non_mutating() -> Result<(), Box<dyn s
         false,
         false,
     );
-    assert!(matches!(
-        rt.submit_protocol(&reversed, command.clone(), None),
-        Err(RuntimeError::Protocol(ProtocolError::InvalidVersionRange {
-            min: 5,
-            max: 2
-        }))
-    ));
+    assert!(
+        matches!(
+            rt.submit_protocol(&reversed, command.clone(), None),
+            Err(RuntimeError::Protocol(ProtocolError::InvalidVersionRange {
+                min: 5,
+                max: 2
+            }))
+        ),
+        "a reversed range is refused as invalid"
+    );
+    Ok(())
+}
+
+#[test]
+fn e47_refusals_are_actionable_scoped_and_non_mutating() -> Result<(), Box<dyn std::error::Error>> {
+    let tenant_a = tenant(1);
+    let mut rt = runtime_with(
+        ScriptedOwner::scripted([succeeded(operation(1))]),
+        &[Scope::FileRead],
+        &[Scope::FileRead],
+        100,
+    )?;
+    let command = command_for(tenant_a, command_id(1), run(1))?;
+    assert_version_ranges_refused(&mut rt, tenant_a, &command)?;
 
     let absent = offer(tenant_a, ProtocolVersionRange::new(1, 1), &[], false, false);
     assert!(matches!(

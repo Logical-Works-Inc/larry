@@ -183,22 +183,25 @@ fn sim_a_weird_key_is_kept_verbatim_or_refused_for_every_seed() -> TestResult {
             while bytes.len() < length {
                 bytes.push(u8::try_from(seeded.below(256)?)?);
             }
-            let value = match std::str::from_utf8(&bytes) {
-                Ok(text) => Value::String(text.into()),
-                // A client cannot send invalid UTF-8 as JSON text, and the draw
-                // stands for one that tried: the document is refused below.
-                Err(_) => continue,
+            // A client cannot send invalid UTF-8 as JSON text, so a draw that is
+            // not UTF-8 is not a key at all and is passed over.
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                continue;
             };
+            let value = Value::String(text.into());
             let legal =
                 (1..=MAX_KEY_BYTES).contains(&length) && !bytes.iter().any(u8::is_ascii_control);
             let parsed = document("/tmp/a", Some(&value));
             match (legal, parsed) {
                 (true, Ok(task)) => assert_eq!(
                     task.idempotency_key(),
-                    std::str::from_utf8(&bytes).ok(),
+                    Some(text),
                     "seed {seed}: a legal key is kept byte for byte"
                 ),
-                (false, Err(_)) => {}
+                (false, Err(ref refusal)) => assert!(
+                    !refusal.to_string().is_empty(),
+                    "seed {seed}: an illegal key is refused with a reason"
+                ),
                 (true, Err(error)) => {
                     return Err(format!("seed {seed}: a legal key was refused: {error}").into());
                 }
@@ -246,8 +249,8 @@ fn sim_an_escaped_control_byte_is_never_a_key_for_every_seed() -> TestResult {
         let length = 1_usize.saturating_add(seeded.index(16)?);
         let at = seeded.index(length)?;
         let mut text = drawn_key(&mut seeded, length)?;
-        let control = u32::try_from(seeded.below(32)?).map_err(|_| "draw overflow")?;
-        let byte = u8::try_from(control).map_err(|_| "control overflow")?;
+        let control = u32::try_from(seeded.below(32)?)?;
+        let byte = u8::try_from(control)?;
         text.insert(at, char::from(byte));
         assert!(
             document("/tmp/a", Some(&Value::String(text.as_str().into()))).is_err(),

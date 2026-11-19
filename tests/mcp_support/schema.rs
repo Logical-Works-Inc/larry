@@ -47,7 +47,7 @@ const RESULT_BODIES: [(&str, &str); 5] = [
 ];
 
 /// Follows a JSON Pointer (RFC 6901) of `/`-separated, `~`-escaped segments.
-pub fn pointer<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+pub(crate) fn pointer<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
         return Some(root);
     }
@@ -64,14 +64,14 @@ pub fn pointer<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 }
 
 /// One vendored official schema.
-pub struct Schema {
+pub(crate) struct Schema {
     /// The parsed `schema.json`, whose `$defs` every `$ref` resolves into.
     root: Value,
 }
 
 impl Schema {
     /// Loads the schema of revision `tag` (`2026-07-28` or `2025-11-25`).
-    pub fn vendored(tag: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn vendored(tag: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/mcp")
             .join(format!("schema-{tag}.json"));
@@ -82,7 +82,7 @@ impl Schema {
 
     /// Checks one reply to a request of `method`: the JSON-RPC envelope, then
     /// the result or error body the schema defines for it.
-    pub fn check_reply(&self, method: &str, reply: &Value) -> Checked {
+    pub(crate) fn check_reply(&self, method: &str, reply: &Value) -> Checked {
         if let Some(error) = reply.get("error") {
             let code = error
                 .get("code")

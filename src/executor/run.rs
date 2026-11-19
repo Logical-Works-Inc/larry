@@ -10,7 +10,9 @@ use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use lgwks_bot::clock::Clock;
-use lgwks_std::process::{identify_process, kill_process_group, process_group_exists};
+use lgwks_std::process::{
+    ProcessIdentity, identify_process, kill_process_group, process_group_exists,
+};
 
 use super::ExecError;
 use super::confine::Confine;
@@ -66,9 +68,9 @@ impl Captured {
     /// `TAIL_BYTES`, and what it pushes out is counted as dropped.
     fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
         let room = HEAD_BYTES.saturating_sub(self.head.len());
-        let kept = room.min(bytes.len());
-        self.head.extend_from_slice(&bytes[..kept]);
-        self.tail.extend_from_slice(&bytes[kept..]);
+        let (head, tail) = bytes.split_at(room.min(bytes.len()));
+        self.head.extend_from_slice(head);
+        self.tail.extend_from_slice(tail);
         if self.tail.len() > TAIL_BYTES.saturating_mul(2) {
             self.trim()?;
         }
@@ -220,62 +222,21 @@ pub(crate) fn run_command(
     // runtime's `live_clock`, larry#268), so a host whose clock reads before the epoch
     // refuses with nothing run.
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    if argv.is_empty() {
-        return Err(spawn_failure(
-            "",
-            io::Error::other("acceptance command is empty"),
-        ));
-    }
-    // A confined command is the platform's wrapper plus the model's argv, so the kernel
-    // confines it and everything it forks; the result still names the model's argv.
-    let (workspace, scratch, wrapped) = match place {
-        Place::Open(path) => (path, None, None),
-        Place::Confined(confine) => (
-            confine.tree(),
-            Some(confine.scratch()),
-            Some(confine.wrap(argv)),
-        ),
-    };
-    let launch: &[String] = match wrapped.as_deref() {
-        Some(prefixed) => prefixed,
-        None => argv,
-    };
-    let Some((program, arguments)) = launch.split_first() else {
-        return Err(spawn_failure(
-            "",
-            io::Error::other("acceptance command is empty"),
-        ));
-    };
+    let (mut command, program) = command_for(argv, place, path_env)?;
+    let program = program.as_str();
     // Computed before the spawn: an overflow found inside the scope below would leave
     // the live leader unkilled, and the scope would wait on it.
     let deadline = started_at.checked_add(timeout).ok_or_else(|| {
         spawn_failure(program, io::Error::other("the command deadline overflowed"))
     })?;
-    let mut command = Command::new(program);
-    command
-        .args(arguments)
-        .current_dir(workspace)
-        .env_clear()
-        .env("PATH", path_env)
-        .env("HOME", workspace)
-        .env("LANG", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(directory) = scratch {
-        command.env("TMPDIR", directory);
-    }
-    #[cfg(unix)]
-    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|source| spawn_failure(program, source))?;
     let pgid = match i32::try_from(child.id()) {
         Ok(pid) => pid,
         Err(error) => {
-            drop(child.kill());
-            drop(child.wait());
-            return Err(spawn_failure(program, io::Error::other(error)));
+            let refusal = spawn_failure(program, io::Error::other(error));
+            return Err(discard(&mut child, refusal));
         }
     };
     let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take()) else {
@@ -286,38 +247,16 @@ pub(crate) fn run_command(
             spawn_failure(program, io::Error::other("piped output is missing")),
         ));
     };
-    let identity = match identify_process(pgid) {
-        Ok(Some(identity)) => identity,
-        Ok(None) => {
-            return Err(abandon(
-                &clock,
-                &mut child,
-                pgid,
-                spawn_failure(
-                    program,
-                    io::Error::other("the child vanished before it was identified"),
-                ),
-            ));
-        }
-        Err(source) => {
-            return Err(abandon(
-                &clock,
-                &mut child,
-                pgid,
-                spawn_failure(program, source),
-            ));
-        }
-    };
-    if let Err(error) = ledger.insert(task_id, &identity) {
-        return Err(abandon(&clock, &mut child, pgid, error));
-    }
+    let identity = track(&clock, &mut child, pgid, program, (ledger, task_id))?;
 
     let (status_sender, status_receiver) = mpsc::sync_channel::<io::Result<ExitStatus>>(1);
     let (status, timed_out, interrupted, stdout, stderr) = std::thread::scope(
         |scope| -> Result<(io::Result<ExitStatus>, bool, bool, Captured, Captured), ExecError> {
             let stdout_reader = scope.spawn(move || capture(stdout_pipe));
             let stderr_reader = scope.spawn(move || capture(stderr_pipe));
-            scope.spawn(move || drop(status_sender.send(child.wait())));
+            // The receiver outlives the wait unless the wait already failed, and that
+            // failure is what the scope returns, so a send with no receiver has no reader.
+            scope.spawn(move || status_sender.send(child.wait()));
             let (status, timed_out, interrupted) =
                 wait_for_status(&clock, &status_receiver, pgid, deadline, cancelled)?;
             // The leader is gone; a background member still holding the pipes must die too,
@@ -351,6 +290,85 @@ pub(crate) fn run_command(
         truncated: stdout_dropped > 0 || stderr_dropped > 0,
         duration_ms,
     })
+}
+
+/// The command that runs `argv` in `place`, and the program it starts, in its own process
+/// group with the environment cleared to PATH, HOME (the workspace) and LANG=C. A confined
+/// command is the platform's wrapper plus the model's argv, so the kernel confines it and
+/// everything it forks; the result still names the model's argv.
+fn command_for(
+    argv: &[String],
+    place: Place<'_>,
+    path_env: &str,
+) -> Result<(Command, String), ExecError> {
+    let empty = || spawn_failure("", io::Error::other("acceptance command is empty"));
+    if argv.is_empty() {
+        return Err(empty());
+    }
+    let (workspace, scratch, wrapped) = match place {
+        Place::Open(path) => (path, None, None),
+        Place::Confined(confine) => (
+            confine.tree(),
+            Some(confine.scratch()),
+            Some(confine.wrap(argv)),
+        ),
+    };
+    let launch: &[String] = match wrapped.as_deref() {
+        Some(prefixed) => prefixed,
+        None => argv,
+    };
+    let Some((program, arguments)) = launch.split_first() else {
+        return Err(empty());
+    };
+    let mut command = Command::new(program);
+    command
+        .args(arguments)
+        .current_dir(workspace)
+        .env_clear()
+        .env("PATH", path_env)
+        .env("HOME", workspace)
+        .env("LANG", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(directory) = scratch {
+        command.env("TMPDIR", directory);
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+    Ok((command, program.clone()))
+}
+
+/// Identifies the leader of `pgid` and records it in the ledger under `task_id`; a
+/// leader that cannot be tracked is killed with its group first.
+fn track(
+    clock: &Clock,
+    child: &mut Child,
+    pgid: i32,
+    program: &str,
+    (ledger, task_id): (&Ledger, &str),
+) -> Result<ProcessIdentity, ExecError> {
+    let identity = match identify_process(pgid) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            return Err(abandon(
+                clock,
+                child,
+                pgid,
+                spawn_failure(
+                    program,
+                    io::Error::other("the child vanished before it was identified"),
+                ),
+            ));
+        }
+        Err(source) => {
+            return Err(abandon(clock, child, pgid, spawn_failure(program, source)));
+        }
+    };
+    match ledger.insert(task_id, &identity) {
+        Ok(()) => Ok(identity),
+        Err(error) => Err(abandon(clock, child, pgid, error)),
+    }
 }
 
 /// Waits for the command's status in slices of at most [`CANCEL_POLL`] until
@@ -412,7 +430,12 @@ fn capture(mut pipe: impl Read) -> io::Result<Captured> {
     loop {
         match pipe.read(&mut chunk) {
             Ok(0) => break,
-            Ok(read) => captured.push(&chunk[..read])?,
+            Ok(read) => {
+                let filled = chunk.get(..read).ok_or_else(|| {
+                    io::Error::other("a read reported more bytes than its buffer holds")
+                })?;
+                captured.push(filled)?;
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
@@ -431,9 +454,9 @@ fn join_reader(
     match reader.join() {
         Ok(Ok(captured)) => Ok(captured),
         Ok(Err(source)) => Err(spawn_failure(argv0, source)),
-        Err(_) => Err(spawn_failure(
+        Err(panic) => Err(spawn_failure(
             argv0,
-            io::Error::other("output reader panicked"),
+            io::Error::other(format!("output reader panicked: {panic:?}")),
         )),
     }
 }
@@ -454,10 +477,37 @@ fn spawn_failure(argv0: &str, source: io::Error) -> ExecError {
     }
 }
 
-/// Kills the group and the leader of a child that could not be tracked, then returns the error.
+/// Kills the group and the leader of a child that could not be tracked, then returns the
+/// error, or the reap failure that names it when the group or the leader could not be ended.
 fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
-    drop(settle_group(clock, pgid));
-    drop(child.wait());
+    let settled = settle_group(clock, pgid);
+    let waited = child.wait();
+    if let Err(cause) = settled {
+        return ExecError::Reap(io::Error::other(format!(
+            "{error}; the group could not be settled: {cause}"
+        )));
+    }
+    if let Err(cause) = waited {
+        return ExecError::Reap(io::Error::other(format!(
+            "{error}; the leader could not be reaped: {cause}"
+        )));
+    }
+    error
+}
+
+/// Kills and reaps a child whose group id is unknown, then returns the error, or the reap
+/// failure that names it when the child could not be ended.
+fn discard(child: &mut Child, error: ExecError) -> ExecError {
+    if let Err(cause) = child.kill() {
+        return ExecError::Reap(io::Error::other(format!(
+            "{error}; the child could not be killed: {cause}"
+        )));
+    }
+    if let Err(cause) = child.wait() {
+        return ExecError::Reap(io::Error::other(format!(
+            "{error}; the child could not be reaped: {cause}"
+        )));
+    }
     error
 }
 

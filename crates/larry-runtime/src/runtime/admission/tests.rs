@@ -116,7 +116,7 @@ fn command(
     let payload = lgwks_std::json::to_vec(body)?.into_boxed_slice();
     Ok(Command::new(
         id,
-        body.tenant,
+        body.tenant(),
         Vec::new(),
         CommandContent::new(kind, payload),
     )?)

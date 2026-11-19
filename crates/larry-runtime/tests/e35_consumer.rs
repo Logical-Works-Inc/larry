@@ -24,8 +24,17 @@ use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 
 /// Concrete runtime, driven exclusively through public entrypoints.
 type Subject = Runtime<FoldProjection, ScriptedOwner>;
-/// Errors propagate through tests instead of panicking on setup.
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+/// Errors propagate through tests instead of panicking on setup; `Send` so a publisher thread
+/// returns its own typed error to the test that joins it.
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Locks the shared runtime, naming a poisoned lock as the failure it is.
+fn locked<T>(shared: &std::sync::Mutex<T>) -> TestResult<std::sync::MutexGuard<'_, T>> {
+    match shared.lock() {
+        Ok(guard) => Ok(guard),
+        Err(poisoned) => Err(format!("runtime lock poisoned: {poisoned}").into()),
+    }
+}
 
 /// Reproducible, portable tenant identity.
 fn tenant(value: u128) -> TenantId {
@@ -310,8 +319,24 @@ fn e35_stale_cross_tenant_and_corrupt_cursors() -> TestResult {
             "corrupt {field} refused"
         );
     }
-    // Corrupt actual recorded bytes but retain every envelope digest. This
-    // is an observation-integrity test, not an admission-validation change.
+    let malformed = lgwks_std::json::from_str::<ConsumerCursor>("{\"sequence\":-1}");
+    assert!(malformed.is_err(), "malformed token cannot become a cursor");
+    let mut restarted = other.subscribe(tenant(1), None, ConsumerLimits::default())?;
+    assert_eq!(
+        other
+            .consumer_page(tenant(1), &mut restarted)?
+            .records()
+            .len(),
+        2,
+        "explicit origin resync replays all history"
+    );
+    Ok(())
+}
+
+/// Recorded bytes changed under an unchanged envelope digest make a saved cursor stale. This is
+/// an observation-integrity test, not an admission-validation change.
+#[test]
+fn e35_changed_recorded_bytes_make_a_cursor_stale() -> TestResult {
     let original = command(91, tenant(1), 0)?;
     let mut journal = Journal::new(2)?;
     journal.accept_command(original.clone())?;
@@ -339,17 +364,6 @@ fn e35_stale_cross_tenant_and_corrupt_cursors() -> TestResult {
             Err(CursorError::StaleCursor)
         ),
         "changed bytes cannot hide behind an unchanged claimed digest"
-    );
-    let malformed = lgwks_std::json::from_str::<ConsumerCursor>("{\"sequence\":-1}");
-    assert!(malformed.is_err(), "malformed token cannot become a cursor");
-    let mut restarted = other.subscribe(tenant(1), None, ConsumerLimits::default())?;
-    assert_eq!(
-        other
-            .consumer_page(tenant(1), &mut restarted)?
-            .records()
-            .len(),
-        2,
-        "explicit origin resync replays all history"
     );
     Ok(())
 }
@@ -429,7 +443,7 @@ fn e35_concurrent_publication_and_recovery() -> TestResult {
     let runtime = std::sync::Mutex::new(subject(None)?);
     let limits = ConsumerLimits::new(3, MAX_PAGE_BYTES, 4, 4096)?;
     let mut consumers = {
-        let guard = runtime.lock().map_err(|_| "runtime lock poisoned")?;
+        let guard = locked(&runtime)?;
         [
             guard.subscribe(tenant(1), None, limits)?,
             guard.subscribe(tenant(2), None, limits)?,
@@ -438,26 +452,24 @@ fn e35_concurrent_publication_and_recovery() -> TestResult {
     let mut histories = [BTreeMap::new(), BTreeMap::new()];
     let (notify, arrivals) = std::sync::mpsc::sync_channel(1);
     std::thread::scope(|threads| -> TestResult {
-        let publisher = threads.spawn(|| -> Result<(), String> {
-            let run = || -> TestResult {
-                for batch in 0_u128..64 {
-                    {
-                        let mut guard = runtime.lock().map_err(|_| "runtime lock poisoned")?;
-                        for item in 1_u128..=8 {
-                            let identity = batch.saturating_mul(8).saturating_add(item);
-                            publish(&mut guard, identity, tenant((item & 1).saturating_add(1)))?;
-                        }
+        let shared = &runtime;
+        // The sender moves into the publisher and closes when it returns, on success or error,
+        // which ends the consumer loop below.
+        let publisher = threads.spawn(move || -> TestResult {
+            for batch in 0_u128..64 {
+                {
+                    let mut guard = locked(shared)?;
+                    for item in 1_u128..=8 {
+                        let identity = batch.saturating_mul(8).saturating_add(item);
+                        publish(&mut guard, identity, tenant((item & 1).saturating_add(1)))?;
                     }
-                    notify.send(())?;
                 }
-                Ok(())
-            };
-            let result = run().map_err(|error| error.to_string());
-            drop(notify);
-            result
+                notify.send(())?;
+            }
+            Ok(())
         });
         for () in arrivals {
-            let guard = runtime.lock().map_err(|_| "runtime lock poisoned")?;
+            let guard = locked(&runtime)?;
             for (index, consumer) in consumers.iter_mut().enumerate() {
                 let scope = tenant(u128::try_from(index)?.saturating_add(1));
                 let saved = consumer.cursor();
@@ -477,10 +489,13 @@ fn e35_concurrent_publication_and_recovery() -> TestResult {
                 drain(&guard, scope, consumer, seen)?;
             }
         }
-        publisher.join().map_err(|_| "publisher panicked")??;
+        match publisher.join() {
+            Ok(published) => published?,
+            Err(panic) => return Err(format!("the publisher panicked: {panic:?}").into()),
+        }
         Ok(())
     })?;
-    let guard = runtime.lock().map_err(|_| "runtime lock poisoned")?;
+    let guard = locked(&runtime)?;
     for (index, seen) in histories.iter().enumerate() {
         assert_eq!(
             *seen,

@@ -162,10 +162,20 @@ fn too_many(what: &'static str, limit: usize) -> ExecError {
     }
 }
 
-/// Kills and reaps a child whose output is no longer wanted.
-fn abandon(child: &mut std::process::Child) {
-    drop(child.kill());
-    drop(child.wait());
+/// Kills and reaps a child whose output is no longer wanted, then returns `error`, or the
+/// failure that names both when the child could not be ended.
+fn abandon(child: &mut std::process::Child, error: ExecError) -> ExecError {
+    if let Err(cause) = child.kill() {
+        return ExecError::Workspace(io::Error::other(format!(
+            "{error}; the listing child could not be killed: {cause}"
+        )));
+    }
+    if let Err(cause) = child.wait() {
+        return ExecError::Workspace(io::Error::other(format!(
+            "{error}; the listing child could not be reaped: {cause}"
+        )));
+    }
+    error
 }
 
 /// Every entry of the folder `origin`, relative and sorted: git's listing when `origin`
@@ -208,27 +218,28 @@ fn listing(git: &Git<'_>, origin: &Path, limits: Limits) -> Result<Vec<PathBuf>,
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command.spawn().map_err(spawn_error)?;
     let Some(stdout) = child.stdout.take() else {
-        abandon(&mut child);
-        return Err(ExecError::Workspace(io::Error::other(
-            "the listing pipe was not opened",
-        )));
+        return Err(abandon(
+            &mut child,
+            ExecError::Workspace(io::Error::other("the listing pipe was not opened")),
+        ));
     };
     let mut raw = Vec::new();
     let read = stdout
         .take(MAX_LISTING_BYTES.saturating_add(1))
         .read_to_end(&mut raw);
     if let Err(cause) = read {
-        abandon(&mut child);
-        return Err(ExecError::Workspace(cause));
+        return Err(abandon(&mut child, ExecError::Workspace(cause)));
     }
     let length =
         u64::try_from(raw.len()).map_err(|cause| ExecError::Workspace(io::Error::other(cause)))?;
     if length > MAX_LISTING_BYTES {
-        abandon(&mut child);
-        return Err(ExecError::SnapshotTooLarge {
-            what: "bytes of file names",
-            limit: MAX_LISTING_BYTES,
-        });
+        return Err(abandon(
+            &mut child,
+            ExecError::SnapshotTooLarge {
+                what: "bytes of file names",
+                limit: MAX_LISTING_BYTES,
+            },
+        ));
     }
     let status = child.wait().map_err(spawn_error)?;
     if !status.success() {
@@ -280,7 +291,7 @@ fn walk(origin: &Path, limits: Limits) -> Result<Vec<PathBuf>, ExecError> {
                     return Err(too_many("directory levels", limits.depth));
                 }
                 pending.push((path, next));
-            } else if kind.is_file() || kind.is_symlink() {
+            } else if copies_as_entry(kind) {
                 found.push(path);
             }
             if found.len().saturating_add(pending.len()) > limits.files {
@@ -290,6 +301,18 @@ fn walk(origin: &Path, limits: Limits) -> Result<Vec<PathBuf>, ExecError> {
     }
     found.sort();
     Ok(found)
+}
+
+/// Whether an entry of this kind is copied: a regular file or a symlink. A directory is
+/// walked, not copied, and a fifo, a socket or a device has no bytes to copy.
+fn copies_as_entry(kind: std::fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+    kind.is_symlink()
+        || !(kind.is_dir()
+            || kind.is_fifo()
+            || kind.is_socket()
+            || kind.is_block_device()
+            || kind.is_char_device())
 }
 
 /// Whether `relative` stays beneath the folder it is joined to: only named components,
@@ -343,7 +366,7 @@ fn copy_entries(
             Err(cause) => return Err(ExecError::Workspace(cause)),
         };
         let kind = meta.file_type();
-        if !(kind.is_file() || kind.is_symlink()) {
+        if !copies_as_entry(kind) {
             continue;
         }
         if copied.files >= limits.files {

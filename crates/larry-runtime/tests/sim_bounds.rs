@@ -378,7 +378,7 @@ fn sim_bounds_single_item_pages_catch_up() -> Outcome {
                 break;
             }
         }
-        let _ = pages;
+        assert!(pages >= 1, "the consumer read at least one page");
         Ok(runtime.journal().len())
     })
 }

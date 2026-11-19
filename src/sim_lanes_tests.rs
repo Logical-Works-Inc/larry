@@ -43,7 +43,9 @@ fn sim_lanes_sweep_returns_seed_order_for_every_lane_count() -> TestResult {
                 "{requested} lanes, {count} seeds"
             );
             assert!(
-                pairs.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+                pairs
+                    .windows(2)
+                    .all(|pair| matches!(*pair, [(before, _), (after, _)] if before <= after)),
                 "{requested} lanes, {count} seeds: lanes are contiguous chunks"
             );
             assert!(

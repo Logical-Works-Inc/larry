@@ -70,7 +70,7 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - design-gate at commit: a recorded plan covers every staged file.
 - rust-surface at commit: a new `pub` item needs a caller outside its crate (tests never count), so new
   `larry-runtime` API lands only once a package depends on the runtime (larry#68 step 4).
-- `lgwks-deps check .` (lgwks_deps 7.2.0) locally: every direct dependency has a schema-3 row in
+- `lgwks-deps check .` (lgwks_deps 7.3.0) locally: every direct dependency has a schema-3 row in
   `contract/APPROVED.toml` with its license, retirement plan and measured cost. CI does not run it.
 - `larry governance` in CI and locally (ADR 0010): frontmatter, local links, unique contiguous R, D, E, C and axis
   inventories that cannot shrink, requirement-to-decision-and-falsifier mapping, execution-cell allocation,
@@ -83,8 +83,9 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests on
   `cargo nextest run --workspace --locked`, the `cargo local-ci` tests lane (larry#154).
 - `issue-link` in CI: a PR whose `closingIssuesReferences` is empty fails (larry#103, ADR 0012).
-- `mutants` in CI (larry#310, ADR 0064): on a PR only, hosted only, a plan, up to 16 shards on the changed lines
-  and one `verdict` that fails under 60% of viable mutants caught, or when any shard did not run.
+- `mutants` in CI (larry#310, ADR 0064, ADR 0066): on a PR only, hosted only, a plan over a rename-aware diff, up
+  to 96 shards of 3 on the changed lines (a plan past 288 fails by name), and one `verdict` that fails under 60% of
+  viable mutants caught, or when any shard did not run.
 - `larry mascot --check` in CI and locally: `docs/larry-mascot.svg` equals the render of the one grid (ADR 0014).
 
 ## CI and platform enforcement

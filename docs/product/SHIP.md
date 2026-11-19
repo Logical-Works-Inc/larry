@@ -32,8 +32,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #86 signed receipts over the journal (ed25519). Proof: a tampered receipt is refused; a denied run never reports success: PR #134, `larry verify` and `larry key` ship it; 6 binary journeys and 5 unit sims, 598 tests in 11.0 s; verify p50 4.6 ms, p99 5.0 ms against a rerun at p50 64.7 ms (32 runs, debug).
 - [x] #123 wire `larry_submit_task` to the executor. Proof: `tests/mcp_stdio_journey.rs` runs one task against the mock model and verifies its receipt: PR #140, 8 seeds replayed to one trace and diff, every fault refused unsealed, 607 tests in 11.4 s; submitted task p50 108.1 ms, p99 148.3 ms (16 runs, debug, mock).
 - [x] #87 matched task set, Claude alone against Claude plus Flash. Proof: cost per accepted task, acceptance rate, p50/p95/p99 and peak RSS printed for both arms: PR #141, `larry eval` ships it; 5 binary journeys and 5 unit sims, 617 tests in 12.1 s; matched-v1 on the mock p50 97.8 ms, p99 114.9 ms per task, peak RSS 12.1 MiB (debug); scored runs are #95.
-- [x] #142 README lists the shipped doors and the v0.1.0 install line (part of #124): docs-check green.
-- [x] #124 v0.1.0 release with #87's numbers: tag on c98062a, prerelease notes carry #87's card; clean `cargo install --tag v0.1.0 --locked` in 28.5 s, `larry mcp` answers `server/discover` (exit 0, peak RSS 7.7 MiB).
+- [x] #142 README lists the shipped doors and the v0.1.0 install line (part of #124): docs-check green. #124 v0.1.0 release with #87's numbers: tag on c98062a, prerelease notes carry #87's card; clean `cargo install --tag v0.1.0 --locked` in 28.5 s, `larry mcp` answers `server/discover` (exit 0, peak RSS 7.7 MiB).
 
 ## 2. Track 0: estate alignment (parallel with section 1)
 - [x] #131 rename Rocco to Larry (Director 2026-11-06). Proof: the Gates green under the new names; 582 tests in 10.3 s under `larry-demo`, `larry-contracts` and `larry-runtime` (ADR 0005).
@@ -41,7 +40,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #103 `issue-link` fails a PR closing no issue. Proof (#149): run 42364512157 red without `Closes`, 42364569033 green.
 - [x] #133 dependency register on lgwks-deps schema 3: PR #135, `lgwks-deps check .` prints OK (was REFUSED).
 - [x] #170 hardening: clipboard-win off yanked 5.4.1, 34 locked to newest, appcui_proc_macro held (crates#841): PR #171.
-- [x] #178 every document current, the Rocco rename finished: PR #179. #180 lgwks_bot 8.2.0, lgwks_deps 6.3.0: PR #185, 800 tests. #187 lgwks_bot 8.3.0: PR #188, 824 tests. #189 lgwks_std 4.1.2, lgwks_bot 8.3.1, lgwks_deps 7.2.0: PR #190, 824 tests. #191 lgwks_std 4.2.0, lgwks_bot 8.4.0: 824 tests.
+- [x] #178 every document current, the Rocco rename finished: PR #179. #180 lgwks_bot 8.2.0, lgwks_deps 6.3.0: PR #185, 800 tests. #187 lgwks_bot 8.3.0: PR #188, 824 tests. #189 lgwks_std 4.1.2, lgwks_bot 8.3.1, lgwks_deps 7.2.0: PR #190, 824 tests. #191 lgwks_std 4.2.0, lgwks_bot 8.4.0: 824 tests. lgwks_std 4.2.1, lgwks_bot 9.0.0, lgwks_deps 7.3.0, lgwks_ast 6.1.0 (rust-guard ESTATE-LATEST): PR #342.
 - [ ] #177 gap: pin the ci.yml `rust` job's three actions to commit SHAs (Director 2026-11-09: not yet).
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
@@ -100,12 +99,13 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [ ] #202 (model routing 2) choose the route by meaning, on the shipped local reranker. Proof: a seeded `sim_` set ranked identically on every replay; a task whose best route breaks the tenant's residency rule goes to the next eligible route; route-choice p50/p95/p99 and peak RSS with the reranker on.
 - [ ] #204 (model routing 4) a token and money budget per tenant, a shared limiter, a real retry wait. Proof: a tenant at its budget is refused before the call and the mock counts zero requests; two tenants share one route and one burst does not starve the other (seeded sim); one non-zero backoff is waited, then cancelled.
 - [ ] #205 (model routing 5) provider adapters and a prompt per route. Proof: the same task through a mock of each provider kind, each receipt naming its kind and usage mapped to one shape; a route with no temperature never sends the field.
-- [x] #228 (first-user CLI) `larry help`, and refusals that name the expected task form. Proof: `larry help` and `larry --help` exit 0 and list every subcommand with its env; a wrong-typed acceptance names the expected form; a binary journey covers both: PR #289, 1042 tests.
+- [x] #228 (first-user CLI) `larry help`, and refusals that name the expected task form. Proof: `larry help` and `larry --help` exit 0 and list every subcommand with its env; a wrong-typed acceptance names the expected form; a binary journey covers both: PR #289. #295 docs and tests claim no more than the code: dispatch runs from the help table alone, route refusals carry `route` by default, the question cap is enforced; #341 the workspace lint floor at deny (ADR 0065): PR #342, 1153 tests.
 - [ ] #216 (hardening) tick, ask and receipt cost grow with open work, not the whole journal. Proof: a bench at 1, 1,000 and 60,000 recorded runs prints tick, ask and receipt p50/p95/p99 and peak RSS before and after; replay trace hashes are unchanged for every seed.
 - [ ] #217 (hardening) docs match the pins and the code. Proof: `larry governance` green; each changed number printed by the command that measured it.
 - [ ] #224 (hardening) the governance latency budget test no longer depends on suite load. Acceptance: the full parallel suite passes 3 times in a row on Oracle with the test present; the serial run prints p50, p95, p99 and peak RSS, and asserts the budget.
 - [x] #227 (hardening) every governance document current after the #200 sweep merges. Proof: `larry governance`, `larry tracker --check` and docs-check green; every named test resolves: PR #229, 920 tests.
 - [ ] #246 (hardening) the workspace suite under the 90 s budget (188 s on Oracle, PR #240). Proof: before and after times on Oracle, test count not lower.
+- [ ] #321 (first real use, ahead of this section's open lines) the 2026-11-19 review: #322 to #340, confinement (#322 to #324, #326) and the approval prompt (#325) first. Proof: each child's falsifier.
 
 ## 8. Human frontend (#241; Director 2026-11-16: "in tui, then Mac app then iOS and android apps")
 - [x] #238, #239 bare `larry` is a split terminal that asks before every command (ADR 0045): PR #240, 923 tests; first paint 32.6 ms, keystroke p99 4.3 ms, idle 0 bytes, peak RSS 11.7 MiB (debug, 120x32). Director: "lock it in for now".

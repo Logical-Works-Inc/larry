@@ -4,6 +4,7 @@
 //! check of the sealed report. Source: MCP specification 2025-06-18
 //! ("Tools: calling tools") and RFC 8032 (the receipt's ed25519).
 
+use crate::json_at::At;
 use crate::mcp_support::{Session, TestResult};
 use lgwks_std::json::{self, Value, json};
 use std::ffi::{OsStr, OsString};
@@ -14,7 +15,7 @@ use std::process::{Command, Output, Stdio};
 
 /// The variables an operator exports to put an executor behind `larry mcp`:
 /// the state directory, the gateway, a key, no backoff wait, plus `extra`.
-pub fn operator(
+pub(crate) fn operator(
     state: &Path,
     gateway: SocketAddr,
     extra: &[(&'static str, &str)],
@@ -38,7 +39,7 @@ pub fn operator(
 }
 
 /// `larry mcp` under `env`, initialized.
-pub fn connected(env: &[(&'static str, OsString)]) -> TestResult<Session> {
+pub(crate) fn connected(env: &[(&'static str, OsString)]) -> TestResult<Session> {
     let borrowed: Vec<(&str, &OsStr)> = env
         .iter()
         .map(|entry| (entry.0, entry.1.as_os_str()))
@@ -49,7 +50,7 @@ pub fn connected(env: &[(&'static str, OsString)]) -> TestResult<Session> {
 }
 
 /// A task with a brief: the model writes each of `files`.
-pub fn briefed(repo: &Path, files: &[&str], acceptance: &[&str]) -> Value {
+pub(crate) fn briefed(repo: &Path, files: &[&str], acceptance: &[&str]) -> Value {
     json!({
         "goal": "replace the readme and add a module",
         "repo": repo.display().to_string(),
@@ -59,10 +60,10 @@ pub fn briefed(repo: &Path, files: &[&str], acceptance: &[&str]) -> Value {
 }
 
 /// One `tools/call` of `larry_submit_task` and its `result`.
-pub fn submit(session: &mut Session, task: &Value) -> TestResult<Value> {
+pub(crate) fn submit(session: &mut Session, task: &Value) -> TestResult<Value> {
     let reply = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"larry_submit_task","arguments":task}}))?;
-    Ok(reply["result"].clone())
+    Ok(reply.at("/result")?.clone())
 }
 
 /// Runs `larry <subcommand>` with only PATH and `env` set and `input` on stdin.
@@ -84,7 +85,7 @@ fn run_larry(subcommand: &str, env: &[(&str, &OsStr)], input: &[u8]) -> TestResu
 
 /// Verifies `report` offline under the key `larry key` prints for `state`;
 /// returns the exit code and the verdict line (printed for accepted and rejected alike).
-pub fn verify_offline(state: &Path, report: &Value) -> TestResult<(Option<i32>, Value)> {
+pub(crate) fn verify_offline(state: &Path, report: &Value) -> TestResult<(Option<i32>, Value)> {
     let key = run_larry("key", &[("LARRY_STATE_DIR", state.as_os_str())], b"")?;
     let printed = String::from_utf8(key.stdout)?;
     let trusted = OsString::from(printed.trim_end());

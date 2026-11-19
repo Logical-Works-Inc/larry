@@ -15,6 +15,12 @@
 //! test makes a paid model call. The local verifier run stands in for Harbor's
 //! container: the same files, the same reward contract, no Docker.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
+#[path = "support/acp_agent.rs"]
+mod acp_agent;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/larry_child.rs"]
@@ -27,11 +33,12 @@ mod origin;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use acp_agent::{Agent, kinds, message_text, prompt, said};
 use lgwks_std::json::{self, Value, json};
 use mock_model::{Config, Fault, Handle};
 use origin::{TempDir, fixture};
@@ -49,125 +56,6 @@ const SAMPLES: u64 = 16;
 /// The task's verifier, as Harbor runs it after the agent: reward 1 when the
 /// working directory holds `hello.txt` with exactly `hello`.
 const TEST_SH: &str = "#!/bin/sh\nmkdir -p \"$LOGS/verifier\"\nif [ \"$(cat \"$WORKDIR/hello.txt\" 2>/dev/null)\" = hello ]; then echo 1 > \"$LOGS/verifier/reward.txt\"; else echo 0 > \"$LOGS/verifier/reward.txt\"; fi\n";
-
-/// One `larry acp` process: its protocol pipes and its log.
-struct Agent {
-    /// The process.
-    child: Child,
-    /// The protocol stream in; `None` once closed.
-    stdin: Option<ChildStdin>,
-    /// The protocol stream out.
-    out: BufReader<ChildStdout>,
-    /// The agent's log.
-    log: BufReader<ChildStderr>,
-}
-
-impl Agent {
-    /// Starts `larry acp` with only PATH and `env` set.
-    fn start(env: &[(&str, &OsStr)]) -> TestResult<Self> {
-        let (mut child, stdin, out) = larry_child::start("acp", env, Stdio::piped())?;
-        let log = BufReader::new(child.stderr.take().ok_or("stderr was not piped")?);
-        Ok(Self {
-            child,
-            stdin: Some(stdin),
-            out,
-            log,
-        })
-    }
-
-    /// Writes one message as its line.
-    fn send(&mut self, message: &Value) -> TestResult {
-        let stdin = self.stdin.as_mut().ok_or("stdin is closed")?;
-        let mut line = message.to_string();
-        line.push('\n');
-        stdin.write_all(line.as_bytes())?;
-        stdin.flush()?;
-        Ok(())
-    }
-
-    /// Reads one message; end of output is an error.
-    fn recv(&mut self) -> TestResult<Value> {
-        let mut line = String::new();
-        if self.out.read_line(&mut line)? == 0 {
-            return Err("larry acp closed its output".into());
-        }
-        Ok(json::from_str(&line)?)
-    }
-
-    /// Reads until the response to `id`, returning the notifications before it.
-    fn until(&mut self, id: &Value) -> TestResult<(Vec<Value>, Value)> {
-        let mut notes = Vec::new();
-        loop {
-            let message = self.recv()?;
-            if message.get("method").is_some() {
-                notes.push(message);
-            } else if message["id"] == *id {
-                return Ok((notes, message));
-            }
-        }
-    }
-
-    /// Sends a request and reads to its response.
-    fn call(&mut self, request: &Value) -> TestResult<(Vec<Value>, Value)> {
-        self.send(request)?;
-        self.until(&request["id"])
-    }
-
-    /// Initializes and opens one session in `cwd`, returning its id.
-    fn open(&mut self, cwd: &Path) -> TestResult<String> {
-        let (_, init) = self.call(&json!({"jsonrpc":"2.0","id":0,"method":"initialize",
-            "params":{"protocolVersion":1,"clientCapabilities":{"terminal":false}}}))?;
-        assert_eq!(init["result"]["protocolVersion"], 1, "version 1");
-        let (_, new) = self.call(&json!({"jsonrpc":"2.0","id":1,"method":"session/new",
-            "params":{"cwd":cwd.to_string_lossy(),"mcpServers":[]}}))?;
-        let session = new["result"]["sessionId"]
-            .as_str()
-            .ok_or("session/new answers a session id")?;
-        Ok(session.to_owned())
-    }
-
-    /// Reads log lines until one holds `text`.
-    fn logged(&mut self, text: &str) -> TestResult {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            if self.log.read_line(&mut line)? == 0 {
-                return Err(format!("the log ended before {text:?}").into());
-            }
-            if line.contains(text) {
-                return Ok(());
-            }
-        }
-    }
-
-    /// Closes stdin and returns the exit code.
-    fn finish(mut self) -> TestResult<Option<i32>> {
-        drop(self.stdin.take());
-        Ok(self.child.wait()?.code())
-    }
-}
-
-impl Drop for Agent {
-    fn drop(&mut self) {
-        // A journey that already ended its agent leaves nothing to kill. A child
-        // that cannot be reaped fails the test, unless it is already failing.
-        let reaped = match self.child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => self.child.kill().and_then(|()| self.child.wait()).map(drop),
-            Err(cause) => Err(cause),
-        };
-        assert!(
-            reaped.is_ok() || std::thread::panicking(),
-            "the larry acp child is killed and reaped: {reaped:?}"
-        );
-    }
-}
-
-/// A `session/prompt` request carrying `text`.
-fn prompt(id: u64, session: &str, text: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"method":"session/prompt",
-        "params":{"sessionId":session,"prompt":[{"type":"text","text":text}]}})
-}
 
 /// The settings an operator exports: the state directory, the mock gateway and,
 /// when given, the policy.
@@ -204,32 +92,6 @@ fn scripted(seed: u64, contents: &[&str]) -> Config {
         contents: contents.iter().map(|text| (*text).to_owned()).collect(),
         ..Config::seeded(seed)
     }
-}
-
-/// The `sessionUpdate` kinds of `notes`, in order.
-fn kinds(notes: &[Value]) -> Vec<String> {
-    notes
-        .iter()
-        .filter_map(|note| note["params"]["update"]["sessionUpdate"].as_str())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// The text of the `agent_message_chunk` among `notes`.
-fn said(notes: &[Value]) -> Option<&str> {
-    notes
-        .iter()
-        .find(|note| note["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
-        .and_then(|note| note["params"]["update"]["content"]["text"].as_str())
-}
-
-/// The text of message `index` of the model request `body`.
-fn message_text(body: &[u8], index: usize) -> TestResult<String> {
-    let request = json::from_slice::<Value>(body)?;
-    let text = request["messages"][index]["content"]
-        .as_str()
-        .ok_or("the request carries that message")?;
-    Ok(text.to_owned())
 }
 
 /// Runs `larry <subcommand>` to completion with only `env` set and `input` on
@@ -322,22 +184,24 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
             let session = acp.open(work.path())?;
             let (notes, reply) = acp.call(&prompt(2, &session, &instruction))?;
             micros.push(started.elapsed().as_micros());
-            assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+            assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
             assert_eq!(
                 kinds(&notes),
                 ["tool_call", "tool_call_update", "agent_message_chunk"],
                 "one command, its result, the summary"
             );
-            let call = &notes[0]["params"];
-            assert_eq!(call["sessionId"], session.as_str(), "the session's update");
-            assert_eq!(call["update"]["kind"], "execute", "an execute call");
+            let call = notes.first().ok_or("a first update")?.at("/params")?;
             assert_eq!(
-                notes[1]["params"]["update"]["status"], "completed",
-                "exit 0"
+                *call.at("/sessionId")?,
+                session.as_str(),
+                "the session's update"
             );
+            assert_eq!(*call.at("/update/kind")?, "execute", "an execute call");
+            let result = notes.get(1).ok_or("a second update")?;
+            assert_eq!(*result.at("/params/update/status")?, "completed", "exit 0");
             assert_eq!(said(&notes), Some("wrote hello.txt"), "the model's summary");
             assert_eq!(mock.served(), 2, "two model calls");
-            let asked = message_text(&mock.requests()[0], 1)?;
+            let asked = message_text(mock.requests().first().ok_or("a first request")?, 1)?;
             assert!(
                 asked.contains(instruction.trim()),
                 "the instruction reaches the model"
@@ -347,15 +211,24 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
                 "1",
                 "rewarded"
             );
-            let report = &reply["result"]["_meta"]["larry"]["report"];
-            assert_eq!(report["session"]["stop"], "end_turn", "the report's stop");
-            assert_eq!(report["results"][0]["exit_code"], 0, "the command's record");
+            let report = reply.at("/result/_meta/larry/report")?;
+            assert_eq!(
+                *report.at("/session/stop")?,
+                "end_turn",
+                "the report's stop"
+            );
+            assert_eq!(
+                *report.at("/results/0/exit_code")?,
+                0,
+                "the command's record"
+            );
             let (code, verdict) = verify(state.path(), report)?;
             // A session has no diff for Larry to accept: the seal verifies, and the
             // task's own verifier decides the reward.
             assert_eq!(code, Some(2), "a verified, unaccepted report: {verdict}");
             assert_eq!(
-                verdict["task_id"], report["task_id"],
+                *verdict.at("/task_id")?,
+                report["task_id"],
                 "the verdict names the run"
             );
             assert_eq!(acp.finish()?, Some(0), "end of input is a clean exit");
@@ -383,13 +256,13 @@ fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
         let mut acp = agent(state.path(), mock, None)?;
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "touch ran.txt"))?;
-        assert_eq!(reply["result"]["stopReason"], "refusal", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
         let line = "gate: policy_refuses: model.command";
         assert_eq!(said(&notes), Some(line), "the refusal names the scope");
         assert_eq!(mock.served(), 0, "no model call");
         assert!(!work.path().join("ran.txt").exists(), "nothing ran");
-        let report = &reply["result"]["_meta"]["larry"]["report"];
-        assert_eq!(report["denied"][0], line, "the denial is sealed");
+        let report = reply.at("/result/_meta/larry/report")?;
+        assert_eq!(*report.at("/denied/0")?, line, "the denial is sealed");
         assert_eq!(
             verify(state.path(), report)?.0,
             Some(2),
@@ -410,13 +283,13 @@ fn a_session_past_its_step_bound_ends_max_turn_requests() -> TestResult {
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "loop"))?;
-        let stop = &reply["result"]["stopReason"];
+        let stop = reply.at("/result/stopReason")?;
         assert_eq!(stop, "max_turn_requests", "{reply}");
         assert_eq!(mock.served(), 256, "one call per command, none past");
         assert_eq!(notes.len(), 512, "a call and its result per command");
-        let report = &reply["result"]["_meta"]["larry"]["report"];
-        assert_eq!(report["session"]["commands"], 256, "256 records");
-        let folded = report["session"]["compaction"]["folded"].as_u64();
+        let report = reply.at("/result/_meta/larry/report")?;
+        assert_eq!(*report.at("/session/commands")?, 256, "256 records");
+        let folded = report.at("/session/compaction/folded")?.as_u64();
         assert!(folded > Some(0), "old steps folded: {report}");
         Ok(())
     })
@@ -441,18 +314,26 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
         let (_, reply) = acp.call(&prompt(2, &session, "read twelve chunks"))?;
-        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
-        let report = &reply["result"]["_meta"]["larry"]["report"];
-        assert_eq!(report["session"]["commands"], 12, "every command ran");
-        let compaction = &report["session"]["compaction"];
+        assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
+        let report = reply.at("/result/_meta/larry/report")?;
+        assert_eq!(*report.at("/session/commands")?, 12, "every command ran");
+        let compaction = report.at("/session/compaction")?;
         assert!(compaction["shrinks"].as_u64() >= Some(1), "{compaction}");
         assert!(compaction["cleared"].as_u64() >= Some(1), "{compaction}");
         assert_eq!(mock.served(), 13, "each reply served once");
         let requests = mock.requests();
         let first = json::from_slice::<Value>(requests.first().ok_or("a request")?)?;
         let last = json::from_slice::<Value>(requests.last().ok_or("a request")?)?;
-        assert_eq!(last["messages"][0], first["messages"][0], "system stable");
-        assert_eq!(last["messages"][1], first["messages"][1], "task stable");
+        assert_eq!(
+            *last.at("/messages/0")?,
+            *first.at("/messages/0")?,
+            "system stable"
+        );
+        assert_eq!(
+            *last.at("/messages/1")?,
+            *first.at("/messages/1")?,
+            "task stable"
+        );
         let text = last.to_string();
         let compacted = text.contains("Auto-compaction record") || text.contains("cleared by auto");
         assert!(compacted, "the last request is compacted: {text}");
@@ -469,7 +350,7 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "list"))?;
-        assert_eq!(reply["result"]["stopReason"], "refusal", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
         assert_eq!(
             said(&notes),
             Some(
@@ -478,7 +359,7 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
             "the last refusal is named"
         );
         assert_eq!(mock.served(), 3, "three model calls");
-        let told = message_text(&mock.requests()[1], 3)?;
+        let told = message_text(mock.requests().get(1).ok_or("a second request")?, 3)?;
         assert!(
             told.starts_with("Your reply was refused: the reply is not JSON"),
             "the model is told why: {told}"
@@ -506,7 +387,8 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
         acp.send(&prompt(2, &session, "wait"))?;
         let started = acp.recv()?;
         assert_eq!(
-            started["params"]["update"]["sessionUpdate"], "tool_call",
+            *started.at("/params/update/sessionUpdate")?,
+            "tool_call",
             "running"
         );
         acp.send(&json!({"jsonrpc":"2.0","method":"session/cancel",
@@ -518,7 +400,7 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
             .open(&fifo)?
             .write_all(b"go\n")?;
         let (notes, reply) = acp.until(&json!(2))?;
-        assert_eq!(reply["result"]["stopReason"], "cancelled", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "cancelled", "{reply}");
         assert_eq!(
             kinds(&notes),
             ["tool_call_update"],
@@ -550,17 +432,18 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
         killed.send(&prompt(2, &session, "wait"))?;
         let started = killed.recv()?;
         assert_eq!(
-            started["params"]["update"]["sessionUpdate"], "tool_call",
+            *started.at("/params/update/sessionUpdate")?,
+            "tool_call",
             "running"
         );
-        killed.child.kill()?;
-        killed.child.wait()?;
+        killed.kill_9()?;
         let mut next = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = next.open(work.path())?;
         let (_, reply) = next.call(&prompt(2, &session, "again"))?;
-        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
         let recovered = fs::read_dir(state.path().join("journals"))?
-            .filter_map(Result::ok)
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
             .filter(|entry| entry.path().extension() == Some(OsStr::new("recovered")))
             .count();
         assert_eq!(recovered, 1, "the killed session's journal was recovered");
@@ -585,7 +468,7 @@ fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
         let session = acp.open(work)?;
         let (_, reply) = acp.call(&prompt(2, &session, "touch"))?;
         assert!(work.join(&name).exists(), "its own file");
-        let report = reply["result"]["_meta"]["larry"]["report"].clone();
+        let report = reply.at("/result/_meta/larry/report")?.clone();
         Ok((report, mock.served()))
     })
 }
@@ -615,7 +498,11 @@ fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> Te
         (2, 2),
         "each gateway saw its own session"
     );
-    assert_ne!(first["task_id"], second["task_id"], "distinct runs");
+    assert_ne!(
+        *first.at("/task_id")?,
+        *second.at("/task_id")?,
+        "distinct runs"
+    );
     assert_eq!(
         verify(first_state.path(), &first)?.0,
         Some(2),
@@ -648,7 +535,7 @@ fn padded_session(state: &Path, work: &Path) -> TestResult<(String, Option<Strin
         let mut acp = agent(state, mock, Some(SESSION_POLICY))?;
         let session = acp.open(work)?;
         let (_, reply) = acp.call(&prompt(2, &session, "pad"))?;
-        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
         assert!(work.join("padded.txt").exists(), "the padded reply ran");
         let key = mock.authorizations().first().cloned().flatten();
         Ok((mock.trace_hash(), key))
@@ -681,7 +568,7 @@ fn a_hostile_gateway_refusal_ends_the_session_with_a_clean_message() -> TestResu
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "go"))?;
-        assert_eq!(reply["result"]["stopReason"], "refusal", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
         let message = said(&notes).ok_or("the refusal is said")?;
         assert!(
             message.starts_with("model: "),
@@ -714,7 +601,7 @@ fn a_cancel_while_the_model_answers_runs_no_command() -> TestResult {
         acp.logged("cancel requested")?;
         mock.release_delayed();
         let (notes, reply) = acp.until(&json!(2))?;
-        assert_eq!(reply["result"]["stopReason"], "cancelled", "{reply}");
+        assert_eq!(*reply.at("/result/stopReason")?, "cancelled", "{reply}");
         assert!(notes.is_empty(), "no command started: {notes:?}");
         assert!(mock.served() <= 1, "at most the call already made");
         assert!(!work.path().join("ran.txt").exists(), "nothing ran");
@@ -732,15 +619,16 @@ fn a_request_before_initialize_and_a_relative_cwd_are_refused() -> TestResult {
         let (_, early) = acp.call(&json!({"jsonrpc":"2.0","id":5,"method":"session/new",
             "params":{"cwd":"/","mcpServers":[]}}))?;
         assert_eq!(
-            early["error"]["message"], "initialize must come first",
+            *early.at("/error/message")?,
+            "initialize must come first",
             "order"
         );
         let (_, init) = acp.call(&json!({"jsonrpc":"2.0","id":6,"method":"initialize",
             "params":{"protocolVersion":1}}))?;
-        assert_eq!(init["result"]["authMethods"], json!([]), "no auth");
+        assert_eq!(*init.at("/result/authMethods")?, json!([]), "no auth");
         let (_, relative) = acp.call(&json!({"jsonrpc":"2.0","id":7,"method":"session/new",
             "params":{"cwd":"work","mcpServers":[]}}))?;
-        assert_eq!(relative["error"]["code"], -32602, "relative cwd");
+        assert_eq!(*relative.at("/error/code")?, -32602, "relative cwd");
         assert_eq!(mock.served(), 0, "no model call");
         assert_eq!(acp.finish()?, Some(0), "clean exit");
         Ok(())

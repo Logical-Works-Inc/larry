@@ -694,7 +694,11 @@ mod tests {
     fn task_settings_derive_the_revision_from_the_policy_record() {
         let first = task_settings(&default_policy());
         let again = task_settings(&default_policy());
-        assert_eq!(first.policy.revision, again.policy.revision);
+        assert_eq!(
+            first.policy.revision(),
+            again.policy.revision(),
+            "the same policy record yields the same revision"
+        );
 
         let mut widened = default_policy();
         widened.insert(Scope::NetworkEgress);

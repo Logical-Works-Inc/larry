@@ -29,14 +29,17 @@ pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resol
 
 /// Most messages one completion request carries.
 pub(crate) const MAX_MESSAGES: usize = 256;
-/// `error.code` a gateway's structured refusal uses when a request is past the
-/// model's context window (larry#236). The code is read before the reason's
-/// words, which a gateway may translate or soften.
-const CONTEXT_CODES: [&str; 1] = ["context_length_exceeded"];
+/// `error.code` stems a gateway's structured refusal uses when a request is past
+/// the model's context window (larry#236): OpenAI's `context_length_exceeded`
+/// and a gateway's bare `context_length` both begin with this one, which no
+/// other refusal code does (larry#295).
+const CONTEXT_CODES: [&str; 1] = ["context_length"];
 /// Phrases a gateway's 400 uses, lowercased, when a request is past the model's
 /// context window (larry#235): OpenAI and vLLM ("maximum context length"),
 /// Anthropic ("prompt is too long") and Gemini ("exceeds the maximum number of
-/// tokens"). Read only when no code says it (larry#236).
+/// tokens"). Read together with the codes: either one is enough, so a gateway
+/// that translates its words but keeps its code, or sends no code, is still read
+/// (larry#236, larry#295).
 const CONTEXT_OVERFLOW: [&str; 4] = [
     "context length",
     "context window",
@@ -181,11 +184,14 @@ impl ModelError {
         match status {
             413 => true,
             400 => {
+                // The wire puts `error.code` first (`refusal_detail`), so a code is
+                // read only there: a message that merely mentions a parameter such
+                // as `max_context_length` is no overflow (larry#295).
                 let reason = detail.to_ascii_lowercase();
-                CONTEXT_CODES
-                    .iter()
-                    .chain(CONTEXT_OVERFLOW.iter())
-                    .any(|marker| reason.contains(marker))
+                CONTEXT_CODES.iter().any(|code| reason.starts_with(code))
+                    || CONTEXT_OVERFLOW
+                        .iter()
+                        .any(|phrase| reason.contains(phrase))
             }
             _ => false,
         }
@@ -237,16 +243,12 @@ impl WindowRefusal {
 /// digits that do not fit a `u64` are no number, never a wrapped one, and a
 /// word where a number should be is no number either.
 fn number_at(text: &str, from: usize) -> Option<u64> {
-    let bytes = text.as_bytes();
-    let start = (from..bytes.len()).find(|&index| bytes[index] != b' ')?;
-    if !bytes[start].is_ascii_digit() {
-        return None;
-    }
-    let end = match (start..bytes.len()).find(|&index| !bytes[index].is_ascii_digit()) {
-        Some(index) => index,
-        None => bytes.len(),
-    };
-    text.get(start..end)?.parse::<u64>().ok()
+    let digits = text
+        .get(from..)?
+        .trim_start_matches(' ')
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?;
+    digits.parse::<u64>().ok()
 }
 
 /// The first whole number in `text` after `marker`'s first occurrence.
@@ -258,13 +260,10 @@ fn number_after(text: &str, marker: &str) -> Option<u64> {
 /// spaces between them allowed.
 fn number_before(text: &str, marker: &str) -> Option<u64> {
     let head = text.get(..text.find(marker)?)?.trim_end();
-    let bytes = head.as_bytes();
-    let end = bytes.len();
-    let start = match (0..end).rev().find(|&index| !bytes[index].is_ascii_digit()) {
-        Some(index) => index.saturating_add(1),
-        None => 0,
-    };
-    head.get(start..end)?.parse::<u64>().ok()
+    let digits = head
+        .rsplit(|character: char| !character.is_ascii_digit())
+        .next()?;
+    digits.parse::<u64>().ok()
 }
 
 /// Append the gateway's reason after a status, when it gave one.

@@ -161,9 +161,10 @@ fn sim_replay_mutated_record_diverges() -> Outcome {
         runtime.tick()?;
         let mut mutated = runtime.projection().authorizations().to_vec();
         assert_eq!(mutated.len(), 1, "one recorded authorization");
-        let mut changed = mutated[0].clone();
-        changed.pinned.budget.remaining = 1;
-        mutated[0] = changed;
+        let recorded = mutated
+            .first_mut()
+            .ok_or("no recorded authorization to mutate")?;
+        recorded.pinned.budget.remaining = 1;
         let report = replay_log(&mutated);
         assert_eq!(report.divergences(), 1, "mutation diverges explicitly");
         assert!(
@@ -396,15 +397,11 @@ fn sim_replay_holds_each_decision_to_own_snapshot() -> Outcome {
         }
         runtime.tick()?;
         let records = runtime.projection().authorizations();
-        assert_eq!(records.len(), 2, "two decisions recorded");
-        assert_eq!(
-            records[0].pinned.budget.remaining, 100,
-            "first sees full budget"
-        );
-        assert_eq!(
-            records[1].pinned.budget.remaining, 70,
-            "second sees remainder"
-        );
+        let [ref first, ref second] = *records else {
+            return Err(format!("two decisions recorded, got {}", records.len()).into());
+        };
+        assert_eq!(first.pinned.budget.remaining, 100, "first sees full budget");
+        assert_eq!(second.pinned.budget.remaining, 70, "second sees remainder");
         assert_eq!(
             runtime.remaining_budget(tenant(1)),
             50,

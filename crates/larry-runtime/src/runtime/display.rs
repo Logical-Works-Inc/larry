@@ -86,7 +86,7 @@ where
         }
         let digest = command_digest(command)?;
         let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
-        self.ensure_run_tenant(proposal.run, command.tenant())?;
+        self.ensure_run_tenant(proposal.run(), command.tenant())?;
         if grants.len() > self.settings.max_grants {
             return Err(BindingError::TooManyGrants {
                 capacity: self.settings.max_grants,
@@ -117,7 +117,7 @@ where
             binding: EffectBinding::new(
                 resolved,
                 approval,
-                self.settings.policy.revision,
+                self.settings.policy.revision(),
                 grant.expiry().min(self.settings.validity.valid_until),
             ),
         })
@@ -170,7 +170,7 @@ where
             }
             shown
                 .binding
-                .verify_runtime(self.settings.policy.revision, at)?;
+                .verify_runtime(self.settings.policy.revision(), at)?;
             let current = self
                 .owner
                 .resolve(&intent)?
@@ -190,7 +190,7 @@ where
     ) -> Result<(), RuntimeError> {
         match intent.binding() {
             Some(binding) => {
-                binding.verify_runtime(self.settings.policy.revision, at)?;
+                binding.verify_runtime(self.settings.policy.revision(), at)?;
                 let current = self
                     .owner
                     .resolve(intent)?
@@ -218,8 +218,8 @@ fn covers(
     grant.tenant() == command.tenant()
         && grant.holder() == holder
         && proposal.required_scopes().is_subset(grant.scopes())
-        && grant.budget().unit() == proposal.unit
-        && proposal.cost <= grant.budget().limit()
+        && grant.budget().unit() == proposal.unit()
+        && proposal.cost() <= grant.budget().limit()
         && at < grant.expiry()
 }
 

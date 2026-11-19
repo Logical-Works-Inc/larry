@@ -12,6 +12,10 @@
 //! gateway is scored as refusals while the arm keeps going; a kill -9 leaves
 //! nothing the next run does not collect; the shipped set runs end to end.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/mock_model.rs"]
@@ -143,7 +147,11 @@ impl Ran {
                 .contains("maximum resident set size")
         })?;
         let digits: String = line.chars().filter(char::is_ascii_digit).collect();
-        let value: u64 = digits.parse().ok()?;
+        // A report line with no number is no reading, the same as no line at all.
+        let value: u64 = match digits.parse() {
+            Ok(value) => value,
+            Err(_no_number) => return None,
+        };
         if cfg!(target_os = "macos") {
             Some(value.div_ceil(1024))
         } else {
@@ -298,7 +306,11 @@ fn arm_on_seed(seed: u64, arm: &Arm, set: &str, state: &Path) -> TestResult<Scor
         }
         for body in handle.requests() {
             let request = json::from_slice::<Value>(&body)?;
-            assert_eq!(request["model"], arm.model, "seed {seed}: the arm's model");
+            assert_eq!(
+                *request.at("/model")?,
+                arm.model,
+                "seed {seed}: the arm's model"
+            );
         }
         Ok::<_, Box<dyn std::error::Error>>(Scored {
             ran,
@@ -672,7 +684,7 @@ fn a_killed_eval_leaves_nothing_the_next_run_does_not_collect() -> TestResult {
 #[test]
 fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
     let shipped = json::from_slice::<Value>(SHIPPED_SET.as_bytes())?;
-    let listed = shipped["tasks"].as_array().ok_or("tasks")?;
+    let listed = shipped.at("/tasks")?.as_array().ok_or("tasks")?;
     let ids: Vec<&Value> = listed.iter().map(|one| &one["id"]).collect();
     let files: usize = listed
         .iter()

@@ -13,13 +13,13 @@ use larry_runtime::owner::EffectOwner;
 /// Host-authenticated holder the display journeys share: the identity every
 /// grant names, without sharing the grants themselves across tenants.
 #[must_use]
-pub fn holder() -> WorkerId {
+pub(crate) fn holder() -> WorkerId {
     WorkerId::from_bytes([42; 16])
 }
 
 /// Seed-selected field with a separate oracle from the digest implementation.
 #[must_use]
-pub fn swapped_field(seed: u64) -> BindingField {
+pub(crate) fn swapped_field(seed: u64) -> BindingField {
     match seed & 7 {
         0 => BindingField::Resource,
         1 => BindingField::Symlink,
@@ -33,7 +33,7 @@ pub fn swapped_field(seed: u64) -> BindingField {
 }
 
 /// Opaque fixture identities vary by seed; exactly one field changes.
-pub fn resolved(seed: u64, changed: bool) -> Result<ResolvedEffect, BindingError> {
+pub(crate) fn resolved(seed: u64, changed: bool) -> Result<ResolvedEffect, BindingError> {
     let original = seed.to_be_bytes();
     let replacement = seed.saturating_add(1).to_be_bytes();
     let field = seed & 7;
@@ -54,15 +54,15 @@ pub fn resolved(seed: u64, changed: bool) -> Result<ResolvedEffect, BindingError
 
 /// A deterministic owner whose fourth observation is the atomic effect boundary.
 #[derive(Debug, Clone)]
-pub struct AtomicOwner {
+pub(crate) struct AtomicOwner {
     /// Single seed controls bytes, identity, time and fault location.
-    pub seed: u64,
+    pub(crate) seed: u64,
     /// Observation number that swaps one field; zero never swaps.
-    pub change_on: u64,
+    pub(crate) change_on: u64,
     /// Observations already made.
-    pub observations: u64,
+    pub(crate) observations: u64,
     /// Whether the effect's response is deliberately lost.
-    pub lose_reply: bool,
+    pub(crate) lose_reply: bool,
     /// Bounded by the runtime queue/workload in these tests; read through `executed`.
     executed: Vec<(TenantId, OperationId, ResolvedEffect)>,
 }
@@ -70,7 +70,7 @@ pub struct AtomicOwner {
 impl AtomicOwner {
     /// Starts an isolated owner without an ambient clock or network.
     #[must_use]
-    pub fn new(seed: u64, change_on: u64) -> Self {
+    pub(crate) fn new(seed: u64, change_on: u64) -> Self {
         Self {
             seed,
             change_on,
@@ -82,7 +82,7 @@ impl AtomicOwner {
 
     /// Every bound effect this owner executed, in dispatch order: tenant, operation, target.
     #[must_use]
-    pub fn executed(&self) -> &[(TenantId, OperationId, ResolvedEffect)] {
+    pub(crate) fn executed(&self) -> &[(TenantId, OperationId, ResolvedEffect)] {
         &self.executed
     }
 

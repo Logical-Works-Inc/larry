@@ -80,8 +80,10 @@ impl Tree {
         Ok(tree)
     }
 
-    /// A governed fixture tree the checker passes on its own terms, never a copy of the live
-    /// checkout (larry#224, larry#270): the latency figures are measured on it.
+    /// A governed fixture tree the checker passes on its own terms (larry#224, larry#270): the
+    /// latency figures are measured on it. `fixture::governed` writes every document; only the
+    /// retained receipts are copied from the checkout, a frozen set since the reranker mandate
+    /// was retired, so no live document reaches the tree (larry#295).
     fn fixture() -> Result<Tree, Box<dyn Error>> {
         let tree = Tree {
             path: TempDir::new()?,
@@ -116,7 +118,7 @@ fn copy_files(from: &Path, to: &Path) -> io::Result<()> {
             .any(|suffix| name.ends_with(suffix));
         if kind.is_dir() {
             copy_files(&entry.path(), &to.join(entry.file_name()))?;
-        } else if kind.is_file() && read {
+        } else if !kind.is_symlink() && read {
             fs::copy(entry.path(), to.join(entry.file_name()))?;
         }
     }
@@ -518,10 +520,10 @@ fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
             Err(format!("the sampled governance check failed: {status}").into())
         }
         Sampled::Runaway { peak } => {
-            drop(child.kill());
-            drop(child.wait());
+            // The runaway is the failure; a kill or reap that also fails is named in it.
+            let reaped = child.kill().and_then(|()| child.wait().map(|_status| ()));
             Err(format!(
-                "one governance check did not exit within {:?}; its peak RSS was {peak:?} KiB",
+                "one governance check did not exit within {:?}; its peak RSS was {peak:?} KiB; kill and reap: {reaped:?}",
                 deadline::PATIENCE
             )
             .into())

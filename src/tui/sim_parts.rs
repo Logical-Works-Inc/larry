@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::app::{compact, hints};
+use super::app::{Key, compact, hints};
 use super::buffer::Buffer;
 use super::cells::{Entry, Header, OUTPUT_TAIL, split_observation};
 use super::composer::Composer;
@@ -14,6 +14,29 @@ use super::style::{Style, text_width};
 
 /// Seeds each simulation runs.
 const SEEDS: u64 = 256;
+
+/// How many keys [`key_at`] draws from.
+pub(super) const KEY_COUNT: usize = 14;
+
+/// The key the seeded input draws at `index`; the last key answers every index past the table.
+pub(super) const fn key_at(index: usize) -> Key {
+    match index {
+        0 => Key::Char('y'),
+        1 => Key::Char('n'),
+        2 => Key::Char('a'),
+        3 => Key::Char('/'),
+        4 => Key::Enter,
+        5 => Key::NewLine,
+        6 => Key::Backspace,
+        7 => Key::Left,
+        8 => Key::Up,
+        9 => Key::PageUp,
+        10 => Key::PageDown,
+        11 => Key::Tab,
+        12 => Key::Esc,
+        _ => Key::KillWord,
+    }
+}
 
 /// A splitmix64 stream: the one source of every choice in a run.
 struct Draw(u64);
@@ -33,6 +56,14 @@ impl Draw {
         let bound = u64::try_from(len).into_iter().sum();
         let drawn: u64 = self.next().checked_rem(bound).into_iter().sum();
         usize::try_from(drawn).into_iter().sum()
+    }
+
+    /// The item of `items` this draw picks, or the empty text for an empty list.
+    fn word<'items>(&mut self, items: &[&'items str]) -> &'items str {
+        match items.get(self.pick(items.len())) {
+            Some(&item) => item,
+            None => "",
+        }
     }
 }
 
@@ -152,7 +183,7 @@ fn sim_composer_edits_match_the_readline_model() {
         let mut model = Model::default();
         for step in 0..64 {
             let op = draw.pick(11);
-            let text = pieces[draw.pick(pieces.len())];
+            let text = draw.word(&pieces);
             edit(&mut composer, op, text);
             model.apply(op, text);
             let expected: String = model.chars.iter().collect();
@@ -241,11 +272,11 @@ fn sim_welcome_box_rows_stay_one_line_and_one_width() {
         let header = Header {
             version: String::from("0.1.0"),
             model: if draw.pick(2) == 0 {
-                Ok(String::from(hostile[draw.pick(hostile.len())]))
+                Ok(String::from(draw.word(&hostile)))
             } else {
-                Err(String::from(hostile[draw.pick(hostile.len())]))
+                Err(String::from(draw.word(&hostile)))
             },
-            directory: String::from(hostile[draw.pick(hostile.len())]),
+            directory: String::from(draw.word(&hostile)),
             blocked: None,
         };
         let width = 12 + draw.pick(80);

@@ -20,7 +20,7 @@ use crate::support::{
 
 /// Settings whose fence permits `bound` mutating reaches between
 /// authentications and stands at `at_epoch`.
-pub fn settings_at(
+pub(crate) fn settings_at(
     at_epoch: SecurityEpoch,
     bound: u32,
 ) -> Result<RuntimeSettings, Box<dyn std::error::Error>> {
@@ -32,7 +32,7 @@ pub fn settings_at(
 
 /// [`settings_at`] with authority validity far enough out that the E30 expiry
 /// check cannot confound a probe that deliberately moves the clock by a year.
-pub fn settings_that_outlive_a_year(
+pub(crate) fn settings_that_outlive_a_year(
     at_epoch: SecurityEpoch,
     bound: u32,
 ) -> Result<RuntimeSettings, Box<dyn std::error::Error>> {
@@ -54,7 +54,7 @@ pub fn settings_that_outlive_a_year(
 ///
 /// Returns the contract's ordering error for an over-long causal-parent list,
 /// which cannot happen here but is not silently discarded.
-pub fn work_in(
+pub(crate) fn work_in(
     run_byte: u8,
     id: u8,
     op: OperationId,
@@ -76,7 +76,7 @@ pub fn work_in(
 /// # Errors
 ///
 /// As [`work_in`].
-pub fn work(
+pub(crate) fn work(
     id: u8,
     op: OperationId,
     strategy: ReconciliationStrategy,
@@ -89,7 +89,7 @@ pub fn work(
 ///
 /// Returns the runtime and the journal-independent fact that the effect is
 /// open, so a caller cannot accidentally assert on a resolved effect.
-pub fn open_retry_safe_effect(
+pub(crate) fn open_retry_safe_effect(
     bound: u32,
 ) -> Result<(TestRuntime, OperationId), Box<dyn std::error::Error>> {
     let mut rt = runtime_at(SecurityEpoch::INITIAL, bound, ScriptedOwner::new())?;
@@ -117,7 +117,7 @@ pub fn open_retry_safe_effect(
 }
 
 /// A runtime over `owner` whose fence stands at `at_epoch` and permits `bound` reaches.
-pub fn runtime_at(
+pub(crate) fn runtime_at(
     at_epoch: SecurityEpoch,
     bound: u32,
     owner: ScriptedOwner,

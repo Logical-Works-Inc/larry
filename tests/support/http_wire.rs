@@ -29,6 +29,10 @@ pub(crate) enum Refusal {
     Closed,
     /// The head was unreadable, oversized or not HTTP.
     Head,
+    /// The head was not UTF-8.
+    Text(std::str::Utf8Error),
+    /// The `Content-Length` was not a number.
+    Length(std::num::ParseIntError),
     /// A body without a `Content-Length` (or with chunked framing).
     LengthRequired,
     /// The declared body exceeds the cap; nothing past the head was read.
@@ -37,7 +41,32 @@ pub(crate) enum Refusal {
         declared: usize,
     },
     /// The socket failed or the client stalled past the read timeout.
-    Io,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Closed => out.write_str("the peer closed before sending a byte"),
+            Self::Head => out.write_str("malformed request head"),
+            Self::Text(ref cause) => write!(out, "request head is not UTF-8: {cause}"),
+            Self::Length(ref cause) => write!(out, "Content-Length is not a number: {cause}"),
+            Self::LengthRequired => out.write_str("Content-Length is required"),
+            Self::TooLarge { declared } => write!(out, "declared body of {declared} bytes"),
+            Self::Io(ref cause) => write!(out, "socket: {cause}"),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Text(ref cause) => Some(cause),
+            Self::Length(ref cause) => Some(cause),
+            Self::Io(ref cause) => Some(cause),
+            Self::Closed | Self::Head | Self::LengthRequired | Self::TooLarge { .. } => None,
+        }
+    }
 }
 
 /// Read one request from `stream`, never buffering more than the head limit
@@ -53,10 +82,10 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
             Ok(0) if head.is_empty() => return Err(Refusal::Closed),
             Ok(0) => return Err(Refusal::Head),
             Ok(_) => head.extend_from_slice(&byte),
-            Err(_) => return Err(Refusal::Io),
+            Err(cause) => return Err(Refusal::Io(cause)),
         }
     }
-    let text = std::str::from_utf8(&head).map_err(|_| Refusal::Head)?;
+    let text = std::str::from_utf8(&head).map_err(Refusal::Text)?;
     let mut lines = text.split("\r\n");
     let mut request_line = lines.next().ok_or(Refusal::Head)?.split_whitespace();
     let method = String::from(request_line.next().ok_or(Refusal::Head)?);
@@ -84,7 +113,7 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
             return Err(Refusal::LengthRequired);
         }
         if name.trim().eq_ignore_ascii_case("content-length") {
-            declared = Some(value.trim().parse().map_err(|_| Refusal::Head)?);
+            declared = Some(value.trim().parse().map_err(Refusal::Length)?);
         }
     }
     let length = match declared {
@@ -96,7 +125,7 @@ pub(crate) fn read_request(stream: &mut impl Read, max_body: usize) -> Result<Re
         return Err(Refusal::TooLarge { declared: length });
     }
     let mut body = vec![0_u8; length];
-    stream.read_exact(&mut body).map_err(|_| Refusal::Io)?;
+    stream.read_exact(&mut body).map_err(Refusal::Io)?;
     Ok(Request {
         method,
         path,

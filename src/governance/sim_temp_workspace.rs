@@ -103,6 +103,7 @@ fn sim_a_workspace_member_and_its_crate_are_both_scanned() -> SimResult {
         let tree = workspace("temp-members", &["crates/alpha", "crates/beta"])?;
         let mut rng = Seeded::from_seed(seed);
         let chosen = rng.index(cases.len())?;
+        let chosen_case = *cases.get(chosen).ok_or("a chosen member case")?;
         for (slot, name) in cases.iter().enumerate() {
             let source = if slot == chosen { LEAK } else { CLEAN };
             named(&tree, name, source)?;
@@ -110,7 +111,7 @@ fn sim_a_workspace_member_and_its_crate_are_both_scanned() -> SimResult {
         named(&tree, "crates/gamma/tests/leak.rs", LEAK)?;
         assert_all(
             &tree,
-            &[refusal(cases[chosen], 2)],
+            &[refusal(chosen_case, 2)],
             "only the member the manifest names is refused",
         )?;
     }

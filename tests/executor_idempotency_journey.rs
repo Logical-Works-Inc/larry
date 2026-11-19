@@ -14,6 +14,10 @@
 //! answers from without running that command again. Each child runs with a
 //! cleared environment.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
 
@@ -26,7 +30,7 @@ use std::time::Instant;
 use exec_cli::deadline::await_fifo_writer;
 use exec_cli::{
     TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid, make_fifo,
-    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry,
+    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry_args,
     task_json, text_of,
 };
 use lgwks_std::json::{self, Value};
@@ -63,8 +67,12 @@ fn journal_entries(state: &Path) -> Result<usize, Box<dyn Error>> {
 /// `larry verify` on `report` bytes, trusting `state`'s key: its exit status and
 /// the verdict it printed.
 fn verify_report(state: &Path, report: &[u8]) -> Result<(Option<i32>, Value), Box<dyn Error>> {
-    let output = spawn_larry("verify", &[("LARRY_STATE_DIR", state.as_os_str())], report)?
-        .wait_with_output()?;
+    let output = spawn_larry_args(
+        &["verify"],
+        &[("LARRY_STATE_DIR", state.as_os_str())],
+        report,
+    )?
+    .wait_with_output()?;
     let verdict = json::from_str::<Value>(&String::from_utf8_lossy(&output.stdout))?;
     Ok((output.status.code(), verdict))
 }
@@ -190,7 +198,7 @@ fn a_task_without_a_key_runs_once_per_submission() -> TestResult {
 /// The `acceptance` member of `document`, rendered back as text.
 fn acceptance_of(document: &str) -> Result<String, Box<dyn Error>> {
     let parsed: Value = json::from_str(document)?;
-    Ok(parsed["acceptance"].to_string())
+    Ok(parsed.at("/acceptance")?.to_string())
 }
 
 #[test]

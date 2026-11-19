@@ -163,13 +163,12 @@ fn a_symlinked_fixture_document_is_refused() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn reranker_receipts_are_present_and_valid() -> Result<(), Box<dyn std::error::Error>> {
+fn reranker_receipts_are_present_and_valid() {
     let errors = super::receipts::receipt_errors(root());
     assert!(
         errors.is_empty(),
         "the retained receipts must be valid: {errors:?}"
     );
-    Ok(())
 }
 
 #[test]

@@ -324,7 +324,7 @@ fn sim_encoded_images_decode_to_their_pixels_for_every_seed() -> Check {
         let colours = if seed & 3 == 3 { 300 } else { 12 };
         let (width, height, rgba) = seeded_image(&mut rng, colours)?;
         let file = encode(&rgba, width, height)?;
-        let decoded = decode(&file).map_err(|error| format!("seed {seed}: {error}"))?;
+        let decoded = decode(&file)?;
         assert_eq!(
             decoded,
             (width, height, rgba),
@@ -360,7 +360,7 @@ fn edge_images_round_trip() -> Check {
 }
 
 #[test]
-fn sizes_outside_the_format_and_short_buffers_are_refused() -> Check {
+fn sizes_outside_the_format_and_short_buffers_are_refused() {
     assert_eq!(
         encode(&[], 0, 1),
         Err(WebpError::Size {
@@ -385,7 +385,6 @@ fn sizes_outside_the_format_and_short_buffers_are_refused() -> Check {
         }),
         "a short buffer"
     );
-    Ok(())
 }
 
 /// The spritesheet decodes to the atlas: eight idle frames in the first row (frames 5 and 6
@@ -504,12 +503,12 @@ fn sim_command_lines_get_their_exact_refusal() -> Check {
         if legal {
             assert!(parsed.is_ok(), "seed {seed}: {args:?} is legal: {parsed:?}");
         } else {
-            let message = parsed
-                .map(|_| String::new())
-                .map_err(|error| error.to_string());
+            let Err(refusal) = parsed else {
+                return Err(format!("seed {seed}: {args:?} was accepted").into());
+            };
             assert_eq!(
-                message,
-                Err(format!("{USAGE} (got {:?})", to_os(&args))),
+                refusal.to_string(),
+                format!("{USAGE} (got {:?})", to_os(&args)),
                 "seed {seed}: {args:?} is refused"
             );
         }

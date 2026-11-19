@@ -13,6 +13,7 @@ use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy, TerminalDis
 use larry_contracts::state::RunState;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
+use larry_runtime::runtime::TickReport;
 
 use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, replay, work};
@@ -29,6 +30,15 @@ type SeededTally = (TerminalDisposition, (usize, usize, usize));
 /// Wrapping seed evolution, independent of any clock or scheduler.
 fn spin(seed: &mut u64) -> u64 {
     step(seed, 13_888_259_582_513_372_209, 7_225_534_248_253_489, 13)
+}
+
+/// The disposition of the first receipt `tick` published, or an error naming
+/// that it published none.
+fn first_disposition(tick: &TickReport) -> Result<TerminalDisposition, Box<dyn std::error::Error>> {
+    tick.receipts()
+        .first()
+        .map(|receipt| receipt.disposition())
+        .ok_or_else(|| "tick published no receipt".into())
 }
 
 /// Witness tally: receipts folded, owner dispatches and reconciliations seen.
@@ -61,7 +71,7 @@ fn sim_reconcile_queryable_unknown_then_success() -> Outcome {
         let tick = rt.tick()?;
         assert_eq!(tick.reconciled(), &[operation(1)], "one effect reconciled");
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::Succeeded,
             "reconcile succeeds"
         );
@@ -83,7 +93,7 @@ fn sim_reconcile_queryable_failed_is_terminal() -> Outcome {
         rt.offer(2, &work)?;
         let tick = rt.tick()?;
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::Failed,
             "failure is terminal"
         );
@@ -107,7 +117,7 @@ fn sim_reconcile_queryable_success_skips_reconcile() -> Outcome {
             "owner never status-queried"
         );
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::Succeeded,
             "success receipts at once"
         );
@@ -130,7 +140,7 @@ fn sim_reconcile_retry_succeeds_third_reach() -> Outcome {
         rt.tick()?;
         assert_state(rt.projection(), run(4), RunState::Reconciling)?;
         assert_eq!(
-            rt.tick()?.receipts()[0].disposition(),
+            first_disposition(&rt.tick()?)?,
             TerminalDisposition::Succeeded,
             "third reach succeeds"
         );
@@ -185,7 +195,7 @@ fn sim_reconcile_human_success_needs_no_reconcile() -> Outcome {
         rt.offer(6, &work)?;
         let tick = rt.tick()?;
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::Succeeded,
             "success succeeds"
         );
@@ -209,7 +219,7 @@ fn sim_reconcile_human_failed_is_terminal() -> Outcome {
         rt.offer(7, &work)?;
         let tick = rt.tick()?;
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::Failed,
             "failure fails"
         );
@@ -227,7 +237,7 @@ fn sim_reconcile_compensate_success_needs_no_compensation() -> Outcome {
         rt.offer(8, &work)?;
         let tick = rt.tick()?;
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::Succeeded,
             "success succeeds"
         );
@@ -247,7 +257,7 @@ fn sim_reconcile_compensate_failed_is_terminal() -> Outcome {
         let work = read_work(9, 1, ReconciliationStrategy::AlwaysCompensate);
         rt.offer(9, &work)?;
         assert_eq!(
-            rt.tick()?.receipts()[0].disposition(),
+            first_disposition(&rt.tick()?)?,
             TerminalDisposition::Failed,
             "failure fails under any strategy"
         );
@@ -264,7 +274,7 @@ fn sim_reconcile_compensate_unknown_is_permanent() -> Outcome {
         rt.offer(10, &work)?;
         let tick = rt.tick()?;
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::UnknownPermanent,
             "unknown closes permanent"
         );
@@ -371,7 +381,8 @@ fn sim_reconcile_seeded_strategy_terminates() -> Outcome {
         rt.tick()?;
         let receipts = rt.projection().receipts();
         assert_eq!(receipts.len(), 1, "seeded strategy terminates once");
-        let (first_d, first_t) = (receipts[0].disposition(), witness_tally(&rt));
+        let first_receipt = receipts.first().ok_or("projection holds no receipt")?;
+        let (first_d, first_t) = (first_receipt.disposition(), witness_tally(&rt));
 
         Ok((first_d, first_t))
     })
@@ -417,7 +428,7 @@ fn sim_reconcile_unknown_reconciles_after_crash() -> Outcome {
             rt.into_journal(),
         )?;
         assert_eq!(
-            restored.tick()?.receipts()[0].disposition(),
+            first_disposition(&restored.tick()?)?,
             TerminalDisposition::Succeeded,
             "post-crash reconcile succeeds"
         );

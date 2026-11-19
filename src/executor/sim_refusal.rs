@@ -32,7 +32,15 @@ fn upto(rng: &mut Seeded, bound: u64) -> Result<usize, SimError> {
 
 /// A client that never sends, whose route bound is `window` bytes.
 fn client(window: usize) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(Some(window))?, |_| false))
+    Ok(ModelClient::new(sim_config(Some(window))?, |_wait| false))
+}
+
+/// A gateway's `status` refusal carrying `detail`.
+fn client_error(status: u16, detail: &str) -> ModelError {
+    ModelError::Client {
+        status,
+        detail: detail.to_owned(),
+    }
 }
 
 /// One step a session ran: a short command and `output` bytes of stdout.
@@ -72,10 +80,6 @@ fn refusal_text(shape: usize, counted: u64, limit: u64) -> String {
 /// not one and invents nothing.
 #[test]
 fn context_overflow_is_a_413_or_a_400_naming_the_window() {
-    let client_error = |status: u16, detail: &str| ModelError::Client {
-        status,
-        detail: detail.to_owned(),
-    };
     for (detail, named) in [
         (
             "This model's maximum context length is 128000 tokens. However, your messages resulted in 130112 tokens.",
@@ -124,12 +128,25 @@ fn context_overflow_is_a_413_or_a_400_naming_the_window() {
         assert!(refusal.is_context_overflow(), "{detail}");
         assert_eq!(refusal.window(), named, "{detail}");
     }
+    // larry#295: a gateway whose `error.code` is the bare `context_length`, with or
+    // without a message, still names the window, and names no number.
+    for code_only in ["context_length", "context_length: request too large"] {
+        let refusal = client_error(400, code_only);
+        assert!(refusal.is_context_overflow(), "{code_only}");
+        assert_eq!(refusal.window(), WindowRefusal::default(), "{code_only}");
+    }
     assert!(client_error(413, "").is_context_overflow(), "413");
     assert_eq!(
         client_error(413, "too large").window(),
         WindowRefusal::default(),
         "a 413 that names no number carries none"
     );
+}
+
+/// A number no `u64` holds, or none at all, is no number: the refusal is still an
+/// overflow, and it names only what it can read.
+#[test]
+fn a_hostile_number_in_a_refusal_names_no_window() {
     for (hostile, named) in [
         (
             "maximum context length is 99999999999999999999999999 tokens",
@@ -157,8 +174,20 @@ fn context_overflow_is_a_413_or_a_400_naming_the_window() {
         assert!(refusal.is_context_overflow(), "{hostile}");
         assert_eq!(refusal.window(), named, "{hostile}");
     }
+}
+
+/// Any other refusal, the same words on a 5xx, a 401, a timeout or an oversize body is
+/// no overflow and names no window.
+#[test]
+fn a_refusal_that_is_no_overflow_names_no_window() {
     for refusal in [
         client_error(400, "temperature must be at most 1"),
+        // larry#295: a code is read only where the wire puts it, first, so a
+        // message that names a `max_context_length` parameter is no overflow.
+        client_error(
+            400,
+            "invalid_request_error: max_context_length must be positive",
+        ),
         client_error(401, "context length"),
         ModelError::Server {
             status: 500,
@@ -294,9 +323,18 @@ fn a_named_limit_shrinks_to_the_model_own_window() -> TestResult {
 /// the count for the limit, and one whose margin leaves a dense request over.
 #[test]
 fn sim_one_refusal_naming_the_limit_brings_the_next_request_under_it() -> TestResult {
+    // The product's parse of vLLM's shape, not the sim's own formatting (larry#295).
+    let vllm = ModelError::Client {
+        status: 400,
+        detail: refusal_text(3, 4_096, 4_096),
+    };
+    assert!(vllm.is_context_overflow(), "vLLM's shape is an overflow");
     assert_eq!(
-        refusal_text(3, 4_096, 4_096),
-        "This model's maximum context length is 4096 tokens.",
+        vllm.window(),
+        WindowRefusal {
+            counted: None,
+            limit: Some(4_096),
+        },
         "vLLM's shape names only the limit"
     );
     for seed in 0..SEEDS {

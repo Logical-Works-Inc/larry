@@ -23,10 +23,11 @@ mod qwen;
 #[cfg(test)]
 mod sim;
 
-/// The reranker model every receipt names.
-pub(crate) const MODEL_ID: &str = "Qwen/Qwen3-Reranker-0.6B";
-/// The pinned model revision every receipt names.
-pub(crate) const MODEL_REVISION: &str = "e61197ed45024b0ed8a2d74b80b4d909f1255473";
+/// The pinned reranker every receipt names, as data: the model id on the first line and its
+/// 40-hex revision on the second, so a re-pin edits no code (ADR 0013). [`model_pin`] reads it.
+const MODEL_PIN: &str = include_str!("rerank/model.pin");
+/// The length of a git revision in hex, the form a pinned model revision takes.
+const REVISION_HEX: usize = 40;
 /// Most candidates one request may rank.
 const MAX_CANDIDATES: usize = 256;
 /// Largest query, in bytes.
@@ -112,6 +113,8 @@ pub enum RerankError {
         /// Why it failed.
         cause: Cause,
     },
+    /// The embedded model pin is not a model id line then a 40-hex revision line.
+    Pin,
 }
 
 impl fmt::Display for RerankError {
@@ -153,7 +156,28 @@ impl fmt::Display for RerankError {
             Self::EngineFault { doing, ref cause } => {
                 write!(out, "reranker engine: {doing}: {cause}")
             }
+            Self::Pin => write!(
+                out,
+                "the model pin must be a model id line then a {REVISION_HEX}-hex revision line"
+            ),
         }
+    }
+}
+
+/// The model id and revision [`MODEL_PIN`] names, or [`RerankError::Pin`] when it is not exactly
+/// two lines, a non-empty id and a 40-hex revision.
+fn model_pin() -> Result<(&'static str, &'static str), RerankError> {
+    let mut lines = MODEL_PIN.lines();
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(model), Some(revision), None)
+            if !model.is_empty()
+                && revision.len() == REVISION_HEX
+                && revision.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Ok((model, revision))
+        }
+        // A missing line, a third line, an empty id or a revision that is not 40 hex.
+        _ => Err(RerankError::Pin),
     }
 }
 
@@ -538,10 +562,11 @@ pub(crate) fn run<S: Scorer, R: Read>(
         .take(admitted.top_k)
         .map(|&(row, score)| json::json!({"id": row.id, "score": score}))
         .collect();
+    let (model, revision) = model_pin()?;
     let receipt = json::json!({
         "phase": request.phase.as_str(),
-        "model": MODEL_ID,
-        "revision": MODEL_REVISION,
+        "model": model,
+        "revision": revision,
         "query_blake3": hash::blake3(request.query.as_bytes()).to_hex(),
         "candidates_blake3": hash::blake3(canonical(&admitted.rows)?.as_bytes()).to_hex(),
         "candidate_count": admitted.rows.len(),

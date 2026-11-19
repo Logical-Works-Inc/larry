@@ -183,8 +183,8 @@ impl ModelClient {
             .user_agent(USER_AGENT)
             .header("Authorization", format!("Bearer {}", self.config.api_key()));
         let url = format!("{}/chat/completions", self.config.base_url());
-        let response =
-            http::post_with(&url, "application/json", body, &options).map_err(map_transport)?;
+        let response = http::post_with(&url, "application/json", body, &options)
+            .map_err(|failure| map_transport(&failure))?;
         if !(200..300).contains(&response.status) {
             let retry_after = response
                 .headers()
@@ -223,8 +223,8 @@ fn retry_after_wait(refusal: &ModelError) -> Option<Duration> {
 }
 
 /// Fold an `lgwks_std::http` failure into this module's typed error.
-fn map_transport(error: HttpError) -> ModelError {
-    match error {
+fn map_transport(error: &HttpError) -> ModelError {
+    match *error {
         HttpError::BodyTooLarge { .. } => ModelError::BodyTooLarge,
         HttpError::Failure {
             kind: FailureKind::Timeout,

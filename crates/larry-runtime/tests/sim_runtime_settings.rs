@@ -1,11 +1,13 @@
 //! larry#212: every bound is a setting, and the runtime answers for the one it
 //! was built with.
 //!
-//! Three deterministic simulations, each driving the real [`Runtime`] through
-//! its public surface: a host that sets 4,096 runs fills 2,000 and restores
-//! all of them after a simulated kill, a payload exactly at the byte ceiling is
-//! admitted while one byte past it is refused, and every bad setting value is
-//! refused by name before the runtime is built. No wall clock and no unseeded
+//! Deterministic simulations, each driving the real [`Runtime`] through its
+//! public surface: a host that sets 4,096 runs fills 2,000 and restores all of
+//! them after a simulated kill, a payload exactly at the byte ceiling is
+//! admitted while one byte past it is refused, the protocol range and the skew
+//! bound come from the settings, and every bad setting value, a question
+//! ceiling past 256 included (larry#295), is refused by name before the runtime
+//! is built. No wall clock and no unseeded
 //! randomness: identities, instants and the lease all come from the fixture's
 //! pinned epoch, so each trace replays identically.
 
@@ -37,6 +39,7 @@ use support::{TestRuntime, clock, proposal, settings, submit, tenant};
 const DECLARED_MAX_GRANTS: usize = 64;
 const DECLARED_MAX_SKEW: Duration = Duration::from_secs(60);
 const DECLARED_MAX_LEASE: Duration = Duration::from_secs(3_600);
+const DECLARED_MAX_QUESTIONS: usize = 256;
 
 /// Fallible test outcome; setup failures propagate instead of panicking.
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -295,17 +298,24 @@ fn sim_the_skew_bound_is_pinned_into_every_decisions_validity() -> Outcome {
 type BadCase = (&'static str, fn(&mut RuntimeSettings));
 
 /// Every setting whose value its meaning refuses is refused by name, before a
-/// runtime exists to enforce it: zero capacities, a grant bound above the
-/// declared work bound, a payload ceiling above the hashed-field bound, a skew
-/// or lease past its maximum, and a protocol range that is not a range.
+/// runtime exists to enforce it: zero capacities, a question bound above its
+/// declared ceiling (larry#295), a grant bound above the declared work bound, a
+/// payload ceiling above the hashed-field bound, a skew or lease past its
+/// maximum, and a protocol range that is not a range.
 #[test]
 fn sim_every_bad_setting_value_is_refused_by_name() -> Outcome {
     let good = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
-    let cases: [BadCase; 13] = [
+    let mut at_ceiling = good.clone();
+    at_ceiling.max_pending_questions = DECLARED_MAX_QUESTIONS;
+    Runtime::<FoldProjection, ScriptedOwner>::new(at_ceiling, ScriptedOwner::new(), clock()?)?;
+    let cases: [BadCase; 14] = [
         ("journal_capacity", |settings| settings.journal_capacity = 0),
         ("run_capacity", |settings| settings.run_capacity = 0),
         ("max_pending_questions", |settings| {
             settings.max_pending_questions = 0;
+        }),
+        ("max_pending_questions", |settings| {
+            settings.max_pending_questions = DECLARED_MAX_QUESTIONS + 1;
         }),
         ("max_grants", |settings| settings.max_grants = 0),
         ("max_grants", |settings| {
@@ -339,6 +349,20 @@ fn sim_every_bad_setting_value_is_refused_by_name() -> Outcome {
     }
     // A restore validates the same way: a bad ceiling is refused before the
     // recorded history is read, not after it.
+    let mut bad_questions = good.clone();
+    bad_questions.max_pending_questions = usize::MAX;
+    match restore::<FoldProjection, ScriptedOwner>(
+        bad_questions,
+        ScriptedOwner::new(),
+        clock()?,
+        Journal::new(4)?,
+    ) {
+        Err(RuntimeError::BadSetting { name, .. }) => {
+            assert_eq!(name, "max_pending_questions", "restore caps the questions");
+        }
+        Err(other) => return Err(format!("expected BadSetting from restore, got {other}").into()),
+        Ok(_) => return Err("restore accepted an unbounded question ceiling".into()),
+    }
     let mut bad = good;
     bad.run_capacity = 0;
     match restore::<FoldProjection, ScriptedOwner>(

@@ -9,6 +9,12 @@
 //! case drives the real process through its public interface, against the
 //! seeded mock model endpoint, so no test makes a paid model call.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
+#[path = "mcp_stdio_journey/accepted.rs"]
+mod accepted;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 mod mcp_support;
@@ -19,7 +25,8 @@ mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
 
-use lgwks_std::json::{self, Value, json};
+use accepted::{check_accepted, check_model_side};
+use lgwks_std::json::{Value, json};
 use mcp_support::{Rng, Session, TestResult};
 use mcp_task::{briefed, connected, operator, submit, verify_offline};
 use mock_model::{Config, Fault, Handle};
@@ -43,7 +50,11 @@ fn task() -> Value {
 fn ready() -> TestResult<Session> {
     let mut session = Session::start()?;
     let reply = session.initialize()?;
-    assert_eq!(reply["id"], 0, "initialize reply carries the request id");
+    assert_eq!(
+        *reply.at("/id")?,
+        0,
+        "initialize reply carries the request id"
+    );
     Ok(session)
 }
 
@@ -53,57 +64,74 @@ fn full_lifecycle_ends_with_exit_code_zero() -> TestResult<()> {
     let mut session = Session::start()?;
     let init = session.initialize()?;
     assert_eq!(
-        init["result"]["protocolVersion"], "2025-06-18",
+        *init.at("/result/protocolVersion")?,
+        "2025-06-18",
         "version negotiated"
     );
     assert_eq!(
-        init["result"]["serverInfo"]["name"], "larry",
+        *init.at("/result/serverInfo/name")?,
+        "larry",
         "server identity"
     );
     assert_eq!(
-        init["result"]["capabilities"]["tools"]["listChanged"], false,
+        *init.at("/result/capabilities/tools/listChanged")?,
+        false,
         "tools declared, static"
     );
 
     let list = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))?;
     assert_eq!(
-        list["result"]["tools"][0]["name"], "larry_submit_task",
+        *list.at("/result/tools/0/name")?,
+        "larry_submit_task",
         "the one tool"
     );
     assert_eq!(
-        list["result"]["tools"][0]["inputSchema"]["additionalProperties"], false,
+        *list.at("/result/tools/0/inputSchema/additionalProperties")?,
+        false,
         "schema is closed"
     );
 
     let refused = session.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
         "params":{"name":"larry_submit_task","arguments":task()}}))?;
-    assert_eq!(refused["result"]["isError"], true, "never a fake success");
     assert_eq!(
-        refused["result"]["structuredContent"]["error"]["code"], "executor_not_connected",
+        *refused.at("/result/isError")?,
+        true,
+        "never a fake success"
+    );
+    assert_eq!(
+        *refused.at("/result/structuredContent/error/code")?,
+        "executor_not_connected",
         "typed refusal while the executor is absent"
     );
 
     let invalid = session.request(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"larry_submit_task","arguments":{"goal":"x"}}}))?;
     assert_eq!(
-        invalid["result"]["structuredContent"]["error"]["code"], "invalid_arguments",
+        *invalid.at("/result/structuredContent/error/code")?,
+        "invalid_arguments",
         "a malformed task is a tool error, not a protocol error"
     );
 
     let unknown_tool = session.request(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
         "params":{"name":"nope","arguments":{}}}))?;
     assert_eq!(
-        unknown_tool["error"]["code"], -32602,
+        *unknown_tool.at("/error/code")?,
+        -32602,
         "unknown tool is invalid params"
     );
 
     let ping = session.request(&json!({"jsonrpc":"2.0","id":"p","method":"ping"}))?;
-    assert_eq!(ping["result"], json!({}), "ping answers an empty result");
-    assert_eq!(ping["id"], "p", "string ids round-trip");
+    assert_eq!(
+        *ping.at("/result")?,
+        json!({}),
+        "ping answers an empty result"
+    );
+    assert_eq!(*ping.at("/id")?, "p", "string ids round-trip");
 
     let unknown = session.request(&json!({"jsonrpc":"2.0","id":6,"method":"resources/list"}))?;
     assert_eq!(
-        unknown["error"]["code"], -32601,
+        *unknown.at("/error/code")?,
+        -32601,
         "unadvertised method is not found"
     );
 
@@ -119,26 +147,35 @@ fn requests_before_initialize_are_refused_and_initialize_is_once() -> TestResult
     let mut session = Session::start()?;
     let early = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))?;
     assert_eq!(
-        early["error"]["code"], -32602,
+        *early.at("/error/code")?,
+        -32602,
         "tools/list before initialize, without _meta"
     );
     let call = session.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
         "params":{"name":"larry_submit_task","arguments":task()}}))?;
     assert_eq!(
-        call["error"]["code"], -32602,
+        *call.at("/error/code")?,
+        -32602,
         "tools/call before initialize, without _meta"
     );
     let ping = session.request(&json!({"jsonrpc":"2.0","id":3,"method":"ping"}))?;
-    assert_eq!(ping["result"], json!({}), "ping is allowed at any time");
+    assert_eq!(
+        *ping.at("/result")?,
+        json!({}),
+        "ping is allowed at any time"
+    );
     let init = session.initialize()?;
     assert!(
-        init["result"].as_object().is_some(),
+        init.member("/result")
+            .and_then(|found| found.as_object())
+            .is_some(),
         "initialize still works after refusals"
     );
     let again = session.request(&json!({"jsonrpc":"2.0","id":9,"method":"initialize",
         "params":{"protocolVersion":"2025-06-18"}}))?;
     assert_eq!(
-        again["error"]["code"], -32600,
+        *again.at("/error/code")?,
+        -32600,
         "a second initialize is refused"
     );
     assert_eq!(session.finish()?.code(), Some(0), "clean exit");
@@ -158,7 +195,8 @@ fn version_negotiation_echoes_known_and_offers_newest_otherwise() -> TestResult<
         let reply = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize",
             "params":{"protocolVersion":asked,"capabilities":{},"clientInfo":{"name":"t","version":"0"}}}))?;
         assert_eq!(
-            reply["result"]["protocolVersion"], answered,
+            *reply.at("/result/protocolVersion")?,
+            answered,
             "asked {asked}"
         );
         assert_eq!(session.finish()?.code(), Some(0), "clean exit");
@@ -166,7 +204,11 @@ fn version_negotiation_echoes_known_and_offers_newest_otherwise() -> TestResult<
     let mut session = Session::start()?;
     let bad =
         session.request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))?;
-    assert_eq!(bad["error"]["code"], -32602, "protocolVersion is required");
+    assert_eq!(
+        *bad.at("/error/code")?,
+        -32602,
+        "protocolVersion is required"
+    );
     Ok(())
 }
 
@@ -184,38 +226,44 @@ fn stateless_journey_needs_no_handshake_and_ends_with_exit_code_zero() -> TestRe
     let refused = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"larry_submit_task","arguments":task(),"_meta":meta("2026-07-28")}}))?;
     assert_eq!(
-        refused["result"]["resultType"], "complete",
+        *refused.at("/result/resultType")?,
+        "complete",
         "resultType on a tool result"
     );
     assert_eq!(
-        refused["result"]["structuredContent"]["error"]["code"], "executor_not_connected",
+        *refused.at("/result/structuredContent/error/code")?,
+        "executor_not_connected",
         "the first request of the process is served, typed refusal intact"
     );
     let found = session.request(&json!({"jsonrpc":"2.0","id":2,"method":"server/discover",
         "params":{"_meta":meta("2026-07-28")}}))?;
     assert_eq!(
-        found["result"]["supportedVersions"][0], "2026-07-28",
+        *found.at("/result/supportedVersions/0")?,
+        "2026-07-28",
         "newest first"
     );
     assert_eq!(
-        found["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "larry",
+        *found.at("/result/_meta/io.modelcontextprotocol~1serverInfo/name")?,
+        "larry",
         "identity in result _meta"
     );
     let list = session.request(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list",
         "params":{"_meta":meta("2026-07-28")}}))?;
     assert_eq!(
-        list["result"]["tools"][0]["name"], "larry_submit_task",
+        *list.at("/result/tools/0/name")?,
+        "larry_submit_task",
         "the one tool"
     );
-    assert_eq!(list["result"]["cacheScope"], "public", "cache scope");
+    assert_eq!(*list.at("/result/cacheScope")?, "public", "cache scope");
     let ping = session.request(&json!({"jsonrpc":"2.0","id":4,"method":"ping",
         "params":{"_meta":meta("2026-07-28")}}))?;
-    assert_eq!(ping["error"]["code"], -32601, "ping is removed");
+    assert_eq!(*ping.at("/error/code")?, -32601, "ping is removed");
     let old = session.request(&json!({"jsonrpc":"2.0","id":5,"method":"tools/list",
         "params":{"_meta":meta("1900-01-01")}}))?;
-    assert_eq!(old["error"]["code"], -32022, "unsupported version");
+    assert_eq!(*old.at("/error/code")?, -32022, "unsupported version");
     assert_eq!(
-        old["error"]["data"]["supported"][0], "2026-07-28",
+        *old.at("/error/data/supported/0")?,
+        "2026-07-28",
         "the supported list names the newest first"
     );
     assert_eq!(session.finish()?.code(), Some(0), "clean exit");
@@ -228,22 +276,22 @@ fn malformed_line_gets_parse_error_and_the_server_keeps_serving() -> TestResult<
     let mut session = ready()?;
     session.send(b"{this is not json")?;
     let error = session.recv()?;
-    assert_eq!(error["error"]["code"], -32700, "parse error");
-    assert_eq!(error["id"], Value::Null, "id unknown");
+    assert_eq!(*error.at("/error/code")?, -32700, "parse error");
+    assert!(error.member("/id").is_none(), "id unknown");
     session.send(b"[1,2,3]")?;
     assert_eq!(
-        session.recv()?["error"]["code"],
+        *session.recv()?.at("/error/code")?,
         -32600,
         "batches are refused"
     );
     session.send(&[0xff, 0xfe, 0x7b])?;
     assert_eq!(
-        session.recv()?["error"]["code"],
+        *session.recv()?.at("/error/code")?,
         -32700,
         "invalid UTF-8 is a parse error"
     );
     let ping = session.request(&json!({"jsonrpc":"2.0","id":5,"method":"ping"}))?;
-    assert_eq!(ping["id"], 5, "still serving");
+    assert_eq!(*ping.at("/id")?, 5, "still serving");
     assert_eq!(session.finish()?.code(), Some(0), "clean exit");
     Ok(())
 }
@@ -255,10 +303,14 @@ fn oversized_frame_is_refused_and_the_server_keeps_serving() -> TestResult<()> {
     let huge = vec![b'x'; 1024 * 1024 + 1];
     session.send(&huge)?;
     let error = session.recv()?;
-    assert_eq!(error["error"]["code"], -32600, "oversized frame refused");
-    assert_eq!(error["id"], Value::Null, "id unknown");
+    assert_eq!(*error.at("/error/code")?, -32600, "oversized frame refused");
+    assert!(error.member("/id").is_none(), "id unknown");
     let ping = session.request(&json!({"jsonrpc":"2.0","id":8,"method":"ping"}))?;
-    assert_eq!(ping["id"], 8, "framing recovered after the discarded line");
+    assert_eq!(
+        *ping.at("/id")?,
+        8,
+        "framing recovered after the discarded line"
+    );
     assert_eq!(session.finish()?.code(), Some(0), "clean exit");
     Ok(())
 }
@@ -278,7 +330,7 @@ fn replies_are_single_lines_and_an_unterminated_last_frame_is_served() -> TestRe
     session.send_raw(br#"{"jsonrpc":"2.0","id":11,"method":"ping"}"#)?;
     session.close_stdin();
     assert_eq!(
-        session.recv()?["id"],
+        *session.recv()?.at("/id")?,
         11,
         "the final unterminated frame is answered"
     );
@@ -300,7 +352,8 @@ fn kill_dash_nine_then_restart_serves_a_fresh_session() -> TestResult<()> {
     let mut first = ready()?;
     let ping = first.request(&json!({"jsonrpc":"2.0","id":id,"method":"ping"}))?;
     assert_eq!(
-        ping["id"], id,
+        *ping.at("/id")?,
+        id,
         "served before the kill (salt {salt}, lane {lane})"
     );
     let status = first.kill()?;
@@ -308,7 +361,8 @@ fn kill_dash_nine_then_restart_serves_a_fresh_session() -> TestResult<()> {
     let mut second = ready()?;
     let list = second.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))?;
     assert_eq!(
-        list["result"]["tools"][0]["name"], "larry_submit_task",
+        *list.at("/result/tools/0/name")?,
+        "larry_submit_task",
         "fresh session serves"
     );
     assert_eq!(second.finish()?.code(), Some(0), "clean exit");
@@ -354,7 +408,8 @@ fn tools_list_latency_is_reported_and_bounded() -> TestResult<()> {
         let reply = session.request(&json!({"jsonrpc":"2.0","id":index,"method":"tools/list"}))?;
         micros.push(started.elapsed().as_micros());
         assert_eq!(
-            reply["result"]["tools"][0]["name"], "larry_submit_task",
+            *reply.at("/result/tools/0/name")?,
+            "larry_submit_task",
             "call {index}"
         );
     }
@@ -400,67 +455,9 @@ fn accepted_run(seed: u64, state: &Path) -> TestResult<Run> {
         let started = Instant::now();
         let result = submit(&mut session, &task)?;
         let took = started.elapsed();
-        assert_eq!(
-            result["isError"], false,
-            "seed {seed}: accepted is a success: {result}"
-        );
-        let structured = &result["structuredContent"];
-        assert_eq!(structured["accepted"], true, "seed {seed}: the verdict");
-        let text = result["content"][0]["text"]
-            .as_str()
-            .ok_or("a text block")?;
-        assert_eq!(
-            &json::from_str::<Value>(text)?,
-            structured,
-            "the text block is the structured content"
-        );
-        let report = &structured["report"];
-        let diff = report["diff"].as_str().ok_or("a sealed diff")?.to_owned();
-        assert!(
-            diff.contains("-origin readme"),
-            "seed {seed}: README was rewritten: {diff}"
-        );
-        assert!(
-            diff.contains("+++ b/src/new.rs"),
-            "seed {seed}: src/new.rs was written"
-        );
-        assert_eq!(
-            report["authored"][0]["path"], "README",
-            "seed {seed}: README is recorded"
-        );
-        assert_eq!(
-            report["authored"][0]["existed"], true,
-            "seed {seed}: README existed"
-        );
-        assert_eq!(
-            report["authored"][1]["existed"], false,
-            "seed {seed}: src/new.rs is new"
-        );
-        for index in 0..2 {
-            assert_eq!(
-                report["results"][index]["exit_code"], 0,
-                "seed {seed}: command {index} saw the files"
-            );
-        }
-        assert_eq!(handle.served(), 2, "seed {seed}: one completion per file");
-        let first: Value = json::from_slice(handle.requests().first().ok_or("a model request")?)?;
-        let turn = first["messages"][1]["content"]
-            .as_str()
-            .ok_or("a user turn")?;
-        assert!(
-            turn.contains("replace the readme")
-                && turn.contains("=== README ===")
-                && turn.contains("origin readme")
-                && turn.ends_with("Write this file now: README"),
-            "seed {seed}: the goal, the files and the file to write reached the model: {turn}"
-        );
-        assert!(
-            handle
-                .authorizations()
-                .iter()
-                .all(|sent| sent.as_deref() == Some("Bearer mcp-key")),
-            "seed {seed}: the operator's key, and only it, reached the gateway"
-        );
+        let diff = check_accepted(seed, &result)?;
+        check_model_side(seed, handle)?;
+        let report = result.at("/structuredContent/report")?;
         let (code, verdict) = verify_offline(state, report)?;
         assert_eq!(
             code,
@@ -468,7 +465,8 @@ fn accepted_run(seed: u64, state: &Path) -> TestResult<Run> {
             "seed {seed}: the receipt verifies offline as accepted"
         );
         assert_eq!(
-            verdict["task_id"], report["task_id"],
+            *verdict.at("/task_id")?,
+            *report.at("/task_id")?,
             "seed {seed}: the verdict names the task"
         );
         assert_eq!(session.finish()?.code(), Some(0), "clean exit");
@@ -519,7 +517,7 @@ fn failure_of(result: &Value) -> TestResult<(String, String)> {
         result["isError"], true,
         "a failure is never a success: {result}"
     );
-    let error = &result["structuredContent"]["error"];
+    let error = result.at("/structuredContent/error")?;
     let code = error["code"].as_str().ok_or("an error code")?.to_owned();
     let message = error["message"]
         .as_str()
@@ -556,7 +554,7 @@ fn refused_with(
             let result = submit(&mut session, task)?;
             handle.release_delayed();
             assert!(
-                result["structuredContent"].get("report").is_none(),
+                result.at("/structuredContent")?.get("report").is_none(),
                 "a refusal seals nothing: {result}"
             );
             let (code, message) = failure_of(&result)?;
@@ -570,6 +568,43 @@ fn refused_with(
         "a refused task leaves no workspace behind"
     );
     Ok(outcome)
+}
+
+/// A gateway that answers 502, rate-limits, refuses with 401 or never answers refuses `task`
+/// with the planner told why, no terminal control in the reason, and one attempt made.
+fn every_model_fault_refuses_the_task(task: &Value) -> TestResult<()> {
+    let once = [("LARRY_MODEL_ATTEMPTS", "1")];
+    let faults = [
+        (Fault::ServerError { status: 502 }, "status 502"),
+        (
+            Fault::RateLimit {
+                retry_after_secs: 30,
+            },
+            "retry after 30s",
+        ),
+        (Fault::HostileRefusal { status: 401 }, "status 401"),
+    ];
+    for (fault, needle) in faults {
+        let (code, message, served) = refused_with(task, vec![Some(fault)], &once)?;
+        assert_eq!(code, "task_refused", "{fault:?} refuses the task");
+        assert!(
+            message.contains(needle),
+            "{fault:?}: the planner sees why: {message:.160}"
+        );
+        assert!(
+            !message.chars().any(char::is_control),
+            "{fault:?}: no terminal control reaches the planner"
+        );
+        assert_eq!(served, 1, "{fault:?}: one attempt was configured");
+    }
+    let slow = [("LARRY_MODEL_TIMEOUT_MS", "200")];
+    let (code, message, _) = refused_with(task, vec![Some(Fault::Delay)], &slow)?;
+    assert_eq!(
+        (code.as_str(), message.contains("timed out")),
+        ("task_refused", true),
+        "{message}"
+    );
+    Ok(())
 }
 
 /// larry#123, forge#158: a rejected run, every model fault, a symlink escape, a
@@ -586,7 +621,7 @@ fn a_rejected_or_refused_task_is_a_failed_tool_result_never_success() -> TestRes
     })?;
     let (code, _) = failure_of(&rejected)?;
     assert_eq!(code, "task_rejected", "a failing command is a rejected run");
-    let report = &rejected["structuredContent"]["report"];
+    let report = rejected.at("/structuredContent/report")?;
     assert_eq!(report["accepted"], false, "sealed as rejected");
     assert_eq!(
         verify_offline(state.path(), report)?.0,
@@ -595,37 +630,7 @@ fn a_rejected_or_refused_task_is_a_failed_tool_result_never_success() -> TestRes
     );
 
     let task = briefed(origin.path(), &files, &["true"]);
-    let once = [("LARRY_MODEL_ATTEMPTS", "1")];
-    let faults = [
-        (Fault::ServerError { status: 502 }, "status 502"),
-        (
-            Fault::RateLimit {
-                retry_after_secs: 30,
-            },
-            "retry after 30s",
-        ),
-        (Fault::HostileRefusal { status: 401 }, "status 401"),
-    ];
-    for (fault, needle) in faults {
-        let (code, message, served) = refused_with(&task, vec![Some(fault)], &once)?;
-        assert_eq!(code, "task_refused", "{fault:?} refuses the task");
-        assert!(
-            message.contains(needle),
-            "{fault:?}: the planner sees why: {message:.160}"
-        );
-        assert!(
-            !message.chars().any(char::is_control),
-            "{fault:?}: no terminal control reaches the planner"
-        );
-        assert_eq!(served, 1, "{fault:?}: one attempt was configured");
-    }
-    let slow = [("LARRY_MODEL_TIMEOUT_MS", "200")];
-    let (code, message, _) = refused_with(&task, vec![Some(Fault::Delay)], &slow)?;
-    assert_eq!(
-        (code.as_str(), message.contains("timed out")),
-        ("task_refused", true),
-        "{message}"
-    );
+    every_model_fault_refuses_the_task(&task)?;
 
     // A zero-wait retry goes ahead, and a padded OpenRouter reply still parses.
     let flaky = Config {
@@ -640,7 +645,8 @@ fn a_rejected_or_refused_task_is_a_failed_tool_result_never_success() -> TestRes
         let mut session = connected(&operator(retried.path(), handle.addr(), &[]))?;
         let result = submit(&mut session, &task)?;
         assert_eq!(
-            result["isError"], false,
+            *result.at("/isError")?,
+            false,
             "a 503 then a padded reply is accepted: {result}"
         );
         assert_eq!(handle.served(), 2, "the 503 was retried once");
@@ -702,13 +708,19 @@ fn submit_task_names_its_acceptance_form() -> TestResult<()> {
         "files": ["src/retry.rs"],
         "acceptance": "run"
     }}}))?;
-    let result = &reply["result"];
-    assert_eq!(result["isError"], true, "a refusal is never a success");
+    let result = reply.at("/result")?;
     assert_eq!(
-        result["structuredContent"]["error"]["code"], "invalid_arguments",
+        *result.at("/isError")?,
+        true,
+        "a refusal is never a success"
+    );
+    assert_eq!(
+        *result.at("/structuredContent/error/code")?,
+        "invalid_arguments",
         "the refusal keeps its typed code"
     );
-    let message = result["structuredContent"]["error"]["message"]
+    let message = result
+        .at("/structuredContent/error/message")?
         .as_str()
         .ok_or("the refusal carries a message")?;
     assert!(

@@ -141,11 +141,12 @@ impl RuntimeSettings {
     pub(super) fn validate(&self) -> Result<(), RuntimeError> {
         in_range("journal_capacity", self.journal_capacity, 1, usize::MAX)?;
         in_range("run_capacity", self.run_capacity, 1, usize::MAX)?;
+        // The declared ceiling binds: a host past it is told, as for `max_grants` (larry#295).
         in_range(
             "max_pending_questions",
             self.max_pending_questions,
             1,
-            usize::MAX,
+            MAX_PENDING_QUESTIONS,
         )?;
         in_range("max_grants", self.max_grants, 1, MAX_DISPLAY_GRANTS)?;
         in_range(

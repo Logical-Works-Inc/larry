@@ -11,9 +11,14 @@
 //! document is a typed refusal before any store or gateway is asked. Every
 //! actor is a fool: a neighbour, a typo, a saboteur who writes escape bytes.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/route_cli.rs"]
 mod route_cli;
 
+use std::path::Path;
 use std::sync::Barrier;
 
 use larry_demo::executor::routes::RouteCliError;
@@ -35,7 +40,7 @@ fn expected_route(
     match named {
         Some(id) if included.contains(&id) => Ok(id.to_owned()),
         Some("env") if env_declared => Ok(String::from("env")),
-        Some(id) => Err(RouteError::Unknown { id: id.to_owned() }),
+        Some(id) => Err(RouteError::NoSuchId { id: id.to_owned() }),
         None => match default {
             Some(id) => Ok(id.to_owned()),
             None if env_declared => Ok(String::from("env")),
@@ -94,7 +99,7 @@ fn sim_resolver_order_holds_for_every_generated_table() -> TestResult {
             let got = route_run(state.path(), &env, &args);
             match (got, expected_route(&included, default, env_declared, named)) {
                 (Ok(text), Ok(id)) => assert_eq!(
-                    parse(&text)?["id"].as_str(),
+                    parse(&text)?.at("/id")?.as_str(),
                     Some(id.as_str()),
                     "seed {seed} named {named:?}"
                 ),
@@ -128,7 +133,7 @@ fn sim_a_poisoned_environment_fails_only_what_needs_it() -> TestResult {
     ];
     let text = route_run(state.path(), &poisoned, &["resolve"])?;
     assert_eq!(
-        parse(&text)?["id"].as_str(),
+        parse(&text)?.at("/id")?.as_str(),
         Some("alpha"),
         "the stored default answers"
     );
@@ -149,6 +154,38 @@ type Truth = (&'static str, &'static str, &'static str);
 /// One tenant's cases: the name asked for (empty for none) and the truth, or
 /// `None` when the name must be unknown to this tenant.
 type Cases = [(&'static str, Option<Truth>); 4];
+
+/// One tenant's 64 seeded `resolve` steps against its state directory `state`: every answer
+/// must be `truth`'s for the name asked, and a name the tenant lacks must be unknown.
+fn hammer(seed: u64, state: &Path, truth: &Cases) -> Result<(), String> {
+    let mut rng = Seeded::from_seed(seed);
+    for step in 0..64_u32 {
+        let pick = rng.below(4).map_err(|error| error.to_string())?;
+        let index = usize::try_from(pick).map_err(|error| error.to_string())?;
+        let entry = truth.get(index).ok_or("a case")?;
+        let name = entry.0;
+        let args: Vec<&str> = if name.is_empty() {
+            vec!["resolve"]
+        } else {
+            vec!["resolve", name]
+        };
+        match (route_run(state, &[], &args), entry.1.as_ref()) {
+            (Ok(text), Some(expect)) => {
+                let value = parse(&text).map_err(|error| error.to_string())?;
+                let member = |pointer: &str| -> Option<&str> { value.member(pointer)?.as_str() };
+                let got = (member("/model"), member("/host"), member("/residency"));
+                if got != (Some(expect.0), Some(expect.1), Some(expect.2)) {
+                    return Err(format!("seed {seed} step {step} {name}: got {got:?}"));
+                }
+            }
+            (Err(RouteCliError::Route(RouteError::NoSuchId { .. })), None) => {}
+            (other, _) => {
+                return Err(format!("seed {seed} step {step} {name}: {other:?}"));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Multi-tenant, the neighbour: two state directories each hold a route
 /// `shared` with different models, hosts and residencies, plus one route of
@@ -207,36 +244,7 @@ fn sim_two_tenants_resolve_only_their_own_routes() -> TestResult {
             let barrier = &barrier;
             handles.push(scope.spawn(move || -> Result<(), String> {
                 barrier.wait();
-                let mut rng = Seeded::from_seed(seed);
-                for step in 0..64_u32 {
-                    let pick = rng.below(4).map_err(|error| error.to_string())?;
-                    let index = usize::try_from(pick).map_err(|error| error.to_string())?;
-                    let entry = truth.get(index).ok_or("a case")?;
-                    let name = entry.0;
-                    let args: Vec<&str> = if name.is_empty() {
-                        vec!["resolve"]
-                    } else {
-                        vec!["resolve", name]
-                    };
-                    match (route_run(state, &[], &args), entry.1.as_ref()) {
-                        (Ok(text), Some(expect)) => {
-                            let value = parse(&text).map_err(|error| error.to_string())?;
-                            let got = (
-                                value["model"].as_str(),
-                                value["host"].as_str(),
-                                value["residency"].as_str(),
-                            );
-                            if got != (Some(expect.0), Some(expect.1), Some(expect.2)) {
-                                return Err(format!("seed {seed} step {step} {name}: got {got:?}"));
-                            }
-                        }
-                        (Err(RouteCliError::Route(RouteError::Unknown { .. })), None) => {}
-                        (other, _) => {
-                            return Err(format!("seed {seed} step {step} {name}: {other:?}"));
-                        }
-                    }
-                }
-                Ok(())
+                hammer(seed, state, truth)
             }));
         }
         for handle in handles {
@@ -247,14 +255,14 @@ fn sim_two_tenants_resolve_only_their_own_routes() -> TestResult {
     route_run(one.path(), &[], &["remove", "shared"])?;
     let still = parse(&route_run(two.path(), &[], &["resolve", "shared"])?)?;
     assert_eq!(
-        still["model"].as_str(),
+        still.at("/model")?.as_str(),
         Some("two-shared"),
         "tenant two keeps its shared route"
     );
     assert!(
         matches!(
             route_run(one.path(), &[], &["resolve", "shared"]),
-            Err(RouteCliError::Route(RouteError::Unknown { .. }))
+            Err(RouteCliError::Route(RouteError::NoSuchId { .. }))
         ),
         "tenant one lost its own"
     );

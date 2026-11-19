@@ -568,7 +568,7 @@ fn sim_a_non_utf8_source_name_is_refused() -> SimResult {
 /// The refusal on every host (larry#316): the entry name the walk reads is refused as not UTF-8,
 /// while a UTF-8 name is returned as it is.
 #[test]
-fn sim_a_non_utf8_entry_name_is_refused_on_every_host() -> SimResult {
+fn sim_a_non_utf8_entry_name_is_refused_on_every_host() {
     use std::os::unix::ffi::OsStringExt as _;
 
     let bad = std::path::PathBuf::from(std::ffi::OsString::from_vec(BAD_NAME.to_vec()));
@@ -583,7 +583,6 @@ fn sim_a_non_utf8_entry_name_is_refused_on_every_host() -> SimResult {
         Ok("good.rs"),
         "a UTF-8 name passes through"
     );
-    Ok(())
 }
 
 /// The worker-count proof (larry#316): one tree checked on 1, 0, 2, 3, 8 and the host's own lane

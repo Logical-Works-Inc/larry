@@ -349,15 +349,15 @@ impl State {
         let Ok(body) = json::from_slice::<Value>(&request.body) else {
             return reject(400, "request body is not JSON");
         };
-        let Some(model) = body["model"].as_str() else {
+        let Some(model) = body.get("model").and_then(Value::as_str) else {
             return reject(400, "model is required");
         };
-        match body["messages"].as_array() {
+        match body.get("messages").and_then(Value::as_array) {
             None => return reject(400, "messages is required"),
             Some(messages) if messages.is_empty() => return reject(400, "messages is empty"),
             Some(_) => {}
         }
-        if body["stream"].as_bool() == Some(true) {
+        if body.get("stream").and_then(Value::as_bool) == Some(true) {
             return reject(400, "streaming is not supported");
         }
         let scripted = self.config.contents.get(usize::try_from(index)?);
@@ -491,8 +491,22 @@ fn handle(state: &State, mut stream: TcpStream, admitted: bool) {
             }
         }
         Err(Refusal::Head) => reply(&mut stream, 400, "malformed request head"),
+        Err(Refusal::Text(ref cause)) => {
+            reply(
+                &mut stream,
+                400,
+                &format!("malformed request head: {cause}"),
+            );
+        }
+        Err(Refusal::Length(ref cause)) => {
+            reply(
+                &mut stream,
+                400,
+                &format!("malformed request head: {cause}"),
+            );
+        }
         Err(Refusal::LengthRequired) => reply(&mut stream, 411, "Content-Length is required"),
-        Err(Refusal::Closed | Refusal::Io) => {}
+        Err(Refusal::Closed | Refusal::Io(..)) => {}
     }
     settle(stream.shutdown(Shutdown::Both));
 }
