@@ -29,11 +29,11 @@ const SEEDS: u64 = 64;
 const CACHE_SEEDS: u64 = 256;
 
 /// The document `{goal, files}` as a map.
-fn document(goal: &Value, files: &Value) -> Result<Map, SimError> {
+fn document(goal: &Value, files: &Value) -> Map {
     let mut map = Map::new();
     map.insert("goal".to_owned(), goal.clone());
     map.insert("files".to_owned(), files.clone());
-    Ok(map)
+    map
 }
 
 /// A seeded valid path: one to four lowercase components.
@@ -71,7 +71,7 @@ fn sim_valid_briefs_roundtrip_for_every_seed() -> TestResult {
             files.push(path);
         }
         let goal = format!("goal {seed}");
-        let brief = Brief::parse(&document(&json!(goal), &json!(files))?)?
+        let brief = Brief::parse(&document(&json!(goal), &json!(files)))?
             .ok_or("a goal and files make a brief")?;
         assert_eq!(brief.goal, goal, "seed {seed}: the goal reads back");
         assert_eq!(
@@ -98,31 +98,31 @@ fn sim_malformed_briefs_get_their_exact_error_for_every_seed() -> TestResult {
             Err(TaskError::IncompleteBrief)
         ));
         assert!(matches!(
-            Brief::parse(&document(&json!(7), &json!([good]))?),
+            Brief::parse(&document(&json!(7), &json!([good]))),
             Err(TaskError::WrongType { key: "goal" })
         ));
         for bad_goal in ["", "  \n", "a\0b"] {
             assert!(matches!(
-                Brief::parse(&document(&json!(bad_goal), &json!([good]))?),
+                Brief::parse(&document(&json!(bad_goal), &json!([good]))),
                 Err(TaskError::BadGoal)
             ));
         }
         let long_goal = "g".repeat(MAX_GOAL_BYTES.saturating_add(1));
         assert!(matches!(
-            Brief::parse(&document(&json!(long_goal), &json!([good]))?),
+            Brief::parse(&document(&json!(long_goal), &json!([good]))),
             Err(TaskError::BadGoal)
         ));
         assert!(matches!(
-            Brief::parse(&document(&goal, &json!("README"))?),
+            Brief::parse(&document(&goal, &json!("README"))),
             Err(TaskError::WrongType { key: "files" })
         ));
         assert!(matches!(
-            Brief::parse(&document(&goal, &json!([]))?),
+            Brief::parse(&document(&goal, &json!([]))),
             Err(TaskError::FileCount { count: 0 })
         ));
         let too_many: Vec<String> = (0..=MAX_FILES).map(|index| format!("f{index}")).collect();
         assert!(matches!(
-            Brief::parse(&document(&goal, &json!(too_many))?),
+            Brief::parse(&document(&goal, &json!(too_many))),
             Err(TaskError::FileCount { count }) if count == MAX_FILES.saturating_add(1)
         ));
         let escapes = [
@@ -139,18 +139,18 @@ fn sim_malformed_briefs_get_their_exact_error_for_every_seed() -> TestResult {
         for escape in &escapes {
             assert!(
                 matches!(
-                    Brief::parse(&document(&goal, &json!([good, escape]))?),
+                    Brief::parse(&document(&goal, &json!([good, escape]))),
                     Err(TaskError::BadFile { index: 1 })
                 ),
                 "seed {seed}: {escape:?} is refused at its index"
             );
         }
         assert!(matches!(
-            Brief::parse(&document(&goal, &json!([good, good]))?),
+            Brief::parse(&document(&goal, &json!([good, good]))),
             Err(TaskError::BadFile { index: 1 })
         ));
         assert!(matches!(
-            Brief::parse(&document(&goal, &json!([good, 3]))?),
+            Brief::parse(&document(&goal, &json!([good, 3]))),
             Err(TaskError::WrongType { key: "files" })
         ));
     }
@@ -167,7 +167,11 @@ const PIECES: [&str; 12] = [
 fn hostile_body(rng: &mut Seeded) -> Result<String, SimError> {
     let mut body = String::new();
     for _ in 0..rng.below(12)? {
-        body.push_str(PIECES[usize::try_from(rng.below(12)?)?]);
+        body.push_str(
+            PIECES
+                .get(usize::try_from(rng.below(12)?)?)
+                .ok_or(SimError::Missing("hostile pieces"))?,
+        );
     }
     Ok(body)
 }
@@ -190,7 +194,9 @@ fn with_newline(text: &str) -> String {
 fn sim_author_weird_bytes_replies_are_written_as_the_reference_model_says() -> TestResult {
     for seed in 0..SEEDS.saturating_mul(16) {
         let mut rng = Seeded::from_seed(seed);
-        let lang = ["", "rust", "md", "sh"][usize::try_from(rng.below(4)?)?];
+        let lang = *["", "rust", "md", "sh"]
+            .get(usize::try_from(rng.below(4)?)?)
+            .ok_or("languages")?;
         let raw = hostile_body(&mut rng)?;
         let body = with_newline(&raw);
         let (reply, want) = match rng.below(4)? {
@@ -523,7 +529,7 @@ fn sim_a_context_past_its_bound_falls_back_to_one_file() -> TestResult {
 /// `None`). Its pause refuses every wait, and the simulation only asks it `fits`,
 /// so it never sends.
 fn bounded_client(bound: Option<usize>) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(bound)?, |_| false))
+    Ok(ModelClient::new(sim_config(bound)?, |_wait| false))
 }
 
 /// escaper (RFC 8259 section 7: a control byte is written as a six-byte `\u` escape):
@@ -581,7 +587,7 @@ fn sim_a_context_past_the_request_bound_falls_back_to_one_file() -> TestResult {
             "seed {seed}: a 1 KiB route refuses a 2 KiB context"
         );
         assert!(
-            fitting_context(None, &system, &paths, |_| true).is_none(),
+            fitting_context(None, &system, &paths, |_sent| true).is_none(),
             "seed {seed}: no context stays no context"
         );
         let context = format!("context {seed}");

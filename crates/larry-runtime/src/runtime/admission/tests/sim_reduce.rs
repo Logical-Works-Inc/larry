@@ -467,21 +467,37 @@ fn interleaved(seed: u64) -> Result<u64, Box<dyn std::error::Error>> {
         assert_eq!(accepted(runtime.journal())?, before_ids, "seed {seed}");
     }
 
-    let mut restored: Rt = restore(
-        settings()?,
-        ScriptedOwner::new(),
-        clock(),
+    restored_reduces_once(
+        seed,
         runtime.into_journal(),
-    )?;
+        &line,
+        &want_pending,
+        &before_ids,
+    )
+}
+
+/// Restores from `journal` with room and checks that A, then B's commands
+/// behind it, are each reduced exactly once, that every run stays with its
+/// tenant, and that a retry of every command afterwards is a duplicate.
+/// Returns the trace hash of the restored journal.
+fn restored_reduces_once(
+    seed: u64,
+    journal: Journal,
+    line: &Line,
+    want_pending: &[CommandId],
+    before_ids: &[CommandId],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let order = line.in_order();
+    let mut restored: Rt = restore(settings()?, ScriptedOwner::new(), clock(), journal)?;
     assert_eq!(pending(&restored), want_pending, "seed {seed}: restored");
     assert_eq!(
         restored.tick()?.admitted(),
-        want_pending.as_slice(),
+        want_pending,
         "seed {seed}: A, then B's behind it, each reduced"
     );
     assert!(restored.tick()?.admitted().is_empty(), "seed {seed}: once");
-    let mut want_accepted = before_ids;
-    want_accepted.extend(&want_pending);
+    let mut want_accepted = before_ids.to_vec();
+    want_accepted.extend(want_pending);
     assert_eq!(accepted(restored.journal())?, want_accepted, "seed {seed}");
     let tenant_b = line.before.first().ok_or("B ran nothing")?.tenant();
     for run in &line.before_runs {

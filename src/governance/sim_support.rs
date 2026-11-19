@@ -297,7 +297,10 @@ impl Scratch {
             for entry in fs::read_dir(root().join(directory))? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if entry.file_type()?.is_file()
+                let kind = entry.file_type()?;
+                // A directory or a link is never governed data; anything else must copy or fail.
+                if !kind.is_dir()
+                    && !kind.is_symlink()
                     && (name.ends_with(".json") || name.ends_with(".html"))
                 {
                     scratch.write(&format!("{directory}/{name}"), &fs::read(entry.path())?)?;

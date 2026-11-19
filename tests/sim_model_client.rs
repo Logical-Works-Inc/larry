@@ -11,6 +11,10 @@
 //! failure and every bad setting is a typed `ModelError`; no client sends
 //! another's key. Settings come from a table, never the process environment.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/mock_model.rs"]
@@ -183,11 +187,12 @@ fn the_body_sent_carries_the_pinned_model_and_temperature() -> TestResult {
             let recorded = handle.requests();
             let sent: Value = json::from_slice(recorded.first().ok_or("no recorded request")?)?;
             assert_eq!(
-                sent["model"], "mock-model",
+                *sent.at("/model")?,
+                "mock-model",
                 "seed {seed}: the configured model reached the gateway (no default model is compiled in)"
             );
             assert_eq!(
-                sent["temperature"],
+                *sent.at("/temperature")?,
                 temperature.parse::<f64>()?,
                 "seed {seed}: the configured temperature reached the gateway"
             );
@@ -284,7 +289,10 @@ fn a_padded_reply_with_a_trailing_done_marker_is_a_completion() -> TestResult {
 #[test]
 fn a_hostile_refusal_message_is_bounded_and_cannot_drive_a_terminal() -> TestResult {
     for seed in 0..SEEDS {
-        let status = [401_u16, 403, 500, 503][usize::try_from(seed % 4)?];
+        let statuses = [401_u16, 403, 500, 503];
+        let status = *statuses
+            .get(usize::try_from(seed % 4)?)
+            .ok_or("a refusal status")?;
         let config = scripted(seed, vec![Some(Fault::HostileRefusal { status }); 3]);
         let (outcome, _) = run_once(config, &[], &[user("hostile")])?;
         let detail = match outcome {
@@ -628,7 +636,10 @@ fn paced(
         let outcome = client.complete(&[user("paced")]);
         Ok::<_, Box<dyn Error>>((outcome, handle.served()))
     })?;
-    let waits = calls.lock().map_err(|_| "pause recorder poisoned")?.clone();
+    let Ok(recorded) = calls.lock() else {
+        return Err("pause recorder poisoned".into());
+    };
+    let waits = recorded.clone();
     Ok((outcome, waits, served))
 }
 

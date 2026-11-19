@@ -130,8 +130,21 @@ fn is_valid_id(value: &Value) -> bool {
 
 /// A notification frame: `method` with `params`, no id.
 pub(crate) fn notification(method: &str, params: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "method": method, "params": params })
+    with_member(
+        json!({ "jsonrpc": "2.0", "method": method }),
+        "params",
+        params,
+    )
 }
+
+/// `frame` with the member `name` set to `member`, which moves in.
+fn with_member(mut frame: Value, name: &str, member: Value) -> Value {
+    if let Some(map) = frame.as_object_mut() {
+        map.insert(String::from(name), member);
+    }
+    frame
+}
+
 /// The JSON-RPC 2.0 internal error (-32603) reply, sent only when a value cannot be
 /// encoded, which the shapes built here never hit.
 const FALLBACK_REPLY: &[u8] =
@@ -207,7 +220,7 @@ fn finish(mut line: Vec<u8>) -> Vec<u8> {
 
 /// A success reply for request `id`.
 pub(crate) fn result(id: &Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+    with_member(json!({ "jsonrpc": "2.0", "id": id }), "result", result)
 }
 
 /// An error reply. `id` is `Value::Null` when the request id is unknown, and
@@ -223,10 +236,8 @@ pub(crate) fn error(id: &Value, code: i64, message: &str) -> Value {
 
 /// An error reply carrying a `data` member, as `UnsupportedProtocolVersionError` does.
 pub(super) fn error_with_data(id: &Value, code: i64, message: &str, data: Value) -> Value {
-    with_id(
-        id,
-        json!({ "jsonrpc": "2.0", "error": { "code": code, "message": message, "data": data } }),
-    )
+    let body = with_member(json!({ "code": code, "message": message }), "data", data);
+    with_id(id, with_member(json!({ "jsonrpc": "2.0" }), "error", body))
 }
 
 /// `frame` with `id` set, unless the id is unknown (`Value::Null`).
@@ -254,6 +265,7 @@ pub(crate) fn encode(value: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{Frame, encode, error, read_frame};
+    use crate::json_at::At;
     use lgwks_std::json::Value;
     use std::io::{BufReader, Cursor};
 
@@ -317,7 +329,11 @@ mod tests {
             "no id key for an unreadable request"
         );
         let known = error(&Value::from(7), -32601, "no");
-        assert_eq!(known["id"], 7, "the request id comes back");
+        assert_eq!(
+            known.member("/id"),
+            Some(&Value::from(7)),
+            "the request id comes back"
+        );
     }
 
     /// Encoded replies are one line and carry the id back.

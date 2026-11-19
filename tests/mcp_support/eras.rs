@@ -10,9 +10,9 @@ use crate::schema::Schema;
 use lgwks_std::json::{self, Value, json};
 
 /// The stateless revision.
-pub const MODERN: &str = "2026-07-28";
+pub(crate) const MODERN: &str = "2026-07-28";
 /// Every revision the server advertises, newest first.
-pub const SERVED: [&str; 5] = [
+pub(crate) const SERVED: [&str; 5] = [
     "2026-07-28",
     "2025-11-25",
     "2025-06-18",
@@ -20,7 +20,7 @@ pub const SERVED: [&str; 5] = [
     "2024-11-05",
 ];
 /// The eight `LoggingLevel` values of schema.json.
-pub const LEVELS: [&str; 8] = [
+pub(crate) const LEVELS: [&str; 8] = [
     "debug",
     "info",
     "notice",
@@ -32,7 +32,7 @@ pub const LEVELS: [&str; 8] = [
 ];
 
 /// A pick from `pool`, by the seed.
-pub fn pick<'a, T>(rng: &mut Rng, pool: &'a [T]) -> TestResult<&'a T> {
+pub(crate) fn pick<'a, T>(rng: &mut Rng, pool: &'a [T]) -> TestResult<&'a T> {
     let bound = u32::try_from(pool.len())?;
     pool.get(rng.index(bound)?)
         .ok_or_else(|| "empty pool".into())
@@ -40,7 +40,7 @@ pub fn pick<'a, T>(rng: &mut Rng, pool: &'a [T]) -> TestResult<&'a T> {
 
 /// The `_meta` of a stateless request at `version`: capabilities always, the
 /// identity, a log level, a progress token and trace context when the seed says so.
-pub fn meta_at(rng: &mut Rng, version: &str) -> TestResult<Value> {
+pub(crate) fn meta_at(rng: &mut Rng, version: &str) -> TestResult<Value> {
     let capabilities = [
         json!({}),
         json!({"roots": {}}),
@@ -79,7 +79,7 @@ pub fn meta_at(rng: &mut Rng, version: &str) -> TestResult<Value> {
 }
 
 /// A stateless request frame: `params` plus a seeded `_meta` at `version`.
-pub fn frame_at(
+pub(crate) fn frame_at(
     rng: &mut Rng,
     id: &Value,
     method: &str,
@@ -96,7 +96,11 @@ pub fn frame_at(
 
 /// Sends `frame`, reads the reply line and checks it against the official
 /// schema of the era; returns the raw line and the parsed reply.
-pub fn ask(session: &mut Session, schema: &Schema, frame: &Value) -> TestResult<(Vec<u8>, Value)> {
+pub(crate) fn ask(
+    session: &mut Session,
+    schema: &Schema,
+    frame: &Value,
+) -> TestResult<(Vec<u8>, Value)> {
     session.send(&json::to_vec(frame)?)?;
     let line = session.recv_line()?;
     let reply: Value = json::from_slice(&line)?;
@@ -108,7 +112,7 @@ pub fn ask(session: &mut Session, schema: &Schema, frame: &Value) -> TestResult<
 }
 
 /// Arguments of a well-formed typed task, its text chosen by the seed.
-pub fn task(rng: &mut Rng) -> Value {
+pub(crate) fn task(rng: &mut Rng) -> Value {
     json!({
         "goal": format!("task {}", rng.below(100_000)),
         "repo": "Logical-Works-Inc/larry",

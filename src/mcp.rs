@@ -58,7 +58,12 @@ fn capabilities() -> Value {
 ///
 /// The reader or the writer failed; a malformed or oversized frame is answered, never an error.
 pub fn serve<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<()> {
-    let executor = tools::Executor::from_env(|name| std::env::var(name).ok());
+    // A variable Larry reads that is not UTF-8 refuses the snapshot: the server
+    // then runs with no executor and says why, never on a default it fell back to.
+    let executor = match crate::executor::process_env() {
+        Ok(read) => tools::Executor::from_env(read),
+        Err(error) => tools::Executor::Absent(error.to_string()),
+    };
     serve_bounded(reader, writer, wire::MAX_FRAME_BYTES, &executor)
 }
 
@@ -190,6 +195,7 @@ fn call_tool(
 #[cfg(test)]
 mod tests {
     use super::{serve_bounded, supported_versions, tools::Executor};
+    use crate::json_at::At;
     use lgwks_std::json::{self, Value};
     use std::io::Cursor;
 
@@ -225,20 +231,31 @@ mod tests {
         );
         let got = replies(input, 1_048_576)?;
         assert_eq!(got.len(), 3, "the notification gets no reply");
+        let (initialized, listed, pinged) = (
+            got.first().ok_or("the initialize reply")?,
+            got.get(1).ok_or("the list reply")?,
+            got.get(2).ok_or("the ping reply")?,
+        );
         assert_eq!(
-            got[0]["result"]["protocolVersion"], "2025-06-18",
+            *initialized.at("/result/protocolVersion")?,
+            "2025-06-18",
             "version echoed"
         );
-        assert_eq!(got[1]["id"], "a", "string ids come back as strings");
+        assert_eq!(*listed.at("/id")?, "a", "string ids come back as strings");
         assert_eq!(
-            got[1]["result"]["tools"][0]["name"], "larry_submit_task",
+            *listed.at("/result/tools/0/name")?,
+            "larry_submit_task",
             "tool listed"
         );
         assert!(
-            got[1]["result"]["resultType"].is_null(),
+            !listed.holds("/result/resultType"),
             "a legacy result keeps the legacy shape"
         );
-        assert_eq!(got[2]["result"], json::json!({}), "ping is an empty result");
+        assert_eq!(
+            *pinged.at("/result")?,
+            json::json!({}),
+            "ping is an empty result"
+        );
         Ok(())
     }
 
@@ -250,9 +267,16 @@ mod tests {
             "\n",
         );
         let got = replies(input, 1_048_576)?;
-        assert_eq!(got[0]["result"]["resultType"], "complete", "resultType");
-        assert_eq!(got[0]["result"]["cacheScope"], "public", "cache scope");
-        assert!(got[0]["result"]["ttlMs"].as_u64().is_some(), "ttlMs");
+        let listed = got.first().ok_or("the list reply")?;
+        assert_eq!(*listed.at("/result/resultType")?, "complete", "resultType");
+        assert_eq!(*listed.at("/result/cacheScope")?, "public", "cache scope");
+        assert!(
+            listed
+                .member("/result/ttlMs")
+                .and_then(|found| found.as_u64())
+                .is_some(),
+            "ttlMs"
+        );
         Ok(())
     }
 
@@ -265,9 +289,14 @@ mod tests {
                      xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\
                      {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n";
         let got = replies(input, 64)?;
-        assert_eq!(got[0]["error"]["code"], -32602, "no _meta, no session");
-        assert_eq!(got[1]["error"]["code"], -32600, "oversized");
-        assert_eq!(got[2]["id"], 2, "still serving");
+        let (unmeta, oversized, served) = (
+            got.first().ok_or("the unmeta reply")?,
+            got.get(1).ok_or("the oversized reply")?,
+            got.get(2).ok_or("the ping reply")?,
+        );
+        assert_eq!(*unmeta.at("/error/code")?, -32602, "no _meta, no session");
+        assert_eq!(*oversized.at("/error/code")?, -32600, "oversized");
+        assert_eq!(*served.at("/id")?, 2, "still serving");
         Ok(())
     }
 

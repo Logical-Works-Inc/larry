@@ -13,6 +13,10 @@ pub mod acp;
 pub mod eval;
 pub mod executor;
 pub mod governance;
+/// The one checked JSON pointer read, shared with the integration tests (larry#341).
+#[cfg(test)]
+#[path = "../tests/support/json_at.rs"]
+pub(crate) mod json_at;
 pub mod mascot;
 pub mod mcp;
 pub mod model;
@@ -286,6 +290,7 @@ impl Demo {
             return Err(Rejected::EmptyFeedback);
         }
         let index = self.selected.ok_or(Rejected::NoSelection)?;
+        let owner = EVENTS.get(index).ok_or(Rejected::InvalidAnchor)?.owner;
         if self.notes.len() == MAX_NOTES {
             return Err(Rejected::NoteBound);
         }
@@ -297,7 +302,7 @@ impl Demo {
             text: text.to_owned(),
         });
         self.work = Work::Held {
-            owner: EVENTS[index].owner,
+            owner,
             anchor: index.saturating_add(1),
         };
         Ok(())
@@ -315,13 +320,14 @@ impl Demo {
     /// Serialize the view contract through the published Logical Works JSON facade.
     /// Synthetic labels are present on every snapshot, including empty scenarios.
     pub fn snapshot(&self) -> Result<String, json::Error> {
-        let inspection = self.selected.map(|index| &EVENTS[index]);
+        let inspection = self.selected.and_then(|index| EVENTS.get(index));
+        let revealed: Vec<&Event> = EVENTS.iter().take(self.cursor).collect();
         let value = json::json!({
             "mode": "DEMO — JSON fixture harness; the terminal frontend: cargo run --bin larry",
             "effects": "none: no execution, providers, filesystem reads or writes",
             "persistence": "session only; reset and restart discard synthetic notes",
             "scenario": if self.empty { "empty" } else { "change" },
-            "events": &EVENTS[..self.cursor], "inspection": inspection,
+            "events": revealed, "inspection": inspection,
             "work": self.work, "feedback": self.notes,
             "folder_drawer_requested": self.folders, "agent_rail_requested": self.agents,
             "agents": if self.agents { json::json!([

@@ -113,21 +113,43 @@ fn verify_value(
     verify(report.to_string().as_bytes(), trusted)
 }
 
-/// Every sealed report verifies under its key, and every tamper is refused
-/// with its exact error.
+/// One sealed report, its verdict and the key that verifies it.
+struct Drawn {
+    /// The sealed report.
+    report: Value,
+    /// The verdict the seal derived.
+    accepted: bool,
+    /// The key the report verifies under.
+    trusted: sign::PublicKey,
+}
+
+/// Seals `original` under a key `stream` draws, and checks the seal keeps the
+/// verdict the results derive.
+fn seal_drawn(seed: u64, stream: &mut Seeded, original: Value) -> Drawn {
+    let expected = acceptance(&original);
+    let signer = key(stream);
+    let trusted = signer.public_key();
+    let (report, accepted) = seal(original, &signer);
+    assert_eq!(
+        accepted, expected,
+        "seed {seed}: the seal keeps the derived verdict"
+    );
+    Drawn {
+        report,
+        accepted,
+        trusted,
+    }
+}
+
+/// Every sealed report verifies under its key, and a rewritten body, task id or
+/// verdict is refused with its exact error.
 #[test]
-fn sim_sealed_reports_verify_and_every_tamper_is_refused_for_every_seed() -> TestResult {
+fn sim_sealed_reports_verify_and_a_rewritten_body_is_refused_for_every_seed() -> TestResult {
     for seed in 0..SEEDS {
         let mut stream = Seeded::from_seed(seed);
         let original = body(&mut stream)?;
-        let expected = acceptance(&original);
-        let signer = key(&mut stream);
-        let trusted = signer.public_key();
-        let (sealed, accepted) = seal(original, &signer);
-        assert_eq!(
-            accepted, expected,
-            "seed {seed}: the seal keeps the derived verdict"
-        );
+        let drawn = seal_drawn(seed, &mut stream, original);
+        let (sealed, accepted, trusted) = (drawn.report, drawn.accepted, drawn.trusted);
         let verdict = verify_value(&sealed, &trusted)?;
         assert_eq!(
             verdict.accepted(),
@@ -169,6 +191,19 @@ fn sim_sealed_reports_verify_and_every_tamper_is_refused_for_every_seed() -> Tes
                 "seed {seed}: a report rewritten to look accepted is refused"
             );
         }
+    }
+    Ok(())
+}
+
+/// A forged signature, a foreign key, a re-seal under an attacker's key and a
+/// stripped receipt are each refused with their exact error.
+#[test]
+fn sim_a_forged_or_foreign_receipt_is_refused_for_every_seed() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut stream = Seeded::from_seed(seed);
+        let original = body(&mut stream)?;
+        let drawn = seal_drawn(seed, &mut stream, original);
+        let (sealed, trusted) = (drawn.report, drawn.trusted);
 
         let mut forged_signature = sealed.clone();
         let signature = receipt_of(&mut forged_signature)?;
@@ -201,7 +236,7 @@ fn sim_sealed_reports_verify_and_every_tamper_is_refused_for_every_seed() -> Tes
             "seed {seed}: a report re-sealed under an attacker's key is refused"
         );
 
-        let mut unsigned = sealed.clone();
+        let mut unsigned = sealed;
         unsigned
             .as_object_mut()
             .ok_or("the report is an object")?
@@ -213,6 +248,19 @@ fn sim_sealed_reports_verify_and_every_tamper_is_refused_for_every_seed() -> Tes
             ),
             "seed {seed}: a report with no receipt is refused"
         );
+    }
+    Ok(())
+}
+
+/// A receipt whose algorithm, key or signature is wrong, missing or malformed is
+/// refused with its exact error.
+#[test]
+fn sim_every_malformed_receipt_member_is_refused_for_every_seed() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut stream = Seeded::from_seed(seed);
+        let original = body(&mut stream)?;
+        let drawn = seal_drawn(seed, &mut stream, original);
+        let (sealed, trusted) = (drawn.report, drawn.trusted);
 
         let mut algorithm = sealed.clone();
         set(receipt_of(&mut algorithm)?, "alg", json::json!("rsa"))?;
@@ -594,7 +642,7 @@ fn a_signed_accepted_claim_over_a_truncated_diff_is_refused() -> TestResult {
 /// Oversize, non-UTF-8, malformed and non-object reports each get their exact
 /// error before any key is consulted.
 #[test]
-fn oversize_and_malformed_reports_get_their_exact_error() -> TestResult {
+fn oversize_and_malformed_reports_get_their_exact_error() {
     let trusted = key(&mut Seeded::from_seed(1)).public_key();
     // Zeroed pages are not touched before the length is refused.
     let oversize = vec![0_u8; MAX_REPORT_BYTES.saturating_add(1)];
@@ -643,5 +691,4 @@ fn oversize_and_malformed_reports_get_their_exact_error() -> TestResult {
             "every refusal names the receipt: {message}"
         );
     }
-    Ok(())
 }

@@ -25,6 +25,7 @@ use super::{
     ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
     check, parse_reply,
 };
+use crate::json_at::At;
 use crate::sim_error::SimError;
 use crate::sim_lanes::{self, LaneError};
 
@@ -459,10 +460,12 @@ fn drive(
             finished.store(true, Ordering::Release);
             cancel.store(true, Ordering::Release);
             let witnessed = match watcher {
-                Some(watcher) => match watcher.join() {
-                    Ok(listed) => Some(listed?),
-                    Err(_) => return Err(CancelSimError::WitnessPanicked),
-                },
+                Some(watcher) => {
+                    let Ok(listed) = watcher.join() else {
+                        return Err(CancelSimError::WitnessPanicked);
+                    };
+                    Some(listed?)
+                }
                 None => None,
             };
             Ok((result?, witnessed))
@@ -471,11 +474,12 @@ fn drive(
     let (exit_code, timed_out, interrupted) =
         (result.exit_code(), result.timed_out(), result.interrupted());
     let record = result.into_json();
-    let pgid = i32::try_from(
-        record["pgid"]
-            .as_i64()
-            .ok_or(CancelSimError::Missing("the record's pgid"))?,
-    )?;
+    let pgid = match record.at("/pgid").map(|pgid| pgid.as_i64()) {
+        Ok(Some(pgid)) => i32::try_from(pgid)?,
+        Ok(None) | Err(crate::json_at::Missing { .. }) => {
+            return Err(CancelSimError::Missing("the record's pgid"));
+        }
+    };
     let gone = !process_group_exists(pgid)?;
     let unlisted = ledger.live_tasks()?.is_empty();
     assert!(!timed_out, "seed {seed} {at}: a cancel is never a timeout");
@@ -588,7 +592,7 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
         );
         assert_eq!(result.exit_code(), None, "seed {seed}: a kill is no exit");
         let record = result.into_json();
-        let pgid = i32::try_from(record["pgid"].as_i64().ok_or("no pgid")?)?;
+        let pgid = i32::try_from(record.at("/pgid")?.as_i64().ok_or("no pgid")?)?;
         assert!(
             !process_group_exists(pgid)?,
             "seed {seed}: process group {pgid} is gone"
@@ -671,8 +675,11 @@ fn panic_inside_run(seed: u64) -> Result<(), CancelSimError> {
         // the run did not panic, so the test fails instead of passing on a fault it missed.
         finished.store(true, Ordering::Release);
         cancel.store(true, Ordering::Release);
-        drop(watcher.join());
-        drop(result?);
+        let Ok(witnessed) = watcher.join() else {
+            return Err(CancelSimError::WitnessPanicked);
+        };
+        witnessed?;
+        result?;
         Err(CancelSimError::Missing("the panic inside run_command"))
     })
 }

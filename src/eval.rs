@@ -94,8 +94,9 @@ impl std::error::Error for EvalError {
     }
 }
 
-/// One task's origin repository; removed when dropped, whatever the run did. The origin's
-/// lock is held for its whole life, so a sweep by another `larry eval` keeps it (larry#214).
+/// One task's origin repository; removed by `remove` once the run ends. The origin's
+/// lock is held for its whole life, so a sweep by another `larry eval` keeps it (larry#214);
+/// an origin a crashed or failed run left behind is unlocked and the next sweep collects it.
 struct Origin {
     /// `<state>/eval/origin-<pid>-<index>`.
     dir: PathBuf,
@@ -148,11 +149,28 @@ impl Origin {
     }
 }
 
-impl Drop for Origin {
-    fn drop(&mut self) {
-        // A removal that fails leaves a directory the next run's sweep collects.
-        drop(fs::remove_dir_all(&self.dir));
-        drop(fs::remove_file(&self.lock));
+impl Origin {
+    /// Removes the origin directory and then its lock file, and releases the lock.
+    /// Both removals are attempted; the first fault is the one reported, and a
+    /// leftover directory is collected by the next run's sweep.
+    ///
+    /// # Errors
+    ///
+    /// The directory or the lock file could not be removed for a reason other
+    /// than already being gone.
+    fn remove(self) -> io::Result<()> {
+        let directory = absent_is_removed(fs::remove_dir_all(&self.dir));
+        let lock = absent_is_removed(fs::remove_file(&self.lock));
+        directory?;
+        lock
+    }
+}
+
+/// A removal of something that is already gone has done its job; any other fault stands.
+fn absent_is_removed(removal: io::Result<()>) -> io::Result<()> {
+    match removal {
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }
 
@@ -187,9 +205,22 @@ fn tokens(report: &Report) -> Option<Spent> {
     Some(spent)
 }
 
-/// Runs task `index` of the set and records how it ended.
+/// Runs task `index` of the set and records how it ended, then removes its origin.
+/// The run's own failure is reported before a failure to remove the origin.
 fn run_one(settings: &Settings, index: usize, task: &EvalTask) -> Result<Outcome, EvalError> {
     let origin = Origin::create(settings, index, task)?;
+    let ran = run_in(&origin, settings, task);
+    let removed = origin.remove().map_err(|cause| EvalError::Origin {
+        id: task.id.clone(),
+        cause,
+    });
+    let outcome = ran?;
+    removed?;
+    Ok(outcome)
+}
+
+/// Runs `task` in its written `origin` and records how it ended.
+fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outcome, EvalError> {
     let repo = origin
         .dir
         .to_str()
@@ -264,5 +295,9 @@ pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecar
 }
 
 #[cfg(test)]
-#[path = "sim_eval.rs"]
+#[path = "eval/sim_eval.rs"]
 mod sim;
+
+#[cfg(test)]
+#[path = "eval/sim_set.rs"]
+mod sim_set;

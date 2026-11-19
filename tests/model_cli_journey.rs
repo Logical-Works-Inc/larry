@@ -10,6 +10,10 @@
 //! nothing it should not. Each child runs with a cleared environment, so the
 //! developer's own key can never reach a test.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/mock_model.rs"]
@@ -91,7 +95,8 @@ fn a_prompt_on_stdin_prints_the_gateway_reply() -> TestResult {
             );
             let sent: Value = json::from_slice(handle.requests().first().ok_or("no request")?)?;
             assert_eq!(
-                sent["messages"][0]["content"], "summarise the plan",
+                *sent.at("/messages/0/content")?,
+                "summarise the plan",
                 "seed {seed}: the prompt reached the gateway as one user turn"
             );
             assert_eq!(

@@ -74,13 +74,25 @@ pub(crate) struct Receipt {
 /// A report the gate denied holds no `session`, so nothing ran: its counts are 0 and its
 /// hand-off is `none`.
 pub(crate) fn receipt_from(body: &Value, accepted: bool, bytes: &[u8]) -> Receipt {
-    let count = |name: &str| match body["session"][name].as_u64().map(usize::try_from) {
-        Some(Ok(number)) => number,
-        Some(Err(_)) | None => 0,
+    let session = body.get("session");
+    let count = |name: &str| {
+        let Some(reported) = session
+            .and_then(|report| report.get(name))
+            .and_then(Value::as_u64)
+        else {
+            return 0;
+        };
+        let Ok(number) = usize::try_from(reported) else {
+            return 0;
+        };
+        number
     };
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
-    let handoff = match body["session"]["handoff"].as_str() {
+    let handoff = match session
+        .and_then(|report| report.get("handoff"))
+        .and_then(Value::as_str)
+    {
         Some(name) => name.to_owned(),
         None => String::from("none"),
     };

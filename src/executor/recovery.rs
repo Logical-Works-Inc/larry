@@ -56,30 +56,21 @@ pub(super) fn journal_path(state: &Path, task_id: &str) -> PathBuf {
 /// no process id at all: the name is one canonical UUID text that a container
 /// cannot reuse (larry#182 defect 3).
 ///
-/// A run whose journal the store or a replay refuses is nobody's: it is not live,
-/// and the recovery sets its evidence aside. The workspace sweep asks this before
-/// it removes a run's workspace, so a live run keeps it between its clone and its
-/// first command (larry#182 defect 3).
-///
-/// # Errors
-///
-/// [`ExecError::Gate`] when the journal cannot be opened for a reason other
-/// than liveness.
-pub(super) fn journal_live(
-    state: &Path,
-    policy: &BTreeSet<Scope>,
-    task_id: &str,
-) -> Result<bool, ExecError> {
+/// A run whose journal the store or a replay refuses, or that cannot be opened for
+/// any reason other than its lock, is nobody's: it is not live, and the recovery
+/// sets its evidence aside. The workspace sweep asks this before it removes a
+/// run's workspace, so a live run keeps it between its clone and its first
+/// command (larry#182 defect 3).
+pub(super) fn journal_live(state: &Path, policy: &BTreeSet<Scope>, task_id: &str) -> bool {
     let path = journal_path(state, task_id);
     if !path.exists() {
-        return Ok(false);
+        return false;
     }
     let capacity = task_settings(policy).journal_capacity;
-    match Journal::open(&path, capacity) {
-        Ok(_) => Ok(false),
-        Err(RuntimeError::Durable(JournalError::Locked { .. })) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    matches!(
+        Journal::open(&path, capacity),
+        Err(RuntimeError::Durable(JournalError::Locked { .. }))
+    )
 }
 
 /// Whether `task_id`'s run already has evidence this state directory kept: a

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A fresh directory under the system temp dir, removed when dropped.
-pub struct TempDir {
+pub(crate) struct TempDir {
     /// Where the directory lives.
     path: PathBuf,
 }
@@ -32,7 +32,7 @@ impl TempDir {
     /// Creates an empty directory whose name no other guard in this process holds. The name is
     /// claimed by `create_dir`, so a second copy of this guard in the same binary moves to the
     /// next name instead of sharing the first copy's directory.
-    pub fn new() -> io::Result<TempDir> {
+    pub(crate) fn new() -> io::Result<TempDir> {
         for _ in 0..ATTEMPTS {
             let path = next_path();
             match fs::create_dir(&path) {
@@ -55,7 +55,7 @@ impl TempDir {
     }
 
     /// The directory path.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -76,8 +76,18 @@ impl AsRef<Path> for TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        // Cleanup is best effort: a leftover temp dir must never fail a journey.
-        drop(fs::remove_dir_all(&self.path));
+        // A directory already gone is clean; any other failure leaves a tree behind, which fails
+        // the test that owns the guard unless that test is already unwinding.
+        let removed = match fs::remove_dir_all(&self.path) {
+            Ok(()) => Ok(()),
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(cause) => Err(cause),
+        };
+        assert!(
+            std::thread::panicking() || removed.is_ok(),
+            "the temp dir {} outlived its guard: {removed:?}",
+            self.path.display()
+        );
     }
 }
 

@@ -1,0 +1,139 @@
+//! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010): their
+//! arguments, their output and the typed reason either stops without a verdict. Split from
+//! `src/bin/larry.rs` by responsibility when the help table took the dispatch (larry#295,
+//! ADR 0065); the table rows in that file call [`governance_once`] and [`tracker_once`].
+
+use std::ffi::OsString;
+use std::fmt;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use larry_demo::governance;
+
+use super::diagnose;
+
+/// Why `larry governance` or `larry tracker` stopped without its verdict; each keeps its cause.
+#[derive(Debug)]
+pub(super) enum GovernanceRun {
+    /// The arguments were not `[FLAG] [--root DIR]`.
+    Usage(Vec<OsString>),
+    /// No root was given and the working directory is unreadable.
+    NoDirectory(io::Error),
+    /// Standard output could not be written.
+    Stdout(io::Error),
+    /// Standard error could not be written.
+    Stderr(io::Error),
+    /// `--check` found the committed page differs from the render.
+    Stale,
+    /// The tracker could not read, render or write.
+    Tracker(governance::TrackerError),
+}
+
+impl fmt::Display for GovernanceRun {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Usage(ref rest) => write!(
+                out,
+                "usage: larry governance [--report] [--root DIR] | larry tracker [--check] [--root DIR] (got {rest:?})"
+            ),
+            Self::NoDirectory(ref cause) => {
+                write!(out, "governance: no working directory: {cause}")
+            }
+            Self::Stdout(ref cause) => write!(out, "governance: stdout unwritable: {cause}"),
+            Self::Stderr(ref cause) => write!(out, "governance: stderr unwritable: {cause}"),
+            Self::Stale => {
+                out.write_str("FAIL: tools/tracker/index.html is stale — run `larry tracker`")
+            }
+            Self::Tracker(ref cause) => write!(out, "FAIL: {cause}"),
+        }
+    }
+}
+
+impl std::error::Error for GovernanceRun {}
+
+/// The root and flag `larry governance` and `larry tracker` take: `[FLAG] [--root DIR]`, in any
+/// order, the root defaulting to the working directory.
+fn governance_args(rest: &[OsString], flag: &str) -> Result<(bool, PathBuf), GovernanceRun> {
+    let usage = || GovernanceRun::Usage(rest.to_vec());
+    let mut set = false;
+    let mut root: Option<PathBuf> = None;
+    let mut items = rest.iter();
+    while let Some(item) = items.next() {
+        if item == flag && !set {
+            set = true;
+        } else if item == "--root" && root.is_none() {
+            let Some(directory) = items.next() else {
+                return Err(usage());
+            };
+            root = Some(PathBuf::from(directory));
+        } else {
+            return Err(usage());
+        }
+    }
+    let root = match root {
+        Some(root) => root,
+        None => std::env::current_dir().map_err(GovernanceRun::NoDirectory)?,
+    };
+    Ok((set, root))
+}
+
+/// Writes each line to standard output and flushes.
+fn print_lines(lines: &[&str]) -> Result<(), GovernanceRun> {
+    let mut out = io::stdout().lock();
+    for line in lines {
+        out.write_all(line.as_bytes())
+            .and_then(|()| out.write_all(b"\n"))
+            .map_err(GovernanceRun::Stdout)?;
+    }
+    out.flush().map_err(GovernanceRun::Stdout)
+}
+
+/// `larry governance [--report] [--root DIR]`: the structural checker (ADR 0010). Prints the
+/// PASS block or the JSON report, or each error as a `FAIL:` line on standard error; exits 1
+/// on any error.
+pub(super) fn governance_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
+    let (report_wanted, root) = governance_args(rest, "--report")?;
+    let report: governance::Report = governance::check(&root);
+    if report_wanted {
+        print_lines(&[&report.pretty()])?;
+    } else if report.ok() {
+        print_lines(&[
+            "PASS: document structure and governance inventory",
+            &report.counts_line(),
+            "NOT CHECKED BY THIS GATE: Mermaid rendering",
+            "NOT RUN: runtime, model evaluations, hardware and human trials",
+        ])?;
+    } else {
+        for error in report.errors() {
+            diagnose(&format!("FAIL: {error}")).map_err(GovernanceRun::Stderr)?;
+        }
+    }
+    Ok(if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// `larry tracker [--check] [--root DIR]`: writes `tools/tracker/index.html` atomically, or with
+/// `--check` exits 1 unless the committed page equals the render.
+pub(super) fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun> {
+    let (check_only, root) = governance_args(rest, "--check")?;
+    if check_only {
+        let current: Result<bool, governance::TrackerError> =
+            governance::tracker::is_current(&root);
+        return match current {
+            Ok(true) => print_lines(&["PASS: tools/tracker/index.html is current"])
+                .map(|()| ExitCode::SUCCESS),
+            Ok(false) => Err(GovernanceRun::Stale),
+            Err(error) => Err(GovernanceRun::Tracker(error)),
+        };
+    }
+    let written: Result<usize, governance::TrackerError> = governance::tracker::write(&root);
+    match written {
+        Ok(bytes) => print_lines(&[&format!("wrote tools/tracker/index.html ({bytes} bytes)")])
+            .map(|()| ExitCode::SUCCESS),
+        Err(error) => Err(GovernanceRun::Tracker(error)),
+    }
+}

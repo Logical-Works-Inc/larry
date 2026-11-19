@@ -275,9 +275,13 @@ pub(crate) fn check(instruction: &str, cwd: &Path) -> Result<(), SessionError> {
     if instruction.contains('\0') {
         return Err(SessionError::NulInInstruction);
     }
-    match std::fs::metadata(cwd) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) | Err(_) => Err(SessionError::NotADirectory),
+    let Ok(meta) = std::fs::metadata(cwd) else {
+        return Err(SessionError::NotADirectory);
+    };
+    if meta.is_dir() {
+        Ok(())
+    } else {
+        Err(SessionError::NotADirectory)
     }
 }
 
@@ -292,7 +296,13 @@ pub(crate) struct Ended {
 
 /// The one denial line of a report the gate sealed without running anything.
 fn denial(report: &Report) -> String {
-    match report.json()["denied"][0].as_str() {
+    let first = report
+        .json()
+        .get("denied")
+        .and_then(lgwks_std::json::Value::as_array)
+        .and_then(|lines| lines.first())
+        .and_then(lgwks_std::json::Value::as_str);
+    match first {
         Some(line) => line.to_owned(),
         None => String::from("gate: the session was denied"),
     }

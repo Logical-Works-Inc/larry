@@ -96,7 +96,7 @@ fn check_all(
 }
 
 /// The finished trace as hex.
-fn hex(trace: Hasher) -> String {
+fn hex(trace: &Hasher) -> String {
     lgwks_std::hex::encode(trace.finalize().as_bytes())
 }
 
@@ -108,14 +108,10 @@ fn outside_loopback(rng: &mut Seeded) -> Result<String, Box<dyn Error>> {
     } else {
         first
     })?;
-    let mut octets = vec![first];
-    for _ in 0..3 {
-        octets.push(u8::try_from(rng.index(256)?)?);
-    }
-    Ok(format!(
-        "{}.{}.{}.{}:0",
-        octets[0], octets[1], octets[2], octets[3]
-    ))
+    let second = u8::try_from(rng.index(256)?)?;
+    let third = u8::try_from(rng.index(256)?)?;
+    let fourth = u8::try_from(rng.index(256)?)?;
+    Ok(format!("{first}.{second}.{third}.{fourth}:0"))
 }
 
 /// One bind pass: each drawn non-loopback address is refused naming itself and the
@@ -137,7 +133,7 @@ fn bind_pass(seed: u64) -> Result<String, Box<dyn Error>> {
         );
         trace.write_framed(addr.as_bytes());
     }
-    Ok(hex(trace))
+    Ok(hex(&trace))
 }
 
 #[test]
@@ -176,7 +172,7 @@ fn revoke_pass(seed: u64) -> Result<String, Box<dyn Error>> {
     check_all(addr, &keyed, victim, seed, &mut trace)?;
     let (status, stderr) = serving.signal_and_wait("TERM")?;
     assert!(status.success(), "seed {seed:#x}: stops clean: {stderr}");
-    Ok(hex(trace))
+    Ok(hex(&trace))
 }
 
 #[test]
@@ -214,7 +210,7 @@ fn wrong_order_pass(seed: u64) -> Result<String, Box<dyn Error>> {
     check_all(addr, &keyed, victim, seed, &mut trace)?;
     let (status, stderr) = serving.signal_and_wait("TERM")?;
     assert!(status.success(), "seed {seed:#x}: stops clean: {stderr}");
-    Ok(hex(trace))
+    Ok(hex(&trace))
 }
 
 #[test]
@@ -256,7 +252,7 @@ fn pulled_plug_pass(seed: u64) -> Result<String, Box<dyn Error>> {
         status.success(),
         "seed {seed:#x}: the restart stops clean: {stderr}"
     );
-    Ok(hex(trace))
+    Ok(hex(&trace))
 }
 
 #[test]
@@ -370,9 +366,16 @@ fn sim_a_burst_on_one_tenant_neither_starves_nor_leaks_into_another() -> TestRes
             );
         }
         for sender in burst {
-            sender
-                .join()
-                .map_err(|_panicked| "a burst thread panicked")??;
+            match sender.join() {
+                Ok(burst) => burst?,
+                Err(panic) => {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+                    return Err(format!("a burst thread panicked: {message:?}").into());
+                }
+            }
         }
         Ok(())
     })?;

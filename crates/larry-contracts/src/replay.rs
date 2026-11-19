@@ -23,9 +23,11 @@ use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime};
 
 use crate::authority::{BudgetUnit, Scope};
-use lgwks_bot::BotError;
-use lgwks_bot::cap::Cap;
-use lgwks_bot::gate::GrantSet;
+// lgwks_bot 9.0.0 exports no root items (crates#1016): the grant and capability types come
+// through the supported `kernel` surface, and `admit`'s error through its own module.
+use lgwks_bot::error::KernelError;
+use lgwks_bot::kernel::cap::Cap;
+use lgwks_bot::kernel::gate::GrantSet;
 
 #[cfg(feature = "serde")]
 use lgwks_std::json::serde::{Deserialize, Serialize};
@@ -41,7 +43,7 @@ mod tests;
 pub struct PolicySnapshot {
     /// The policy revision the decision is made under; a decision is only
     /// comparable within one revision (D18: pinned, versioned inputs).
-    pub revision: u64,
+    revision: u64,
     /// The scopes the policy allows at this revision.
     allowed_scopes: BTreeSet<Scope>,
 }
@@ -54,6 +56,12 @@ impl PolicySnapshot {
             revision,
             allowed_scopes,
         }
+    }
+
+    /// Returns the policy revision this snapshot was pinned at.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Returns the scopes admitted by this immutable policy snapshot.
@@ -150,16 +158,16 @@ impl ValiditySnapshot {
 #[non_exhaustive]
 pub struct EffectRequest {
     /// The stable operation ID of the effect to dispatch.
-    pub operation: crate::ids::OperationId,
+    operation: crate::ids::OperationId,
     /// The scopes the effect requires; every one must pass.
     required_scopes: BTreeSet<Scope>,
     /// The cost the effect declares.
-    pub cost: u64,
+    cost: u64,
     /// The unit the cost is declared in; it must match the budget snapshot.
-    pub unit: BudgetUnit,
+    unit: BudgetUnit,
     /// The pinned observation instant (E30: expiry is a pinned input, so
     /// an expired approval is a typed denial, never consent by timeout).
-    pub observed_at: SystemTime,
+    observed_at: SystemTime,
 }
 
 impl EffectRequest {
@@ -185,6 +193,30 @@ impl EffectRequest {
     #[must_use]
     pub fn required_scopes(&self) -> &BTreeSet<Scope> {
         &self.required_scopes
+    }
+
+    /// The stable operation ID of the effect to dispatch.
+    #[must_use]
+    pub const fn operation(&self) -> crate::ids::OperationId {
+        self.operation
+    }
+
+    /// The cost the effect declares.
+    #[must_use]
+    pub const fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    /// The unit the declared cost is denominated in.
+    #[must_use]
+    pub const fn unit(&self) -> BudgetUnit {
+        self.unit
+    }
+
+    /// The pinned observation instant the expiry is judged at.
+    #[must_use]
+    pub const fn observed_at(&self) -> SystemTime {
+        self.observed_at
     }
 }
 
@@ -269,7 +301,7 @@ fn first_uncovered(required: &BTreeSet<Scope>, granted: &BTreeSet<Scope>) -> Opt
     let caps: Vec<Cap> = required.iter().map(|&scope| capability(scope)).collect();
     match grants.admit(&caps) {
         Ok(()) => None,
-        Err(BotError::CapabilityDenied { deficit }) => {
+        Err(KernelError::CapabilityDenied { deficit }) => {
             let missing = deficit.first().required();
             required
                 .iter()
@@ -299,7 +331,7 @@ pub fn decide(
     // observer's own timeline, whose origin is the pinned instant, so no epoch is assumed.
     // The pinned validity carries the deployment's skew allowance (larry#212), so a foreign
     // clock within the bound still holds; zero is one host, where any disagreement is a defect.
-    let remaining = match validity.valid_until.duration_since(request.observed_at) {
+    let remaining = match validity.valid_until.duration_since(request.observed_at()) {
         Ok(remaining) => remaining,
         // The expiry precedes the pinned instant: nothing remains. The judge below
         // reads that against the bound, which is a typed denial at zero and the

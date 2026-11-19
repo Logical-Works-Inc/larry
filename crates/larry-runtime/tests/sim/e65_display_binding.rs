@@ -1,9 +1,9 @@
 //! E65 deterministic simulation families, driven through the public runtime.
 
 use super::{
-    AtomicOwner, BindingError, ProjectionBackend, ReconciliationStrategy, Result, Runtime,
-    RuntimeError, SEEDS, Scope, TestRuntime, assert_swap, clock_at, command, grant, holder,
-    replay_authorizations, restore, runtime, settings, success_journey, swap_journey,
+    AtomicOwner, BindingError, EffectIntent, ProjectionBackend, ReconciliationStrategy, Result,
+    Runtime, RuntimeError, SEEDS, Scope, TestRuntime, assert_swap, clock_at, command, grant,
+    holder, replay_authorizations, restore, runtime, settings, success_journey, swap_journey,
     swapped_field, trace,
 };
 
@@ -93,7 +93,7 @@ fn sim_e65_retry_after_restore_keeps_binding() -> Result {
         let epoch = restored.fence().epoch()?;
         restored.fence_mut().authenticate(epoch)?;
         let before = trace(restored.journal());
-        assert_swap(restored.tick(), swapped_field(seed));
+        assert_swap(&restored.tick(), swapped_field(seed));
         assert_eq!(
             trace(restored.journal()),
             before,
@@ -157,12 +157,13 @@ fn sim_e65_overlapping_grants_never_union() -> Result {
             1,
             "one sufficient grant must remain usable"
         );
+        let pinned = runtime
+            .projection()
+            .authorizations()
+            .first()
+            .ok_or("one authorization is recorded")?;
         assert_eq!(
-            runtime.projection().authorizations()[0]
-                .pinned
-                .budget
-                .remaining,
-            3,
+            pinned.pinned.budget.remaining, 3,
             "selected ceiling is pinned"
         );
     }
@@ -209,7 +210,11 @@ fn sim_e65_full_journal_restore_preserves_display() -> Result {
             runtime.into_journal(),
         )?;
         assert_eq!(
-            restored.projection().intents()[0].binding(),
+            restored
+                .projection()
+                .intents()
+                .first()
+                .and_then(EffectIntent::binding),
             Some(&expected),
             "display survives recovery"
         );

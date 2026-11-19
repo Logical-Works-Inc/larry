@@ -114,7 +114,7 @@ fn constructed_snapshots_still_deny_expired_authority_and_replay_divergence() {
         CapabilitySnapshot::new(BTreeSet::from([Scope::FileRead])),
         ValiditySnapshot::new(SystemTime::UNIX_EPOCH),
     );
-    assert_eq!(pinned.policy.revision, 7);
+    assert_eq!(pinned.policy.revision(), 7);
     assert_eq!(pinned.budget.remaining, 10);
     assert_eq!(
         pinned.decide(),

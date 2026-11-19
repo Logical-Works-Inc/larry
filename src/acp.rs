@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{SendError, SyncSender, sync_channel};
 use std::sync::{Mutex, MutexGuard};
 
 use lgwks_std::json::{Map, Value, json};
@@ -68,9 +68,7 @@ fn locked(book: &Book) -> MutexGuard<'_, BTreeMap<String, Entry>> {
 ///
 /// The reader or the writer failed; a malformed or oversized frame is answered, never an error.
 pub fn serve<R: BufRead + Send, W: Write>(reader: R, writer: W) -> io::Result<()> {
-    let settings = crate::executor::process_env()
-        .and_then(Settings::from_env)
-        .map_err(|error| error.to_string());
+    let settings = crate::executor::process_env().and_then(Settings::from_env);
     serve_bounded(
         reader,
         writer,
@@ -85,7 +83,7 @@ fn serve_bounded<R, W, L>(
     reader: R,
     mut writer: W,
     max: usize,
-    settings: &Result<Settings, String>,
+    settings: &Result<Settings, ExecError>,
     log: L,
 ) -> io::Result<()>
 where
@@ -134,40 +132,61 @@ where
                 failed = Some(cause);
             }
         }
-        match failed {
-            Some(cause) => Err(cause),
-            None => Ok(()),
+        if let Some(cause) = failed {
+            return Err(cause);
         }
+        Ok(())
     })
 }
 
 /// Reads frames into the inbox until end of input, flagging each `session/cancel`
 /// on the way so it lands while a prompt runs.
+///
+/// # Errors
+///
+/// The agent hung up: the inbox is closed and no frame can be delivered.
 fn read_loop<R: BufRead, L: Write>(
     mut reader: R,
     max: usize,
     book: &Book,
     inbox: &SyncSender<io::Result<Frame>>,
     mut log: L,
-) {
+) -> Result<(), SendError<io::Result<Frame>>> {
     loop {
         let frame = wire::read_frame(&mut reader, max);
         let end = !matches!(frame, Ok(Frame::Line(_) | Frame::Oversized));
-        if let Ok(Frame::Line(ref bytes)) = frame {
-            mark(bytes, book, &mut log);
+        let logged = log_cancel(&frame, book, &mut log);
+        inbox.send(frame)?;
+        if let Err(cause) = logged {
+            // A cancel whose acknowledgement could not be logged ends the stream
+            // with that fault, which the agent returns to its caller.
+            return inbox.send(Err(cause));
         }
-        if inbox.send(frame).is_err() || end {
-            return;
+        if end {
+            return Ok(());
         }
     }
+}
+
+/// Flags a line frame's cancel and logs its acknowledgement; any other frame
+/// carries no cancel.
+fn log_cancel<L: Write>(frame: &io::Result<Frame>, book: &Book, log: &mut L) -> io::Result<()> {
+    if let Ok(Frame::Line(ref bytes)) = *frame {
+        mark(bytes, book, log)?;
+    }
+    Ok(())
 }
 
 /// Applies a frame's effect on a session's cancel flag in stream order: a
 /// `session/prompt` clears it and a `session/cancel` sets it, so a cancel sent
 /// after a prompt always reaches that prompt, however far behind the agent runs.
-fn mark<L: Write>(bytes: &[u8], book: &Book, log: &mut L) {
+///
+/// # Errors
+///
+/// The acknowledgement line for a cancel could not be written to the log.
+fn mark<L: Write>(bytes: &[u8], book: &Book, log: &mut L) -> io::Result<()> {
     let Ok(frame) = wire::object(bytes) else {
-        return;
+        return Ok(());
     };
     let (cancel, params) = match wire::envelope(&frame) {
         Ok(Envelope::Notification {
@@ -179,22 +198,20 @@ fn mark<L: Write>(bytes: &[u8], book: &Book, log: &mut L) {
             params: Some(params),
             ..
         }) => (false, params),
-        _ => return,
+        _ => return Ok(()),
     };
     let Some(session) = params.get("sessionId").and_then(Value::as_str) else {
-        return;
+        return Ok(());
     };
     if let Some(entry) = locked(book).get_mut(session) {
         entry.cancelled = cancel;
     }
     if cancel {
-        // The log line is the observable acknowledgement that the cancel was
-        // read; a failed log write changes nothing about the cancel itself.
-        drop(writeln!(
-            log,
-            "larry acp: session {session} cancel requested"
-        ));
+        // The cancel flag is already set; the log line is the observable
+        // acknowledgement that it was read, and a failed write is reported.
+        writeln!(log, "larry acp: session {session} cancel requested")?;
     }
+    Ok(())
 }
 
 /// Writes one message as its line and flushes.
@@ -206,7 +223,7 @@ fn send<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
 /// The agent's side of one connection.
 struct Agent<'run> {
     /// The executor's settings, or why they were refused.
-    settings: &'run Result<Settings, String>,
+    settings: &'run Result<Settings, ExecError>,
     /// The sessions this process opened.
     book: &'run Book,
     /// Whether `initialize` has been answered.
@@ -371,7 +388,7 @@ impl Agent<'_> {
         let settings = match *self.settings {
             Ok(ref settings) => settings,
             Err(ref reason) => {
-                updates.message(reason);
+                updates.message(&reason.to_string());
                 return updates.close(stopped(id, "refusal", None));
             }
         };
@@ -442,10 +459,15 @@ fn instruction(params: Option<&Map>) -> Result<String, PromptFault> {
     }
     let mut parts: Vec<String> = Vec::with_capacity(blocks.len());
     for block in blocks {
-        let part = match block["type"].as_str() {
-            Some("text") => block["text"].as_str().map(str::to_owned),
-            Some("resource") => block["resource"]["text"].as_str().map(str::to_owned),
-            Some("resource_link") => match (block["name"].as_str(), block["uri"].as_str()) {
+        let field = |key: &str| block.get(key).and_then(Value::as_str);
+        let part = match field("type") {
+            Some("text") => field("text").map(str::to_owned),
+            Some("resource") => block
+                .get("resource")
+                .and_then(|resource| resource.get("text"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            Some("resource_link") => match (field("name"), field("uri")) {
                 (Some(name), Some(uri)) => Some(format!("{name}: {uri}")),
                 _ => None,
             },
@@ -474,7 +496,7 @@ struct Updates<'a, W: Write> {
 
 impl<W: Write> Updates<'_, W> {
     /// Sends one `session/update` unless an earlier write failed.
-    fn update(&mut self, update: Value) {
+    fn update(&mut self, update: &Value) {
         if self.failed.is_some() {
             return;
         }
@@ -512,7 +534,7 @@ impl<W: Write> Observer for Updates<'_, W> {
             .flat_map(str::chars)
             .take(MAX_TITLE_CHARS)
             .collect();
-        self.update(json!({
+        self.update(&json!({
             "sessionUpdate": "tool_call",
             "toolCallId": format!("larry-{step}"),
             "title": title,
@@ -524,7 +546,7 @@ impl<W: Write> Observer for Updates<'_, W> {
 
     fn finished(&mut self, step: usize, observation: &str, passed: bool) {
         let status = if passed { "completed" } else { "failed" };
-        self.update(json!({
+        self.update(&json!({
             "sessionUpdate": "tool_call_update",
             "toolCallId": format!("larry-{step}"),
             "status": status,
@@ -533,7 +555,7 @@ impl<W: Write> Observer for Updates<'_, W> {
     }
 
     fn message(&mut self, text: &str) {
-        self.update(json!({
+        self.update(&json!({
             "sessionUpdate": "agent_message_chunk",
             "content": { "type": "text", "text": text }
         }));
@@ -552,7 +574,7 @@ impl<W: Write> Observer for Updates<'_, W> {
 }
 
 #[cfg(test)]
-#[path = "sim_acp.rs"]
+#[path = "acp/sim_acp.rs"]
 mod sim;
 #[cfg(test)]
 mod tests;

@@ -377,17 +377,18 @@ where
         at: SystemTime,
     ) -> Result<(), RuntimeError> {
         let payload = command.content().payload();
-        match command.content().kind() {
-            CommandKind::Ask => {
-                let question: Question = lgwks_std::json::from_slice(payload)?;
-                self.check_ask(command.tenant(), &question, at)
-            }
-            CommandKind::Answer => {
-                let answer: Answer = lgwks_std::json::from_slice(payload)?;
-                self.check_answer(command.tenant(), &answer, at)
-            }
-            _ => Ok(()),
+        let kind = command.content().kind();
+        if kind == CommandKind::Ask {
+            let question: Question = lgwks_std::json::from_slice(payload)?;
+            return self.check_ask(command.tenant(), &question, at);
         }
+        if kind == CommandKind::Answer {
+            let answer: Answer = lgwks_std::json::from_slice(payload)?;
+            return self.check_answer(command.tenant(), &answer, at);
+        }
+        // Every other kind carries no question; admission judges it on its own
+        // terms and refuses a kind it does not support.
+        Ok(())
     }
 
     /// An `Ask` expires after it is asked, targets an open run, is its
@@ -473,7 +474,7 @@ where
             return false;
         };
         self.questions
-            .bound(command.tenant(), run, proposal.operation)
+            .bound(command.tenant(), run, proposal.operation())
             .is_some_and(|asked| asked.status(at, self.run_closed(run)) == QuestionStatus::Pending)
     }
 
@@ -488,11 +489,11 @@ where
     ) -> Result<(), DenialReason> {
         let Some(asked) = self
             .questions
-            .bound(tenant, proposal.run, proposal.operation)
+            .bound(tenant, proposal.run(), proposal.operation())
         else {
             return Ok(());
         };
-        match asked.status(at, self.run_closed(proposal.run)) {
+        match asked.status(at, self.run_closed(proposal.run())) {
             QuestionStatus::Approved(ref scopes)
                 if asked.question.subject.effect == content
                     && proposal.required_scopes().is_subset(scopes) =>
@@ -517,17 +518,17 @@ where
         let proposal: WorkProposal = lgwks_std::json::from_slice(command.content().payload())?;
         let closing = self
             .projection
-            .run_state(proposal.run)
+            .run_state(proposal.run())
             .is_some_and(|state| state == RunState::Cancelling || state.is_terminal());
         if closing
             && self
                 .questions
-                .bound(tenant, proposal.run, proposal.operation)
+                .bound(tenant, proposal.run(), proposal.operation())
                 .is_some()
         {
             report
                 .denied
-                .push((proposal.operation, DenialReason::NotApproved));
+                .push((proposal.operation(), DenialReason::NotApproved));
             return Ok(());
         }
         let content = command.content().digest();

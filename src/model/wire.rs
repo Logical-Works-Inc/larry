@@ -31,9 +31,12 @@ pub(super) fn request_body(model: &str, temperature: f64, messages: &[Message]) 
 pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
     let text = std::str::from_utf8(body).map_err(ModelError::NotUtf8)?;
     let document = leading_document(text)?;
-    let message = &document["choices"][0]["message"];
-    let content = message["content"]
-        .as_str()
+    let content = document
+        .get("choices")
+        .and_then(|choices| choices.get(0_usize))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
         .ok_or(ModelError::Malformed("the reply has no message content"))?;
     Ok(Completion {
         content: content.to_owned(),
@@ -111,10 +114,18 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
         let Ok(chunk) = json::from_str::<Value>(payload) else {
             continue;
         };
-        if chunk["usage"].as_object().is_some() {
-            usage = chunk["usage"].clone();
+        if let Some(reported) = chunk.get("usage")
+            && reported.as_object().is_some()
+        {
+            usage = reported.clone();
         }
-        if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
+        if let Some(delta) = chunk
+            .get("choices")
+            .and_then(|choices| choices.get(0_usize))
+            .and_then(|choice| choice.get("delta"))
+            .and_then(|delta| delta.get("content"))
+            .and_then(Value::as_str)
+        {
             assembled.push_str(delta);
             chunks = chunks.saturating_add(1);
         }
@@ -172,12 +183,16 @@ fn refusal_detail(body: &[u8]) -> String {
     let code = document
         .as_ref()
         .ok()
-        .and_then(|document| document["error"]["code"].as_str())
+        .and_then(|document| document.get("error"))
+        .and_then(|refusal| refusal.get("code"))
+        .and_then(Value::as_str)
         .map(|code| bounded(code, MAX_CODE_CHARS));
     let message = document
         .as_ref()
         .ok()
-        .and_then(|document| document["error"]["message"].as_str())
+        .and_then(|document| document.get("error"))
+        .and_then(|refusal| refusal.get("message"))
+        .and_then(Value::as_str)
         .map(str::to_owned);
     let reason = match (code, message) {
         (Some(code), Some(message)) => format!("{code}: {message}"),

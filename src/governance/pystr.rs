@@ -191,7 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn splitlines_matches_python_on_every_break() -> Result<(), Box<dyn std::error::Error>> {
+    fn splitlines_matches_python_on_every_break() {
         let cases: [(&str, &[&str]); 6] = [
             ("", &[]),
             ("a", &["a"]),
@@ -210,7 +210,6 @@ mod tests {
                 "splitlines of {text:?} must match Python"
             );
         }
-        Ok(())
     }
 
     #[test]
@@ -273,8 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn casefold_finds_ascii_anchors_behind_full_foldings() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn casefold_finds_ascii_anchors_behind_full_foldings() {
         assert!(
             casefold_contains("SELF-MAINTENANCE", "Self-maintenance"),
             "upper case folds"
@@ -288,6 +286,5 @@ mod tests {
             !casefold_contains("Moo", "Nova"),
             "an absent anchor stays absent"
         );
-        Ok(())
     }
 }

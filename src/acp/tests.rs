@@ -8,6 +8,8 @@ use std::io::Cursor;
 use lgwks_std::json::{self, Value};
 
 use super::serve_bounded;
+use crate::executor::ExecError;
+use crate::json_at::At;
 
 /// Serves `lines` with refused settings and returns every reply line and the log.
 fn replies(lines: &[&str], max: usize) -> Result<(Vec<Value>, String), Box<dyn std::error::Error>> {
@@ -15,7 +17,7 @@ fn replies(lines: &[&str], max: usize) -> Result<(Vec<Value>, String), Box<dyn s
     input.push('\n');
     let mut out: Vec<u8> = Vec::new();
     let mut log: Vec<u8> = Vec::new();
-    let settings = Err(String::from("no executor in a unit test"));
+    let settings = Err(ExecError::StateDirUnset);
     serve_bounded(
         Cursor::new(input.into_bytes()),
         &mut out,
@@ -46,16 +48,30 @@ fn initialize_answers_version_one_and_its_capabilities() -> Result<(), Box<dyn s
         &[r#"{"jsonrpc":"2.0","id":"a","method":"initialize","params":{"protocolVersion":7}}"#],
         1_048_576,
     )?;
-    let result = &got[0]["result"];
-    assert_eq!(got[0]["id"], "a", "id echoed");
-    assert_eq!(result["protocolVersion"], 1, "the one version Larry speaks");
-    assert_eq!(result["agentCapabilities"]["loadSession"], false, "no load");
+    let reply = got.first().ok_or("no reply")?;
+    let result = reply.at("/result")?;
+    assert_eq!(*reply.at("/id")?, "a", "id echoed");
     assert_eq!(
-        result["agentCapabilities"]["promptCapabilities"]["image"], false,
+        *result.at("/protocolVersion")?,
+        1,
+        "the one version Larry speaks"
+    );
+    assert_eq!(
+        *result.at("/agentCapabilities/loadSession")?,
+        false,
+        "no load"
+    );
+    assert_eq!(
+        *result.at("/agentCapabilities/promptCapabilities/image")?,
+        false,
         "no image input"
     );
-    assert_eq!(result["authMethods"], json::json!([]), "no auth method");
-    assert_eq!(result["agentInfo"]["name"], "larry", "agent info");
+    assert_eq!(
+        *result.at("/authMethods")?,
+        json::json!([]),
+        "no auth method"
+    );
+    assert_eq!(*result.at("/agentInfo/name")?, "larry", "agent info");
     Ok(())
 }
 
@@ -89,35 +105,42 @@ fn every_malformed_frame_gets_its_exact_error() -> Result<(), Box<dyn std::error
         r#"{"jsonrpc":"2.0","result":{},"id":11}"#,
     ];
     let (got, _) = replies(&lines, 1_048_576)?;
-    let codes: Vec<(Value, Value)> = got
+    // `Value::Null` is an id the reply omits because the request's was unknown (`wire::error`).
+    let codes = got
         .iter()
-        .map(|reply| (reply["id"].clone(), reply["error"]["code"].clone()))
-        .collect();
-    let expected: Vec<(Value, Value)> = [
-        (json::json!(1), json::json!(-32600)),
-        (Value::Null, json::json!(-32700)),
-        (Value::Null, json::json!(-32600)),
-        (Value::Null, json::json!(-32600)),
-        (json::json!(2), json::json!(-32600)),
-        (json::json!(3), json::json!(-32600)),
-        (json::json!(4), json::json!(-32602)),
-        (json::json!(5), json::json!(-32602)),
-        (json::json!(0), Value::Null),
-        (json::json!(0), json::json!(-32600)),
-        (json::json!(6), json::json!(-32602)),
-        (json::json!(7), json::json!(-32601)),
-        (json::json!(8), json::json!(-32602)),
-        (json::json!(9), json::json!(-32602)),
-        (json::json!(10), json::json!(-32602)),
+        .map(super::sim::id_and_code)
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected: Vec<(Value, Option<i64>)> = [
+        (json::json!(1), Some(-32600)),
+        (Value::Null, Some(-32700)),
+        (Value::Null, Some(-32600)),
+        (Value::Null, Some(-32600)),
+        (json::json!(2), Some(-32600)),
+        (json::json!(3), Some(-32600)),
+        (json::json!(4), Some(-32602)),
+        (json::json!(5), Some(-32602)),
+        (json::json!(0), None),
+        (json::json!(0), Some(-32600)),
+        (json::json!(6), Some(-32602)),
+        (json::json!(7), Some(-32601)),
+        (json::json!(8), Some(-32602)),
+        (json::json!(9), Some(-32602)),
+        (json::json!(10), Some(-32602)),
     ]
     .to_vec();
     assert_eq!(codes, expected, "each frame's exact answer, in order");
     assert_eq!(
-        got[0]["error"]["message"], "initialize must come first",
+        *got.first()
+            .ok_or("no reply at that index")?
+            .at("/error/message")?,
+        "initialize must come first",
         "a session before the handshake"
     );
     assert_eq!(
-        got[13]["error"]["message"], "cwd must be an absolute path",
+        *got.get(13)
+            .ok_or("no reply at that index")?
+            .at("/error/message")?,
+        "cwd must be an absolute path",
         "ACP: cwd MUST be absolute"
     );
     Ok(())
@@ -129,12 +152,27 @@ fn the_frame_bound_and_errors_are_the_mcp_wires_own() -> Result<(), Box<dyn std:
     // The bound sits above the initialize frame (about 100 bytes) and below the long one.
     let long = "x".repeat(200);
     let (got, _) = replies(&[&long, INIT], 160)?;
-    assert_eq!(got[0]["error"]["code"], -32600, "oversized");
     assert_eq!(
-        got[0]["error"]["message"], "frame exceeds the size limit and was discarded",
+        *got.first()
+            .ok_or("no reply at that index")?
+            .at("/error/code")?,
+        -32600,
+        "oversized"
+    );
+    assert_eq!(
+        *got.first()
+            .ok_or("no reply at that index")?
+            .at("/error/message")?,
+        "frame exceeds the size limit and was discarded",
         "the wire's message"
     );
-    assert_eq!(got[1]["result"]["protocolVersion"], 1, "still serving");
+    assert_eq!(
+        *got.get(1)
+            .ok_or("no reply at that index")?
+            .at("/result/protocolVersion")?,
+        1,
+        "still serving"
+    );
     Ok(())
 }
 
@@ -160,20 +198,38 @@ fn a_prompt_without_settings_is_a_refusal_and_a_cancel_is_logged()
     );
     let (got, log) = replies(&[INIT, &new, &cancel, &prompt, &image], 1_048_576)?;
     assert_eq!(
-        got[1]["result"]["sessionId"],
+        *got.get(1)
+            .ok_or("no reply at that index")?
+            .at("/result/sessionId")?,
         session.as_str(),
         "session id"
     );
     assert_eq!(
-        got[2]["method"], "session/update",
+        *got.get(2).ok_or("no reply at that index")?.at("/method")?,
+        "session/update",
         "the refusal is said first"
     );
     assert_eq!(
-        got[2]["params"]["update"]["content"]["text"], "no executor in a unit test",
-        "the reason"
+        *got.get(2)
+            .ok_or("no reply at that index")?
+            .at("/params/update/content/text")?,
+        ExecError::StateDirUnset.to_string().as_str(),
+        "the reason is the refused settings' own message"
     );
-    assert_eq!(got[3]["result"]["stopReason"], "refusal", "stop reason");
-    assert_eq!(got[4]["error"]["code"], -32602, "an image block is refused");
+    assert_eq!(
+        *got.get(3)
+            .ok_or("no reply at that index")?
+            .at("/result/stopReason")?,
+        "refusal",
+        "stop reason"
+    );
+    assert_eq!(
+        *got.get(4)
+            .ok_or("no reply at that index")?
+            .at("/error/code")?,
+        -32602,
+        "an image block is refused"
+    );
     assert_eq!(got.len(), 5, "the cancel notification gets no reply");
     assert_eq!(
         log,
@@ -199,11 +255,14 @@ fn a_process_holds_at_most_sixteen_sessions() -> Result<(), Box<dyn std::error::
     let (got, _) = replies(&lines, 1_048_576)?;
     let opened = got
         .iter()
-        .filter(|reply| reply["result"]["sessionId"].is_string())
+        .filter(|reply| matches!(reply.member("/result/sessionId"), Some(Value::String(..))))
         .count();
     assert_eq!(opened, 16, "sixteen sessions");
     assert_eq!(
-        got[17]["error"]["code"], -32600,
+        *got.get(17)
+            .ok_or("no reply at that index")?
+            .at("/error/code")?,
+        -32600,
         "the seventeenth is refused"
     );
     Ok(())

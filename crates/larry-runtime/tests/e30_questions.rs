@@ -120,7 +120,7 @@ fn command(
 
 /// The JSON body of a question or an answer.
 mod serde_body {
-    pub trait Body {
+    pub(crate) trait Body {
         fn bytes(&self) -> Result<Vec<u8>, lgwks_std::json::Error>;
     }
     impl Body for larry_runtime::runtime::Question {

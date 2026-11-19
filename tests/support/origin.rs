@@ -15,10 +15,10 @@ use std::process::Command;
 
 #[path = "temp_dir.rs"]
 mod temp_dir;
-pub use temp_dir::TempDir;
+pub(crate) use temp_dir::TempDir;
 
 /// A state dir for the executor and a fresh origin repository, in that order.
-pub fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
+pub(crate) fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
     let state = TempDir::new()?;
     let origin = TempDir::new()?;
     origin_repo(origin.path())?;
@@ -29,7 +29,7 @@ pub fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
 /// `/dev/null` and the system file is off, so no user or machine config, template or hook is
 /// read; `main` is the branch default, signing is off, an empty `core.hooksPath` runs no hooks,
 /// and the author and committer are fixed. Every test git call is built here.
-pub fn git_command(dir: &Path) -> Command {
+pub(super) fn git_command(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -89,7 +89,7 @@ fn git_text(
 /// Automatic maintenance is off before the first commit: `git commit` otherwise forks
 /// `git maintenance run --auto --detach`, whose object-database lock file can appear
 /// under `.git/objects` while a journey hashes the origin (larry#138).
-pub fn origin_repo(dir: &Path) -> Result<(), Box<dyn Error>> {
+pub(super) fn origin_repo(dir: &Path) -> Result<(), Box<dyn Error>> {
     origin_repo_with(&git_command, dir)?;
     commit_all(dir, "init")
 }
@@ -106,7 +106,7 @@ fn origin_repo_with(make: &dyn Fn(&Path) -> Command, dir: &Path) -> Result<(), B
 }
 
 /// Stages everything in `dir` and commits it as `message`, through [`git_command`].
-pub fn commit_all(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
+pub(super) fn commit_all(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
     commit_all_with(&git_command, dir, message)
 }
 

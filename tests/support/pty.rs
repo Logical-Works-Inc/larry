@@ -14,15 +14,15 @@ use std::thread::{Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
 /// Failures propagate instead of panicking.
-pub type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[path = "deadline.rs"]
-pub mod deadline;
+pub(crate) mod deadline;
 
 /// The PATH every terminal's shell gets: the directories the journeys' tools live in, never the
 /// host's PATH (larry#269). `script`, `sh`, `stty`, `git`, `cp` and `sleep` live under one of
 /// these on macOS and Linux, so the frame behaves the same on any host that runs the suite.
-pub const TEST_PATH: &str = "/usr/bin:/bin";
+pub(crate) const TEST_PATH: &str = "/usr/bin:/bin";
 /// Terminal rows.
 const ROWS: usize = 32;
 /// Terminal columns.
@@ -32,7 +32,7 @@ const COLUMNS: usize = 120;
 const OUTPUT_BOUND: usize = 1_048_576;
 
 /// The screen the terminal shows.
-pub struct Screen {
+pub(crate) struct Screen {
     /// Each row's cells.
     cells: Vec<Vec<char>>,
     /// Cursor column.
@@ -45,7 +45,7 @@ pub struct Screen {
 
 impl Screen {
     /// A blank 32x120 screen.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cells: vec![vec![' '; COLUMNS]; ROWS],
             column: 0,
@@ -55,7 +55,7 @@ impl Screen {
     }
 
     /// The visible text, rows joined by newlines.
-    pub fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         let rows: Vec<String> = self.cells.iter().map(|row| row.iter().collect()).collect();
         rows.join("\n")
     }
@@ -129,7 +129,7 @@ impl Screen {
     }
 
     /// Applies `chunk` to the screen; an incomplete sequence waits for the next chunk.
-    pub fn ingest(&mut self, chunk: &[u8]) {
+    pub(crate) fn ingest(&mut self, chunk: &[u8]) {
         self.pending.extend_from_slice(chunk);
         let mut index = 0_usize;
         while let Some(&current) = self.pending.get(index) {
@@ -173,7 +173,7 @@ impl Screen {
 }
 
 /// The shipped binary under `script(1)`, its output read by one thread the test's scope owns.
-pub struct Pty<'scope> {
+pub(crate) struct Pty<'scope> {
     /// The `script` process; the binary is its child, exec'd from the shell.
     child: Child,
     /// The terminal's input.
@@ -196,7 +196,7 @@ pub struct Pty<'scope> {
 /// Whether `now` shows `text` as the reply to keys typed over `before`. Text already on the
 /// screen before the keys is refused, because the first chunk of a late paint would pass for
 /// the reply (larry#148 run 42366888296).
-pub fn replied(before: Option<&str>, now: &str, text: &str) -> Result<bool, String> {
+pub(crate) fn replied(before: Option<&str>, now: &str, text: &str) -> Result<bool, String> {
     if before.is_some_and(|screen| screen.contains(text)) {
         return Err(format!(
             "{text:?} was on screen before the keys; wait for text only the reply paints"
@@ -209,7 +209,7 @@ impl<'scope> Pty<'scope> {
     /// Starts the shipped binary in a fresh 32x120 terminal in `cwd`, with only the fixed PATH,
     /// TERM and `env` set. The shell prints its own PID before it execs the binary, so the PID is
     /// the binary's.
-    pub fn open<'env>(
+    pub(crate) fn open<'env>(
         owner: &'scope Scope<'scope, 'env>,
         cwd: &Path,
         env: &[(&str, OsString)],
@@ -270,7 +270,7 @@ impl<'scope> Pty<'scope> {
 
     /// Reads until the frame has answered the last keys and the screen shows `text`, which
     /// must not have been on screen when those keys were typed.
-    pub fn wait_for(&mut self, text: &str) -> Journey {
+    pub(crate) fn wait_for(&mut self, text: &str) -> Journey {
         let deadline = Instant::now()
             .checked_add(deadline::PATIENCE)
             .ok_or("deadline overflows")?;
@@ -285,7 +285,7 @@ impl<'scope> Pty<'scope> {
     }
 
     /// Reads whatever arrives for `window` and returns its byte count.
-    pub fn drain(&mut self, window: Duration) -> Journey<usize> {
+    pub(crate) fn drain(&mut self, window: Duration) -> Journey<usize> {
         let before = self.raw.len();
         let deadline = Instant::now()
             .checked_add(window)
@@ -300,7 +300,7 @@ impl<'scope> Pty<'scope> {
     }
 
     /// Types `keys`.
-    pub fn send(&mut self, keys: &str) -> Journey {
+    pub(crate) fn send(&mut self, keys: &str) -> Journey {
         let stdin = self.stdin.as_mut().ok_or("terminal input closed")?;
         self.answered = false;
         self.before = Some(self.screen.text());
@@ -309,7 +309,7 @@ impl<'scope> Pty<'scope> {
     }
 
     /// The binary's PID, as the shell printed it.
-    pub fn pid(&self) -> Journey<String> {
+    pub(crate) fn pid(&self) -> Journey<String> {
         let text = String::from_utf8_lossy(&self.raw);
         let digits = text
             .split_once("LARRYPID:")
@@ -321,7 +321,7 @@ impl<'scope> Pty<'scope> {
 
     /// Reads to the end of the output, then reaps the terminal and its reader; returns the
     /// exit status and the whole transcript.
-    pub fn finish(mut self) -> Journey<(ExitStatus, Vec<u8>)> {
+    pub(crate) fn finish(mut self) -> Journey<(ExitStatus, Vec<u8>)> {
         let deadline = Instant::now()
             .checked_add(deadline::PATIENCE)
             .ok_or("deadline overflows")?;
@@ -336,9 +336,16 @@ impl<'scope> Pty<'scope> {
         self.stdin = None;
         let status = self.child.wait()?;
         if let Some(reader) = self.reader.take() {
-            reader
-                .join()
-                .map_err(|_| "terminal reader thread panicked")??;
+            match reader.join() {
+                Ok(read) => read?,
+                Err(panic) => {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+                    return Err(format!("terminal reader thread panicked: {message:?}").into());
+                }
+            }
         }
         Ok((status, std::mem::take(&mut self.raw)))
     }
@@ -348,11 +355,22 @@ impl Drop for Pty<'_> {
     fn drop(&mut self) {
         // Best effort on an early return: kill and reap so no terminal outlives the test.
         self.stdin = None;
-        drop(self.child.kill());
-        drop(self.child.wait());
-        if let Some(reader) = self.reader.take() {
-            drop(reader.join());
-        }
+        let stopped = match self.child.try_wait() {
+            Ok(Some(_status)) => Ok(()),
+            Ok(None) => self
+                .child
+                .kill()
+                .and_then(|()| self.child.wait().map(|_status| ())),
+            Err(cause) => Err(cause),
+        };
+        let read_out = match self.reader.take() {
+            Some(reader) => matches!(reader.join(), Ok(Ok(()))),
+            None => true,
+        };
+        assert!(
+            std::thread::panicking() || (stopped.is_ok() && read_out),
+            "the terminal and its reader stop with the test: {stopped:?}, reader ok {read_out}"
+        );
     }
 }
 

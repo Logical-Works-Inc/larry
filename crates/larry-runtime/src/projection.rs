@@ -293,7 +293,7 @@ impl FoldProjection {
         // The cost is charged to the tenant the recorded event named, never to
         // the tenant the intent declared (D42, larry#208).
         let spent = self.reserved.entry(event.tenant()).or_insert(0);
-        *spent = spent.saturating_add(payload.authorization.pinned.request.cost);
+        *spent = spent.saturating_add(payload.authorization.pinned.request.cost());
         self.authorizations.push(payload.authorization);
         self.intents.push(payload.intent);
         Ok(())

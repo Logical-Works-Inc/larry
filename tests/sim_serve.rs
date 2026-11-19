@@ -170,6 +170,51 @@ fn case(
     }
 }
 
+/// A health probe on the tenant segment `tenant`, which the edge refuses as a bad tenant.
+fn bad_tenant(tenant: &str, key: Option<&str>) -> Case {
+    case(
+        "GET",
+        format!("/t/{tenant}/healthz"),
+        b"",
+        key,
+        400,
+        BAD_TENANT,
+    )
+}
+
+/// `name` with one seeded byte replaced by a byte no tenant name may hold.
+fn foreign_byte(rng: &mut Seeded, name: &str) -> Result<String, Box<dyn Error>> {
+    let mut bytes = name.as_bytes().to_vec();
+    let at = rng.index(bytes.len())?;
+    let foreign = pick(rng, FOREIGN_BYTES)?;
+    if let Some(byte) = bytes.get_mut(at) {
+        *byte = foreign;
+    }
+    Ok(String::from_utf8(bytes)?)
+}
+
+/// A key that is not `own`'s: none, another tenant's, or `own`'s with one digit flipped.
+fn wrong_key(
+    rng: &mut Seeded,
+    keyed: &[Keyed],
+    own: &Keyed,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let other = choose_ref(rng, keyed)?;
+    let tampered = {
+        let mut bytes = own.key.clone().into_bytes();
+        let at = rng.index(bytes.len())?;
+        if let Some(byte) = bytes.get_mut(at) {
+            *byte = if *byte == b'0' { b'1' } else { b'0' };
+        }
+        String::from_utf8(bytes)?
+    };
+    Ok(match rng.index(3)? {
+        0 => None,
+        1 if other.name != own.name => Some(other.key.clone()),
+        _ => Some(tampered),
+    })
+}
+
 /// One request from the seed, with the reference answer: the rule the edge
 /// documents, written out here rather than read from the binary.
 fn draw(rng: &mut Seeded, keyed: &[Keyed]) -> Result<Case, Box<dyn Error>> {
@@ -182,32 +227,9 @@ fn draw(rng: &mut Seeded, keyed: &[Keyed]) -> Result<Case, Box<dyn Error>> {
         1 => {
             let past = TENANT_MAX.saturating_add(1).saturating_add(rng.index(16)?);
             let long = tenant(rng, past)?;
-            case(
-                "GET",
-                format!("/t/{long}/healthz"),
-                b"",
-                any_key,
-                400,
-                BAD_TENANT,
-            )
+            bad_tenant(&long, any_key)
         }
-        2 => {
-            let mut bytes = name.as_bytes().to_vec();
-            let at = rng.index(bytes.len())?;
-            let foreign = pick(rng, FOREIGN_BYTES)?;
-            if let Some(byte) = bytes.get_mut(at) {
-                *byte = foreign;
-            }
-            let bad = String::from_utf8(bytes)?;
-            case(
-                "GET",
-                format!("/t/{bad}/healthz"),
-                b"",
-                any_key,
-                400,
-                BAD_TENANT,
-            )
-        }
+        2 => bad_tenant(&foreign_byte(rng, name)?, any_key),
         3 => case(
             "GET",
             String::from("/t//healthz"),
@@ -261,20 +283,7 @@ fn draw(rng: &mut Seeded, keyed: &[Keyed]) -> Result<Case, Box<dyn Error>> {
             verb => case(verb, String::from("/healthz"), b"", any_key, 200, LIVE),
         },
         10 => {
-            let other = choose_ref(rng, keyed)?;
-            let tampered = {
-                let mut bytes = own.key.clone().into_bytes();
-                let at = rng.index(bytes.len())?;
-                if let Some(byte) = bytes.get_mut(at) {
-                    *byte = if *byte == b'0' { b'1' } else { b'0' };
-                }
-                String::from_utf8(bytes)?
-            };
-            let sent = match rng.index(3)? {
-                0 => None,
-                1 if other.name != own.name => Some(other.key.clone()),
-                _ => Some(tampered),
-            };
+            let sent = wrong_key(rng, keyed, own)?;
             let verb = choose(rng, &["GET", "POST", "PUT"])?;
             case(
                 verb,
@@ -414,8 +423,7 @@ fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult 
             }
             let mut answered = 0_usize;
             for sender in senders {
-                answered = answered
-                    .saturating_add(sender.join().map_err(|_panicked| "a sender panicked")??);
+                answered = answered.saturating_add(sender_result(sender.join())??);
             }
             assert_eq!(
                 answered,
@@ -431,6 +439,20 @@ fn sim_serve_concurrent_tenants_are_all_answered_for_every_seed() -> TestResult 
         "the host stops clean after load: {stderr}"
     );
     Ok(())
+}
+
+/// A joined sender thread's own result, or its panic named by its payload.
+fn sender_result<T>(joined: std::thread::Result<T>) -> Result<T, String> {
+    match joined {
+        Ok(result) => Ok(result),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+            Err(format!("a sender panicked: {message:?}"))
+        }
+    }
 }
 
 #[test]
@@ -473,7 +495,7 @@ fn sim_serve_two_identities_on_one_path_at_once_each_see_only_themselves() -> Te
             }
         }
         for sender in senders {
-            let (answered, expected) = sender.join().map_err(|_panicked| "a sender panicked")??;
+            let (answered, expected) = sender_result(sender.join())??;
             assert_eq!(answered, expected, "each identity sees only itself");
         }
         Ok(())
@@ -566,7 +588,9 @@ fn reload_pass(seed: u64) -> Result<String, Box<dyn Error>> {
     for name in RELOAD_NAMES {
         issue_key(&state, name)?;
     }
-    let victim = RELOAD_NAMES[Seeded::from_seed(seed).index(RELOAD_NAMES.len())?];
+    let victim = *RELOAD_NAMES
+        .get(Seeded::from_seed(seed).index(RELOAD_NAMES.len())?)
+        .ok_or("a reload name")?;
     let mut serving = start_host(&state)?;
     let mut trace = Hasher::new();
     serving.signal("HUP")?;

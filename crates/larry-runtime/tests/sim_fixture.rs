@@ -102,7 +102,8 @@ fn witness_world(seed: u64) -> Result<(Vec<u8>, Vec<u8>), DrawError> {
     let at = SystemTime::UNIX_EPOCH;
     for _ in 0..stream.below(17)? {
         let asked = intent(stream.below(256)?.to_le_bytes()[0]);
-        let _ = if stream.below(2)? == 0 {
+        // The scripted outcome is not read here; the witness lists below are.
+        let _outcome = if stream.below(2)? == 0 {
             owner.dispatch(&asked, at)
         } else {
             owner.reconcile(&asked, at)

@@ -9,6 +9,10 @@
 //! same seed must give the same reply bytes. Every test drives the binary
 //! through its public interface; nothing here calls server code.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "mcp_support/eras.rs"]
 mod eras;
 mod mcp_support;
@@ -30,17 +34,22 @@ fn pick_id(rng: &mut Rng, index: usize) -> Value {
 }
 
 /// The reply to `id` is a complete 2026-07-28 result naming this server.
-fn assert_complete(reply: &Value, id: &Value, context: &str) {
-    assert_eq!(&reply["id"], id, "{context}: id");
-    let result = &reply["result"];
-    assert_eq!(result["resultType"], "complete", "{context}: resultType");
-    let info = &result["_meta"]["io.modelcontextprotocol/serverInfo"];
-    assert_eq!(info["name"], "larry", "{context}: serverInfo name");
+fn assert_complete(reply: &Value, id: &Value, context: &str) -> TestResult<()> {
+    assert_eq!(reply.at("/id")?, id, "{context}: id");
+    let result = reply.at("/result")?;
     assert_eq!(
-        info["version"],
+        *result.at("/resultType")?,
+        "complete",
+        "{context}: resultType"
+    );
+    let info = result.at("/_meta/io.modelcontextprotocol~1serverInfo")?;
+    assert_eq!(*info.at("/name")?, "larry", "{context}: serverInfo name");
+    assert_eq!(
+        *info.at("/version")?,
         env!("CARGO_PKG_VERSION"),
         "{context}: serverInfo version"
     );
+    Ok(())
 }
 
 /// What one generated request must draw.
@@ -88,44 +97,54 @@ fn run_any_order(seed: u64, schema: &Schema) -> TestResult<Vec<Vec<u8>>> {
         let context = format!("seed {seed} step {index} {method}");
         match want {
             Want::Discover => {
-                assert_complete(&reply, &id, &context);
+                assert_complete(&reply, &id, &context)?;
                 assert_eq!(
-                    reply["result"]["supportedVersions"],
+                    *reply.at("/result/supportedVersions")?,
                     json!(SERVED),
                     "{context}: versions"
                 );
                 assert_eq!(
-                    reply["result"]["capabilities"]["tools"]["listChanged"], false,
+                    *reply.at("/result/capabilities/tools/listChanged")?,
+                    false,
                     "{context}: capabilities"
                 );
             }
             Want::List => {
-                assert_complete(&reply, &id, &context);
+                assert_complete(&reply, &id, &context)?;
                 assert_eq!(
-                    reply["result"]["tools"][0]["name"], "larry_submit_task",
+                    *reply.at("/result/tools/0/name")?,
+                    "larry_submit_task",
                     "{context}: tool"
                 );
-                assert_eq!(reply["result"]["cacheScope"], "public", "{context}: scope");
+                assert_eq!(
+                    *reply.at("/result/cacheScope")?,
+                    "public",
+                    "{context}: scope"
+                );
                 assert!(
-                    reply["result"]["ttlMs"].as_u64().is_some(),
+                    reply
+                        .member("/result/ttlMs")
+                        .and_then(|found| found.as_u64())
+                        .is_some(),
                     "{context}: ttlMs"
                 );
             }
             Want::Refused(code) => {
-                assert_complete(&reply, &id, &context);
-                assert_eq!(reply["result"]["isError"], true, "{context}: isError");
+                assert_complete(&reply, &id, &context)?;
+                assert_eq!(*reply.at("/result/isError")?, true, "{context}: isError");
                 assert_eq!(
-                    reply["result"]["structuredContent"]["error"]["code"], code,
+                    *reply.at("/result/structuredContent/error/code")?,
+                    code,
                     "{context}: code"
                 );
                 assert!(
-                    reply["result"]["ttlMs"].is_null(),
+                    !reply.holds("/result/ttlMs"),
                     "{context}: a tool result is not cacheable"
                 );
             }
             Want::Error(code) => {
-                assert_eq!(reply["error"]["code"], code, "{context}: error code");
-                assert_eq!(reply["id"], id, "{context}: error id");
+                assert_eq!(*reply.at("/error/code")?, code, "{context}: error code");
+                assert_eq!(*reply.at("/id")?, id, "{context}: error id");
             }
         }
         trace.push(line);
@@ -164,7 +183,8 @@ fn sim_discover_first_then_a_request_at_a_listed_version() -> TestResult<()> {
         let mut session = Session::start()?;
         let frame = frame_at(&mut rng, &json!("d"), "server/discover", json!({}), MODERN)?;
         let (_, found) = ask(&mut session, &schema, &frame)?;
-        let listed: Vec<&str> = found["result"]["supportedVersions"]
+        let listed: Vec<&str> = found
+            .at("/result/supportedVersions")?
             .as_array()
             .ok_or("supportedVersions")?
             .iter()
@@ -172,13 +192,16 @@ fn sim_discover_first_then_a_request_at_a_listed_version() -> TestResult<()> {
             .collect();
         assert_eq!(listed, SERVED, "seed {seed}: versions");
         assert!(
-            found["result"]["ttlMs"].as_u64().is_some_and(|ttl| ttl > 0),
+            found
+                .at("/result/ttlMs")?
+                .as_u64()
+                .is_some_and(|ttl| ttl > 0),
             "seed {seed}: a static server is cacheable"
         );
         let chosen = listed.first().ok_or("no versions")?;
         let call = frame_at(&mut rng, &json!(1), "tools/list", json!({}), chosen)?;
         let (_, list) = ask(&mut session, &schema, &call)?;
-        assert_complete(&list, &json!(1), &format!("seed {seed}"));
+        assert_complete(&list, &json!(1), &format!("seed {seed}"))?;
     }
     Ok(())
 }
@@ -206,9 +229,9 @@ fn sim_version_mismatch_returns_unsupported_protocol_version() -> TestResult<()>
         let method = *pick(&mut rng, &methods)?;
         let frame = frame_at(&mut rng, &json!(index), method, json!({}), asked)?;
         let (_, reply) = ask(&mut session, &schema, &frame)?;
-        assert_eq!(reply["error"]["code"], -32022, "{asked:?} on {method}");
-        assert_eq!(reply["error"]["data"]["requested"], asked, "echoed");
-        assert_eq!(reply["error"]["data"]["supported"], json!(SERVED), "list");
+        assert_eq!(*reply.at("/error/code")?, -32022, "{asked:?} on {method}");
+        assert_eq!(*reply.at("/error/data/requested")?, asked, "echoed");
+        assert_eq!(*reply.at("/error/data/supported")?, json!(SERVED), "list");
     }
     let mut wrong_type = frame_at(&mut rng, &json!("t"), "tools/list", json!({}), MODERN)?;
     wrong_type
@@ -219,7 +242,8 @@ fn sim_version_mismatch_returns_unsupported_protocol_version() -> TestResult<()>
         .insert("io.modelcontextprotocol/protocolVersion", json!(20260728));
     let (_, reply) = ask(&mut session, &schema, &wrong_type)?;
     assert_eq!(
-        reply["error"]["code"], -32602,
+        *reply.at("/error/code")?,
+        -32602,
         "a numeric version is malformed"
     );
     Ok(())
@@ -257,9 +281,10 @@ fn sim_missing_or_malformed_meta_is_invalid_params() -> TestResult<()> {
         let frame = json!({"jsonrpc": "2.0", "id": index, "method": method, "params": params});
         let (_, reply) = ask(&mut session, &schema, &frame)?;
         assert_eq!(
-            reply["error"]["code"], -32602,
+            *reply.at("/error/code")?,
+            -32602,
             "{method} with {}",
-            frame["params"]
+            *frame.at("/params")?
         );
     }
     for bare in [
@@ -268,19 +293,21 @@ fn sim_missing_or_malformed_meta_is_invalid_params() -> TestResult<()> {
     ] {
         let (_, reply) = ask(&mut session, &schema, &bare)?;
         assert_eq!(
-            reply["error"]["code"], -32602,
+            *reply.at("/error/code")?,
+            -32602,
             "no params, no session: {bare}"
         );
     }
     let unknown = json!({"jsonrpc": "2.0", "id": 3, "method": "resources/list"});
     let (_, reply) = ask(&mut session, &schema, &unknown)?;
     assert_eq!(
-        reply["error"]["code"], -32601,
+        *reply.at("/error/code")?,
+        -32601,
         "an unknown method is not found"
     );
     let good = frame_at(&mut rng, &json!(4), "tools/list", json!({}), MODERN)?;
     let (_, reply) = ask(&mut session, &schema, &good)?;
-    assert_complete(&reply, &json!(4), "after the refusals");
+    assert_complete(&reply, &json!(4), "after the refusals")?;
     Ok(())
 }
 
@@ -305,7 +332,7 @@ fn sim_removed_methods_are_method_not_found() -> TestResult<()> {
         let params = json!({"level": *pick(&mut rng, &LEVELS)?});
         let frame = frame_at(&mut rng, &json!(index), method, params, MODERN)?;
         let (_, reply) = ask(&mut session, &schema, &frame)?;
-        assert_eq!(reply["error"]["code"], -32601, "{method} is not found");
+        assert_eq!(*reply.at("/error/code")?, -32601, "{method} is not found");
     }
     Ok(())
 }
@@ -346,7 +373,8 @@ fn sim_log_level_is_honoured_and_no_message_is_sent_unasked() -> TestResult<()> 
                 "seed {seed}: a notification leaked"
             );
             assert_eq!(
-                &reply["id"], id,
+                reply.at("/id")?,
+                id,
                 "seed {seed}: one reply per request, in order"
             );
             schema.check_reply("tools/list", &reply)?;
@@ -360,7 +388,8 @@ fn sim_log_level_is_honoured_and_no_message_is_sent_unasked() -> TestResult<()> 
         )?;
         let (_, last) = ask(&mut session, &schema, &barrier)?;
         assert_eq!(
-            last["id"], "barrier",
+            *last.at("/id")?,
+            "barrier",
             "seed {seed}: nothing was queued behind"
         );
     }
@@ -379,19 +408,22 @@ fn sim_tool_list_is_deterministic_cacheable_and_valid_2020_12() -> TestResult<()
         for index in 0..4 {
             let frame = frame_at(&mut rng, &json!(index), "tools/list", json!({}), MODERN)?;
             let (_, reply) = ask(&mut session, &schema, &frame)?;
-            let tools = reply["result"]["tools"].clone();
+            let tools = reply.at("/result/tools")?.clone();
             let first = reference.get_or_insert_with(|| tools.clone());
             assert_eq!(
                 &tools, first,
                 "seed {seed}: the list varied with the request"
             );
             assert!(
-                reply["result"]["ttlMs"].as_u64().is_some(),
+                reply
+                    .member("/result/ttlMs")
+                    .and_then(|found| found.as_u64())
+                    .is_some(),
                 "seed {seed}: ttlMs is a non-negative integer"
             );
             assert!(
                 matches!(
-                    reply["result"]["cacheScope"].as_str(),
+                    reply.at("/result/cacheScope")?.as_str(),
                     Some("public" | "private")
                 ),
                 "seed {seed}: cacheScope is public or private"
@@ -410,8 +442,9 @@ fn sim_tool_list_is_deterministic_cacheable_and_valid_2020_12() -> TestResult<()
     for tool in listed {
         check_dialect(&tool["inputSchema"], "inputSchema")?;
         assert!(
-            tool["inputSchema"]["$schema"].is_null()
-                || tool["inputSchema"]["$schema"] == "https://json-schema.org/draft/2020-12/schema",
+            !tool.holds("/inputSchema/$schema")
+                || *tool.at("/inputSchema/$schema")?
+                    == "https://json-schema.org/draft/2020-12/schema",
             "the dialect is the default or 2020-12 stated"
         );
     }
@@ -527,19 +560,21 @@ fn sim_a_legacy_session_leaves_stateless_requests_stateless() -> TestResult<()> 
         let (_, before) = ask(&mut session, &schema, &list)?;
         let init = session.initialize()?;
         assert!(
-            init["result"]["protocolVersion"].is_string(),
+            init.at("/result/protocolVersion")?.is_string(),
             "seed {seed}: initialize answered"
         );
         let (_, after) = ask(&mut session, &schema, &list)?;
         assert_eq!(
-            before["result"], after["result"],
+            *before.at("/result")?,
+            *after.at("/result")?,
             "seed {seed}: initialize changed a stateless answer"
         );
         let ping = frame_at(&mut rng, &json!("p"), "ping", json!({}), MODERN)?;
         let refused = session.request(&ping)?;
         schema.check_reply("ping", &refused)?;
         assert_eq!(
-            refused["error"]["code"], -32601,
+            *refused.at("/error/code")?,
+            -32601,
             "seed {seed}: ping with _meta stays removed"
         );
     }
@@ -575,7 +610,11 @@ fn sim_one_hundred_stateless_sessions_stay_isolated() -> TestResult<()> {
         }
         for (session, (id, method)) in sessions.iter_mut().zip(asked) {
             let reply = session.recv()?;
-            assert_eq!(reply["id"], id, "round {round}: reply crossed sessions");
+            assert_eq!(
+                *reply.at("/id")?,
+                id,
+                "round {round}: reply crossed sessions"
+            );
             schema.check_reply(method, &reply)?;
         }
     }

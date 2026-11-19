@@ -10,6 +10,7 @@ use std::fs::{File, TryLockError};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ExecError;
 
@@ -125,8 +126,14 @@ impl Workspace {
             state: state.to_path_buf(),
             path_env: path_env.to_owned(),
         };
-        let separate = flag("separate-git-dir", &workspace.git_dir);
-        let clone = workspace.git().output(
+        workspace.populate(repo, base)?;
+        Ok(workspace)
+    }
+
+    /// Clones `repo` into the work tree and checks out `base` detached.
+    fn populate(&self, repo: &Path, base: &str) -> Result<(), ExecError> {
+        let separate = flag("separate-git-dir", &self.git_dir);
+        let clone = self.git().output(
             None,
             &[
                 OsStr::new("clone"),
@@ -136,7 +143,7 @@ impl Workspace {
                 separate.as_os_str(),
                 OsStr::new("--"),
                 repo.as_os_str(),
-                workspace.tree.as_os_str(),
+                self.tree.as_os_str(),
             ],
         )?;
         if !clone.status.success() {
@@ -144,7 +151,7 @@ impl Workspace {
                 repo: repo.to_path_buf(),
             });
         }
-        let checkout = workspace.bound(&[
+        let checkout = self.bound(&[
             OsStr::new("checkout"),
             OsStr::new("--detach"),
             OsStr::new("--quiet"),
@@ -155,7 +162,7 @@ impl Workspace {
                 base: base.to_owned(),
             });
         }
-        Ok(workspace)
+        Ok(())
     }
 
     /// The work tree the task's commands run in.
@@ -188,26 +195,37 @@ impl Workspace {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command.spawn().map_err(spawn_error)?;
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            drop(child.kill());
-            drop(child.wait());
-            return Err(diff_failed("the diff pipes were not opened"));
+            return Err(match reap(&mut child) {
+                Ok(()) => diff_failed("the diff pipes were not opened"),
+                Err(cause) => diff_failed(&format!(
+                    "the diff pipes were not opened, and the child was not reaped: {cause}"
+                )),
+            });
         };
-        let (sunk, errors) = std::thread::scope(|scope| {
+        let (sunk, errors, killed) = std::thread::scope(|scope| {
             let errors = scope.spawn(move || read_capped(stderr));
             let sunk = pump(stdout);
-            if sunk.is_err() {
-                drop(child.kill());
-            }
-            (sunk, errors.join())
+            let killed = if sunk.is_err() { child.kill() } else { Ok(()) };
+            (sunk, errors.join(), killed)
         });
-        let sink = sunk?;
+        let sink = match sunk {
+            Ok(sink) => sink,
+            Err(cause) => {
+                return Err(match killed {
+                    Ok(()) => cause,
+                    Err(kill) => diff_failed(&format!(
+                        "{cause}; the diff child could not be killed: {kill}"
+                    )),
+                });
+            }
+        };
         let detail = match errors {
             Ok(Ok(kept)) => String::from_utf8_lossy(&kept).trim().to_owned(),
             Ok(Err(source)) => return Err(ExecError::Workspace(source)),
-            Err(_) => {
-                return Err(ExecError::Workspace(io::Error::other(
-                    "the diff stderr reader panicked",
-                )));
+            Err(panic) => {
+                return Err(ExecError::Workspace(io::Error::other(format!(
+                    "the diff stderr reader panicked: {panic:?}"
+                ))));
             }
         };
         let status = child.wait().map_err(spawn_error)?;
@@ -241,10 +259,17 @@ impl Workspace {
     }
 }
 
+/// Workspaces this process could not remove when they dropped. Each is a directory under
+/// `<state>/ws` that no live run owns, so the next start's sweep collects it.
+static STRANDED: AtomicU64 = AtomicU64::new(0);
+
 impl Drop for Workspace {
     fn drop(&mut self) {
-        // A removal that fails leaves a directory the next start's sweep collects.
-        drop(std::fs::remove_dir_all(&self.root));
+        if let Err(cause) = std::fs::remove_dir_all(&self.root)
+            && cause.kind() != io::ErrorKind::NotFound
+        {
+            STRANDED.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -294,9 +319,9 @@ impl DiffSink {
             .checked_add(length)
             .ok_or_else(|| io::Error::other("the diff is longer than u64 bytes"))?;
         self.hasher.update(piece);
-        let kept = DIFF_LIMIT.saturating_sub(self.head.len()).min(piece.len());
-        self.head.extend_from_slice(&piece[..kept]);
-        self.truncated = self.truncated || kept < piece.len();
+        let room = DIFF_LIMIT.saturating_sub(self.head.len());
+        self.head.extend(piece.iter().take(room));
+        self.truncated = self.truncated || room < piece.len();
         Ok(())
     }
 
@@ -339,11 +364,25 @@ fn pump(mut stdout: impl Read) -> Result<DiffSink, ExecError> {
     loop {
         match stdout.read(&mut chunk) {
             Ok(0) => return Ok(sink),
-            Ok(read) => sink.push(&chunk[..read]).map_err(ExecError::Workspace)?,
+            Ok(read) => {
+                let filled = chunk.get(..read).ok_or_else(|| {
+                    ExecError::Workspace(io::Error::other(
+                        "a read reported more bytes than its buffer holds",
+                    ))
+                })?;
+                sink.push(filled).map_err(ExecError::Workspace)?;
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(ExecError::Workspace(error)),
         }
     }
+}
+
+/// Kills a child that cannot be used and waits for it, so no process is left behind.
+fn reap(child: &mut std::process::Child) -> io::Result<()> {
+    child.kill()?;
+    child.wait()?;
+    Ok(())
 }
 
 /// Keeps the first `STDERR_LIMIT` bytes of a pipe and drains the rest, so git never blocks on it.

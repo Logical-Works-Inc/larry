@@ -19,6 +19,7 @@ use super::{
 use crate::executor::Ledger;
 use crate::executor::run::{Place, run_command};
 use crate::executor::sim_tree::{Scratch, path_env, scratch, tree_digest};
+use crate::json_at::At;
 use crate::sim_error::SimError;
 
 /// What every simulation returns.
@@ -339,7 +340,7 @@ fn bench_confine_overhead_is_measured_against_the_unconfined_spawn() -> TestResu
             assert_eq!(result.exit_code(), Some(0), "a sample did not run");
             // The run's own measured wall time, spawn to reaped group, in milliseconds.
             let json = result.into_json();
-            into.push(json["duration_ms"].as_u64().ok_or("duration_ms")?);
+            into.push(json.at("/duration_ms")?.as_u64().ok_or("duration_ms")?);
         }
     }
     let [p50, p95, p99] = percentiles(&mut plain).ok_or("plain samples")?;

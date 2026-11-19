@@ -282,8 +282,8 @@ impl fmt::Display for FenceError {
 impl std::error::Error for FenceError {}
 
 /// The fence change a broker refusal is.
-fn refused(error: BrokerError) -> FenceError {
-    match error {
+fn refused(error: &BrokerError) -> FenceError {
+    match *error {
         BrokerError::Exhausted { .. } => FenceError::EpochExhausted,
         BrokerError::RevocationsFull { limit, .. } => FenceError::RevocationsFull { limit },
         BrokerError::Closed { .. } => FenceError::Closed,
@@ -292,8 +292,8 @@ fn refused(error: BrokerError) -> FenceError {
 }
 
 /// The reach refusal a broker refusal is, for `intent`.
-fn fenced(error: BrokerError, intent: &EffectIntent) -> FenceRefusal {
-    match error {
+fn fenced(error: &BrokerError, intent: &EffectIntent) -> FenceRefusal {
+    match *error {
         BrokerError::Revoked { .. } => FenceRefusal::Revoked {
             operation: intent.operation,
         },
@@ -344,11 +344,15 @@ impl RevocationFence {
     pub fn new(epoch: SecurityEpoch, offline_bound: u32) -> Result<Self, FenceError> {
         let at = generation(epoch).ok_or(FenceError::EpochExhausted)?;
         let mut broker = Broker::new();
-        broker.register(ENVIRONMENT).map_err(refused)?;
-        broker.authenticate(ENVIRONMENT, at).map_err(refused)?;
+        broker
+            .register(ENVIRONMENT)
+            .map_err(|error| refused(&error))?;
+        broker
+            .authenticate(ENVIRONMENT, at)
+            .map_err(|error| refused(&error))?;
         broker
             .set_offline_bound(ENVIRONMENT, offline_bound)
-            .map_err(refused)?;
+            .map_err(|error| refused(&error))?;
         Ok(Self {
             broker,
             unconfirmed: None,
@@ -441,7 +445,7 @@ impl RevocationFence {
         let action = action(operation).ok_or(FenceError::ZeroOperation)?;
         self.broker
             .revoke_operation(ENVIRONMENT, action)
-            .map_err(refused)
+            .map_err(|error| refused(&error))
     }
 
     /// Moves the fence to the next epoch: revocation's linearization point.
@@ -458,7 +462,7 @@ impl RevocationFence {
         self.broker
             .replace(ENVIRONMENT)
             .map(security)
-            .map_err(refused)
+            .map_err(|error| refused(&error))
     }
 
     /// Establishes freshness: the authority source was reached and reports
@@ -477,20 +481,22 @@ impl RevocationFence {
     /// [`FenceError::Closed`] once it is closed.
     pub fn authenticate(&mut self, reported: SecurityEpoch) -> Result<SecurityEpoch, FenceError> {
         let Some(at) = generation(reported) else {
-            self.broker.close(ENVIRONMENT).map_err(refused)?;
+            self.broker
+                .close(ENVIRONMENT)
+                .map_err(|error| refused(&error))?;
             return Err(FenceError::EpochExhausted);
         };
         let now = self
             .broker
             .authenticate(ENVIRONMENT, at)
             .map(security)
-            .map_err(refused)?;
+            .map_err(|error| refused(&error))?;
         // The first contact after a restore takes up the configured ceiling;
         // the broker's own count starts from this contact.
         if let Some(bound) = self.unconfirmed {
             self.broker
                 .set_offline_bound(ENVIRONMENT, bound)
-                .map_err(refused)?;
+                .map_err(|error| refused(&error))?;
             self.unconfirmed = None;
         }
         Ok(now)
@@ -514,12 +520,12 @@ impl RevocationFence {
     ) -> Result<Authority, FenceRefusal> {
         self.broker
             .authorize(key)
-            .map_err(|error| self.refusal(error, intent))
+            .map_err(|error| self.refusal(&error, intent))
     }
 
     /// The broker's refusal as Larry's, naming the configured ceiling rather
     /// than the zero a restored fence holds until its first contact.
-    fn refusal(&self, error: BrokerError, intent: &EffectIntent) -> FenceRefusal {
+    fn refusal(&self, error: &BrokerError, intent: &EffectIntent) -> FenceRefusal {
         match (fenced(error, intent), self.unconfirmed) {
             (FenceRefusal::OfflineExposureExhausted { .. }, Some(bound)) => {
                 FenceRefusal::OfflineExposureExhausted { bound }
@@ -542,7 +548,7 @@ impl RevocationFence {
     ) -> Result<(), FenceRefusal> {
         self.broker
             .revalidate(warrant)
-            .map_err(|error| self.refusal(error, intent))
+            .map_err(|error| self.refusal(&error, intent))
     }
 
     /// Counts the reach `warrant` made: the check once more and one unit of
@@ -558,7 +564,7 @@ impl RevocationFence {
     ) -> Result<(), FenceRefusal> {
         self.broker
             .spend(warrant)
-            .map_err(|error| self.refusal(error, intent))
+            .map_err(|error| self.refusal(&error, intent))
     }
 }
 

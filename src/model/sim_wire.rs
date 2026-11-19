@@ -31,18 +31,13 @@ fn reported(text: &str) -> Result<Option<Usage>, ModelError> {
 }
 
 /// The usage a reader must report for these counts.
-const fn counts(
-    prompt: u64,
-    completion: u64,
-    cached: Option<u64>,
-    written: Option<u64>,
-) -> Option<Usage> {
-    Some(Usage {
+const fn counts(prompt: u64, completion: u64, cached: Option<u64>, written: Option<u64>) -> Usage {
+    Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
         cached_tokens: cached,
         cache_write_tokens: written,
-    })
+    }
 }
 
 /// A bare completion document whose `usage` member is the JSON text `usage`.
@@ -55,51 +50,51 @@ fn fixed_cases() -> [(&'static str, Option<Usage>); 13] {
     [
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":8}}"#,
-            counts(10, 2, Some(8), None),
+            Some(counts(10, 2, Some(8), None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":8}"#,
-            counts(10, 2, Some(8), None),
+            Some(counts(10, 2, Some(8), None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"cache_read_input_tokens":8}"#,
-            counts(10, 2, Some(8), None),
+            Some(counts(10, 2, Some(8), None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cache_write_tokens":4}}"#,
-            counts(10, 2, None, Some(4)),
+            Some(counts(10, 2, None, Some(4))),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"cache_creation_input_tokens":4}"#,
-            counts(10, 2, None, Some(4)),
+            Some(counts(10, 2, None, Some(4))),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"cache_read_input_tokens":6,"cache_creation_input_tokens":4}"#,
-            counts(10, 2, Some(6), Some(4)),
+            Some(counts(10, 2, Some(6), Some(4))),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2}"#,
-            counts(10, 2, None, None),
+            Some(counts(10, 2, None, None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"cache_read_input_tokens":8,"cache_creation_input_tokens":4}"#,
-            counts(10, 2, None, None),
+            Some(counts(10, 2, None, None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":11}"#,
-            counts(10, 2, None, None),
+            Some(counts(10, 2, None, None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":8},"prompt_cache_hit_tokens":3}"#,
-            counts(10, 2, Some(8), None),
+            Some(counts(10, 2, Some(8), None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":-1,"cache_read_input_tokens":5}"#,
-            counts(10, 2, Some(5), None),
+            Some(counts(10, 2, Some(5), None)),
         ),
         (
             r#"{"prompt_tokens":10,"completion_tokens":2,"cache_read_input_tokens":"5"}"#,
-            counts(10, 2, None, None),
+            Some(counts(10, 2, None, None)),
         ),
         (r#"{"prompt_tokens":10,"cached_tokens":5}"#, None),
     ]
@@ -136,7 +131,7 @@ fn cached_tokens_are_read_from_every_usage_shape_and_sse() -> TestResult {
     );
     assert_eq!(
         completion.usage(),
-        counts(10, 2, Some(8), None),
+        Some(counts(10, 2, Some(8), None)),
         "the last chunk's usage survives the stream and its done marker"
     );
     let silent = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
@@ -389,7 +384,7 @@ fn sim_usage_shapes_round_trip_for_every_seed() -> TestResult {
 
 /// A client that only answers `fits`: its pause refuses every wait and it never sends.
 fn client(bound: Option<usize>) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(bound)?, |_| false))
+    Ok(ModelClient::new(sim_config(bound)?, |_wait| false))
 }
 
 /// giant-and-empty (larry#230: the executor shares a prompt prefix only when the

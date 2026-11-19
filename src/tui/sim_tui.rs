@@ -52,6 +52,14 @@ impl Seeded {
         let bound = u64::try_from(len).into_iter().sum();
         usize::try_from(self.below(bound)).into_iter().sum()
     }
+
+    /// The item of `items` this stream picks, or the empty text for an empty list.
+    pub(super) fn word<'items>(&mut self, items: &[&'items str]) -> &'items str {
+        match items.get(self.pick(items.len())) {
+            Some(&item) => item,
+            None => "",
+        }
+    }
 }
 
 /// Text a hostile model or command might print: escapes, controls, bidi, wide.
@@ -78,7 +86,7 @@ fn header() -> Header {
 
 /// One seeded input.
 fn input(rng: &mut Seeded) -> Input {
-    let text = |rng: &mut Seeded| HOSTILE[rng.pick(HOSTILE.len())].to_owned();
+    let text = |rng: &mut Seeded| rng.word(&HOSTILE).to_owned();
     match rng.below(14) {
         0 => Input::Resize(rng.pick(260), rng.pick(90)),
         1 => Input::Paste(text(rng)),
@@ -92,25 +100,9 @@ fn input(rng: &mut Seeded) -> Input {
         6 => Input::Worker(Event::Ended(Ended::Done)),
         7 => Input::Worker(Event::Ended(Ended::Failed(text(rng)))),
         8 => Input::Tick(Duration::from_millis(rng.below(100_000))),
-        _ => {
-            let keys = [
-                Key::Char('y'),
-                Key::Char('n'),
-                Key::Char('a'),
-                Key::Char('/'),
-                Key::Enter,
-                Key::NewLine,
-                Key::Backspace,
-                Key::Left,
-                Key::Up,
-                Key::PageUp,
-                Key::PageDown,
-                Key::Tab,
-                Key::Esc,
-                Key::KillWord,
-            ];
-            Input::Key(keys[rng.pick(keys.len())])
-        }
+        _ => Input::Key(super::sim_parts::key_at(
+            rng.pick(super::sim_parts::KEY_COUNT),
+        )),
     }
 }
 
@@ -585,11 +577,11 @@ fn sim_tui_apply_review_lines_are_sanitized() {
         let mut rng = Seeded::new(seed);
         let mut app = App::new(header(), Vec::new(), 60 + rng.pick(160), 20 + rng.pick(40));
         let lines: Vec<String> = (0..1 + rng.pick(4))
-            .map(|_| HOSTILE[rng.pick(HOSTILE.len())].to_owned())
+            .map(|_round| rng.word(&HOSTILE).to_owned())
             .collect();
         app.handle(Input::Worker(Event::Review(lines)));
         app.handle(Input::Worker(Event::Handed {
-            line: HOSTILE[rng.pick(HOSTILE.len())].to_owned(),
+            line: rng.word(&HOSTILE).to_owned(),
             applied: rng.pick(2) == 1,
         }));
         let frame = app.draw();
@@ -650,7 +642,7 @@ fn sim_tui_history_skips_blank_and_repeated_submissions() {
         let mut composer = super::composer::Composer::default();
         let mut model: Vec<String> = Vec::new();
         for _ in 0..rng.pick(24) {
-            let text = pool[rng.pick(pool.len())];
+            let text = rng.word(&pool);
             composer.insert(text);
             assert_eq!(composer.take(), sanitize_kept(text));
             let kept = sanitize_kept(text);
@@ -721,7 +713,7 @@ fn sim_tui_wrap_drops_spaces_at_breaks_and_keeps_every_word() {
             for _ in 0..rng.pick(4) {
                 text.push(' ');
             }
-            text.push_str(words[rng.pick(words.len())]);
+            text.push_str(rng.word(&words));
         }
         let width = 2 + rng.pick(20);
         let rows = super::style::wrap(

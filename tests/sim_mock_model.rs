@@ -9,6 +9,10 @@
 //! must survive is reachable and visible from a plain `TcpStream`; the body and
 //! connection bounds refuse instead of growing.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/mock_model.rs"]
@@ -134,7 +138,8 @@ fn session(config: Config, count: u32) -> Result<(Vec<Reply>, String), Box<dyn E
 fn content(reply: &Reply) -> Result<String, Box<dyn Error>> {
     let value: Value = json::from_slice(&reply.body)?;
     Ok(String::from(
-        value["choices"][0]["message"]["content"]
+        value
+            .at("/choices/0/message/content")?
             .as_str()
             .ok_or("no content")?,
     ))
@@ -249,7 +254,7 @@ fn sim_scripted_faults_are_visible_to_a_plain_client_and_replay() -> TestResult 
     let refusal: Value = json::from_slice(&hostile.body)?;
     assert_eq!(hostile.status, 401, "the hostile refusal keeps its status");
     assert_eq!(
-        refusal["error"]["message"].as_str(),
+        refusal.at("/error/message")?.as_str(),
         Some(mock_model::hostile_message().as_str()),
         "the hostile message is sent unaltered"
     );
@@ -429,14 +434,20 @@ fn the_model_and_temperature_a_client_sends_reach_the_endpoint() -> TestResult {
         let reply = chat(handle.addr(), 12)?;
         let echoed: Value = json::from_slice(&reply.body)?;
         assert_eq!(
-            echoed["model"], "deepseek-v4-flash",
+            *echoed.at("/model")?,
+            "deepseek-v4-flash",
             "the pinned model is echoed"
         );
         let seen = handle.requests();
         let sent: Value = json::from_slice(seen.first().ok_or("no recorded request")?)?;
-        assert_eq!(sent["temperature"], 0.0, "temperature reached the gateway");
         assert_eq!(
-            sent["model"], "deepseek-v4-flash",
+            *sent.at("/temperature")?,
+            0.0,
+            "temperature reached the gateway"
+        );
+        assert_eq!(
+            *sent.at("/model")?,
+            "deepseek-v4-flash",
             "model reached the gateway"
         );
         assert_eq!(

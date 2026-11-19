@@ -67,6 +67,15 @@ fn fire(
     Ok(runtime.tick()?)
 }
 
+/// The disposition of the first receipt `tick` published, or an error naming
+/// that it published none.
+fn first_disposition(tick: &TickReport) -> Result<TerminalDisposition, Box<dyn std::error::Error>> {
+    tick.receipts()
+        .first()
+        .map(|receipt| receipt.disposition())
+        .ok_or_else(|| "tick published no receipt".into())
+}
+
 /// Standard FileRead/FileRead/100 runtime over `owner`.
 fn mk_life(owner: ScriptedOwner) -> Result<TestRuntime, Box<dyn std::error::Error>> {
     reader(owner, 100)
@@ -97,7 +106,7 @@ fn success_journey(seed: u64) -> Result<(Trace, u64), Box<dyn std::error::Error>
     );
     assert_eq!(tick.receipts().len(), 1, "one effect publishes one receipt");
     assert_eq!(
-        tick.receipts()[0].disposition(),
+        first_disposition(&tick)?,
         TerminalDisposition::Succeeded,
         "the receipt records success"
     );
@@ -140,7 +149,7 @@ fn sim_lifecycle_failed_outcome_is_terminal() -> Outcome {
                 ReconciliationStrategy::Queryable,
             )?;
             assert_eq!(
-                tick.receipts()[0].disposition(),
+                first_disposition(&tick)?,
                 TerminalDisposition::Failed,
                 "seed {seed}: failure recorded"
             );
@@ -175,7 +184,7 @@ fn sim_lifecycle_unknown_queryable_reconciles() -> Outcome {
         let second = rt.tick()?;
         assert_eq!(second.reconciled(), &[operation(3)], "reconcile closes it");
         assert_eq!(
-            second.receipts()[0].disposition(),
+            first_disposition(&second)?,
             TerminalDisposition::Succeeded,
             "reconciled outcome succeeds"
         );
@@ -198,7 +207,7 @@ fn sim_lifecycle_unknown_requires_human_permanent() -> Outcome {
         )?;
         assert_eq!(tick.receipts().len(), 1, "permanent unknown still receipts");
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::UnknownPermanent,
             "unknown stays unknown"
         );
@@ -220,7 +229,7 @@ fn sim_lifecycle_unknown_compensate_permanent() -> Outcome {
             ReconciliationStrategy::AlwaysCompensate,
         )?;
         assert_eq!(
-            tick.receipts()[0].disposition(),
+            first_disposition(&tick)?,
             TerminalDisposition::UnknownPermanent,
             "compensate closes unknown"
         );
@@ -244,7 +253,7 @@ fn sim_lifecycle_idempotent_retry_succeeds_second_reach() -> Outcome {
         let second = rt.tick()?;
         assert_eq!(second.receipts().len(), 1, "retry publishes one receipt");
         assert_eq!(
-            second.receipts()[0].disposition(),
+            first_disposition(&second)?,
             TerminalDisposition::Succeeded,
             "retry succeeds"
         );

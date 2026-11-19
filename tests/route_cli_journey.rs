@@ -17,23 +17,29 @@
 
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/json_at.rs"]
+mod json_at;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "support/sealed_report.rs"]
+mod sealed_report;
 
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 
-use larry_cli::{denial_lines, flag_of, report_of, spawn_larry, stderr_of};
+use json_at::At;
+use larry_cli::{spawn_larry_args, stderr_of};
 use lgwks_std::json::{self, Value, json};
 use mock_model::{Config, Fault, Handle};
 use origin::{TempDir, commit_all, fixture};
+use sealed_report::{denial_lines, flag_of, report_of};
 
 /// What every journey returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -125,13 +131,18 @@ impl<'tenant> Tenant<'tenant> {
 
     /// Runs `larry exec` on `task` with the extra variables `extra` as well.
     fn exec_with(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Output, Box<dyn Error>> {
+        Ok(self.start(task, extra)?.wait_with_output()?)
+    }
+
+    /// Starts `larry exec` on `task` with the extra variables `extra` as well, unwaited.
+    fn start(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Child, Box<dyn Error>> {
         let mut env: Vec<(&str, &OsStr)> = vec![
             ("LARRY_STATE_DIR", self.state.path().as_os_str()),
             ("LARRY_POLICY", OsStr::new(POLICY)),
             (self.key_var, OsStr::new(self.key)),
         ];
         env.extend_from_slice(extra);
-        Ok(spawn_larry("exec", &env, task.as_bytes())?.wait_with_output()?)
+        spawn_larry_args(&["exec"], &env, task.as_bytes())
     }
 
     /// A briefed task over this tenant's origin, naming `route` and `key` when given.
@@ -170,7 +181,7 @@ impl<'tenant> Tenant<'tenant> {
         for body in &bodies {
             let sent: Value = json::from_slice(body)?;
             assert_eq!(
-                sent["model"].as_str(),
+                sent.at("/model")?.as_str(),
                 Some(self.model),
                 "every request carries the route's model"
             );
@@ -192,7 +203,7 @@ impl<'tenant> Tenant<'tenant> {
         assert!(flag_of(&report, "accepted")?, "{}", stderr_of(output));
         assert!(denial_lines(&report)?.is_empty(), "no denial was sealed");
         assert_eq!(
-            report["authored"][0]["route"],
+            *report.at("/authored/0/route")?,
             self.sealed_route(id),
             "the receipt names this tenant's route, host and residency"
         );
@@ -228,13 +239,19 @@ fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult
             one.add_route("main")?;
             two.add_route("main")?;
             let (task_one, task_two) = (one.briefed(None, None)?, two.briefed(None, None)?);
+            let (child_one, child_two) = (one.start(&task_one, &[])?, two.start(&task_two, &[])?);
             let (out_one, out_two) = std::thread::scope(|scope| {
-                let first = scope.spawn(|| one.exec(&task_one).map_err(|error| error.to_string()));
-                let second = scope.spawn(|| two.exec(&task_two).map_err(|error| error.to_string()));
+                let first = scope.spawn(move || child_one.wait_with_output());
+                let second = scope.spawn(move || child_two.wait_with_output());
                 (first.join(), second.join())
             });
-            let out_one = out_one.map_err(|_panicked| "tenant one panicked")??;
-            let out_two = out_two.map_err(|_panicked| "tenant two panicked")??;
+            let Ok(waited_one) = out_one else {
+                return Err("tenant one panicked".into());
+            };
+            let Ok(waited_two) = out_two else {
+                return Err("tenant two panicked".into());
+            };
+            let (out_one, out_two) = (waited_one?, waited_two?);
             one.assert_sealed_under(&out_one, "main")?;
             two.assert_sealed_under(&out_two, "main")?;
             assert_ne!(
@@ -342,17 +359,17 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
     let listed = larry_route(state.path(), &[], &["list", "--json"])?;
     let value: Value = json::from_slice(&listed.stdout)?;
     assert_eq!(
-        value["default"].as_str(),
+        value.at("/default")?.as_str(),
         Some("main"),
         "main is the default"
     );
     assert_eq!(
-        value["routes"][0]["host"].as_str(),
+        value.at("/routes/0/host")?.as_str(),
         Some("gateway.test:8443"),
         "the listing shows the gateway's host and port"
     );
     assert_eq!(
-        value["routes"][0]["key_env"].as_str(),
+        value.at("/routes/0/key_env")?.as_str(),
         Some("LARRY_KEY_ROUTE"),
         "the listing names the key's variable, not its value"
     );

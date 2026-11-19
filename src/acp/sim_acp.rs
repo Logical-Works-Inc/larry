@@ -15,6 +15,8 @@ use lgwks_std::json::{self, Value, json};
 use lgwks_std::seeded::Seeded;
 
 use super::{PromptFault, instruction, serve_bounded};
+use crate::executor::ExecError;
+use crate::json_at::At;
 use crate::mcp::wire;
 use crate::sim_error::SimError;
 
@@ -39,6 +41,19 @@ fn tmp() -> Result<String, SimError> {
         .to_owned())
 }
 
+/// A reply's id and its error code, `None` for a result: the pair every reference answer owes.
+/// An unknown id is omitted, never null (`wire::error`, MCP `JSONRPCErrorResponse`), and the
+/// reference writes that omission as `Value::Null`; a reply carrying an explicit null id is
+/// refused, so the sim catches the shape the indexed read used to let through.
+pub(super) fn id_and_code(line: &Value) -> Result<(Value, Option<i64>), SimError> {
+    let id = match line.member("/id") {
+        None => Value::Null,
+        Some(&Value::Null) => return Err(SimError::Missing("a reply id that is not null")),
+        Some(id) => id.clone(),
+    };
+    Ok((id, line.member("/error/code").and_then(Value::as_i64)))
+}
+
 /// A generated text of up to `most` weird pieces.
 fn weird(rng: &mut Seeded, most: u64) -> Result<String, SimError> {
     let mut out = String::new();
@@ -49,6 +64,11 @@ fn weird(rng: &mut Seeded, most: u64) -> Result<String, SimError> {
         out.push_str(piece);
     }
     Ok(out)
+}
+
+/// One JSON-RPC request line for `method` with `params`, under the request id `id`.
+fn request_line(id: &Value, method: &str, params: &Value) -> String {
+    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string()
 }
 
 /// The reference agent: ACP v1 as Larry declares it, with refused settings.
@@ -105,25 +125,14 @@ impl Reference {
         format!("larry-{}-{n}", std::process::id())
     }
 
-    /// One monkey frame and what the reference owes it.
-    fn draw(
-        &mut self,
+    /// The frames that need no session state: malformed bytes and envelopes, a
+    /// notification, a stray result, and a `session/new` whose params are no object.
+    fn stateless(
         rng: &mut Seeded,
-        index: u64,
-        cwd: &str,
+        kind: u64,
+        id: &Value,
     ) -> Result<(Vec<u8>, Owed), Box<dyn std::error::Error>> {
-        let id = if rng.below(2)? == 0 {
-            json!(index)
-        } else {
-            json!(format!("s{index}"))
-        };
-        let target = Self::session(rng.below(self.opened.saturating_add(2))?);
-        let known = self.opened > 0 && (0..self.opened).any(|n| Self::session(n) == target);
-        let request = |method: &str, params: Value| {
-            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string()
-        };
-        // Four of twenty draws open a session, so most seeds pass the 16-session bound.
-        Ok(match rng.below(20)? {
+        Ok(match kind {
             0 => (
                 b"\xff\xfe{".to_vec(),
                 Owed::reply(Value::Null, Some(-32700)),
@@ -168,9 +177,22 @@ impl Reference {
                 Owed::silent(false),
             ),
             8 => (
-                request("session/new", json!("x")).into_bytes(),
+                request_line(id, "session/new", &json!("x")).into_bytes(),
                 Owed::reply(id.clone(), Some(-32602)),
             ),
+            other => return Err(format!("no stateless draw {other}").into()),
+        })
+    }
+
+    /// The frames about the handshake: `initialize` with good and bad versions,
+    /// `session/load` and `authenticate`, which the reference refuses by state.
+    fn handshake(
+        &mut self,
+        rng: &mut Seeded,
+        kind: u64,
+        id: &Value,
+    ) -> Result<(Vec<u8>, Owed), Box<dyn std::error::Error>> {
+        Ok(match kind {
             9 => {
                 let owed = if self.initialized {
                     Owed::reply(id.clone(), Some(-32600))
@@ -179,7 +201,8 @@ impl Reference {
                     Owed::reply(id.clone(), None)
                 };
                 (
-                    request("initialize", json!({"protocolVersion": rng.below(5)?})).into_bytes(),
+                    request_line(id, "initialize", &json!({"protocolVersion": rng.below(5)?}))
+                        .into_bytes(),
                     owed,
                 )
             }
@@ -199,13 +222,35 @@ impl Reference {
                 (text.into_bytes(), owed)
             }
             11 => (
-                request("session/load", json!({})).into_bytes(),
-                self.gated(&id, Some(-32601)),
+                request_line(id, "session/load", &json!({})).into_bytes(),
+                self.gated(id, Some(-32601)),
             ),
             12 => (
-                request("authenticate", json!({"methodId":"x"})).into_bytes(),
-                self.gated(&id, Some(-32602)),
+                request_line(id, "authenticate", &json!({"methodId":"x"})).into_bytes(),
+                self.gated(id, Some(-32602)),
             ),
+            other => return Err(format!("no handshake draw {other}").into()),
+        })
+    }
+
+    /// One monkey frame and what the reference owes it.
+    fn draw(
+        &mut self,
+        rng: &mut Seeded,
+        index: u64,
+        cwd: &str,
+    ) -> Result<(Vec<u8>, Owed), Box<dyn std::error::Error>> {
+        let id = if rng.below(2)? == 0 {
+            json!(index)
+        } else {
+            json!(format!("s{index}"))
+        };
+        let target = Self::session(rng.below(self.opened.saturating_add(2))?);
+        let known = self.opened > 0 && (0..self.opened).any(|n| Self::session(n) == target);
+        // Four of twenty draws open a session, so most seeds pass the 16-session bound.
+        Ok(match rng.below(20)? {
+            kind @ 0..=8 => Self::stateless(rng, kind, &id)?,
+            kind @ 9..=12 => self.handshake(rng, kind, &id)?,
             13 | 17..=19 => {
                 let owed = match (self.initialized, self.opened < 16) {
                     (false, _) => Owed::reply(id.clone(), Some(-32600)),
@@ -216,12 +261,18 @@ impl Reference {
                     }
                 };
                 (
-                    request("session/new", json!({"cwd":cwd,"mcpServers":[]})).into_bytes(),
+                    request_line(&id, "session/new", &json!({"cwd":cwd,"mcpServers":[]}))
+                        .into_bytes(),
                     owed,
                 )
             }
             14 => (
-                request("session/new", json!({"cwd":"rel/../x","mcpServers":[]})).into_bytes(),
+                request_line(
+                    &id,
+                    "session/new",
+                    &json!({"cwd":"rel/../x","mcpServers":[]}),
+                )
+                .into_bytes(),
                 self.gated(&id, Some(-32602)),
             ),
             15 => {
@@ -237,9 +288,10 @@ impl Reference {
                 };
                 owed.update = self.initialized && known && !image;
                 (
-                    request(
+                    request_line(
+                        &id,
                         "session/prompt",
-                        json!({"sessionId":target,"prompt":[block]}),
+                        &json!({"sessionId":target,"prompt":[block]}),
                     )
                     .into_bytes(),
                     owed,
@@ -266,7 +318,7 @@ fn serve(
     }
     let mut out = Vec::new();
     let mut log = Vec::new();
-    let settings = Err(String::from("no executor in a simulation"));
+    let settings = Err(ExecError::StateDirUnset);
     serve_bounded(Cursor::new(input), &mut out, max, &settings, &mut log)?;
     let mut lines = Vec::new();
     for line in String::from_utf8(out)?.lines() {
@@ -294,11 +346,11 @@ fn sim_acp_monkey_frames_get_the_reference_agents_answer_for_every_seed() -> Sim
             owed.push(answer);
         }
         let (lines, log) = serve(&frames, 4096)?;
-        let replies: Vec<(Value, Option<i64>)> = lines
+        let replies = lines
             .iter()
             .filter(|line| line.get("method").is_none())
-            .map(|line| (line["id"].clone(), line["error"]["code"].as_i64()))
-            .collect();
+            .map(id_and_code)
+            .collect::<Result<Vec<_>, _>>()?;
         let expected: Vec<(Value, Option<i64>)> = owed
             .iter()
             .filter_map(|answer| answer.reply.clone())
@@ -322,13 +374,14 @@ fn sim_acp_monkey_frames_get_the_reference_agents_answer_for_every_seed() -> Sim
             "seed {seed}: log"
         );
         for line in &lines {
-            assert_eq!(line["jsonrpc"], "2.0", "seed {seed}: {line}");
+            assert_eq!(*line.at("/jsonrpc")?, "2.0", "seed {seed}: {line}");
             assert!(
                 line.get("result").is_none() || line.get("error").is_none(),
                 "seed {seed}: both"
             );
             if line.get("method").is_some() {
-                let session = line["params"]["sessionId"]
+                let session = line
+                    .at("/params/sessionId")?
                     .as_str()
                     .ok_or("an update names its session")?;
                 let opened = (0..reference.opened).any(|n| Reference::session(n) == session);
@@ -365,10 +418,10 @@ fn sim_acp_giant_frames_at_and_past_the_bound_get_the_rule_answer() -> SimResult
             expected.push((id, Some(-32600)));
         }
         let (lines, _) = serve(&frames, max)?;
-        let got: Vec<(Value, Option<i64>)> = lines
+        let got = lines
             .iter()
-            .map(|line| (line["id"].clone(), line["error"]["code"].as_i64()))
-            .collect();
+            .map(id_and_code)
+            .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(got, expected, "seed {seed}: bound {max}");
     }
     Ok(())
@@ -488,9 +541,10 @@ fn sim_acp_weird_bytes_ids_are_valid_exactly_when_string_or_integer() -> SimResu
             }
             Err(Some(reply)) => {
                 assert!(!valid, "seed {seed}: {literal} refused");
-                assert_eq!(reply["id"], Value::Null, "seed {seed}: null id");
+                assert!(reply.member("/id").is_none(), "seed {seed}: null id");
                 assert_eq!(
-                    reply["error"]["code"], -32600,
+                    *reply.at("/error/code")?,
+                    -32600,
                     "seed {seed}: invalid request"
                 );
             }

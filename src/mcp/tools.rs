@@ -366,6 +366,7 @@ fn is_repo_relative(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Executor, call, list, sorted_by_name};
+    use crate::json_at::At;
     use lgwks_std::json::{Value, json};
 
     /// A process with no executor behind it.
@@ -451,7 +452,10 @@ mod tests {
             "unknown tool"
         );
         assert_eq!(
-            list()["tools"].as_array().map(Vec::len),
+            list()
+                .member("/tools")
+                .and_then(Value::as_array)
+                .map(Vec::len),
             Some(1),
             "one tool declared"
         );

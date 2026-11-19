@@ -25,6 +25,7 @@ use crate::executor::sim_tree::{
 };
 use crate::executor::workspace::{ApplyFault, Diff, DiffSink};
 use crate::executor::{Approval, ExecError, Handoff, Ledger, Observer, Settings, prepare};
+use crate::json_at::At;
 use crate::sim_error::SimError;
 
 /// What every simulation returns.
@@ -609,8 +610,15 @@ fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResul
         "digest",
         &key,
         || {
-            let (island, diff) =
-                changed(&rig, id, "printf z > added.txt").map_err(|_| ExecError::StateDirUnset)?;
+            let (island, diff) = match changed(&rig, id, "printf z > added.txt") {
+                Ok(pair) => pair,
+                Err(SimError::Exec(cause)) => return Err(cause),
+                Err(other) => {
+                    return Err(ExecError::Workspace(std::io::Error::other(
+                        other.to_string(),
+                    )));
+                }
+            };
             let mut observer = Scripted::new(Handoff::Apply);
             let outcome = island.hand_off(&rig.origin.dir, Some(&diff), &mut observer);
             assert_eq!(outcome, Outcome::Applied);
@@ -643,7 +651,11 @@ fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResul
         },
     )?;
     assert!(!ran, "the dead run's body ran again");
-    let line = again.json()["denied"][0].as_str().ok_or("a denial line")?;
+    let line = again
+        .json()
+        .at("/denied/0")?
+        .as_str()
+        .ok_or("a denial line")?;
     assert!(
         line.contains("recovered from its journal as unknown") || line.contains("already recorded"),
         "{line}"

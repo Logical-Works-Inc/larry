@@ -10,6 +10,10 @@
 //! server emits is valid for its era. One seed drives each run; the same seed
 //! must give the same reply bytes.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 #[path = "mcp_support/eras.rs"]
 mod eras;
 mod mcp_support;
@@ -37,7 +41,7 @@ fn open(session: &mut Session, legacy: &Schema, revision: &str) -> TestResult<Va
 }
 
 /// A legacy request: no `_meta`, the shape every pre-2026 client sends.
-fn legacy_frame(id: &Value, method: &str, params: Value) -> Value {
+fn legacy_frame(id: &Value, method: &str, params: &Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
 
@@ -52,49 +56,51 @@ fn sim_old_client_initialize_fallback_serves_every_legacy_revision() -> TestResu
         let mut session = Session::start()?;
         let init = open(&mut session, &legacy, revision)?;
         assert_eq!(
-            init["result"]["protocolVersion"], *revision,
+            *init.at("/result/protocolVersion")?,
+            *revision,
             "{revision} echoed"
         );
         assert_eq!(
-            init["result"]["serverInfo"]["name"], "larry",
+            *init.at("/result/serverInfo/name")?,
+            "larry",
             "{revision}: identity"
         );
-        let list = legacy_frame(&json!(1), "tools/list", json!({}));
+        let list = legacy_frame(&json!(1), "tools/list", &json!({}));
         let (_, listed) = ask(&mut session, &legacy, &list)?;
         assert_eq!(
-            listed["result"]["tools"][0]["name"], "larry_submit_task",
+            *listed.at("/result/tools/0/name")?,
+            "larry_submit_task",
             "{revision}: tool"
         );
         assert!(
-            listed["result"]["resultType"].is_null(),
+            !listed.holds("/result/resultType"),
             "{revision}: legacy shape"
         );
-        assert!(
-            listed["result"]["ttlMs"].is_null(),
-            "{revision}: no cache hints"
-        );
+        assert!(!listed.holds("/result/ttlMs"), "{revision}: no cache hints");
         let call = legacy_frame(
             &json!(2),
             "tools/call",
-            json!({"name": "larry_submit_task", "arguments": task(&mut rng)}),
+            &json!({"name": "larry_submit_task", "arguments": task(&mut rng)}),
         );
         let (_, called) = ask(&mut session, &legacy, &call)?;
         assert_eq!(
-            called["result"]["structuredContent"]["error"]["code"], "executor_not_connected",
+            *called.at("/result/structuredContent/error/code")?,
+            "executor_not_connected",
             "{revision}: the typed refusal survives"
         );
         assert!(
-            called["result"]["resultType"].is_null(),
+            !called.holds("/result/resultType"),
             "{revision}: legacy call shape"
         );
-        let ping = legacy_frame(&json!(3), "ping", json!({}));
+        let ping = legacy_frame(&json!(3), "ping", &json!({}));
         let pong = session.request(&ping)?;
         legacy.check_reply("ping", &pong)?;
-        assert_eq!(pong["result"], json!({}), "{revision}: ping");
-        let discover = legacy_frame(&json!(4), "server/discover", json!({}));
+        assert_eq!(*pong.at("/result")?, json!({}), "{revision}: ping");
+        let discover = legacy_frame(&json!(4), "server/discover", &json!({}));
         let (_, absent) = ask(&mut session, &legacy, &discover)?;
         assert_eq!(
-            absent["error"]["code"], -32601,
+            *absent.at("/error/code")?,
+            -32601,
             "{revision}: no discover without _meta"
         );
         assert_eq!(session.finish()?.code(), Some(0), "{revision}: clean exit");
@@ -122,22 +128,29 @@ fn sim_both_eras_interleave_on_one_process() -> TestResult<()> {
                 let frame = frame_at(&mut rng, &id, "tools/list", json!({}), MODERN)?;
                 let (_, reply) = ask(&mut session, &modern, &frame)?;
                 assert_eq!(
-                    reply["result"]["resultType"], "complete",
+                    *reply.at("/result/resultType")?,
+                    "complete",
                     "seed {seed}: stateless"
                 );
                 assert!(
-                    reply["result"]["ttlMs"].as_u64().is_some(),
+                    reply
+                        .member("/result/ttlMs")
+                        .and_then(|found| found.as_u64())
+                        .is_some(),
                     "seed {seed}: cache hint"
                 );
             } else if index >= opened_at {
-                let list = legacy_frame(&id, "tools/list", json!({}));
+                let list = legacy_frame(&id, "tools/list", &json!({}));
                 let (_, reply) = ask(&mut session, &legacy, &list)?;
                 assert!(
-                    reply["result"]["tools"].as_array().is_some(),
+                    reply
+                        .member("/result/tools")
+                        .and_then(|found| found.as_array())
+                        .is_some(),
                     "seed {seed}: legacy list"
                 );
                 assert!(
-                    reply["result"]["resultType"].is_null(),
+                    !reply.holds("/result/resultType"),
                     "seed {seed}: legacy shape"
                 );
             }
@@ -221,7 +234,7 @@ fn make_step(rng: &mut Rng, index: usize, seed: u64) -> TestResult<Step> {
             false,
         ),
         6 => (
-            legacy_frame(&id, "tools/list", json!({})),
+            legacy_frame(&id, "tools/list", &json!({})),
             "tools/list",
             true,
         ),
@@ -231,12 +244,12 @@ fn make_step(rng: &mut Rng, index: usize, seed: u64) -> TestResult<Step> {
             false,
         ),
         8 => (
-            legacy_frame(&id, "initialize", initialize),
+            legacy_frame(&id, "initialize", &initialize),
             "initialize",
             true,
         ),
-        9 => (legacy_frame(&id, "ping", json!({})), "ping", true),
-        10 => (legacy_frame(&id, "tools/call", valid), "tools/call", true),
+        9 => (legacy_frame(&id, "ping", &json!({})), "ping", true),
+        10 => (legacy_frame(&id, "tools/call", &valid), "tools/call", true),
         11 => return Ok(Step::raw(b"{not json".to_vec(), false)),
         12 => {
             return Ok(Step::raw(
@@ -288,9 +301,14 @@ fn run_mixed(seed: u64, modern: &Schema, legacy: &Schema) -> TestResult<Vec<Vec<
                 .check_reply(step.method, &reply)
                 .map_err(|why| format!("{context}: {why}; {reply}"))?;
         }
-        if reply["result"].as_object().is_some() && step.method.starts_with("tools/") {
+        if reply
+            .member("/result")
+            .and_then(|found| found.as_object())
+            .is_some()
+            && step.method.starts_with("tools/")
+        {
             assert_eq!(
-                reply["result"]["resultType"].is_null(),
+                !reply.holds("/result/resultType"),
                 step.legacy,
                 "{context}: the shape follows the era of the request"
             );
@@ -299,7 +317,7 @@ fn run_mixed(seed: u64, modern: &Schema, legacy: &Schema) -> TestResult<Vec<Vec<
     }
     session.send(br#"{"jsonrpc":"2.0","id":"barrier","method":"ping"}"#)?;
     assert_eq!(
-        session.recv()?["id"],
+        *session.recv()?.at("/id")?,
         "barrier",
         "seed {seed}: no stray line was queued"
     );
@@ -348,7 +366,7 @@ fn sim_the_schema_check_refuses_a_broken_reply() -> TestResult<()> {
     let discover = get("server/discover", MODERN)?;
     let call = get("tools/call", MODERN)?;
     let mismatch = get("tools/list", "1900-01-01")?;
-    let cases: [Corruption; 15] = [
+    let cases: [Corruption<'_>; 15] = [
         ("tools/list", &list, "/result/resultType", None),
         ("tools/list", &list, "/result/ttlMs", Some(json!(-1))),
         ("tools/list", &list, "/result/ttlMs", Some(json!("1"))),

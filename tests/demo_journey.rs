@@ -17,8 +17,11 @@ use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 
+#[path = "support/json_at.rs"]
+mod json_at;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
+use json_at::At;
 use temp_dir::TempDir;
 
 /// Failures propagate instead of panicking.
@@ -137,22 +140,24 @@ fn inspect_feedback_independent_work_and_continue() -> Journey {
     );
     let views = frames(&output)?;
     assert_eq!(
-        frame(&views, 4)?["work"]["Held"]["anchor"],
+        *frame(&views, 4)?.at("/work/Held/anchor")?,
         1,
         "the hold keeps its anchor"
     );
     assert_eq!(
-        frame(&views, 4)?["inspection"]["trace"],
+        *frame(&views, 4)?.at("/inspection/trace")?,
         "fixture-02",
         "inspect 2"
     );
     let last = views.last().ok_or("no frames")?;
     assert_eq!(
-        last["inspection"]["line"], 18,
+        *last.at("/inspection/line")?,
+        18,
         "continue then next reaches line 18"
     );
     assert_eq!(
-        last["feedback"][0]["text"], "bound retries",
+        *last.at("/feedback/0/text")?,
+        "bound retries",
         "feedback is kept"
     );
     assert!(
@@ -179,7 +184,7 @@ fn panes_empty_scenario_and_invalid_operation_recovery() -> Journey {
         .ok_or("no folders")?;
     assert_eq!(folders.len(), 2, "the folders pane lists two folders");
     assert_eq!(
-        frame(&views, 2)?["agents"][2]["parent"],
+        *frame(&views, 2)?.at("/agents/2/parent")?,
         0,
         "agent 2's parent is 0"
     );
@@ -283,7 +288,7 @@ fn actual_process_crash_resets_fixture_without_workspace_changes() -> Journey {
     let before = workspace_digests()?;
     let seen = killed_after(&scratch, b"next\nfeedback preserve original anchor\n", 3)?;
     assert_eq!(
-        seen.last().ok_or("no frames")?["work"]["Held"]["anchor"],
+        *seen.last().ok_or("no frames")?.at("/work/Held/anchor")?,
         1,
         "held at 1"
     );

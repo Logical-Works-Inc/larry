@@ -240,11 +240,9 @@ fn canonical(lengths: &[u8]) -> Result<Vec<u32>, WebpError> {
     }
     let mut next = [0_u32; 16];
     let mut code = 0_u32;
-    for length in 1..16_usize {
-        code = code
-            .wrapping_add(per_length[length.wrapping_sub(1)])
-            .wrapping_shl(1);
-        next[length] = code;
+    for (counted, slot) in per_length.iter().zip(next.iter_mut().skip(1)) {
+        code = code.wrapping_add(*counted).wrapping_shl(1);
+        *slot = code;
     }
     let mut codes = Vec::with_capacity(lengths.len());
     for &length in lengths {

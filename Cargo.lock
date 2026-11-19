@@ -1589,9 +1589,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lgwks_ast"
-version = "6.0.3"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a99268f3a65d15a63c851d87321e56f60c025e097e0fd16e9910ee1404f1105"
+checksum = "fc9389099d0cc77d3636e42f3198ff76bee69ec992f6a22a7456c22d232eb3af"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
@@ -1603,9 +1603,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "8.4.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f07844cd1ac4d2fc387157318b658d90f953ee16999693798cc4128cbe3d9cb"
+checksum = "fbe9cd8ddbbb24cb2e2d2280da13635180b8e97ce0cc1568276169229a40e8fe"
 dependencies = [
  "lgwks_ast",
  "lgwks_deps",
@@ -1615,9 +1615,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "7.2.0"
+version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb4bd578b050839a373dd13aa4f14b8590745aff79238295d259178993c12526"
+checksum = "c4a9ce99ea84447af644e0b925673f99e756f121ad08147f6babac5d6716ae14"
 dependencies = [
  "axum",
  "bevy_ecs",
@@ -1634,9 +1634,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_macros"
-version = "2.1.2"
+version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1ad10420baf1c8b67a4c88d52d59bc5705af594adab334031297afe5730e2aa"
+checksum = "78972100e37d1e55818f93aecf5e05517f20db722e1b070a3b6e511a50e5c2fc"
 dependencies = [
  "lgwks_ast",
  "lgwks_deps",
@@ -1645,9 +1645,9 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "4.2.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f652d90fa8feb41d0a0a83e3a8471b0baea65034b7c5df91911c6078291a0b"
+checksum = "f3f28661ffe5c6274c5cb5568c4de9cd83d3d03cc6532337272ad445ef99dc70"
 dependencies = [
  "blake3",
  "ed25519-dalek",

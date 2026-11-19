@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use exec_cli::{
     TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid, make_fifo,
-    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry,
+    millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry_args,
     task_json, text_of,
 };
 use lgwks_std::json::{self, Value};
@@ -35,7 +35,7 @@ const SAMPLES: usize = 32;
 
 /// Runs `larry verify` with only `env` set and `report` on stdin.
 fn run_verify(env: &[(&str, &OsStr)], report: &[u8]) -> Result<Output, Box<dyn Error>> {
-    Ok(spawn_larry("verify", env, report)?.wait_with_output()?)
+    Ok(spawn_larry_args(&["verify"], env, report)?.wait_with_output()?)
 }
 
 /// Runs `larry verify` trusting the key of the state directory `state`.
@@ -52,8 +52,8 @@ fn verdict_of(output: &Output) -> Result<Value, Box<dyn Error>> {
 
 /// The receipt public key `larry key` prints for the state directory `state`.
 fn key_of(state: &Path) -> Result<String, Box<dyn Error>> {
-    let output =
-        spawn_larry("key", &[("LARRY_STATE_DIR", state.as_os_str())], b"")?.wait_with_output()?;
+    let output = spawn_larry_args(&["key"], &[("LARRY_STATE_DIR", state.as_os_str())], b"")?
+        .wait_with_output()?;
     assert!(output.status.success(), "larry key must exit 0");
     let printed = String::from_utf8_lossy(&output.stdout)
         .trim_end()

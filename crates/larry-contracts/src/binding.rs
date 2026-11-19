@@ -99,20 +99,22 @@ impl EffectTarget {
         payload: &[u8],
         adapter: &[u8],
     ) -> Result<Self, BindingError> {
-        let inputs = [resource, symlink, recipient, account, payload, adapter];
+        let inputs: [(u8, &[u8]); 6] = [
+            (0, resource),
+            (1, symlink),
+            (2, recipient),
+            (3, account),
+            (4, payload),
+            (5, adapter),
+        ];
         let names = Self::names();
-        for (bytes, field) in inputs.iter().zip(names) {
+        for (&(_, bytes), field) in inputs.iter().zip(names) {
             if bytes.len() > MAX_BOUND_FIELD_BYTES {
                 return Err(BindingError::TooLarge { field });
             }
         }
-        let fields = [0_u8, 1, 2, 3, 4, 5].map(|index| {
-            ContentDigest::over(&[
-                b"larry/e65/field/v1\0",
-                &[index],
-                inputs[usize::from(index)],
-            ])
-        });
+        let fields = inputs
+            .map(|(index, bytes)| ContentDigest::over(&[b"larry/e65/field/v1\0", &[index], bytes]));
         Ok(Self { fields })
     }
 

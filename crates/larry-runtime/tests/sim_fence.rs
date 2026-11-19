@@ -56,8 +56,9 @@ fn sim_fence_revoked_operation_refused_before_reach() -> Outcome {
         );
         let tick = runtime.tick()?;
         assert_eq!(tick.fenced().len(), 1, "one mutating reach fenced");
-        assert_eq!(tick.fenced()[0].0, operation(1), "refusal names operation");
-        let refusal = format!("{:?}", tick.fenced()[0].1);
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        assert_eq!(fenced.0, operation(1), "refusal names operation");
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("Revoked"),
             "refusal names reason, got {refusal}"
@@ -132,12 +133,9 @@ fn sim_fence_advanced_epoch_strands_prior_admission() -> Outcome {
         assert_eq!(stood, next, "authentication stands at new generation");
         let tick = runtime.tick()?;
         assert_eq!(tick.fenced().len(), 1, "stranded admission fenced");
-        assert_eq!(
-            tick.fenced()[0].0,
-            operation(5),
-            "report names stranded operation"
-        );
-        let refusal = format!("{:?}", tick.fenced()[0].1);
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        assert_eq!(fenced.0, operation(5), "report names stranded operation");
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("StaleEpoch"),
             "refusal names stale epoch, got {refusal}"
@@ -180,7 +178,8 @@ fn sim_fence_stale_refusal_reports_current_generation() -> Outcome {
         );
         let tick = runtime.tick()?;
         assert_eq!(tick.fenced().len(), 1, "stranded admission fenced");
-        let refusal = format!("{:?}", tick.fenced()[0].1);
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("StaleEpoch"),
             "refusal names stale epoch, got {refusal}"
@@ -270,7 +269,8 @@ fn sim_fence_tight_bound_refuses_by_name() -> Outcome {
             "gate authorizes both"
         );
         assert_eq!(tick.fenced().len(), 1, "second reach fenced");
-        let refusal = format!("{:?}", tick.fenced()[0].1);
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("OfflineExposureExhausted"),
             "refusal names the spent bound, got {refusal}"
@@ -376,7 +376,6 @@ fn sim_fence_starts_at_settings_epoch() -> Outcome {
     for seed in 88_u64..96 {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let runtime = mk_fence(ScriptedOwner::new())?;
-            let _ = seed;
             Ok(runtime.fence().epoch()? == SecurityEpoch::INITIAL)
         };
         assert!(
@@ -407,7 +406,6 @@ fn sim_fence_advance_returns_next_generation() -> Outcome {
                 .successor()
                 .ok_or("initial epoch advances")?;
             let next = runtime.fence_mut().advance_epoch()?;
-            let _ = seed;
             Ok(next == wanted && runtime.fence().epoch()? == next)
         };
         assert!(drive()?, "seed {seed}: advance returns next generation");
@@ -424,7 +422,6 @@ fn sim_fence_authenticate_older_never_moves_back() -> Outcome {
             let mut runtime = mk_fence(ScriptedOwner::new())?;
             let newer = runtime.fence_mut().advance_epoch()?;
             let stood = runtime.fence_mut().authenticate(SecurityEpoch::INITIAL)?;
-            let _ = seed;
             Ok(stood == newer && runtime.fence().epoch()? == newer)
         };
         assert!(
@@ -444,7 +441,12 @@ fn sim_fence_epoch_exhaustion_refused() -> Outcome {
     for seed in 120_u64..128 {
         let drive = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut topped = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
-            topped.security_epoch = SecurityEpoch::new(u64::MAX);
+            // The last epoch a fence can hold, and the one past it that has no
+            // broker generation: the top is the successor of the last.
+            let last = SecurityEpoch::new(u64::MAX - 1);
+            topped.security_epoch = last
+                .successor()
+                .ok_or("the last holdable epoch has a successor")?;
             let refused: Result<TestRuntime, _> = larry_runtime::runtime::Runtime::new(
                 topped.clone(),
                 ScriptedOwner::new(),
@@ -459,7 +461,7 @@ fn sim_fence_epoch_exhaustion_refused() -> Outcome {
                 ),
                 "u64::MAX has no generation, so no runtime starts there"
             );
-            topped.security_epoch = SecurityEpoch::new(u64::MAX - 1);
+            topped.security_epoch = last;
             let mut runtime: TestRuntime = larry_runtime::runtime::Runtime::new(
                 topped,
                 ScriptedOwner::new(),
@@ -474,7 +476,6 @@ fn sim_fence_epoch_exhaustion_refused() -> Outcome {
                     "refusal names exhaustion, got {report}"
                 );
             }
-            let _ = seed;
             Ok(true)
         };
         assert!(drive()?, "seed {seed}: exhaustion always refused");
@@ -495,7 +496,8 @@ fn sim_fence_report_carries_operation_identity() -> Outcome {
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
-        assert_eq!(tick.fenced()[0].0, operation(16), "report names operation");
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        assert_eq!(fenced.0, operation(16), "report names operation");
         Ok((
             fence_counts(&runtime, tick.fenced().len()),
             trace(runtime.journal()),
@@ -515,8 +517,9 @@ fn sim_fence_revoked_reason_reported() -> Outcome {
             "withdrawal reports change"
         );
         let tick = runtime.tick()?;
-        assert_eq!(tick.fenced()[0].0, operation(17), "report names operation");
-        let refusal = format!("{:?}", tick.fenced()[0].1);
+        let fenced = tick.fenced().first().ok_or("tick fenced no reach")?;
+        assert_eq!(fenced.0, operation(17), "report names operation");
+        let refusal = format!("{:?}", fenced.1);
         assert!(
             refusal.contains("Revoked"),
             "report names revoked reason, got {refusal}"
@@ -591,7 +594,7 @@ fn sim_fence_seeded_target_refuses_sibling_dispatches() -> Outcome {
         let tick = runtime.tick()?;
         assert_eq!(tick.fenced().len(), 1, "withdrawn operation fenced");
         assert_eq!(
-            tick.fenced()[0].0,
+            tick.fenced().first().ok_or("tick fenced no reach")?.0,
             refused,
             "report names refused operation"
         );

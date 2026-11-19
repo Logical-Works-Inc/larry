@@ -7,6 +7,10 @@
 //! Requirement: larry#84. Each test is one protocol property driven by one
 //! seed through the public stdio interface; the same seed gives the same run.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 mod mcp_support;
 
 use lgwks_std::json::{self, Value, json};
@@ -35,7 +39,9 @@ fn submit(session: &mut Session, arguments: &Value) -> TestResult<Value> {
 
 /// The typed tool-error code of a `tools/call` reply, or an empty string.
 fn tool_code(reply: &Value) -> Option<&str> {
-    reply["result"]["structuredContent"]["error"]["code"].as_str()
+    reply
+        .member("/result/structuredContent/error/code")?
+        .as_str()
 }
 
 /// A JSON-RPC ping frame with a string id, as bytes.
@@ -82,7 +88,7 @@ fn seeded_pipelined_requests_are_answered_in_order() -> TestResult<()> {
         }
         for index in 0..count {
             assert_eq!(
-                session.recv()?["id"],
+                *session.recv()?.at("/id")?,
                 format!("p{seed}-{index}"),
                 "seed {seed}: reply {index} out of order"
             );
@@ -106,7 +112,8 @@ fn seeded_notification_storms_draw_no_reply() -> TestResult<()> {
         }
         let barrier = ask(&mut session, &json!("barrier"), "ping")?;
         assert_eq!(
-            barrier["id"], "barrier",
+            *barrier.at("/id")?,
+            "barrier",
             "seed {seed}: a notification was answered"
         );
     }
@@ -130,16 +137,20 @@ fn seeded_pre_initialize_traffic_is_gated() -> TestResult<()> {
         let mut rng = Rng(seed);
         let mut session = Session::start()?;
         for index in 0..20 {
-            let (method, code) = table[rng.index(7)?];
+            let (method, code) = *table.get(rng.index(7)?).ok_or("a table row")?;
             let reply = ask(&mut session, &json!(index), method)?;
             if code == 0 {
                 assert!(
-                    reply["result"].as_object().is_some(),
+                    reply
+                        .member("/result")
+                        .and_then(|found| found.as_object())
+                        .is_some(),
                     "seed {seed}: {method} allowed"
                 );
             } else {
                 assert_eq!(
-                    reply["error"]["code"], code,
+                    *reply.at("/error/code")?,
+                    code,
                     "seed {seed}: {method} refused"
                 );
             }
@@ -147,7 +158,9 @@ fn seeded_pre_initialize_traffic_is_gated() -> TestResult<()> {
         session.initialize()?;
         let list = ask(&mut session, &json!("after"), "tools/list")?;
         assert!(
-            list["result"]["tools"].as_array().is_some(),
+            list.member("/result/tools")
+                .and_then(|found| found.as_array())
+                .is_some(),
             "seed {seed}: open after initialize"
         );
     }
@@ -172,7 +185,7 @@ fn seeded_version_strings_negotiate_to_a_supported_revision() -> TestResult<()> 
     ];
     let mut rng = Rng(0x5eed);
     for _ in 0..12 {
-        let asked = pool[rng.index(9)?];
+        let asked = *pool.get(rng.index(9)?).ok_or("a pool entry")?;
         let mut session = Session::start()?;
         let reply = session.request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize",
             "params":{"protocolVersion":asked}}))?;
@@ -181,7 +194,11 @@ fn seeded_version_strings_negotiate_to_a_supported_revision() -> TestResult<()> 
         } else {
             "2025-11-25"
         };
-        assert_eq!(reply["result"]["protocolVersion"], want, "asked {asked:?}");
+        assert_eq!(
+            *reply.at("/result/protocolVersion")?,
+            want,
+            "asked {asked:?}"
+        );
     }
     Ok(())
 }
@@ -205,7 +222,7 @@ fn seeded_ids_round_trip_exactly() -> TestResult<()> {
     ];
     for id in &ids {
         let reply = ask(&mut session, id, "ping")?;
-        assert_eq!(&reply["id"], id, "id {id}");
+        assert_eq!(reply.at("/id")?, id, "id {id}");
     }
     Ok(())
 }
@@ -227,7 +244,7 @@ fn seeded_path_variants_decide_task_validity() -> TestResult<()> {
     let mut rng = Rng(0xfa11);
     let mut session = ready()?;
     for _ in 0..24 {
-        let (path, valid) = table[rng.index(9)?];
+        let (path, valid) = *table.get(rng.index(9)?).ok_or("a table row")?;
         let reply = submit(
             &mut session,
             &json!({"goal":"g","repo":"r","files":[path],"acceptance":["c"]}),
@@ -291,9 +308,13 @@ fn seeded_frame_sizes_around_the_bound() -> TestResult<()> {
         session.send(&frame)?;
         let reply = session.recv()?;
         if length <= MAX_FRAME {
-            assert_eq!(reply["id"], 1, "{length} bytes fit the bound");
+            assert_eq!(*reply.at("/id")?, 1, "{length} bytes fit the bound");
         } else {
-            assert_eq!(reply["error"]["code"], -32600, "{length} bytes exceed it");
+            assert_eq!(
+                *reply.at("/error/code")?,
+                -32600,
+                "{length} bytes exceed it"
+            );
         }
     }
     Ok(())
@@ -309,14 +330,14 @@ fn seeded_crlf_and_blank_lines() -> TestResult<()> {
             session.send_raw(&ping_frame(&format!("c{index}"))?)?;
             session.send_raw(b"\r\n")?;
             assert_eq!(
-                session.recv()?["id"],
+                *session.recv()?.at("/id")?,
                 format!("c{index}"),
                 "CRLF frame {index}"
             );
         } else {
             session.send_raw(b"\n")?;
             assert_eq!(
-                session.recv()?["error"]["code"],
+                *session.recv()?.at("/error/code")?,
                 -32700,
                 "blank line {index}"
             );
@@ -333,7 +354,7 @@ fn seeded_kill_points_never_corrupt_a_restart() -> TestResult<()> {
         let mut session = ready()?;
         for index in 0..rng.index(10)? {
             assert_eq!(
-                ask(&mut session, &json!(index), "ping")?["id"],
+                *ask(&mut session, &json!(index), "ping")?.at("/id")?,
                 index,
                 "seed {seed}"
             );
@@ -345,7 +366,8 @@ fn seeded_kill_points_never_corrupt_a_restart() -> TestResult<()> {
         let mut restarted = ready()?;
         let list = ask(&mut restarted, &json!("again"), "tools/list")?;
         assert_eq!(
-            list["result"]["tools"][0]["name"], "larry_submit_task",
+            *list.at("/result/tools/0/name")?,
+            "larry_submit_task",
             "seed {seed}"
         );
     }
@@ -360,12 +382,16 @@ fn seeded_eof_inside_a_frame_is_served_then_clean_exit() -> TestResult<()> {
         let mut session = ready()?;
         for index in 0..rng.index(5)?.saturating_add(1) {
             session.send(&ping_frame(&format!("k{index}"))?)?;
-            assert_eq!(session.recv()?["id"], format!("k{index}"), "seed {seed}");
+            assert_eq!(
+                *session.recv()?.at("/id")?,
+                format!("k{index}"),
+                "seed {seed}"
+            );
         }
         session.send_raw(&ping_frame("last")?)?;
         session.close_stdin();
         assert_eq!(
-            session.recv()?["id"],
+            *session.recv()?.at("/id")?,
             "last",
             "seed {seed}: unterminated frame"
         );
@@ -388,7 +414,7 @@ fn seeded_unicode_payloads_survive_and_broken_utf8_is_refused() -> TestResult<()
     let mut rng = Rng(0xc0de);
     let mut session = ready()?;
     for _ in 0..10 {
-        let goal = pool[rng.index(5)?];
+        let goal = *pool.get(rng.index(5)?).ok_or("a pool entry")?;
         let reply = submit(
             &mut session,
             &json!({"goal":goal,"repo":"r","files":["f"],"acceptance":["c"]}),
@@ -403,7 +429,7 @@ fn seeded_unicode_payloads_survive_and_broken_utf8_is_refused() -> TestResult<()
     broken.extend_from_slice(&[0xc3, b'"', b'}', b'}']);
     session.send(&broken)?;
     assert_eq!(
-        session.recv()?["error"]["code"],
+        *session.recv()?.at("/error/code")?,
         -32700,
         "truncated sequence"
     );
@@ -417,7 +443,7 @@ fn seeded_nesting_depths_split_at_the_parser_limit() -> TestResult<()> {
     let mut rng = Rng(0xdee9);
     let mut session = ready()?;
     for _ in 0..14 {
-        let depth = depths[rng.index(7)?];
+        let depth = *depths.get(rng.index(7)?).ok_or("a depth")?;
         let frame = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"x":{}1{}}}}}"#,
             "[".repeat(depth),
@@ -427,11 +453,18 @@ fn seeded_nesting_depths_split_at_the_parser_limit() -> TestResult<()> {
         let reply = session.recv()?;
         if depth <= 100 {
             assert!(
-                reply["result"].as_object().is_some(),
+                reply
+                    .member("/result")
+                    .and_then(|found| found.as_object())
+                    .is_some(),
                 "depth {depth} is served"
             );
         } else {
-            assert_eq!(reply["error"]["code"], -32700, "depth {depth} is refused");
+            assert_eq!(
+                *reply.at("/error/code")?,
+                -32700,
+                "depth {depth} is refused"
+            );
         }
     }
     Ok(())
@@ -455,10 +488,10 @@ fn seeded_near_miss_method_names_are_not_found() -> TestResult<()> {
         let method = if rng.below(4) == 0 {
             format!("m{}", rng.next())
         } else {
-            String::from(fixed[rng.index(7)?])
+            String::from(*fixed.get(rng.index(7)?).ok_or("a fixed name")?)
         };
         let reply = ask(&mut session, &json!("m"), &method)?;
-        assert_eq!(reply["error"]["code"], -32601, "method {method:?}");
+        assert_eq!(*reply.at("/error/code")?, -32601, "method {method:?}");
     }
     Ok(())
 }
@@ -475,13 +508,16 @@ fn seeded_repeated_initialization_is_refused_without_harm() -> TestResult<()> {
                 .request(&json!({"jsonrpc":"2.0","id":index,"method":"initialize",
                 "params":{"protocolVersion":"2025-06-18"}}))?;
             assert_eq!(
-                again["error"]["code"], -32600,
+                *again.at("/error/code")?,
+                -32600,
                 "seed {seed}: initialize {index}"
             );
         }
         let list = ask(&mut session, &json!("ok"), "tools/list")?;
         assert!(
-            list["result"]["tools"].as_array().is_some(),
+            list.member("/result/tools")
+                .and_then(|found| found.as_array())
+                .is_some(),
             "seed {seed}: still serving"
         );
     }
@@ -499,13 +535,13 @@ fn seeded_oversized_and_valid_frames_interleave() -> TestResult<()> {
                 let junk = vec![b'z'; MAX_FRAME.saturating_add(1).saturating_add(rng.index(512)?)];
                 session.send(&junk)?;
                 assert_eq!(
-                    session.recv()?["error"]["code"],
+                    *session.recv()?.at("/error/code")?,
                     -32600,
                     "seed {seed} frame {index}"
                 );
             } else {
                 assert_eq!(
-                    ask(&mut session, &json!(index), "ping")?["id"],
+                    *ask(&mut session, &json!(index), "ping")?.at("/id")?,
                     index,
                     "seed {seed} frame {index}"
                 );

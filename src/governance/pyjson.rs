@@ -85,24 +85,22 @@ fn separate(out: &mut String, index: usize, indent: Option<usize>, depth: usize)
             out.write_char(' ')?;
         }
     }
-    match indent {
-        Some(width) => {
-            out.write_char('\n')?;
-            push_spaces(out, width.saturating_mul(depth.saturating_add(1)))
-        }
-        None => Ok(()),
+    // A compact layout (`None`) has no line break and no indentation to write.
+    if let Some(width) = indent {
+        out.write_char('\n')?;
+        push_spaces(out, width.saturating_mul(depth.saturating_add(1)))?;
     }
+    Ok(())
 }
 
 /// Writes the newline and indentation before a closing bracket of an indented layout.
 fn close(out: &mut String, indent: Option<usize>, depth: usize) -> fmt::Result {
-    match indent {
-        Some(width) => {
-            out.write_char('\n')?;
-            push_spaces(out, width.saturating_mul(depth))
-        }
-        None => Ok(()),
+    // A compact layout (`None`) has no line break and no indentation to write.
+    if let Some(width) = indent {
+        out.write_char('\n')?;
+        push_spaces(out, width.saturating_mul(depth))?;
     }
+    Ok(())
 }
 
 /// Appends `count` spaces.
@@ -264,7 +262,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pyjson_floats_match_python_repr() -> Result<(), Box<dyn std::error::Error>> {
+    fn pyjson_floats_match_python_repr() {
         let vectors: [(f64, &str); 13] = [
             (37.5, "37.5"),
             (40.0, "40.0"),
@@ -287,7 +285,6 @@ mod tests {
                 "repr of {value:?} must match Python"
             );
         }
-        Ok(())
     }
 
     #[test]

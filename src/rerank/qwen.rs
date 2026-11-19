@@ -15,7 +15,7 @@ use lgwks_deps::candle_transformers::models::qwen3::{Config, ModelForCausalLM};
 use lgwks_deps::tokenizers::Tokenizer;
 use lgwks_std::json;
 
-use super::{Candidate, Cause, Deadline, MODEL_ID, MODEL_REVISION, RerankError, Scorer};
+use super::{Candidate, Cause, Deadline, RerankError, Scorer, model_pin};
 
 /// Most tokens one judged prompt may hold, prefix and suffix included.
 const MAX_LENGTH: usize = 8192;
@@ -82,9 +82,10 @@ impl Qwen {
                 }
             },
         };
-        let repository = format!("models--{}", MODEL_ID.replace('/', "--"));
+        let (model, revision) = model_pin()?;
+        let repository = format!("models--{}", model.replace('/', "--"));
         Ok(Self {
-            snapshot: hub.join(repository).join("snapshots").join(MODEL_REVISION),
+            snapshot: hub.join(repository).join("snapshots").join(revision),
             loaded: None,
         })
     }

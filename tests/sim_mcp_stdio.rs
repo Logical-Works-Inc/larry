@@ -7,6 +7,10 @@
 //! replies to a notification, and stays isolated per session. One seed drives
 //! every generated frame; the same seed must give the same reply bytes.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 mod mcp_support;
 
 use lgwks_std::json::{self, Value, json};
@@ -177,22 +181,25 @@ fn check(seed: u64, index: usize, step: &Step, reply: &Value) -> TestResult<()> 
     assert_eq!(reply["id"], step.id, "seed {seed} step {index}: id");
     match step.want {
         Want::Ok => assert!(
-            reply["result"].as_object().is_some() && reply["result"]["isError"].is_null(),
+            reply["result"].as_object().is_some() && !reply.holds("/result/isError"),
             "seed {seed} step {index}: a plain result, got {reply}"
         ),
         Want::ToolError(code) => {
             assert_eq!(
-                reply["result"]["isError"], true,
+                *reply.at("/result/isError")?,
+                true,
                 "seed {seed} step {index}: isError"
             );
             assert_eq!(
-                reply["result"]["structuredContent"]["error"]["code"], code,
+                *reply.at("/result/structuredContent/error/code")?,
+                code,
                 "seed {seed} step {index}: tool error code"
             );
         }
         Want::Error(code) => {
             assert_eq!(
-                reply["error"]["code"], code,
+                *reply.at("/error/code")?,
+                code,
                 "seed {seed} step {index}: error code"
             );
         }
@@ -230,7 +237,8 @@ fn run_seed(seed: u64) -> TestResult<u64> {
     session.send(br#"{"jsonrpc":"2.0","id":"barrier","method":"ping"}"#)?;
     let barrier = session.recv()?;
     assert_eq!(
-        barrier["id"], "barrier",
+        *barrier.at("/id")?,
+        "barrier",
         "seed {seed}: no notification or response was answered"
     );
     assert_eq!(session.finish()?.code(), Some(0), "seed {seed}: clean exit");
@@ -284,9 +292,16 @@ fn one_hundred_concurrent_sessions_stay_isolated() -> TestResult<()> {
         }
         for (session, (id, list)) in sessions.iter_mut().zip(asked) {
             let reply = session.recv()?;
-            assert_eq!(reply["id"], id, "round {round}: reply crossed sessions");
             assert_eq!(
-                reply["result"]["tools"].as_array().is_some(),
+                *reply.at("/id")?,
+                id,
+                "round {round}: reply crossed sessions"
+            );
+            assert_eq!(
+                reply
+                    .member("/result/tools")
+                    .and_then(|found| found.as_array())
+                    .is_some(),
                 list,
                 "round {round}: result shape for id {id}"
             );

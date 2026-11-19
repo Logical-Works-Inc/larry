@@ -13,7 +13,7 @@
 //! `route` word. The MCP door's own form is proved in `tests/mcp_stdio_journey.rs`.
 
 #[path = "support/larry_cli.rs"]
-pub mod larry_cli;
+mod larry_cli;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
@@ -128,6 +128,70 @@ fn an_unknown_word_is_refused_and_names_help() -> TestResult {
     Ok(())
 }
 
+/// A listed word followed by an argument that word does not take exits 1 with
+/// the one refusal line, and runs nothing: the dispatcher finds the word's row
+/// in the help table and that row's handler owns its arity (larry#295).
+#[test]
+fn a_listed_word_with_arguments_it_does_not_take_is_refused() -> TestResult {
+    let cases: [&[&str]; 9] = [
+        &["mcp", "--extra"],
+        &["acp", "--extra"],
+        &["model", "--extra"],
+        &["exec", "--extra"],
+        &["verify", "--extra"],
+        &["key", "--extra"],
+        &["eval", "--extra"],
+        &["serve", "--extra"],
+        &["serve", "key", "t1", "--extra"],
+    ];
+    for words in cases {
+        let output = spawn_larry_args(words, &[], b"")?.wait_with_output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "a refusal exits 1: {words:?}"
+        );
+        let stderr = stderr_of(&output);
+        assert_eq!(stderr.lines().count(), 1, "one refusal line: {stderr:?}");
+        assert!(
+            stderr.contains("larry help"),
+            "the refusal names `larry help`: {stderr:?}"
+        );
+        assert!(output.stdout.is_empty(), "nothing ran: {words:?}");
+    }
+    Ok(())
+}
+
+/// `larry route remove` on an id no route has is refused with the `route` word
+/// first and the id named, like every other route refusal (larry#295).
+#[test]
+fn route_remove_of_an_unknown_id_names_route() -> TestResult {
+    let state = TempDir::new()?;
+    let output = spawn_larry_args(
+        &["route", "remove", "r9"],
+        &[("LARRY_STATE_DIR", state.path().as_os_str())],
+        b"",
+    )?
+    .wait_with_output()?;
+    assert_eq!(output.status.code(), Some(1), "a refusal exits 1");
+    let stderr = stderr_of(&output);
+    assert_eq!(stderr.lines().count(), 1, "one refusal line: {stderr:?}");
+    assert!(
+        stderr.starts_with("route: "),
+        "the refusal says route first: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("r9"),
+        "the refusal names the id: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("route").count(),
+        2,
+        "`route` once as the prefix and once in the cause: {stderr:?}"
+    );
+    Ok(())
+}
+
 /// `larry exec` reads `acceptance` as argv arrays. A document that sends a
 /// string, a bare string per command, or a non-string item is refused with the
 /// form and an example, never with a bare "wrong type" (larry#228).
@@ -169,16 +233,22 @@ fn exec_a_wrong_typed_acceptance_names_argv_arrays() -> TestResult {
 #[test]
 fn route_add_errors_name_the_field_once() -> TestResult {
     let state = TempDir::new()?;
-    let cases: [(&str, &str); 2] = [
-        ("bad", "route key-env must name a variable"),
-        ("OTHER_KEY", "route key-env must start with LARRY_KEY_"),
+    // larry#295: the reserved id `env` is a field refusal too, and says `route` once.
+    let cases: [(&str, &str, &str); 3] = [
+        ("r1", "bad", "route key-env must name a variable"),
+        (
+            "r1",
+            "OTHER_KEY",
+            "route key-env must start with LARRY_KEY_",
+        ),
+        ("env", "LARRY_KEY_ROUTE", "route id env is reserved"),
     ];
-    for (key_env, expected) in cases {
+    for (id, key_env, expected) in cases {
         let output = spawn_larry_args(
             &[
                 "route",
                 "add",
-                "r1",
+                id,
                 "--url",
                 "http://gateway.test:8443/v1",
                 "--model",

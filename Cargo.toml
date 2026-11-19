@@ -46,22 +46,22 @@ rust-version = "1.98"
 # stated here rather than per member: cargo ignores a member's
 # `default-features` when the workspace declaration omits it, so leaving it
 # out would silently keep defaults on. Select only the capabilities used by
-# each member; 0.6.6 defaults also include structured tracing.
-lgwks_std = { version = "=4.2.0", default-features = false }
+# each member.
+lgwks_std = { version = "=4.2.1", default-features = false }
 # The runtime's owner (larry#68). Defaults off; each member names its features. larry-runtime
 # takes `wire`. The larry package takes `edge` (the `lgwks_bot::app` HTTP edge of `larry serve`,
-# ADR 0021), which pulls `script` and with it the ECS world, and `signal` for its drain. 8.4.0
-# (larry#191) is the newest release; 8.3.0 (larry#187) added `RecordJournal::admits` and
+# ADR 0021), which pulls `script` and with it the ECS world, and `signal` for its drain. 9.0.0
+# is the newest release; 8.3.0 (larry#187) added `RecordJournal::admits` and
 # `RecordProjection::admit` (crates#898, #905, #906), which larry#90 builds on.
-lgwks_bot = { version = "=8.4.0", default-features = false }
+lgwks_bot = { version = "=9.0.0", default-features = false }
 # The dependency-admission storefront. The larry package opts into `sqlite`; the
-# published storefront owns that dependency and its transitive admission. 7.2.0 (larry#189)
-# is a major release; the ledger's `sqlite::open` and `sqlite::migrate` calls take its API.
-lgwks_deps = { version = "=7.2.0", default-features = false }
+# published storefront owns that dependency and its transitive admission. 7.3.0 is the newest
+# release; 7.2.0 (larry#189) set the ledger's `sqlite::open` and `sqlite::migrate` API.
+lgwks_deps = { version = "=7.3.0", default-features = false }
 # The estate's one Rust reader (larry#293, ADR 0061). The governance temp-path rule parses
 # test sources with its tree-sitter grammar and takes its byte, node, depth and time bounds;
-# 6.0.3 is the newest release. `lang-rust` selects the Rust grammar and the parser it needs.
-lgwks_ast = { version = "=6.0.3", default-features = false }
+# 6.1.0 is the newest release. `lang-rust` selects the Rust grammar and the parser it needs.
+lgwks_ast = { version = "=6.1.0", default-features = false }
 thiserror = "=2.0.21"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # The runtime gate (larry#164): the executor submits every task through it, so
 # a task body runs only inside the runtime's authorized owner call.
@@ -132,6 +132,19 @@ improper_ctypes = "forbid"
 improper_ctypes_definitions = "forbid"
 unsafe_code = "forbid"
 unused_must_use = "forbid"
+# The estate's 15-axis lint floor (rust-guard LINT_FLOOR, 2026-11-19), at `deny` so a
+# derive or proc macro that emits its own `allow` still compiles.
+elided_lifetimes_in_paths = "deny"
+let_underscore_drop = "deny"
+missing_debug_implementations = "deny"
+missing_docs = "deny"
+non_ascii_idents = "deny"
+redundant_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unnameable_types = "deny"
+unreachable_pub = "deny"
+unused_lifetimes = "deny"
 
 # 66 clippy lints, all `forbid` — a `deny` is defeated by any single
 # `#[allow]`; `forbid` cannot be lowered from source (E0453).
@@ -202,3 +215,32 @@ unwrap_in_result = "forbid"
 unwrap_or_default = "forbid"
 unwrap_used = "forbid"
 wildcard_imports = "forbid"
+# The estate's 15-axis lint floor (rust-guard LINT_FLOOR, 2026-11-19), at `deny` like the
+# rust table above.
+fallible_impl_from = "deny"
+filetype_is_file = "deny"
+get_unwrap = "deny"
+host_endian_bytes = "deny"
+indexing_slicing = "deny"
+infinite_loop = "deny"
+large_futures = "deny"
+large_include_file = "deny"
+let_underscore_untyped = "deny"
+map_err_ignore = "deny"
+match_wildcard_for_single_variants = "deny"
+mod_module_files = "deny"
+mutex_atomic = "deny"
+mutex_integer = "deny"
+needless_pass_by_value = "deny"
+partial_pub_fields = "deny"
+pub_underscore_fields = "deny"
+rc_mutex = "deny"
+string_slice = "deny"
+too_many_lines = "deny"
+try_err = "deny"
+unnecessary_wraps = "deny"
+unreachable = "deny"
+unused_async = "deny"
+unused_result_ok = "deny"
+verbose_file_reads = "deny"
+wildcard_dependencies = "deny"

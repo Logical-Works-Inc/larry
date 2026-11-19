@@ -3,6 +3,10 @@
 //! directly; the shipped driver has `tests/demo_journey.rs` and the native
 //! surface its real-PTY suite in `tests/e2e_journey.rs`.
 
+#[path = "support/json_at.rs"]
+mod json_at;
+use json_at::At;
+
 use larry_demo::{Demo, MAX_INPUT, Rejected};
 use lgwks_std::json::{self, Value};
 
@@ -15,20 +19,22 @@ fn view(demo: &Demo) -> Result<Value, json::Error> {
 fn quiet_default_and_real_estate_serialization() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = view(&Demo::default())?;
     assert!(
-        snapshot["mode"]
+        snapshot
+            .at("/mode")?
             .as_str()
             .ok_or("mode must be a string")?
             .starts_with("DEMO")
     );
     assert_eq!(
-        snapshot["events"]
+        snapshot
+            .at("/events")?
             .as_array()
             .ok_or("events must be an array")?
             .len(),
         0
     );
-    assert!(snapshot["agents"].is_null());
-    assert!(snapshot["folders"].is_null());
+    assert!(!snapshot.holds("/agents"));
+    assert!(!snapshot.holds("/folders"));
     Ok(())
 }
 
@@ -47,18 +53,20 @@ fn hold_remembers_original_anchor_while_other_owner_advances()
     assert_eq!(demo, held);
     assert_eq!(demo.command("next"), Err(Rejected::HeldWork));
     assert_eq!(demo, held);
-    assert_eq!(view(&demo)?["work"]["Held"]["anchor"], 1);
-    assert_eq!(view(&demo)?["inspection"]["trace"], "fixture-02");
+    let held_view = view(&demo)?;
+    assert_eq!(*held_view.at("/work/Held/anchor")?, 1);
+    assert_eq!(*held_view.at("/inspection/trace")?, "fixture-02");
     assert!(demo.command("continue")?);
     assert!(demo.command("next")?);
-    assert_eq!(view(&demo)?["inspection"]["line"], 18);
-    assert_eq!(view(&demo)?["inspection"]["file"], "src/retry.rs");
-    assert_eq!(view(&demo)?["inspection"]["before"], "sleep(delay)");
+    let advanced = view(&demo)?;
+    assert_eq!(*advanced.at("/inspection/line")?, 18);
+    assert_eq!(*advanced.at("/inspection/file")?, "src/retry.rs");
+    assert_eq!(*advanced.at("/inspection/before")?, "sleep(delay)");
     assert_eq!(
-        view(&demo)?["inspection"]["after"],
+        *advanced.at("/inspection/after")?,
         "sleep(delay.min(remaining))"
     );
-    assert_eq!(view(&demo)?["feedback"][0]["text"], "bound retries");
+    assert_eq!(*advanced.at("/feedback/0/text")?, "bound retries");
     assert_eq!(demo.command("continue"), Err(Rejected::NoHeldWork));
     Ok(())
 }
@@ -94,18 +102,16 @@ fn toggles_are_reversible_and_clone_tree_has_one_parent() -> Result<(), Box<dyn 
     assert!(demo.command("agents")?);
     let snapshot = view(&demo)?;
     assert_eq!(
-        snapshot["folders"]
+        snapshot
+            .at("/folders")?
             .as_array()
             .ok_or("folders must be an array")?
             .len(),
         2
     );
-    let agents = snapshot["agents"]
-        .as_array()
-        .ok_or("agents must be an array")?;
-    assert!(agents[0]["parent"].is_null());
-    assert_eq!(agents[1]["parent"], 0);
-    assert_eq!(agents[2]["parent"], 0);
+    assert!(!snapshot.holds("/agents/0/parent"));
+    assert_eq!(*snapshot.at("/agents/1/parent")?, 0);
+    assert_eq!(*snapshot.at("/agents/2/parent")?, 0);
     assert!(demo.command("folders")?);
     assert!(demo.command("agents")?);
     assert_eq!(demo, Demo::default());
@@ -117,7 +123,7 @@ fn empty_reset_end_and_quit_are_explicit() -> Result<(), Box<dyn std::error::Err
     let mut demo = Demo::default();
     assert!(demo.command("scenario empty")?);
     assert_eq!(demo.command("next"), Err(Rejected::EndOfFixture));
-    assert_eq!(view(&demo)?["scenario"], "empty");
+    assert_eq!(*view(&demo)?.at("/scenario")?, "empty");
     assert!(demo.command("scenario change")?);
     for _ in 0..3 {
         assert!(demo.command("next")?);
@@ -143,13 +149,14 @@ fn unicode_notes_have_finite_capacity_and_other_sessions_are_isolated()
     assert_eq!(demo.command("feedback overflow"), Err(Rejected::NoteBound));
     assert_eq!(demo, before);
     assert_eq!(other, Demo::default());
+    let full = view(&demo)?;
     assert_eq!(
-        view(&demo)?["feedback"]
+        full.at("/feedback")?
             .as_array()
             .ok_or("feedback must be an array")?
             .len(),
         16
     );
-    assert_eq!(view(&demo)?["feedback"][0]["text"], "préserver 日本語");
+    assert_eq!(*full.at("/feedback/0/text")?, "préserver 日本語");
     Ok(())
 }

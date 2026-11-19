@@ -16,7 +16,7 @@ use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 
-use super::{Candidate, Deadline, Request, RerankError, Scorer, candidates, run};
+use super::{Candidate, Deadline, Request, RerankError, Scorer, candidates, model_pin, run};
 use crate::governance::receipts::receipt_errors;
 use crate::governance::sim_support::Scratch;
 
@@ -25,6 +25,21 @@ type Check<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Seeds each control runs.
 const SEEDS: u64 = 64;
+
+/// The embedded pin parses into the reranker every receipt names: an `owner/model` id and a full
+/// 40-hex revision. A re-pin that breaks the shape fails here before any receipt is written
+/// (ADR 0013).
+#[test]
+fn the_model_pin_names_one_model_and_a_full_revision() -> Check {
+    let (model, revision) = model_pin()?;
+    assert_eq!(
+        model.split('/').filter(|part| !part.is_empty()).count(),
+        2,
+        "the id names its owner and its model: {model}"
+    );
+    assert_eq!(revision.len(), 40, "a full revision: {revision}");
+    Ok(())
+}
 
 /// A seeded engine: fixed scores per call, counting calls, refusing on demand.
 struct Stub {
@@ -52,10 +67,17 @@ impl Scorer for Stub {
     }
 }
 
+/// The message of the refusal `outcome` must be; an accepted outcome fails the check.
+fn refusal<T: std::fmt::Debug>(outcome: Result<T, RerankError>) -> Check<String> {
+    match outcome {
+        Ok(accepted) => Err(format!("expected a refusal, got {accepted:?}").into()),
+        Err(refused) => Ok(refused.to_string()),
+    }
+}
+
 /// A seeded draw below `bound`.
 fn draw(rng: &mut Seeded, bound: usize) -> Check<usize> {
-    rng.index(bound)
-        .map_err(|cause| format!("{cause:?}").into())
+    Ok(rng.index(bound)?)
 }
 
 /// A seeded non-empty text mixing ASCII, escapes and multi-byte characters.
@@ -432,10 +454,14 @@ fn a_timed_out_engine_and_a_bad_query_write_no_receipt() -> Check {
         timeout: true,
     };
     let outcome = run(&request, lines.as_bytes(), root.path(), &mut stub);
+    assert!(
+        matches!(outcome, Err(RerankError::Timeout(7))),
+        "the timeout surfaces as its own variant: {outcome:?}"
+    );
     assert_eq!(
-        outcome.map_err(|error| error.to_string()),
-        Err(String::from("reranker exceeded its 7-second limit")),
-        "the timeout surfaces"
+        RerankError::Timeout(7).to_string(),
+        "reranker exceeded its 7-second limit",
+        "the timeout names its limit"
     );
     assert!(
         !root.path().join("tools/receipts/late.json").exists(),
@@ -452,10 +478,8 @@ fn a_timed_out_engine_and_a_bad_query_write_no_receipt() -> Check {
         ])?;
         let outcome = run(&request, lines.as_bytes(), root.path(), &mut stub);
         assert_eq!(
-            outcome.map_err(|error| error.to_string()),
-            Err(String::from(
-                "query must be non-empty and at most 16384 bytes"
-            )),
+            refusal(outcome)?,
+            "query must be non-empty and at most 16384 bytes",
             "the query bound"
         );
     }
@@ -495,11 +519,7 @@ fn the_command_line_refuses_unknown_repeated_and_missing_flags() -> Check {
     ];
     for (args, message) in cases {
         let outcome = Request::parse(args.iter().map(|arg| OsString::from(*arg)));
-        assert_eq!(
-            outcome.map(|_| ()).map_err(|error| error.to_string()),
-            Err(String::from(message)),
-            "{args:?}"
-        );
+        assert_eq!(refusal(outcome)?, message, "{args:?}");
     }
     #[cfg(unix)]
     {

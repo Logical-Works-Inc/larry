@@ -294,10 +294,11 @@ fn find_heading(text: &str, heading: &str, from: usize) -> Option<usize> {
     loop {
         let position = search.checked_add(text.get(search..)?.find(heading)?)?;
         let after = position.checked_add(heading.len())?;
-        let boundary = match text.get(after..).and_then(|rest| rest.chars().next()) {
-            Some(character) => !(character.is_alphanumeric() || character == '_'),
-            None => true,
-        };
+        // The end of the text ends the word, so no next character is a boundary.
+        let boundary = text
+            .get(after..)
+            .and_then(|rest| rest.chars().next())
+            .is_none_or(|character| !(character.is_alphanumeric() || character == '_'));
         if boundary {
             return Some(position);
         }

@@ -89,8 +89,8 @@ pub(super) fn request(
     if !METHODS.contains(&method) {
         return wire::error(id, wire::METHOD_NOT_FOUND, "method not found");
     }
-    if let Err(message) = check_meta(meta) {
-        return wire::error(id, wire::INVALID_PARAMS, message);
+    if let Err(fault) = check_meta(meta) {
+        return wire::error(id, wire::INVALID_PARAMS, fault.message());
     }
     match method {
         "server/discover" => complete(id, discover(), true),
@@ -111,18 +111,44 @@ fn unsupported_version(id: &Value, requested: &str) -> Value {
     )
 }
 
+/// Why the rest of a request's `_meta` was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaFault {
+    /// The client capabilities are absent or not an object.
+    Capabilities,
+    /// The client identity lacks a string name or version.
+    ClientInfo,
+    /// The log level is not one the schema names.
+    LogLevel,
+}
+
+impl MetaFault {
+    /// The `invalid params` text the client reads.
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Capabilities => {
+                "io.modelcontextprotocol/clientCapabilities is required and must be an object"
+            }
+            Self::ClientInfo => {
+                "io.modelcontextprotocol/clientInfo needs a string name and version"
+            }
+            Self::LogLevel => "io.modelcontextprotocol/logLevel is not a recognized log level",
+        }
+    }
+}
+
 /// Checks the rest of `_meta`: capabilities required, identity and log level optional.
-fn check_meta(meta: &Map) -> Result<(), &'static str> {
+fn check_meta(meta: &Map) -> Result<(), MetaFault> {
     if !meta
         .get(CAPABILITIES_KEY)
         .is_some_and(|value| value.as_object().is_some())
     {
-        return Err("io.modelcontextprotocol/clientCapabilities is required and must be an object");
+        return Err(MetaFault::Capabilities);
     }
     if let Some(info) = meta.get(CLIENT_INFO_KEY) {
         let named = |key: &str| info.get(key).is_some_and(Value::is_string);
         if !(named("name") && named("version")) {
-            return Err("io.modelcontextprotocol/clientInfo needs a string name and version");
+            return Err(MetaFault::ClientInfo);
         }
     }
     if let Some(level) = meta.get(LOG_LEVEL_KEY)
@@ -130,7 +156,7 @@ fn check_meta(meta: &Map) -> Result<(), &'static str> {
             .as_str()
             .is_some_and(|text| LOG_LEVELS.contains(&text))
     {
-        return Err("io.modelcontextprotocol/logLevel is not a recognized log level");
+        return Err(MetaFault::LogLevel);
     }
     Ok(())
 }
@@ -169,6 +195,7 @@ fn complete(id: &Value, body: Value, cacheable: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{Executor, check_meta, is_stateless, request};
+    use crate::json_at::At;
     use lgwks_std::json::{Map, Value, json};
 
     /// A request's params as a map.
@@ -225,8 +252,16 @@ mod tests {
         };
         let absent = Executor::Absent(String::from("no executor in a unit test"));
         let old = request(&id, "ping", params(&at("2025-11-25")), &absent);
-        assert_eq!(old["error"]["code"], -32022, "older revision");
+        assert_eq!(
+            old.member("/error/code"),
+            Some(&json!(-32022)),
+            "older revision"
+        );
         let now = request(&id, "ping", params(&at("2026-07-28")), &absent);
-        assert_eq!(now["error"]["code"], -32601, "removed method");
+        assert_eq!(
+            now.member("/error/code"),
+            Some(&json!(-32601)),
+            "removed method"
+        );
     }
 }

@@ -202,7 +202,10 @@ impl Keys {
 /// The edge's judgement of one request against the snapshot. A poisoned snapshot
 /// admits no one, so a panicked writer fails closed.
 fn judge(snapshot: &RwLock<Keys>, tenant: &str, token: &str) -> Option<Principal> {
-    snapshot.read().ok()?.admit(tenant, token)
+    match snapshot.read() {
+        Ok(keys) => keys.admit(tenant, token),
+        Err(std::sync::PoisonError { .. }) => None,
+    }
 }
 
 /// Re-reads the store and swaps the snapshot, returning how many tenants hold a
@@ -345,7 +348,7 @@ impl Signals {
     /// Register the three handlers on the process driver.
     fn register() -> Result<Self, ServeError> {
         use lgwks_bot::rt::signal::unix::{SignalKind, signal};
-        lgwks_bot::block_on(async {
+        lgwks_bot::rt::runtime::block_on(async {
             Ok(Self {
                 terminate: signal(SignalKind::terminate()).map_err(ServeError::Signal)?,
                 interrupt: signal(SignalKind::interrupt()).map_err(ServeError::Signal)?,
@@ -361,10 +364,11 @@ impl Signals {
         done: &CancellationToken,
         mut on_reload: impl FnMut() -> io::Result<()>,
     ) -> io::Result<()> {
-        lgwks_bot::block_on(async move {
+        // lgwks_bot 9.0.0 moved both off the crate root (crates#1016).
+        lgwks_bot::rt::runtime::block_on(async move {
             let mut serving = true;
             while serving {
-                lgwks_bot::select! {
+                lgwks_bot::rt::select! {
                     _ = self.terminate.recv() => serving = false,
                     _ = self.interrupt.recv() => serving = false,
                     // A closed SIGHUP stream yields None: the pattern then disables this arm, so no reload loops.
@@ -395,8 +399,8 @@ impl Signals {
         done: &CancellationToken,
         _on_reload: impl FnMut() -> io::Result<()>,
     ) -> io::Result<()> {
-        lgwks_bot::block_on(async move {
-            lgwks_bot::select! {
+        lgwks_bot::rt::runtime::block_on(async move {
+            lgwks_bot::rt::select! {
                 _ = lgwks_bot::rt::signal::ctrl_c() => {}
                 () = done.cancelled() => {}
             }

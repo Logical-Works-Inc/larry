@@ -54,15 +54,22 @@ impl fmt::Display for RouteCliError {
             Self::BadNumber { flag, ref reason } => {
                 write!(out, "route {flag} is not a number: {reason}")
             }
-            // A route field or id refusal already opens with `route`, so this door adds
-            // no second prefix; a refusal that names no field or row keeps the context
-            // (larry#228).
+            // A field refusal already opens with `route <field>`, so this door adds no
+            // second prefix (larry#228); every other refusal, a new variant included,
+            // gets the prefix by default, so none reaches the user bare (larry#295).
             Self::Route(
-                ref cause @ (RouteError::NoRoute
-                | RouteError::TableFull { .. }
-                | RouteError::Damaged { .. }),
-            ) => write!(out, "route: {cause}"),
-            Self::Route(ref cause) => write!(out, "{cause}"),
+                ref cause @ (RouteError::BadId
+                | RouteError::ReservedId
+                | RouteError::BadUrl
+                | RouteError::BadModel
+                | RouteError::BadKeyEnv
+                | RouteError::KeyEnvOutsideNamespace
+                | RouteError::BadTemperature
+                | RouteError::BadResidency
+                | RouteError::BadRequestBytes
+                | RouteError::BadDescribe),
+            ) => write!(out, "{cause}"),
+            Self::Route(ref cause) => write!(out, "route: {cause}"),
             Self::Exec(ref cause) => write!(out, "route: {cause}"),
             Self::Output(ref cause) => write!(out, "route output unwritable: {cause}"),
         }
@@ -383,7 +390,7 @@ mod tests {
     use crate::model::RouteError;
 
     /// The `larry route` text of one refusal.
-    fn said(error: RouteCliError) -> String {
+    fn said(error: &RouteCliError) -> String {
         error.to_string()
     }
 
@@ -391,19 +398,24 @@ mod tests {
     /// CLI's context prefix once (larry#228).
     #[test]
     fn every_route_refusal_names_route_once() {
-        let field = said(RouteCliError::Route(RouteError::BadKeyEnv));
+        let field = said(&RouteCliError::Route(RouteError::BadKeyEnv));
         assert!(
             field.starts_with("route key-env must name a variable"),
             "{field}"
         );
         assert_eq!(field.matches("route").count(), 1, "{field}");
-        let outside = said(RouteCliError::Route(RouteError::KeyEnvOutsideNamespace));
+        let outside = said(&RouteCliError::Route(RouteError::KeyEnvOutsideNamespace));
         assert!(outside.starts_with("route key-env must start"), "{outside}");
         assert_eq!(outside.matches("route").count(), 1, "{outside}");
-        let numbered = said(RouteCliError::Route(RouteError::BadTemperature));
+        let numbered = said(&RouteCliError::Route(RouteError::BadTemperature));
         assert!(numbered.starts_with("route temperature must"), "{numbered}");
         assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
+        // larry#295: a refusal that names no field, such as `route remove r9` on an
+        // unknown id, carries the `route` word by default.
         for row in [
+            RouteError::NoSuchId {
+                id: String::from("r9"),
+            },
             RouteError::NoRoute,
             RouteError::TableFull { limit: 256 },
             RouteError::Damaged {
@@ -411,7 +423,7 @@ mod tests {
                 cause: None,
             },
         ] {
-            let text = said(RouteCliError::Route(row));
+            let text = said(&RouteCliError::Route(row));
             assert!(text.starts_with("route: "), "{text}");
             assert!(!text.starts_with("route: route"), "{text}");
         }

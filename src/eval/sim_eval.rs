@@ -8,14 +8,13 @@
 
 use std::error::Error;
 
-use lgwks_std::json::{Map, Value, json};
+use lgwks_std::json::json;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::score::{
-    Ending, Outcome, PriceFault, Prices, Spent, card, parse_price, percentile, usd,
+    Ending, Outcome, PriceFault, Prices, Scorecard, Spent, card, parse_price, percentile, usd,
 };
-use super::set::{SetError, TaskSet};
-use crate::executor::TaskError;
+use crate::sim_error::SimError;
 
 /// What every test returns.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -54,9 +53,13 @@ fn reference_price(text: &str) -> Result<u64, PriceFault> {
     }
     let padded = format!("{whole}{fraction:0<6}");
     let micro = wide_digits(&padded).ok_or(PriceFault::TooLarge)?;
-    match u64::try_from(micro) {
-        Ok(value) if value <= 10_000_000_000 => Ok(value),
-        Ok(_) | Err(_) => Err(PriceFault::TooLarge),
+    let Ok(value) = u64::try_from(micro) else {
+        return Err(PriceFault::TooLarge);
+    };
+    if value <= 10_000_000_000 {
+        Ok(value)
+    } else {
+        Err(PriceFault::TooLarge)
     }
 }
 
@@ -88,7 +91,11 @@ fn sim_eval_weird_bytes_prices_match_a_reference_parser() -> TestResult {
         let mut rng = Seeded::from_seed(seed);
         let mut text = String::new();
         for _ in 0..rng.below(15)? {
-            text.push(PRICE_KEYS[rng.index(PRICE_KEYS.len())?]);
+            text.push(
+                *PRICE_KEYS
+                    .get(rng.index(PRICE_KEYS.len())?)
+                    .ok_or("price keys")?,
+            );
         }
         assert_eq!(
             parse_price(&text),
@@ -120,7 +127,9 @@ fn sim_eval_giant_and_empty_percentiles_match_a_counting_reference() -> TestResu
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let count = rng.index(301)?;
-        let spread = [1, 3, 1_000, u64::MAX][rng.index(4)?];
+        let spread = *[1, 3, 1_000, u64::MAX]
+            .get(rng.index(4)?)
+            .ok_or("spreads")?;
         let mut samples = Vec::with_capacity(count);
         for _ in 0..count {
             samples.push(if spread == u64::MAX {
@@ -311,6 +320,54 @@ fn reference_cache_cost(
         .checked_add(u128::from(spent.completion).checked_mul(u128::from(output))?)
 }
 
+/// What a drawn set of outcomes adds up to, in wide integers.
+struct Tally {
+    /// Prompt tokens of the outcomes that counted tokens.
+    prompt: u128,
+    /// Cached tokens of those outcomes.
+    cached: u128,
+    /// Written tokens of those outcomes.
+    written: u128,
+    /// The reference cost of those outcomes.
+    known: u128,
+}
+
+/// Up to eleven seeded outcomes, some without a token count, and their reference sums.
+fn draw_outcomes(
+    rng: &mut Seeded,
+    rates: (u64, u64),
+    declared: (Option<u64>, Option<u64>),
+) -> Result<(Vec<Outcome>, Tally), SimError> {
+    let mut outcomes = Vec::new();
+    let mut tally = Tally {
+        prompt: 0,
+        cached: 0,
+        written: 0,
+        known: 0,
+    };
+    for index in 0..rng.index(12)? {
+        let reported = rng.below(5)? != 0;
+        let size = rng.below(1 << 40)?;
+        let one = spend_within(rng, size, reported)?;
+        let tokens = if rng.below(6)? == 0 { None } else { Some(one) };
+        if let Some(counted) = tokens {
+            tally.prompt = tally.prompt.saturating_add(u128::from(counted.prompt));
+            tally.cached = tally.cached.saturating_add(u128::from(counted.cached));
+            tally.written = tally.written.saturating_add(u128::from(counted.written));
+            let task = reference_cache_cost(counted, rates, declared)
+                .ok_or(SimError::Missing("reference cost"))?;
+            tally.known = tally.known.saturating_add(task);
+        }
+        outcomes.push(Outcome {
+            id: format!("t{index}"),
+            ending: Ending::Accepted,
+            micros: 1,
+            tokens,
+        });
+    }
+    Ok((outcomes, tally))
+}
+
 /// giant-and-empty, liar-upstream and fat-finger: for 256 seeds a spend whose cached and
 /// written tokens fit the prompt (up to `u64::MAX`), priced with and without the two
 /// optional cache rates, costs what wide checked arithmetic says; an undeclared rate is
@@ -349,30 +406,10 @@ fn sim_cached_tokens_are_priced_at_their_own_rate() -> TestResult {
             at_input.cost(spent),
             "seed {seed}: an undeclared rate is the input rate"
         );
-        let mut outcomes = Vec::new();
-        let (mut prompt_sum, mut cached_sum, mut written_sum, mut known) =
-            (0_u128, 0_u128, 0_u128, 0_u128);
-        for index in 0..rng.index(12)? {
-            let reported = rng.below(5)? != 0;
-            let size = rng.below(1 << 40)?;
-            let one = spend_within(&mut rng, size, reported)?;
-            let tokens = if rng.below(6)? == 0 { None } else { Some(one) };
-            if let Some(counted) = tokens {
-                prompt_sum = prompt_sum.saturating_add(u128::from(counted.prompt));
-                cached_sum = cached_sum.saturating_add(u128::from(counted.cached));
-                written_sum = written_sum.saturating_add(u128::from(counted.written));
-                let task =
-                    reference_cache_cost(counted, (input, output), (cached_rate, write_rate))
-                        .ok_or("overflow")?;
-                known = known.saturating_add(task);
-            }
-            outcomes.push(Outcome {
-                id: format!("t{index}"),
-                ending: Ending::Accepted,
-                micros: 1,
-                tokens,
-            });
-        }
+        let (mut outcomes, tally) =
+            draw_outcomes(&mut rng, (input, output), (cached_rate, write_rate))?;
+        let (prompt_sum, cached_sum, written_sum, known) =
+            (tally.prompt, tally.cached, tally.written, tally.known);
         let all_reported = outcomes
             .iter()
             .all(|done| done.tokens.is_none_or(|counted| counted.cache_reported));
@@ -417,338 +454,48 @@ fn sim_cached_tokens_are_priced_at_their_own_rate() -> TestResult {
             json!(write_rate.is_some()),
             "seed {seed}: the write rate's declaration is on the card"
         );
-        for (result, outcome) in sheet["results"]
-            .as_array()
-            .ok_or("results")?
-            .iter()
-            .zip(&outcomes)
-        {
-            assert_eq!(
-                result["cached_tokens"].as_u64(),
-                outcome.tokens.map(|counted| counted.cached),
-                "seed {seed}: each result names its cached tokens"
-            );
-            assert_eq!(
-                result["cache_write_tokens"].as_u64(),
-                outcome.tokens.map(|counted| counted.written),
-                "seed {seed}: each result names its written tokens"
-            );
-        }
-        let silenced = match outcomes.iter_mut().find_map(|done| done.tokens.as_mut()) {
-            Some(counted) => {
-                counted.cache_reported = false;
-                true
-            }
-            None => false,
-        };
-        let rescored = card("set", "model", prices, &outcomes);
+        check_rows(seed, &scored, &outcomes)?;
+        check_silenced(seed, prices, &mut outcomes);
+    }
+    Ok(())
+}
+
+/// Each result row of `scored` names its outcome's cached and written tokens.
+fn check_rows(seed: u64, scored: &Scorecard, outcomes: &[Outcome]) -> Result<(), SimError> {
+    let sheet = scored.json();
+    for (result, outcome) in sheet["results"]
+        .as_array()
+        .ok_or(SimError::Missing("results"))?
+        .iter()
+        .zip(outcomes)
+    {
         assert_eq!(
-            rescored.json()["cache_complete"],
-            json!(!silenced),
-            "seed {seed}: one outcome that did not report makes the card incomplete"
+            result["cached_tokens"].as_u64(),
+            outcome.tokens.map(|counted| counted.cached),
+            "seed {seed}: each result names its cached tokens"
+        );
+        assert_eq!(
+            result["cache_write_tokens"].as_u64(),
+            outcome.tokens.map(|counted| counted.written),
+            "seed {seed}: each result names its written tokens"
         );
     }
     Ok(())
 }
 
-/// A seeded lowercase word of 1 to 8 letters.
-fn word(rng: &mut Seeded) -> Result<String, DrawError> {
-    let mut text = String::new();
-    for _ in 0..=rng.index(8)? {
-        text.push(char::from(b"abcdefghijklmnopqrstuvwxyz"[rng.index(26)?]));
-    }
-    Ok(text)
-}
-
-/// A seeded valid set of `count` tasks with unicode, right-to-left and empty origin files.
-fn valid_set(rng: &mut Seeded, count: usize) -> Result<Value, DrawError> {
-    let mut tasks = Vec::with_capacity(count);
-    for index in 0..count {
-        let mut files = Map::new();
-        for slot in 0..=rng.index(4)? {
-            let content = ["", "ünïcödé\n", "#!/bin/sh\necho 42\n", "\u{202e}rtl"][rng.index(4)?];
-            files.insert(format!("{}/{slot}.txt", word(rng)?), json!(content));
+/// One outcome that did not report its cached tokens makes the card incomplete.
+fn check_silenced(seed: u64, prices: Prices, outcomes: &mut [Outcome]) {
+    let silenced = match outcomes.iter_mut().find_map(|done| done.tokens.as_mut()) {
+        Some(counted) => {
+            counted.cache_reported = false;
+            true
         }
-        let write: Vec<String> = (0..=rng.index(3)?)
-            .map(|slot| format!("out/{slot}.sh"))
-            .collect();
-        let acceptance: Vec<String> = (0..=rng.index(4)?)
-            .map(|slot| format!("test -s out/{slot}.sh"))
-            .collect();
-        tasks.push(json!({
-            "id": format!("{}-{index}", word(rng)?),
-            "files": files,
-            "goal": format!("goal {index}"),
-            "write": write,
-            "acceptance": acceptance,
-        }));
-    }
-    Ok(json!({ "name": "matched-sim", "tasks": tasks }))
-}
-
-/// Task `index` of set `value`, to rewrite in place.
-fn task_mut(value: &mut Value, index: usize) -> Option<&mut Map> {
-    value.get_mut("tasks")?.get_mut(index)?.as_object_mut()
-}
-
-/// The set `value` after `edit` on its first task's object; `None` when it has none.
-fn with_task(value: &Value, edit: fn(&mut Map)) -> Option<Vec<u8>> {
-    let mut changed = value.clone();
-    edit(task_mut(&mut changed, 0)?);
-    Some(changed.to_string().into_bytes())
-}
-
-/// The error a set is refused with; `None` when it was accepted.
-fn refusal(bytes: &[u8]) -> Option<SetError> {
-    TaskSet::parse(bytes).err()
-}
-
-/// A whole set's bytes and the exact refusal they must draw.
-type WholeMistake = (&'static [u8], fn(&SetError) -> bool);
-
-/// One mistake made to task 0, and the exact refusal it must draw.
-type Mistake = (fn(&mut Map), fn(&SetError) -> bool);
-
-/// Every single mistake a fat-fingered author makes in one task.
-const MISTAKES: [Mistake; 13] = [
-    (
-        |task| drop(task.insert(String::from("cost"), json!(0))),
-        |error| matches!(*error, SetError::UnknownKey { index: Some(0), .. }),
-    ),
-    (
-        |task| drop(task.insert(String::from("id"), json!(""))),
-        |error| matches!(*error, SetError::BadId { index: 0 }),
-    ),
-    (
-        |task| drop(task.insert(String::from("files"), json!({}))),
-        |error| matches!(*error, SetError::FileCount { index: 0, count: 0 }),
-    ),
-    (
-        |task| drop(task.insert(String::from("files"), json!({"../escape": "x"}))),
-        |error| matches!(*error, SetError::BadFile { index: 0, .. }),
-    ),
-    (
-        |task| drop(task.insert(String::from("files"), json!({".git/config": "x"}))),
-        |error| matches!(*error, SetError::BadFile { index: 0, .. }),
-    ),
-    (
-        |task| drop(task.insert(String::from("files"), json!({"big": "x".repeat(262_145)}))),
-        |error| matches!(*error, SetError::FileTooLarge { index: 0, .. }),
-    ),
-    (
-        |task| drop(task.insert(String::from("files"), json!({"a": 7}))),
-        |error| {
-            matches!(
-                *error,
-                SetError::WrongType {
-                    index: Some(0),
-                    key: "files"
-                }
-            )
-        },
-    ),
-    (
-        |task| drop(task.insert(String::from("acceptance"), json!([]))),
-        |error| matches!(*error, SetError::AcceptanceCount { index: 0, count: 0 }),
-    ),
-    (
-        |task| drop(task.insert(String::from("acceptance"), json!(vec!["true"; 17]))),
-        |error| {
-            matches!(
-                *error,
-                SetError::AcceptanceCount {
-                    index: 0,
-                    count: 17
-                }
-            )
-        },
-    ),
-    (
-        |task| drop(task.insert(String::from("write"), json!([]))),
-        |error| {
-            matches!(
-                *error,
-                SetError::Task {
-                    index: 0,
-                    cause: TaskError::FileCount { count: 0 }
-                }
-            )
-        },
-    ),
-    (
-        |task| drop(task.insert(String::from("write"), json!(["a", "a"]))),
-        |error| {
-            matches!(
-                *error,
-                SetError::Task {
-                    index: 0,
-                    cause: TaskError::BadFile { index: 1 }
-                }
-            )
-        },
-    ),
-    (
-        |task| drop(task.insert(String::from("goal"), json!(" "))),
-        |error| {
-            matches!(
-                *error,
-                SetError::Task {
-                    index: 0,
-                    cause: TaskError::BadGoal
-                }
-            )
-        },
-    ),
-    (
-        |task| drop(task.insert(String::from("goal"), json!(7))),
-        |error| {
-            matches!(
-                *error,
-                SetError::WrongType {
-                    index: Some(0),
-                    key: "goal"
-                }
-            )
-        },
-    ),
-];
-
-/// fat-finger, giant-and-empty and wrong-order: every single mistake in a seeded
-/// valid set is refused with its exact error before anything runs. Catches a set
-/// that runs with no acceptance (accepted for nothing), an origin file outside the
-/// clone, a repeated id that would merge two tasks' scores, and an oversize set
-/// read whole.
-#[test]
-fn sim_eval_fat_finger_sets_get_their_exact_error() -> TestResult {
-    for seed in 0..64 {
-        let mut rng = Seeded::from_seed(seed);
-        let count = rng.index(4)?.saturating_add(2);
-        let set = valid_set(&mut rng, count)?;
-        assert!(
-            refusal(set.to_string().as_bytes()).is_none(),
-            "seed {seed}: the base set is valid"
-        );
-        for (index, &(edit, expected)) in MISTAKES.iter().enumerate() {
-            let error = refusal(&with_task(&set, edit).ok_or("task 0")?).ok_or("accepted")?;
-            assert!(
-                expected(&error),
-                "seed {seed}: mistake {index} gave {error}"
-            );
-        }
-        let mut twins = set.clone();
-        let first = twins["tasks"][0]["id"].clone();
-        task_mut(&mut twins, 1)
-            .ok_or("task 1")?
-            .insert(String::from("id"), first);
-        let error = refusal(twins.to_string().as_bytes()).ok_or("accepted twins")?;
-        assert!(
-            matches!(error, SetError::DuplicateId { index: 1 }),
-            "seed {seed}: {error}"
-        );
-        let mut extra = set;
-        extra
-            .as_object_mut()
-            .ok_or("set object")?
-            .insert(String::from("extra"), json!(1));
-        let error = refusal(extra.to_string().as_bytes()).ok_or("accepted extra")?;
-        assert!(
-            matches!(error, SetError::UnknownKey { index: None, .. }),
-            "{error}"
-        );
-    }
-    let whole: [WholeMistake; 7] = [
-        (br#"{"tasks":[]}"#, |error| {
-            matches!(
-                *error,
-                SetError::WrongType {
-                    index: None,
-                    key: "name"
-                }
-            )
-        }),
-        (br#"{"name":"Bad Name","tasks":[]}"#, |error| {
-            matches!(*error, SetError::BadName)
-        }),
-        (br#"{"name":"s","tasks":[]}"#, |error| {
-            matches!(*error, SetError::TaskCount { count: 0 })
-        }),
-        (br#"{"name":"s","tasks":{}}"#, |error| {
-            matches!(
-                *error,
-                SetError::WrongType {
-                    index: None,
-                    key: "tasks"
-                }
-            )
-        }),
-        (br#"{"name":"s","tasks":[7]}"#, |error| {
-            matches!(*error, SetError::NotAnObject { index: Some(0) })
-        }),
-        (b"[1]", |error| {
-            matches!(*error, SetError::NotAnObject { index: None })
-        }),
-        (b"{\"name\":", |error| {
-            matches!(*error, SetError::NotJson(_))
-        }),
-    ];
-    for (bytes, expected) in whole {
-        let error = refusal(bytes).ok_or("accepted")?;
-        assert!(expected(&error), "{error}");
-    }
-    let oversize = refusal(&vec![b' '; 4_194_305]).ok_or("accepted oversize")?;
-    assert!(
-        matches!(oversize, SetError::TooLarge { len: 4_194_305 }),
-        "{oversize}"
+        None => false,
+    };
+    let rescored = card("set", "model", prices, outcomes);
+    assert_eq!(
+        rescored.json()["cache_complete"],
+        json!(!silenced),
+        "seed {seed}: one outcome that did not report makes the card incomplete"
     );
-    Ok(())
-}
-
-/// monkey: seeded valid sets of 1 to 12 tasks with unicode, right-to-left and
-/// empty origin files read back exactly, task by task, in order, and each task
-/// builds the executor document naming its files. Catches a reordered or dropped
-/// task, a mangled origin file, and a set check that disagrees with the executor.
-#[test]
-fn sim_eval_valid_sets_read_back_exactly() -> TestResult {
-    for seed in 0..256 {
-        let mut rng = Seeded::from_seed(seed);
-        let count = rng.index(12)?.saturating_add(1);
-        let value = valid_set(&mut rng, count)?;
-        let set = TaskSet::parse(value.to_string().as_bytes())?;
-        assert_eq!(set.name, "matched-sim", "seed {seed}: name");
-        assert_eq!(set.tasks.len(), count, "seed {seed}: every task");
-        for (index, task) in set.tasks.iter().enumerate() {
-            let written = &value["tasks"][index];
-            assert_eq!(json!(task.id), written["id"], "seed {seed}: id {index}");
-            assert_eq!(
-                json!(task.goal),
-                written["goal"],
-                "seed {seed}: goal {index}"
-            );
-            assert_eq!(
-                json!(task.write),
-                written["write"],
-                "seed {seed}: write {index}"
-            );
-            assert_eq!(
-                json!(task.acceptance),
-                written["acceptance"],
-                "seed {seed}: acceptance {index}"
-            );
-            let files: Map = task
-                .files
-                .iter()
-                .map(|pair| (pair.0.clone(), json!(pair.1)))
-                .collect();
-            assert_eq!(
-                Value::Object(files),
-                written["files"],
-                "seed {seed}: files {index}"
-            );
-            assert!(
-                task.task("/origin").is_ok(),
-                "seed {seed}: task {index} builds its document"
-            );
-        }
-    }
-    Ok(())
 }

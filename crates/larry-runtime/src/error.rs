@@ -210,83 +210,107 @@ pub struct SettingRange {
 }
 
 impl fmt::Display for RuntimeError {
+    /// Variants that wrap a typed cause print here; every other variant
+    /// continues to [`RuntimeError::fmt_limit`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Binding(ref err) => write!(f, "{err}"),
-            Self::UnsupportedDecision(value) => {
-                write!(f, "unsupported authorization decision: {value:?}")
-            }
-            Self::UnsupportedCommand(value) => write!(f, "unsupported command kind: {value:?}"),
-            Self::UnsupportedEvent(value) => write!(f, "unsupported event kind: {value:?}"),
-            Self::UnsupportedDisposition(value) => {
-                write!(f, "unsupported terminal disposition: {value:?}")
-            }
-            Self::UnsupportedReconciliationAction(value) => {
-                write!(f, "unsupported reconciliation action: {value:?}")
-            }
-            Self::JournalFull { capacity } => {
-                write!(
-                    f,
-                    "journal is at capacity {capacity}; admission is backpressured"
-                )
-            }
-            Self::RunLimitReached { capacity } => {
-                write!(f, "run table is at capacity {capacity}")
-            }
-            Self::ReadyWorkFull { capacity } => {
-                write!(
-                    f,
-                    "ready-work queue is at capacity {capacity}; drain a tick first"
-                )
-            }
-            Self::EffectLimitReached { run, capacity } => {
-                write!(
-                    f,
-                    "run {run} already holds the maximum of {capacity} recorded effects"
-                )
-            }
-            Self::BadSetting { name, ref range } => {
-                let SettingRange { value, min, max } = **range;
-                write!(f, "runtime setting {name}={value} is outside {min}..={max}")
-            }
-            Self::SettingUnreadable { name, ref cause } => {
-                write!(f, "runtime setting {name} cannot be read: {cause}")
-            }
-            Self::PayloadTooLarge { bytes, ceiling } => write!(
-                f,
-                "command payload of {bytes} bytes exceeds the {ceiling}-byte ceiling"
-            ),
             Self::Sequence(ref err) => write!(f, "event sequencing refused: {err}"),
             Self::Ordering(ref err) => write!(f, "record ordering refused: {err}"),
             Self::Command(ref err) => write!(f, "command refused: {err}"),
             Self::Transition(ref err) => write!(f, "run-state transition refused: {err}"),
             Self::Authority(ref err) => write!(f, "effect-boundary authority refused: {err}"),
             Self::Codec(ref err) => write!(f, "journal payload codec failed: {err}"),
+            Self::Fence(ref err) => write!(f, "dispatch fence refused: {err}"),
+            Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
+            Self::Question(ref err) => write!(f, "question refused: {err}"),
+            Self::Durable(ref err) => write!(f, "journal file refused: {err}"),
+            Self::SettingUnreadable { name, ref cause } => {
+                write!(f, "runtime setting {name} cannot be read: {cause}")
+            }
+            Self::ClockBeforeEpoch(ref cause) => {
+                write!(f, "the system clock reads before the Unix epoch: {cause}")
+            }
+            ref other => other.fmt_limit(f),
+        }
+    }
+}
+
+impl RuntimeError {
+    /// The text of the unsupported-kind and capacity variants; every other
+    /// variant continues to [`RuntimeError::fmt_detail`]. `source` below is
+    /// the one exhaustive match, so a new variant cannot compile unvisited.
+    fn fmt_limit(&self, sink: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::UnsupportedDecision(value) => {
+                write!(sink, "unsupported authorization decision: {value:?}")
+            }
+            Self::UnsupportedCommand(value) => {
+                write!(sink, "unsupported command kind: {value:?}")
+            }
+            Self::UnsupportedEvent(value) => write!(sink, "unsupported event kind: {value:?}"),
+            Self::UnsupportedDisposition(value) => {
+                write!(sink, "unsupported terminal disposition: {value:?}")
+            }
+            Self::UnsupportedReconciliationAction(value) => {
+                write!(sink, "unsupported reconciliation action: {value:?}")
+            }
+            Self::JournalFull { capacity } => write!(
+                sink,
+                "journal is at capacity {capacity}; admission is backpressured"
+            ),
+            Self::RunLimitReached { capacity } => {
+                write!(sink, "run table is at capacity {capacity}")
+            }
+            Self::ReadyWorkFull { capacity } => write!(
+                sink,
+                "ready-work queue is at capacity {capacity}; drain a tick first"
+            ),
+            Self::EffectLimitReached { run, capacity } => write!(
+                sink,
+                "run {run} already holds the maximum of {capacity} recorded effects"
+            ),
+            Self::BadSetting { name, ref range } => {
+                let SettingRange { value, min, max } = **range;
+                write!(
+                    sink,
+                    "runtime setting {name}={value} is outside {min}..={max}"
+                )
+            }
+            Self::PayloadTooLarge { bytes, ceiling } => write!(
+                sink,
+                "command payload of {bytes} bytes exceeds the {ceiling}-byte ceiling"
+            ),
+            _ => self.fmt_detail(sink),
+        }
+    }
+
+    /// The text of the identity, outcome and journal-file variants. A variant
+    /// no arm describes prints its structured `Debug` form: never a wrong
+    /// message, and never a `fmt::Error` that makes `to_string` panic.
+    fn fmt_detail(&self, sink: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
             Self::Denied { operation, reason } => {
-                write!(f, "effect {operation} denied: {reason:?}")
+                write!(sink, "effect {operation} denied: {reason:?}")
             }
-            Self::RunNotTracked { run } => write!(f, "run {run} is not tracked"),
-            Self::RunTenantMismatch { run, expected, got } => {
-                write!(
-                    f,
-                    "run {run} belongs to tenant {expected}; command carried tenant {got}"
-                )
-            }
-            Self::IntentNotDurable { operation } => {
-                write!(
-                    f,
-                    "operation {operation} has no durable intent; dispatch refused"
-                )
-            }
+            Self::RunNotTracked { run } => sink.write_fmt(format_args!("run {run} is not tracked")),
+            Self::RunTenantMismatch { run, expected, got } => write!(
+                sink,
+                "run {run} belongs to tenant {expected}; command carried tenant {got}"
+            ),
+            Self::IntentNotDurable { operation } => write!(
+                sink,
+                "operation {operation} has no durable intent; dispatch refused"
+            ),
             Self::DuplicateOperation { operation } => {
-                write!(f, "operation {operation} was already reserved")
+                write!(sink, "operation {operation} was already reserved")
             }
             Self::UnresolvableOutcome { operation } => write!(
-                f,
+                sink,
                 "operation {operation}'s outcome stays open: not a success, not a failure"
             ),
             Self::ReceiptAlreadyPublished { operation } => write!(
-                f,
+                sink,
                 "operation {operation} already has an immutable terminal receipt"
             ),
             Self::FoldDivergence {
@@ -294,32 +318,26 @@ impl fmt::Display for RuntimeError {
                 recorded,
                 rederived,
             } => write!(
-                f,
+                sink,
                 "run {run} fold diverged: journal recorded {recorded}, algebra re-derived {rederived}"
             ),
             Self::ClockOutOfRange { elapsed } => write!(
-                f,
+                sink,
                 "clock reading {elapsed:?} after the Unix epoch is outside the platform's time range"
             ),
-            Self::ClockBeforeEpoch(ref cause) => {
-                write!(f, "the system clock reads before the Unix epoch: {cause}")
-            }
             Self::EffectIdentity { operation, field } => write!(
-                f,
+                sink,
                 "operation {operation}'s {field} names no effect key: all-zero or past the last generation"
             ),
-            Self::Fence(ref err) => write!(f, "dispatch fence refused: {err}"),
-            Self::Protocol(ref err) => write!(f, "protocol ingress refused: {err}"),
-            Self::Question(ref err) => write!(f, "question refused: {err}"),
-            Self::Durable(ref err) => write!(f, "journal file refused: {err}"),
             Self::DurableRepeat { index } => write!(
-                f,
+                sink,
                 "journal file record {index} repeats an accepted command; the file is not this runtime's"
             ),
             Self::DurabilityShort { promised } => write!(
-                f,
+                sink,
                 "journal file promised {promised}, short of surviving a process crash"
             ),
+            ref unrouted => write!(sink, "{unrouted:?}"),
         }
     }
 }

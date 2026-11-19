@@ -97,13 +97,13 @@ fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult
         let head_end = total.min(HEAD_BYTES);
         assert_eq!(
             captured.head.as_slice(),
-            &expected[..head_end],
+            expected.get(..head_end).ok_or("the head range")?,
             "seed {seed}: the head is the first bytes"
         );
         let tail_start = HEAD_BYTES.max(total.saturating_sub(TAIL_BYTES)).min(total);
         assert_eq!(
             captured.tail.as_slice(),
-            &expected[tail_start..],
+            expected.get(tail_start..).ok_or("the tail range")?,
             "seed {seed}: the tail is the last bytes"
         );
         let (text, reported) = captured.into_text();
@@ -141,7 +141,7 @@ fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult
         while offset < total {
             let piece = usize::try_from(stream.below(8_192)?)?.saturating_add(1);
             let end = offset.saturating_add(piece).min(total);
-            direct.push(&expected[offset..end])?;
+            direct.push(expected.get(offset..end).ok_or("the piece range")?)?;
             offset = end;
             assert!(
                 direct.head.len().saturating_add(direct.tail.len())

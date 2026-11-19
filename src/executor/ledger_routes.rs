@@ -185,7 +185,7 @@ impl Ledger {
     ///
     /// # Errors
     ///
-    /// [`RouteError::Unknown`] (as [`ExecError::Route`]) when the tenant has no
+    /// [`RouteError::NoSuchId`] (as [`ExecError::Route`]) when the tenant has no
     /// such route; [`ExecError::Sql`] otherwise.
     pub(crate) fn remove_route(&self, tenant: &str, id: &str) -> Result<(), ExecError> {
         let removed = self
@@ -196,7 +196,7 @@ impl Ledger {
             )
             .map_err(ExecError::Sql)?;
         if removed == 0 {
-            return Err(ExecError::Route(RouteError::Unknown { id: id.to_owned() }));
+            return Err(ExecError::Route(RouteError::NoSuchId { id: id.to_owned() }));
         }
         Ok(())
     }
@@ -206,7 +206,7 @@ impl Ledger {
     ///
     /// # Errors
     ///
-    /// [`RouteError::Unknown`] (as [`ExecError::Route`]) when the tenant has no
+    /// [`RouteError::NoSuchId`] (as [`ExecError::Route`]) when the tenant has no
     /// such route, which changes nothing; [`ExecError::Sql`] otherwise.
     pub(crate) fn set_default_route(&self, tenant: &str, id: &str) -> Result<(), ExecError> {
         let moved = self
@@ -218,7 +218,7 @@ impl Ledger {
             )
             .map_err(ExecError::Sql)?;
         if moved == 0 {
-            return Err(ExecError::Route(RouteError::Unknown { id: id.to_owned() }));
+            return Err(ExecError::Route(RouteError::NoSuchId { id: id.to_owned() }));
         }
         Ok(())
     }
@@ -300,7 +300,7 @@ mod tests {
         assert!(
             matches!(
                 ledger.set_default_route("tenant-a", "nope"),
-                Err(ExecError::Route(RouteError::Unknown { .. }))
+                Err(ExecError::Route(RouteError::NoSuchId { .. }))
             ),
             "an unknown default is refused"
         );
@@ -318,7 +318,7 @@ mod tests {
         assert!(
             matches!(
                 ledger.remove_route("tenant-a", "beta"),
-                Err(ExecError::Route(RouteError::Unknown { .. }))
+                Err(ExecError::Route(RouteError::NoSuchId { .. }))
             ),
             "removing twice is refused"
         );
@@ -350,7 +350,8 @@ mod tests {
             ledger.routes("tenant-a").is_ok(),
             "tenant a still reads: the damage is tenant b's"
         );
-        drop(std::fs::remove_dir_all(&directory));
+        // A cleanup that fails is a test failure, never a dropped error.
+        std::fs::remove_dir_all(&directory)?;
         Ok(())
     }
 }

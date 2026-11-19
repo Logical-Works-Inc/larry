@@ -39,7 +39,7 @@ use lgwks_std::json::serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub struct WorkProposal {
     /// The run the work belongs to.
-    pub run: RunId,
+    run: RunId,
     /// The tenant the body claims the run belongs to.
     ///
     /// A declaration, and one the runtime does not consult: the run's tenant
@@ -49,17 +49,18 @@ pub struct WorkProposal {
     /// it does not own (D42, E63). The field stays because the body is the
     /// caller's declaration of its own intent, not because the runtime trusts
     /// it.
-    pub tenant: TenantId,
+    tenant: TenantId,
     /// The stable operation identity presented to the endpoint.
-    pub operation: OperationId,
+    operation: OperationId,
     /// The scopes the effect requires; every one must pass the gate.
     required_scopes: BTreeSet<Scope>,
-    /// The declared cost.
-    pub cost: u64,
+    /// The declared cost. Crate-visible so the admission tests can declare a changed body; every
+    /// caller outside the crate reads it through [`WorkProposal::cost`].
+    pub(crate) cost: u64,
     /// The unit the cost is denominated in.
-    pub unit: BudgetUnit,
-    /// The declared reconciliation strategy (R72).
-    pub strategy: ReconciliationStrategy,
+    unit: BudgetUnit,
+    /// The declared reconciliation strategy (R72), crate-visible for the same tests.
+    pub(crate) strategy: ReconciliationStrategy,
 }
 
 impl WorkProposal {
@@ -89,6 +90,42 @@ impl WorkProposal {
     #[must_use]
     pub fn required_scopes(&self) -> &BTreeSet<Scope> {
         &self.required_scopes
+    }
+
+    /// The run the work belongs to.
+    #[must_use]
+    pub const fn run(&self) -> RunId {
+        self.run
+    }
+
+    /// The tenant the body claims the run belongs to (a declaration only).
+    #[must_use]
+    pub const fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// The stable operation identity presented to the endpoint.
+    #[must_use]
+    pub const fn operation(&self) -> OperationId {
+        self.operation
+    }
+
+    /// The declared cost.
+    #[must_use]
+    pub const fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    /// The unit the declared cost is denominated in.
+    #[must_use]
+    pub const fn unit(&self) -> BudgetUnit {
+        self.unit
+    }
+
+    /// The declared reconciliation strategy (R72).
+    #[must_use]
+    pub const fn strategy(&self) -> ReconciliationStrategy {
+        self.strategy
     }
 
     /// The intent this proposal reserves, for `tenant`, admitted under

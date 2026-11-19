@@ -72,7 +72,7 @@ pub enum RouteError {
     /// The description is over 1 KiB or holds a control byte other than a newline.
     BadDescribe,
     /// No route has this id.
-    Unknown {
+    NoSuchId {
         /// The id that was asked for.
         id: String,
     },
@@ -98,7 +98,8 @@ impl fmt::Display for RouteError {
         match *self {
             Self::BadId => out.write_str("route id must be 1 to 64 bytes of a-z, 0-9, _ and -"),
             Self::ReservedId => {
-                out.write_str("route id env is reserved for the LARRY_MODEL_* environment route")
+                // One `route` word, as every field refusal carries (larry#228, larry#295).
+                out.write_str("route id env is reserved for the LARRY_MODEL_* environment variables")
             }
             Self::BadUrl => out.write_str(
                 "route url must be a bare http or https base URL: no credentials, query or fragment",
@@ -122,7 +123,7 @@ impl fmt::Display for RouteError {
             Self::BadDescribe => out.write_str(
                 "route description must be at most 1024 bytes with no control byte but a newline",
             ),
-            Self::Unknown { ref id } => write!(out, "no route has the id {id}"),
+            Self::NoSuchId { ref id } => write!(out, "no route has the id {id}"),
             Self::NoRoute => out.write_str(
                 "no model route: add one with `larry route add`, or set LARRY_MODEL_URL, LARRY_MODEL and LARRY_MODEL_KEY",
             ),
@@ -153,7 +154,7 @@ impl std::error::Error for RouteError {
             | Self::BadResidency
             | Self::BadRequestBytes
             | Self::BadDescribe
-            | Self::Unknown { .. }
+            | Self::NoSuchId { .. }
             | Self::NoRoute
             | Self::TableFull { .. } => None,
         }
@@ -481,7 +482,7 @@ impl Table {
 ///
 /// # Errors
 ///
-/// [`RouteError::Unknown`] for a name nothing has and [`RouteError::NoRoute`]
+/// [`RouteError::NoSuchId`] for a name nothing has and [`RouteError::NoRoute`]
 /// when no name, default or environment route exists.
 pub(crate) fn resolve(
     table: &Table,
@@ -493,7 +494,7 @@ pub(crate) fn resolve(
     }
     match (named, environment) {
         (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
-        (Some(id), _) => Err(RouteError::Unknown { id: id.to_owned() }),
+        (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
         (None, Some(route)) => Ok(route),
         (None, None) => Err(RouteError::NoRoute),
     }
@@ -502,10 +503,10 @@ pub(crate) fn resolve(
 /// Unit tests of the field checks at their boundaries and of the resolver order.
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_REQUEST_BYTES, Draft, ENV_ROUTE, Kind, Route, RouteError, Table, resolve};
+    use super::{Draft, ENV_ROUTE, Kind, Route, RouteError};
 
     /// A draft every check accepts.
-    fn accepted() -> Draft<'static> {
+    pub(super) fn accepted() -> Draft<'static> {
         Draft {
             id: "alpha",
             kind: Kind::OpenAiChat,
@@ -520,15 +521,18 @@ mod tests {
     }
 
     /// The outcome of building the accepted draft after `change`.
-    fn built<'text>(change: impl FnOnce(&mut Draft<'text>)) -> Result<Route, RouteError> {
+    pub(super) fn built<'text>(
+        change: impl FnOnce(&mut Draft<'text>),
+    ) -> Result<Route, RouteError> {
         let mut candidate: Draft<'text> = accepted();
         change(&mut candidate);
         Route::new(&candidate)
     }
 
-    /// Each field is refused at its boundary with its own variant, and accepted one step inside.
+    /// The id, URL and model are each refused at their boundary with their own variant, and
+    /// accepted one step inside.
     #[test]
-    fn every_field_has_its_boundary_and_its_own_refusal() -> Result<(), RouteError> {
+    fn every_identity_field_has_its_boundary_and_its_own_refusal() -> Result<(), RouteError> {
         let long_id = "a".repeat(65);
         let ok_id = "a".repeat(64);
         assert_eq!(
@@ -574,6 +578,13 @@ mod tests {
                 "{model:.20}"
             );
         }
+        Ok(())
+    }
+
+    /// The key variable, temperature, request bound, residency and description are each
+    /// refused at their boundary with their own variant, and accepted one step inside.
+    #[test]
+    fn every_other_field_has_its_boundary_and_its_own_refusal() -> Result<(), RouteError> {
         let long_key = format!("LARRY_KEY_{}", "A".repeat(55));
         let top_key = format!("LARRY_KEY_{}", "A".repeat(54));
         for name in ["", "lower", "1ABC", "LARRY_KEY_A-B", long_key.as_str()] {
@@ -646,103 +657,9 @@ mod tests {
         })?;
         Ok(())
     }
-
-    /// A built route keeps its parts: the URL loses its trailing slash, the host
-    /// keeps its port, the request bound defaults to 1 MiB, and the seal names no key.
-    #[test]
-    fn a_built_route_keeps_its_parts_and_seals_no_key() -> Result<(), RouteError> {
-        let route = Route::new(&accepted())?;
-        assert_eq!(
-            route.base_url(),
-            "https://gateway.example:8443/v1",
-            "slash trimmed"
-        );
-        assert_eq!(route.host(), "gateway.example:8443", "host keeps its port");
-        assert_eq!(route.kind().name(), "openai-chat", "kind name");
-        let defaulted = built(|fields| fields.request_bytes = None)?;
-        assert_eq!(
-            defaulted.request_bytes(),
-            DEFAULT_REQUEST_BYTES,
-            "1 MiB default"
-        );
-        let sealed = route.seal().to_string();
-        assert!(
-            sealed.contains("gateway.example:8443"),
-            "host sealed: {sealed}"
-        );
-        assert!(
-            sealed.contains("\"residency\":\"CA\""),
-            "residency sealed: {sealed}"
-        );
-        assert!(
-            !sealed.contains("LARRY_KEY_ALPHA"),
-            "the key variable stays out: {sealed}"
-        );
-        assert!(!sealed.contains("/v1"), "the URL path stays out: {sealed}");
-        let undeclared = built(|fields| fields.residency = None)?;
-        assert!(
-            undeclared.seal().to_string().contains("\"residency\":null"),
-            "an undeclared residency seals as null"
-        );
-        assert_eq!(Kind::parse("openai-chat"), Some(Kind::OpenAiChat), "parse");
-        assert_eq!(Kind::parse("other"), None, "an unknown kind");
-        Ok(())
-    }
-
-    /// The resolver's order: named, else default, else environment, else none;
-    /// a name nothing has never falls through.
-    #[test]
-    fn the_resolver_order_holds() -> Result<(), RouteError> {
-        let alpha = Route::new(&accepted())?;
-        let beta = built(|fields| fields.id = "beta")?;
-        let environment = Route::environment(&Draft {
-            id: ENV_ROUTE,
-            ..accepted()
-        })?;
-        let table = Table::new(
-            vec![alpha.clone(), beta.clone()],
-            Some(String::from("beta")),
-        );
-        assert_eq!(
-            resolve(&table, Some("alpha"), None)?,
-            alpha,
-            "named beats default"
-        );
-        assert_eq!(
-            resolve(&table, None, Some(environment.clone()))?,
-            beta,
-            "default beats env"
-        );
-        assert_eq!(
-            resolve(&table, Some("env"), Some(environment.clone()))?,
-            environment,
-            "env can be named"
-        );
-        assert_eq!(
-            resolve(&table, Some("gamma"), Some(environment.clone())),
-            Err(RouteError::Unknown {
-                id: String::from("gamma")
-            }),
-            "an unknown name never falls through"
-        );
-        assert_eq!(
-            resolve(&table, Some("env"), None),
-            Err(RouteError::Unknown {
-                id: String::from("env")
-            }),
-            "env is unknown when undeclared"
-        );
-        let bare = Table::new(Vec::new(), None);
-        assert_eq!(
-            resolve(&bare, None, Some(environment.clone()))?,
-            environment,
-            "env alone"
-        );
-        assert_eq!(
-            resolve(&bare, None, None),
-            Err(RouteError::NoRoute),
-            "nothing"
-        );
-        Ok(())
-    }
 }
+
+/// A built route's parts and the resolver's order.
+#[cfg(test)]
+#[path = "sim_route.rs"]
+mod sim_route;

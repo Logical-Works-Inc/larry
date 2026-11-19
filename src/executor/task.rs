@@ -5,6 +5,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod check;
+
+use self::check::{check_acceptance, check_repo_and_base, owned_argvs};
 use super::author::Brief;
 use crate::model::is_route_id;
 
@@ -153,55 +156,9 @@ impl Task {
             .get("acceptance")
             .and_then(|entry| entry.as_array())
             .ok_or(TaskError::AcceptanceNotArgv)?;
-        let mut acceptance: Vec<Vec<String>> = Vec::with_capacity(acceptance_value.len());
-        for command in acceptance_value {
-            let argv = command.as_array().ok_or(TaskError::AcceptanceNotArgv)?;
-            let mut owned_argv: Vec<String> = Vec::with_capacity(argv.len());
-            for item in argv {
-                let text_item = item.as_str().ok_or(TaskError::AcceptanceNotArgv)?;
-                owned_argv.push(text_item.to_owned());
-            }
-            acceptance.push(owned_argv);
-        }
-        if repo_text.is_empty() || repo_text.len() > MAX_REPO_BYTES || repo_text.contains('\0') {
-            return Err(TaskError::BadRepo);
-        }
-        if base_text.is_empty()
-            || base_text.len() > MAX_BASE_BYTES
-            || base_text.starts_with('-')
-            || base_text
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace())
-        {
-            return Err(TaskError::BadBase);
-        }
-        if acceptance.len() > MAX_COMMANDS {
-            return Err(TaskError::TooManyCommands {
-                count: acceptance.len(),
-            });
-        }
-        for (index, argv) in acceptance.iter().enumerate() {
-            if argv.is_empty() {
-                return Err(TaskError::EmptyArgv { index });
-            }
-            if argv.len() > MAX_ARGV {
-                return Err(TaskError::ArgvTooLong {
-                    index,
-                    len: argv.len(),
-                });
-            }
-            for item in argv {
-                if item.len() > MAX_ARG_BYTES {
-                    return Err(TaskError::ArgTooLarge {
-                        index,
-                        len: item.len(),
-                    });
-                }
-                if item.contains('\0') {
-                    return Err(TaskError::ArgHasNul { index });
-                }
-            }
-        }
+        let acceptance = owned_argvs(acceptance_value)?;
+        check_repo_and_base(repo_text, base_text)?;
+        check_acceptance(&acceptance)?;
         let brief = Brief::parse(object)?;
         let idempotency_key = match object.get("idempotency_key") {
             None => None,
@@ -568,11 +525,22 @@ mod tests {
         })
     }
 
+    /// What every simulation here returns.
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A valid repository path and base the seed draws.
+    fn repo_and_base(seed: u64) -> Result<(String, String), Box<dyn std::error::Error>> {
+        let mut generator = SplitMix64::new(seed);
+        Ok((generator.next_text(4)?, generator.next_word(4)?))
+    }
+
     /// Renders a minimal valid document given its parts.
     fn rendered(repo: &str, base: &str, acceptance: lgwks_std::json::Value) -> Vec<u8> {
-        lgwks_std::json::json!({"repo": repo, "base": base, "acceptance": acceptance})
-            .to_string()
-            .into_bytes()
+        let mut document = lgwks_std::json::json!({"repo": repo, "base": base});
+        if let Some(object) = document.as_object_mut() {
+            object.insert("acceptance".to_owned(), acceptance);
+        }
+        document.to_string().into_bytes()
     }
 
     /// Every seeded valid task roundtrips through the parser.
@@ -666,6 +634,18 @@ mod tests {
                 Task::parse(wrong_item.to_string().as_bytes()),
                 Err(TaskError::AcceptanceNotArgv)
             ));
+            seed = seed.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Every seeded repository or base that is empty, oversize or unsafe to hand to
+    /// git gets its exact error.
+    #[test]
+    fn sim_hostile_repo_and_base_get_their_exact_error_for_every_seed() -> TestResult {
+        let mut seed = 0_u64;
+        while seed < 64 {
+            let (repo, base) = repo_and_base(seed)?;
             assert!(matches!(
                 Task::parse(&rendered("", &base, lgwks_std::json::json!([]))),
                 Err(TaskError::BadRepo)
@@ -700,6 +680,18 @@ mod tests {
                 Task::parse(&rendered(&repo, "a\tb", lgwks_std::json::json!([]))),
                 Err(TaskError::BadBase)
             ));
+            seed = seed.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Every seeded acceptance list past its command, argv or argument bound, or
+    /// holding a NUL byte, gets its exact error.
+    #[test]
+    fn sim_hostile_acceptance_gets_its_exact_error_for_every_seed() -> TestResult {
+        let mut seed = 0_u64;
+        while seed < 64 {
+            let (repo, base) = repo_and_base(seed)?;
             let mut many_commands = Vec::new();
             let mut command_index = 0_usize;
             while command_index < 17 {

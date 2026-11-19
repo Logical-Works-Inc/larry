@@ -121,11 +121,11 @@ fn runtime(seed: u64, change_on: u64) -> Result<TestRuntime> {
 
 /// Names the exact field and verifies a human-readable recovery instruction.
 fn assert_swap(
-    result: std::result::Result<larry_runtime::runtime::TickReport, RuntimeError>,
+    result: &std::result::Result<larry_runtime::runtime::TickReport, RuntimeError>,
     field: BindingField,
 ) {
     assert!(
-        matches!(result, Err(RuntimeError::Binding(BindingError::Changed { field: got })) if got == field),
+        matches!(*result, Err(RuntimeError::Binding(BindingError::Changed { field: ref got })) if *got == field),
         "expected exact field {field:?}, got {result:?}"
     );
 }
@@ -160,7 +160,7 @@ fn swap_journey(seed: u64, change_on: u64) -> Result<ContentDigest> {
     )?;
     let shown = *display.binding();
     runtime.submit_displayed(command, display)?;
-    assert_swap(runtime.tick(), swapped_field(seed));
+    assert_swap(&runtime.tick(), swapped_field(seed));
     assert!(
         runtime.owner().executed().is_empty(),
         "swap must execute nothing, seed {seed}"
@@ -227,10 +227,10 @@ fn success_journey(seed: u64) -> Result<ContentDigest> {
         displayed.push(display.binding().digest());
         runtime.submit_displayed(command, display)?;
     }
-    assert_ne!(
-        displayed[0], displayed[1],
-        "tenant is part of the display identity"
-    );
+    let [ref first, ref second] = *displayed.as_slice() else {
+        return Err(format!("two displays, got {}", displayed.len()).into());
+    };
+    assert_ne!(first, second, "tenant is part of the display identity");
     let report = runtime.tick()?;
     assert_eq!(
         report.receipts().len(),
@@ -443,7 +443,7 @@ fn e65_bounds_epochs_and_integrity() -> Result {
         SecurityEpoch::new(1),
         "host moves epoch"
     );
-    assert_swap(runtime.tick(), BindingField::SecurityEpoch);
+    assert_swap(&runtime.tick(), BindingField::SecurityEpoch);
     assert!(
         runtime.journal().is_empty(),
         "stale display is refused before admission"
@@ -533,14 +533,15 @@ fn e65_unsupported_owner_and_malformed_display_refuse() -> Result {
     let fields = display.binding().resolved().target().fields();
     for (index, field) in fields.iter().enumerate() {
         assert!(
-            !fields[..index].contains(field),
+            !fields.iter().take(index).any(|prior| prior == field),
             "identical bytes in different fields have separate domains"
         );
     }
     let json = lgwks_std::json::to_value(&display)?;
     assert_eq!(
-        json["binding"]["digest"],
-        lgwks_std::json::to_value(&display.binding().digest())?,
+        json.get("binding")
+            .and_then(|binding| binding.get("digest")),
+        Some(&lgwks_std::json::to_value(&display.binding().digest())?),
         "rendered identity is the retained identity"
     );
     runtime.submit_displayed(command, display)?;

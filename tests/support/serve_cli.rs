@@ -7,7 +7,6 @@
 //! hanging it (larry#269).
 
 use std::error::Error;
-use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
@@ -21,7 +20,7 @@ use lgwks_std::json::{self, Value};
 
 #[path = "temp_dir.rs"]
 mod temp_dir;
-pub use temp_dir::TempDir;
+pub(crate) use temp_dir::TempDir;
 
 /// How long one exchange may take before the host is called broken: a bound on
 /// a hung host, never the pace of a working one. A serving line and every later
@@ -35,12 +34,12 @@ const LINE_BACKLOG: usize = 64;
 
 /// A fresh, empty state directory under the system temp dir, removed when its
 /// guard drops (larry#267).
-pub fn fresh_state_dir() -> std::io::Result<TempDir> {
+pub(crate) fn fresh_state_dir() -> std::io::Result<TempDir> {
     TempDir::new()
 }
 
 /// `larry serve key <tenant>` against `state`: the key it printed once.
-pub fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Error>> {
+pub(crate) fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Error>> {
     let output = Command::new(env!("CARGO_BIN_EXE_larry"))
         .args(["serve", "key", tenant])
         .env_clear()
@@ -67,7 +66,7 @@ pub fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Error>> {
 
 /// `larry serve revoke <tenant>` against `state`: the child's whole output, so
 /// a test reads its status and its refusal text.
-pub fn revoke(state: &Path, tenant: &str) -> Result<Output, Box<dyn Error>> {
+pub(crate) fn revoke(state: &Path, tenant: &str) -> Result<Output, Box<dyn Error>> {
     Ok(Command::new(env!("CARGO_BIN_EXE_larry"))
         .args(["serve", "revoke", tenant])
         .env_clear()
@@ -80,7 +79,11 @@ pub fn revoke(state: &Path, tenant: &str) -> Result<Output, Box<dyn Error>> {
 /// Inserts `count` tenant key rows straight into the store `issue_key` created in
 /// `state`, named `tenant-<from>` onward, each with a 64 hex digest. One
 /// transaction, so filling the cap stays fast.
-pub fn fill_key_store(state: &Path, from: usize, count: usize) -> Result<(), Box<dyn Error>> {
+pub(crate) fn fill_key_store(
+    state: &Path,
+    from: usize,
+    count: usize,
+) -> Result<(), Box<dyn Error>> {
     let mut conn = rusqlite::Connection::open(state.join("executor.db"))?;
     let transaction = conn.transaction()?;
     for offset in 0..count {
@@ -96,7 +99,7 @@ pub fn fill_key_store(state: &Path, from: usize, count: usize) -> Result<(), Box
 
 /// A running `larry serve` and the address it printed. Dropping it kills the
 /// child, so a failed test leaves no host behind.
-pub struct Serving {
+pub(crate) struct Serving {
     /// The child; `None` once it was waited for.
     child: Option<Child>,
     /// The child's process id, for sending it a signal.
@@ -104,7 +107,7 @@ pub struct Serving {
     /// The child's standard output, read one line at a time by `reader`.
     lines: Option<Receiver<io::Result<String>>>,
     /// The reader thread, joined with the host.
-    reader: Option<JoinHandle<()>>,
+    reader: Option<Reader>,
     /// The address from the serving line.
     addr: SocketAddr,
 }
@@ -116,31 +119,53 @@ pub struct Serving {
 /// error.
 fn forward_lines(
     mut stdout: BufReader<ChildStdout>,
-) -> io::Result<(Receiver<io::Result<String>>, JoinHandle<()>)> {
+) -> io::Result<(Receiver<io::Result<String>>, Reader)> {
     let (sender, lines): (SyncSender<io::Result<String>>, _) = mpsc::sync_channel(LINE_BACKLOG);
+    // The thread ends on the end of output, a read error or a closed channel, and hands back
+    // the one message the closed channel no longer took, so no send result is lost.
     let reader = std::thread::Builder::new()
         .name(String::from("serve-lines"))
         .spawn(move || {
             loop {
                 let mut line = String::new();
-                match stdout.read_line(&mut line) {
-                    Ok(0) => {
-                        drop(sender.send(Ok(line)));
-                        return;
-                    }
-                    Ok(_) => {
-                        if sender.send(Ok(line)).is_err() {
-                            return;
-                        }
-                    }
-                    Err(cause) => {
-                        drop(sender.send(Err(cause)));
-                        return;
-                    }
+                let read = stdout.read_line(&mut line);
+                let last = !matches!(read, Ok(count) if count > 0);
+                if let Err(unsent) = sender.send(read.map(|_count| line)) {
+                    return Some(unsent.0);
+                }
+                if last {
+                    return None;
                 }
             }
         })?;
     Ok((lines, reader))
+}
+
+/// The reader thread of [`forward_lines`]: it returns the message it could not deliver.
+type Reader = JoinHandle<Option<io::Result<String>>>;
+
+/// Kills and reaps `child`, closes `lines` and joins `reader`, in that order. A line the closed
+/// channel no longer took is expected after the kill; a read error or a panic is not.
+fn shut_down(
+    child: Option<Child>,
+    lines: Option<Receiver<io::Result<String>>>,
+    reader: Option<Reader>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(mut child) = child {
+        child.kill()?;
+        child.wait()?;
+    }
+    {
+        // Closing the receiver before the join returns a reader parked on a full channel.
+        let _closed = lines;
+    }
+    match reader.map(JoinHandle::join) {
+        None | Some(Ok(None | Some(Ok(_)))) => Ok(()),
+        Some(Ok(Some(Err(cause)))) => {
+            Err(format!("the host's stdout failed after the test stopped: {cause}").into())
+        }
+        Some(Err(panic)) => Err(format!("the serve-lines reader panicked: {panic:?}").into()),
+    }
 }
 
 /// The next line `lines` carries within `within`, or a typed failure naming the
@@ -169,7 +194,11 @@ fn stderr_text(stderr: Option<ChildStderr>) -> String {
             Ok(_) => {}
             // The child closed its stderr before the read ended: the text says so, and the exit
             // status stays the evidence.
-            Err(cause) => drop(write!(text, "<stderr unreadable: {cause}>")),
+            Err(cause) => {
+                text.push_str("<stderr unreadable: ");
+                text.push_str(&cause.to_string());
+                text.push('>');
+            }
         }
     }
     text
@@ -179,7 +208,7 @@ impl Serving {
     /// Start `larry serve` with only PATH and `env` set, from the system temp
     /// directory, and read its serving line within [`EXCHANGE_TIMEOUT`]: a host
     /// that never prints fails typed instead of hanging the test (larry#269).
-    pub fn start(env: &[(&str, &str)]) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn start(env: &[(&str, &str)]) -> Result<Self, Box<dyn Error>> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
             .arg("serve")
             .env_clear()
@@ -198,19 +227,22 @@ impl Serving {
         let line = match await_line(&lines, EXCHANGE_TIMEOUT) {
             Ok(line) => line,
             Err(cause) => {
-                // The host never printed: kill and reap it, then return the refusal.
-                drop(child.kill());
-                drop(child.wait());
-                drop(lines);
-                drop(reader.join());
-                return Err(cause);
+                // The host never printed: kill and reap it, then return the refusal, with the
+                // stop's own failure when there is one.
+                return Err(match shut_down(Some(child), Some(lines), Some(reader)) {
+                    Ok(()) => cause,
+                    Err(stop) => format!("{cause}; the host would not stop: {stop}").into(),
+                });
             }
         };
         if line.is_empty() {
             let status = child.wait()?;
             let stderr = stderr_text(child.stderr.take());
-            drop(reader.join());
-            return Err(format!("larry serve printed no serving line: {status}, {stderr}").into());
+            let stopped = shut_down(None, Some(lines), Some(reader));
+            return Err(format!(
+                "larry serve printed no serving line: {status}, {stderr}; reader: {stopped:?}"
+            )
+            .into());
         }
         let printed: Value = json::from_str(&line)?;
         let serving = printed
@@ -231,13 +263,13 @@ impl Serving {
     }
 
     /// The address the host is serving on.
-    pub const fn addr(&self) -> SocketAddr {
+    pub(crate) const fn addr(&self) -> SocketAddr {
         self.addr
     }
 
     /// The next line the host prints on standard output, without its newline,
     /// within [`EXCHANGE_TIMEOUT`].
-    pub fn next_line(&mut self) -> Result<String, Box<dyn Error>> {
+    pub(crate) fn next_line(&mut self) -> Result<String, Box<dyn Error>> {
         let lines = self.lines.as_ref().ok_or("the host's output is closed")?;
         let line = await_line(lines, EXCHANGE_TIMEOUT)?;
         if line.is_empty() {
@@ -247,7 +279,7 @@ impl Serving {
     }
 
     /// Send `signal` (`TERM`, `HUP`, `KILL` and the like) without waiting.
-    pub fn signal(&self, signal: &str) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn signal(&self, signal: &str) -> Result<(), Box<dyn Error>> {
         let sent = Command::new("kill")
             .arg(format!("-{signal}"))
             .arg(self.pid.to_string())
@@ -259,7 +291,7 @@ impl Serving {
     }
 
     /// Send `signal` (`TERM` or `KILL`) and wait for the exit; its status and stderr.
-    pub fn signal_and_wait(
+    pub(crate) fn signal_and_wait(
         &mut self,
         signal: &str,
     ) -> Result<(ExitStatus, String), Box<dyn Error>> {
@@ -272,18 +304,13 @@ impl Serving {
 
 impl Drop for Serving {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            // The child may already be gone; either way it is reaped here. A reap that fails is
-            // the operating system's answer about a gone process, never the test's result.
-            drop(child.kill());
-            drop(child.wait());
-        }
-        // Drop the receiver before joining: a reader waiting on a full channel returns, and the
-        // killed host's closed pipe ends the read.
-        drop(self.lines.take());
-        if let Some(reader) = self.reader.take() {
-            drop(reader.join());
-        }
+        // A child already gone still kills and reaps cleanly; a host that would not stop fails
+        // the test that owned it, unless that test is already failing.
+        let stopped = shut_down(self.child.take(), self.lines.take(), self.reader.take());
+        assert!(
+            std::thread::panicking() || stopped.is_ok(),
+            "the serve host would not stop: {stopped:?}"
+        );
     }
 }
 
@@ -308,10 +335,7 @@ fn a_host_that_never_prints_its_line_fails_within_the_bound() -> Result<(), Box<
         Ok(line) => return Err(format!("the silent host printed {line:?}").into()),
         Err(cause) => cause.to_string(),
     };
-    drop(silent.kill());
-    drop(silent.wait());
-    drop(lines);
-    drop(reader.join());
+    shut_down(Some(silent), Some(lines), Some(reader))?;
     assert!(
         message.contains("printed no line within"),
         "the failure names the bound: {message}"
@@ -322,7 +346,7 @@ fn a_host_that_never_prints_its_line_fails_within_the_bound() -> Result<(), Box<
 /// One request on a fresh connection, with `key` as its bearer token when
 /// given: its status and body. The connection closes after the answer, so the
 /// read ends with it.
-pub fn exchange(
+pub(crate) fn exchange(
     addr: SocketAddr,
     method: &str,
     path: &str,
@@ -364,7 +388,7 @@ pub fn exchange(
 }
 
 /// `GET path` with no body, as `key` when given.
-pub fn get(
+pub(crate) fn get(
     addr: SocketAddr,
     path: &str,
     key: Option<&str>,
@@ -373,7 +397,7 @@ pub fn get(
 }
 
 /// The probe body the shipped binary answers, built independently of it.
-pub fn probe_body() -> String {
+pub(crate) fn probe_body() -> String {
     format!(
         "{{\"status\":\"ok\",\"service\":\"larry\",\"version\":\"{}\"}}",
         env!("CARGO_PKG_VERSION")
