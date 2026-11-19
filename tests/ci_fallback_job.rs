@@ -252,8 +252,20 @@ fn the_mutants_verdict_fails_closed_on_a_lost_shard() -> Check {
 fn the_mutants_lane_caps_its_shards_and_bounds_each_one() -> Check {
     let text = workflow("mutants.yml")?;
     assert!(
-        text.contains("MUTANTS_MAX_SHARDS: 16"),
-        "the matrix is capped at 16 shards"
+        text.contains("MUTANTS_MAX_SHARDS: 96") && text.contains("MUTANTS_SHARD_CAPACITY: 3"),
+        "the matrix is capped at 96 shards of at most 3 mutants each"
+    );
+    let plan = job(&text, "plan")?;
+    assert!(
+        plan.contains("if [ \"$count\" -gt \"$capacity\" ]; then")
+            && plan.contains("exceed the lane's capacity of $capacity")
+            && plan.contains("exit 1"),
+        "a plan past the capacity fails in the plan job by name, not at a shard's timeout"
+    );
+    // PR #342: eight mod.rs moves planned 358 of its 572 mutants on lines no one changed.
+    assert!(
+        plan.contains("git diff --no-color --no-ext-diff -M ") && !plan.contains("--no-renames"),
+        "the plan diffs with rename detection, so a moved file plans only its changed lines"
     );
     let shard = job(&text, "shard")?;
     assert!(

@@ -83,8 +83,9 @@ evidence. No background policy writer, model-backed hook or daemon exists or is 
 - Cargo lanes in CI: fmt, clippy with every lint at `forbid`, and the workspace tests on
   `cargo nextest run --workspace --locked`, the `cargo local-ci` tests lane (larry#154).
 - `issue-link` in CI: a PR whose `closingIssuesReferences` is empty fails (larry#103, ADR 0012).
-- `mutants` in CI (larry#310, ADR 0064): on a PR only, hosted only, a plan, up to 16 shards on the changed lines
-  and one `verdict` that fails under 60% of viable mutants caught, or when any shard did not run.
+- `mutants` in CI (larry#310, ADR 0064, ADR 0066): on a PR only, hosted only, a plan over a rename-aware diff, up
+  to 96 shards of 3 on the changed lines (a plan past 288 fails by name), and one `verdict` that fails under 60% of
+  viable mutants caught, or when any shard did not run.
 - `larry mascot --check` in CI and locally: `docs/larry-mascot.svg` equals the render of the one grid (ADR 0014).
 
 ## CI and platform enforcement
