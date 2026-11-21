@@ -67,17 +67,21 @@ use std::time::SystemTime;
 
 use lgwks_bot::clock::Clock;
 
+use larry_contracts::binding::{BindingError, BindingField};
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
-use larry_contracts::effect::{EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt};
+use larry_contracts::effect::{
+    EffectIntent, EffectOutcome, ReconciliationStrategy, TerminalDisposition, TerminalReceipt,
+};
+use larry_contracts::event::EventKind;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::state::{RunState, TransitionEvent};
 
 use crate::error::RuntimeError;
 use crate::fence::{FenceRefusal, RevocationFence};
-use crate::journal::Journal;
+use crate::journal::{Journal, JournalEntry};
 use crate::owner::EffectOwner;
-use crate::payload::WorkProposal;
+use crate::payload::{OutcomePayload, WorkProposal};
 use crate::projection::{EffectPhase, ProjectionBackend};
 use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK};
 
@@ -445,6 +449,19 @@ where
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let run = proposal.run();
+        // A display approved at an earlier epoch is not a standing entitlement.
+        // The command may have waited in the pending set since it was shown,
+        // and a revocation since then withdraws the generation it approved
+        // (larry#332). A ready command is checked at admission already; this
+        // re-check is what covers the held one when its reduce finally comes.
+        if let Some(shown) = display
+            && shown.epoch != self.fence.epoch()?
+        {
+            return Err(BindingError::Changed {
+                field: BindingField::SecurityEpoch,
+            }
+            .into());
+        }
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection alone: recording the command already
         // created a run view, so a projection-based check would read `Draft`
@@ -625,6 +642,32 @@ pub fn replay<P: ProjectionBackend>(
     projection.rebuild(journal)
 }
 
+/// How many `Unknown` outcomes the journal records for each operation.
+///
+/// An `Unknown` record is one reconciliation pass already spent, so `restore`
+/// reads the reconciliation budget from these rather than resetting it: a
+/// strategy that can neither query nor retry would otherwise append another
+/// whole budget of them after every restart (larry#332).
+///
+/// # Errors
+///
+/// [`RuntimeError::Codec`] for an outcome record that does not decode.
+fn recorded_unknowns(journal: &Journal) -> Result<BTreeMap<OperationId, u8>, RuntimeError> {
+    let mut unknowns: BTreeMap<OperationId, u8> = BTreeMap::new();
+    for entry in journal.entries() {
+        if let JournalEntry::Event(ref event) = *entry
+            && event.kind() == EventKind::EffectOutcomeRecorded
+        {
+            let payload: OutcomePayload = lgwks_std::json::from_slice(event.payload())?;
+            if matches!(payload.outcome, EffectOutcome::Unknown { .. }) {
+                let spent = unknowns.entry(payload.outcome.operation()).or_insert(0_u8);
+                *spent = spent.saturating_add(1);
+            }
+        }
+    }
+    Ok(unknowns)
+}
+
 /// Restores a runtime from a recorded journal, consulting no live state.
 ///
 /// The projection is rebuilt by folding, and the live effect table is
@@ -701,6 +744,11 @@ where
         .map(|(tenant, spent)| (tenant, settings.initial_budget.saturating_sub(spent)))
         .collect();
     let leases = retry::leases(projection.authorizations());
+    // The reconciliation budget is not journaled either (larry#332): every
+    // `Unknown` record is one pass a strategy that can neither query nor retry
+    // has already spent, so the fold counts them and a restart cannot buy
+    // another budget of `Unknown` records.
+    let unknowns = recorded_unknowns(&journal)?;
     // `cap::Auth` never serializes, so each recorded authorization is re-issued
     // a proof for only the lease left on the clock now (larry#77); an intent
     // with no recorded authorization holds none.
@@ -727,10 +775,26 @@ where
         // budget spent; one the journal never mentions at all also restores
         // with the whole budget spent, because nothing proves a lower count.
         let dispatches = match phase {
-            Some(EffectPhase::Observed { .. } | EffectPhase::Reconciled { .. }) => {
-                projection.dispatches(intent.operation)
+            Some(EffectPhase::Observed { outcome }) => {
+                let recorded = projection.dispatches(intent.operation);
+                // A retry may have reached the owner after the journal's last
+                // outcome and before the crash that cut the process off. The
+                // record cannot prove it did not, so an unresolved retry-safe
+                // effect restores one attempt further along (larry#332).
+                if intent.strategy == ReconciliationStrategy::IdempotentRetrySafe
+                    && crate::projection::resolve(intent, outcome).is_err()
+                {
+                    recorded.saturating_add(1).min(settings.max_effect_attempts)
+                } else {
+                    recorded
+                }
             }
+            Some(EffectPhase::Reconciled { .. }) => projection.dispatches(intent.operation),
             Some(EffectPhase::Reserved) | None => settings.max_effect_attempts,
+        };
+        let reconciliations = match unknowns.get(&intent.operation) {
+            Some(&spent) => spent,
+            None => 0,
         };
         live.insert(
             intent.operation,
@@ -745,7 +809,7 @@ where
                 // one the dispatch budget below already takes.
                 sent: true,
                 dispatches,
-                reconciliations: 0,
+                reconciliations,
                 // Zero, so a restored effect is reconcilable on the first tick
                 // rather than waiting a tick for a dispatch that already
                 // happened before the crash.

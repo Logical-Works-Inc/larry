@@ -25,7 +25,7 @@ pub struct DisplayedEffect {
     /// One independently sufficient grant; never a union of grants.
     grant: Grant,
     /// Runtime security generation at display.
-    epoch: SecurityEpoch,
+    pub(super) epoch: SecurityEpoch,
     /// Exact resolved display committed to the intent at admission.
     binding: EffectBinding,
 }

@@ -531,6 +531,61 @@ fn sim_cancel_same_tick_submit_and_cancel() -> Outcome {
     })
 }
 
+/// Source: E30 (the stop control in LICENSE Part B.4.3) and R72/E56 (no blind
+/// resend). A run in `Cancelling` makes no new mutating reach: the retry is
+/// refused, the retry budget is spent so the hold is bounded, and the effect
+/// stays visibly unresolved rather than being dispatched after the person
+/// stopped the run (larry#332).
+#[test]
+fn sim_cancel_a_retry_safe_effect_never_retries_while_cancelling() -> Outcome {
+    replay(192_u64..256, |seed| -> Sim<(usize, usize, usize)> {
+        let mut runtime: TestRuntime = reader(ScriptedOwner::new(), 100)?;
+        runtime.offer(
+            40,
+            &read_work(40, 1, ReconciliationStrategy::IdempotentRetrySafe),
+        )?;
+        assert_eq!(
+            runtime.tick()?.outcomes().len(),
+            1,
+            "seed {seed}: the first dispatch answers unknown"
+        );
+        assert_eq!(
+            runtime.owner().dispatched().len(),
+            1,
+            "seed {seed}: one mutating reach before the stop"
+        );
+        nix(&mut runtime, 41, 40)?;
+        assert_state(runtime.projection(), run(40), RunState::Cancelling)?;
+        assert_eq!(
+            runtime.owner().dispatched().len(),
+            1,
+            "seed {seed}: the cancelling run makes no mutating reach"
+        );
+        assert!(
+            runtime.owner().reconciled().is_empty(),
+            "seed {seed}: a retry-safe effect is not queried either"
+        );
+
+        // The refusal spends the retry budget, so the hold is bounded and the
+        // effect is not re-asked every tick.
+        let settled = runtime.journal().len();
+        assert!(
+            runtime.tick()?.is_idle(),
+            "seed {seed}: a spent retry is quiet"
+        );
+        assert_eq!(
+            runtime.journal().len(),
+            settled,
+            "seed {seed}: the journal stops growing"
+        );
+        Ok((
+            runtime.projection().receipts().len(),
+            runtime.owner().dispatched().len(),
+            runtime.journal().len(),
+        ))
+    })
+}
+
 /// E30/R72: over an owner that never answers, every seeded cancel delay holds
 /// the run in `Cancelling` with no receipt, and the hold is bounded: once the
 /// reconciliation budget is spent a quiet tick records nothing (larry#119).

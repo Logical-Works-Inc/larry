@@ -90,12 +90,30 @@ where
                 .reconciliation_action(self.settings.max_effect_attempts)
             {
                 larry_contracts::effect::ReconciliationAction::RetryBounded { max_attempts } => {
-                    let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
-                    let authority_live = self.fence.authorize(key, &live.intent).is_ok()
-                        && live.proof.check().is_ok();
-                    let decision = retry::decide(live, max_attempts, at, authority_live)?;
-                    let authority_only = decision.refusals() == [RetryRefusal::AuthorityNotLive];
-                    if decision.permits_retry() || authority_only {
+                    // Cancellation stops new work, so a run the person stopped
+                    // makes no mutating reach. The refusal is recorded like a
+                    // spent budget — one `Unknown`, the retry budget spent — so
+                    // the hold is bounded and the effect stays visibly
+                    // unresolved rather than being dispatched after the stop
+                    // (larry#332).
+                    let cancelling =
+                        self.projection.run_state(live.intent.run) == Some(RunState::Cancelling);
+                    let decision = if cancelling {
+                        None
+                    } else {
+                        let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
+                        let authority_live = self.fence.authorize(key, &live.intent).is_ok()
+                            && live.proof.check().is_ok();
+                        Some(retry::decide(live, max_attempts, at, authority_live)?)
+                    };
+                    let reach = match decision {
+                        Some(decision) => {
+                            decision.permits_retry()
+                                || decision.refusals() == [RetryRefusal::AuthorityNotLive]
+                        }
+                        None => false,
+                    };
+                    if reach {
                         self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
                     } else {
                         // The estate rule refused the retry. The effect stays
