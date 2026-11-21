@@ -305,8 +305,9 @@ fn app(snapshot: Arc<RwLock<Keys>>) -> App<()> {
 }
 
 /// The one line a reload prints on standard output: how many tenants hold a key
-/// now, or why none do.
-fn announce_reload(outcome: &Result<usize, ServeError>) -> io::Result<()> {
+/// now, or why none do. A closed log pipe must not stop the server (larry#338), so
+/// a failed write is reported on stderr and the host keeps serving.
+fn announce_reload(outcome: &Result<usize, ServeError>) {
     let line = match *outcome {
         Ok(count) => lgwks_std::json::json!({ "reloaded": true, "keyed_tenants": count }),
         Err(ref cause) => lgwks_std::json::json!({
@@ -316,7 +317,21 @@ fn announce_reload(outcome: &Result<usize, ServeError>) -> io::Result<()> {
         }),
     };
     let mut out = io::stdout().lock();
-    writeln!(out, "{line}").and_then(|()| out.flush())
+    if let Err(cause) = writeln!(out, "{line}").and_then(|()| out.flush()) {
+        report_reload_fault(&cause);
+    }
+}
+
+/// Reports a reload line that could not be written on standard error, the
+/// operator's channel. A stderr that also failed leaves no channel to report on,
+/// and the watcher keeps serving regardless (larry#338).
+fn report_reload_fault(cause: &io::Error) {
+    let mut err = io::stderr().lock();
+    let written = writeln!(
+        err,
+        "larry serve: reload line could not be written: {cause}"
+    );
+    drop(written);
 }
 
 /// The text of a panic payload, when it carries one.
@@ -359,11 +374,7 @@ impl Signals {
 
     /// Run `on_reload` on each SIGHUP until SIGTERM, SIGINT or `done`, which the
     /// edge cancels once it stopped by itself.
-    fn wait(
-        mut self,
-        done: &CancellationToken,
-        mut on_reload: impl FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
+    fn wait(mut self, done: &CancellationToken, mut on_reload: impl FnMut()) {
         // lgwks_bot 9.0.0 moved both off the crate root (crates#1016).
         lgwks_bot::rt::runtime::block_on(async move {
             let mut serving = true;
@@ -372,12 +383,11 @@ impl Signals {
                     _ = self.terminate.recv() => serving = false,
                     _ = self.interrupt.recv() => serving = false,
                     // A closed SIGHUP stream yields None: the pattern then disables this arm, so no reload loops.
-                    Some(()) = self.hangup.recv() => on_reload()?,
+                    Some(()) = self.hangup.recv() => on_reload(),
                     () = done.cancelled() => serving = false,
                 }
             }
-            Ok(())
-        })
+        });
     }
 }
 
@@ -394,18 +404,13 @@ impl Signals {
     }
 
     /// Wait for Ctrl-C, or for `done` once the edge stopped by itself.
-    fn wait(
-        self,
-        done: &CancellationToken,
-        _on_reload: impl FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
+    fn wait(self, done: &CancellationToken, _on_reload: impl FnMut()) {
         lgwks_bot::rt::runtime::block_on(async move {
             lgwks_bot::rt::select! {
                 _ = lgwks_bot::rt::signal::ctrl_c() => {}
                 () = done.cancelled() => {}
             }
         });
-        Ok(())
     }
 }
 
@@ -419,8 +424,8 @@ impl Signals {
 /// # Errors
 ///
 /// [`ServeError::Bind`], [`ServeError::Signal`], [`ServeError::Announce`] from
-/// `announce` or a reload line, [`ServeError::Watcher`] when the watcher panicked,
-/// or [`ServeError::Host`] from the edge.
+/// `announce`, [`ServeError::Watcher`] when the watcher panicked, or
+/// [`ServeError::Host`] from the edge.
 pub fn run(
     settings: Settings,
     announce: impl FnOnce(SocketAddr, usize) -> io::Result<()>,
@@ -440,16 +445,15 @@ pub fn run(
     let done = CancellationToken::new();
     std::thread::scope(|scope| {
         let watcher = scope.spawn(|| {
-            let outcome = signals.wait(&done, || announce_reload(&reload(&snapshot, &state)));
+            signals.wait(&done, || announce_reload(&reload(&snapshot, &state)));
             stop.stop();
-            outcome
         });
         let served = app.serve(listener, &stop).map_err(ServeError::Host);
         done.cancel();
-        let watched = watcher.join().map_err(|panic| ServeError::Watcher {
+        watcher.join().map_err(|panic| ServeError::Watcher {
             cause: panic_text(&*panic),
         })?;
-        served.and(watched.map_err(ServeError::Announce))
+        served
     })
 }
 
