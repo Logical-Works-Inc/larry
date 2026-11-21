@@ -21,6 +21,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 
 use super::{Diff, ExecError, Git, Workspace, flag, spawn_error};
+use crate::executor::author::checked_target;
 use crate::executor::run::clip;
 
 /// Most entries (files and links) one snapshot copies.
@@ -358,6 +359,10 @@ fn copy_entries(
                 format!("a listed path leaves the folder: {}", relative.display()),
             )));
         }
+        // `stays_beneath` is lexical only: an untracked symlink copied before a tracked
+        // file beneath its old directory name would make the write follow the link out
+        // (larry#335, CWE-59). Refuse any write beneath a symlink the copy already made.
+        checked_target(tree, relative)?;
         let from = origin.join(relative);
         let to = tree.join(relative);
         let meta = match std::fs::symlink_metadata(&from) {

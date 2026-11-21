@@ -12,11 +12,11 @@ use std::path::Path;
 use std::process::Command;
 
 use super::{Copied, Limits, MAX_DEPTH, MAX_FILES, summary};
-use crate::executor::ExecError;
 use crate::executor::sim_tree::{
     Shape, files_beneath, origin, path_env, scratch, settings, tree_digest,
 };
 use crate::executor::workspace::{DiffSink, Workspace, sweep};
+use crate::executor::{AuthorFault, ExecError};
 use crate::sim_error::SimError;
 
 /// What every simulation returns.
@@ -84,6 +84,49 @@ fn sim_snapshot_matches_the_reference_listing_for_every_seed() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+/// saboteur: an untracked symlink shadows a tracked directory name, so a lexical check passes
+/// every listed path while a copy that follows the link would write outside the folder. The
+/// copy refuses typed, leaves the folder and a sentinel outside it byte-identical, and leaves
+/// no workspace (CWE-59, larry#335).
+#[cfg(unix)]
+#[test]
+fn sim_snapshot_refuses_a_symlink_shadowing_a_tracked_directory() -> TestResult {
+    let path = path_env()?;
+    let (root, state, sentinel) = (
+        scratch("shadow-origin")?,
+        scratch("shadow-state")?,
+        scratch("shadow-sentinel")?,
+    );
+    let settings = settings(&state, None)?;
+    std::fs::write(sentinel.join("keep.txt"), "outside the folder\n")?;
+    let outside = tree_digest(&sentinel, false)?;
+    std::fs::create_dir_all(root.join("shadow"))?;
+    std::fs::write(root.join("shadow/inside.txt"), "tracked\n")?;
+    std::fs::write(root.join("top.txt"), "top\n")?;
+    settings.seed_origin(&root)?;
+    // The index keeps `shadow/inside.txt`; on disk `shadow` becomes an untracked link out.
+    std::fs::remove_dir_all(root.join("shadow"))?;
+    symlink(&sentinel.to_string_lossy(), &root.join("shadow"))?;
+    match Workspace::snapshot(&state, &root, "shadowed", &path) {
+        Err(ExecError::Author {
+            fault: AuthorFault::Symlink,
+            ..
+        }) => {}
+        Err(other) => return Err(format!("expected the symlink refusal, got {other}").into()),
+        Ok(_) => return Err("the copy followed the shadowing symlink".into()),
+    }
+    assert_eq!(
+        tree_digest(&sentinel, false)?,
+        outside,
+        "a byte outside the folder changed"
+    );
+    assert!(
+        !state.join("ws").join("shadowed").exists(),
+        "a refused copy was left behind"
+    );
     Ok(())
 }
 
