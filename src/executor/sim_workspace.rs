@@ -490,3 +490,75 @@ fn sim_an_entry_that_vanishes_as_the_walk_reaches_it_is_skipped() -> TestResult 
     );
     Ok(())
 }
+
+/// A kept link is one typed JSON event on the operator's channel, naming the entry, once
+/// (larry#366). Source: the operator's one line per kept link in ADR 0081.
+#[cfg(unix)]
+#[test]
+fn sim_a_kept_link_is_one_json_event() -> TestResult {
+    let state = scratch_directory()?;
+    let workspace = state.join("ws").join("run");
+    let link = workspace.join("link");
+    std::fs::create_dir_all(&workspace)?;
+    let target = state.join("sentinel");
+    std::fs::write(&target, b"outside the tree")?;
+    std::os::unix::fs::symlink(&target, &link)?;
+    let links = reset_with(&workspace, &mut |_| Ok(()))?;
+    let mut out = Vec::new();
+    super::mode::report_all(&links, &mut out)?;
+    let line = std::str::from_utf8(&out)?;
+    assert!(
+        line.starts_with('{') && line.ends_with("}\n"),
+        "the event is one JSON line: {line:?}"
+    );
+    assert!(
+        line.contains("\"workspace\":\"link\""),
+        "the event names the kept link: {line:?}"
+    );
+    assert!(
+        line.contains(&format!("\"{}\"", link.display())),
+        "the event names the entry: {line:?}"
+    );
+    assert_eq!(line.matches('\n').count(), 1, "one event, one line");
+    Ok(())
+}
+
+/// The Linux reset opens a directory only, never a link, and resets a mode-000 directory through
+/// the descriptor it opened (larry#366, CWE-367, CWE-59). Linux has no no-follow `fchmodat`, so
+/// this is the arm CI compiles and the only test that drives its open flags.
+#[cfg(target_os = "linux")]
+#[test]
+fn sim_a_linux_mode_reset_opens_only_a_directory_and_never_a_link() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let state = scratch_directory()?;
+    let parent = &*state;
+    let sealed = parent.join("sealed");
+    std::fs::create_dir(&sealed)?;
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000))?;
+    let sentinel = parent.join("sentinel");
+    std::fs::write(&sentinel, b"outside the tree")?;
+    std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(SENTINEL_MODE))?;
+    std::os::unix::fs::symlink(&sentinel, parent.join("link"))?;
+    std::fs::write(parent.join("plain"), b"x")?;
+    let held = lgwks_std::fs::capability::Dir::open(parent)?;
+    super::mode::reset_mode(&held, "sealed")?;
+    assert_eq!(
+        std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
+        0o700,
+        "a mode-000 directory is opened and reset through its descriptor"
+    );
+    assert!(
+        super::mode::reset_mode(&held, "link").is_err(),
+        "a link is refused by the open, never followed"
+    );
+    assert_eq!(
+        std::fs::metadata(&sentinel)?.permissions().mode() & 0o777,
+        SENTINEL_MODE,
+        "the link's target keeps its mode"
+    );
+    assert!(
+        super::mode::reset_mode(&held, "plain").is_err(),
+        "a regular file is refused by the open"
+    );
+    Ok(())
+}

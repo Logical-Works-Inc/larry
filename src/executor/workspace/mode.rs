@@ -40,16 +40,23 @@ impl LinkKept {
         self.entry.as_path()
     }
 
-    /// Reports the kept link as one typed JSON line on standard error, the operator's channel.
-    fn report(&self) {
+    /// Writes the kept link as one typed JSON line to `out`, the operator's channel.
+    fn report(&self, out: &mut impl Write) -> io::Result<()> {
         let event = lgwks_std::json::json!({
             "workspace": "link",
             "entry": format!("{}", self.entry().display()),
         });
-        let mut err = io::stderr().lock();
-        let written = writeln!(err, "{event}");
-        drop(written);
+        writeln!(out, "{event}")
     }
+}
+
+/// Reports every kept link as one typed JSON line each, so an operator reading the channel sees one
+/// event per link and nothing else (larry#366).
+pub(super) fn report_all(links: &[LinkKept], out: &mut impl Write) -> io::Result<()> {
+    for link in links {
+        link.report(out)?;
+    }
+    Ok(())
 }
 
 /// Resets `root` and every directory beneath it to owner rwx through held descriptors, following
@@ -58,10 +65,8 @@ impl LinkKept {
 /// explicit stack, never recursion: a command can nest directories past any stack.
 pub(super) fn reset(root: &Path) -> io::Result<()> {
     let links = reset_with(root, &mut |_| Ok(()))?;
-    for link in &links {
-        link.report();
-    }
-    Ok(())
+    let mut err = io::stderr().lock();
+    report_all(&links, &mut err)
 }
 
 /// [`reset`] with one seam after an entry is judged a directory and before its mode is reset, so a
@@ -186,7 +191,7 @@ fn link_or_error(
 /// `/proc/self/fd` name, which pins the object that was opened; a link or a file swapped in is
 /// refused by the open itself (CWE-367, CWE-59).
 #[cfg(target_os = "linux")]
-fn reset_mode(parent: &Dir, name: &str) -> io::Result<()> {
+pub(super) fn reset_mode(parent: &Dir, name: &str) -> io::Result<()> {
     let entry = rustix::fs::openat(
         parent.as_fd(),
         name,
