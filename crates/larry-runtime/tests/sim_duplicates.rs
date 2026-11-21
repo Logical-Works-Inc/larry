@@ -10,11 +10,12 @@ mod support;
 use larry_contracts::authority::Scope;
 use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy};
-use larry_contracts::ids::ContentDigest;
+use larry_contracts::ids::{CommandId, ContentDigest};
 use larry_contracts::state::RunState;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
+use larry_runtime::runtime::TickItem;
 
 use seed::step;
 use sim_kit::{Offer, Sim, dispatch, read_work, reader, replay, trace, work};
@@ -41,21 +42,36 @@ fn mk_dupe(owner: ScriptedOwner) -> Result<TestRuntime, Box<dyn std::error::Erro
     reader(owner, 100)
 }
 
-/// Submits a conflicting retry and asserts the typed refusal at whichever
-/// stage reports it, returning the trace.
+/// Submits a conflicting retry and asserts the typed denial the tick records,
+/// returning the trace. The tick goes on; one identity's conflict never ends it
+/// for every tenant (larry#329).
 fn conflicting_retry(
     runtime: &mut TestRuntime,
 ) -> Result<ContentDigest, Box<dyn std::error::Error>> {
     let changed = read_work(4, 9, ReconciliationStrategy::IdempotentRetrySafe);
     match runtime.submit(submit(command_id(4), &changed)?) {
         Err(RuntimeError::Command(_)) => {}
-        Ok(()) => assert!(
-            matches!(runtime.tick(), Err(RuntimeError::Command(_))),
-            "conflicting retry refused at tick"
-        ),
+        Ok(()) => conflict_denial(runtime, command_id(4))?,
         Err(other) => return Err(other.into()),
     }
     Ok(trace(runtime.journal()))
+}
+
+/// The typed denial a tick records for a command whose identity conflicts with
+/// one the journal already holds.
+fn conflict_denial(rt: &mut TestRuntime, id: CommandId) -> Result<(), Box<dyn std::error::Error>> {
+    let tick = rt.tick()?;
+    assert!(
+        tick.refused().iter().any(|entry| {
+            entry.0 == TickItem::Command(id)
+                && matches!(
+                    &entry.1,
+                    RuntimeError::Command(_) | RuntimeError::RunTenantMismatch { .. }
+                )
+        }),
+        "conflicting identity is a typed denial: {tick:?}"
+    );
+    Ok(())
 }
 
 /// E28: the same identity submitted twice before one tick admits once.
@@ -163,10 +179,7 @@ fn sim_duplicates_conflicting_cost_refused() -> Outcome {
         let changed = read_work(5, 5, ReconciliationStrategy::Queryable);
         match rt.submit(submit(command_id(5), &changed)?) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => assert!(
-                matches!(rt.tick(), Err(RuntimeError::Command(_))),
-                "conflicting cost refused at tick"
-            ),
+            Ok(()) => conflict_denial(&mut rt, command_id(5))?,
             Err(other) => return Err(other.into()),
         }
         assert_eq!(
@@ -195,10 +208,7 @@ fn sim_duplicates_conflicting_strategy_refused() -> Outcome {
         let changed = read_work(6, 1, ReconciliationStrategy::RequiresHuman);
         match rt.submit(submit(command_id(6), &changed)?) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => assert!(
-                matches!(rt.tick(), Err(RuntimeError::Command(_))),
-                "conflicting strategy refused at tick"
-            ),
+            Ok(()) => conflict_denial(&mut rt, command_id(6))?,
             Err(other) => return Err(other.into()),
         }
         Ok(trace(rt.journal()))
@@ -221,16 +231,7 @@ fn sim_duplicates_cross_tenant_identity_refused() -> Outcome {
         let foreign = work(7, 2, 7, 1, ReconciliationStrategy::IdempotentRetrySafe);
         match rt.submit(submit(command_id(7), &foreign)?) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => {
-                let result = rt.tick();
-                assert!(
-                    matches!(
-                        &result,
-                        Err(RuntimeError::Command(_)) | Err(RuntimeError::RunTenantMismatch { .. })
-                    ),
-                    "cross-tenant identity refused at tick, got {result:?}"
-                );
-            }
+            Ok(()) => conflict_denial(&mut rt, command_id(7))?,
             Err(other) => return Err(other.into()),
         }
         assert_state(rt.projection(), run(7), RunState::Completed)?;
@@ -261,16 +262,7 @@ fn sim_duplicates_envelope_tenant_change_is_conflict() -> Outcome {
         )?;
         match rt.submit(relabelled) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => {
-                let result = rt.tick();
-                assert!(
-                    matches!(
-                        &result,
-                        Err(RuntimeError::Command(_)) | Err(RuntimeError::RunTenantMismatch { .. })
-                    ),
-                    "relabelled envelope refused at tick, got {result:?}"
-                );
-            }
+            Ok(()) => conflict_denial(&mut rt, command_id(8))?,
             Err(other) => return Err(other.into()),
         }
         Ok(trace(rt.journal()))
@@ -585,10 +577,7 @@ fn sim_duplicates_conflict_after_success() -> Outcome {
         let changed = read_work(19, 3, ReconciliationStrategy::IdempotentRetrySafe);
         match rt.submit(submit(command_id(19), &changed)?) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => assert!(
-                matches!(rt.tick(), Err(RuntimeError::Command(_))),
-                "conflicting cost refused at tick"
-            ),
+            Ok(()) => conflict_denial(&mut rt, command_id(19))?,
             Err(other) => return Err(other.into()),
         }
         assert_eq!(rt.projection().receipts().len(), 1, "one receipt total");
@@ -621,10 +610,7 @@ fn sim_duplicates_conflicting_cancel_refused() -> Outcome {
         );
         match rt.submit(cancel(command_id(20), &changed)?) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => assert!(
-                matches!(rt.tick(), Err(RuntimeError::Command(_))),
-                "conflicting cancel refused at tick"
-            ),
+            Ok(()) => conflict_denial(&mut rt, command_id(20))?,
             Err(other) => return Err(other.into()),
         }
         assert_state(rt.projection(), run(20), RunState::Cancelled)?;

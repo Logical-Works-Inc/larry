@@ -15,6 +15,7 @@ use larry_contracts::state::RunState;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
+use larry_runtime::runtime::TickItem;
 
 use support::{
     assert_state, command_id, operation, proposal, run, runtime_with, submit, succeeded, tenant,
@@ -64,11 +65,14 @@ fn e63_malformed_work_payload_is_refused_before_authorization_or_effects()
     )?;
     runtime.submit(hostile_submit(1, 1, br#"{"run":"not-a-complete-payload"#)?)?;
 
-    let result = runtime.tick();
+    let report = runtime.tick()?;
 
     assert!(
-        matches!(result, Err(RuntimeError::Codec(_))),
-        "a malformed proposal must surface the typed codec refusal"
+        report.refused().iter().any(|entry| {
+            entry.0 == TickItem::Command(command_id(1))
+                && matches!(&entry.1, RuntimeError::Codec(_))
+        }),
+        "a malformed proposal must surface the typed codec denial: {report:?}"
     );
     assert!(runtime.projection().intents().is_empty());
     assert!(runtime.projection().receipts().is_empty());
@@ -110,23 +114,28 @@ fn e63_foreign_cancel_is_refused_before_journal_or_state_mutation()
     )?;
     runtime.submit(submit(command_id(4), &body)?)?;
     runtime.tick()?;
-    let before_journal = runtime.journal().len();
     let before_state = runtime.projection().run_state(run(4));
     let before_dispatches = runtime.owner().dispatched().len();
     let payload = lgwks_std::json::to_vec(&body)?;
     runtime.submit(hostile_command(5, 2, CommandKind::Cancel, &payload)?)?;
 
-    let result = runtime.tick();
+    let report = runtime.tick()?;
 
-    assert!(matches!(
-        result,
-        Err(RuntimeError::RunTenantMismatch {
-            run: rejected,
-            expected,
-            got,
-        }) if rejected == run(4) && expected == tenant(1) && got == tenant(2)
-    ));
-    assert_eq!(runtime.journal().len(), before_journal);
+    assert!(
+        report.refused().iter().any(|entry| {
+            entry.0 == TickItem::Command(command_id(5))
+                && matches!(
+                    &entry.1,
+                    RuntimeError::RunTenantMismatch { run: rejected, expected, got }
+                        if *rejected == run(4) && *expected == tenant(1) && *got == tenant(2)
+                )
+        }),
+        "the foreign cancel is a typed denial: {report:?}"
+    );
+    assert!(
+        runtime.journal().command(command_id(5)).is_none(),
+        "the foreign cancel was never admitted"
+    );
     assert_eq!(runtime.projection().run_state(run(4)), before_state);
     assert_eq!(runtime.owner().dispatched().len(), before_dispatches);
     Ok(())

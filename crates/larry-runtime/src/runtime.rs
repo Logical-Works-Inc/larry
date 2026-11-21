@@ -63,12 +63,10 @@ pub use display::DisplayedEffect;
 use display::ReadyCommand;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::time::SystemTime;
 
 use lgwks_bot::clock::Clock;
 
-use larry_contracts::binding::{BindingError, BindingField};
-use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
+use larry_contracts::command::{Command, CommandKind};
 use larry_contracts::effect::{
     EffectIntent, EffectOutcome, ReconciliationStrategy, TerminalDisposition, TerminalReceipt,
 };
@@ -77,16 +75,16 @@ use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::state::{RunState, TransitionEvent};
 
+use crate::MAX_READY_WORK;
 use crate::error::RuntimeError;
 use crate::fence::{FenceRefusal, RevocationFence};
 use crate::journal::{Journal, JournalEntry};
 use crate::owner::EffectOwner;
-use crate::payload::{OutcomePayload, WorkProposal};
+use crate::payload::OutcomePayload;
 use crate::projection::{EffectPhase, ProjectionBackend};
-use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK};
 
 /// What one tick did, in stage order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct TickReport {
     /// First-time command admissions in this tick.
     admitted: Vec<CommandId>,
@@ -104,6 +102,22 @@ pub struct TickReport {
     receipts: Vec<TerminalReceipt>,
     /// Mutating reaches refused by the freshness fence.
     fenced: Vec<(OperationId, FenceRefusal)>,
+    /// One command's, effect's or run's typed refusal. The tick recorded it
+    /// and went on; only the journal's and the clock's own refusals end a tick
+    /// (larry#329).
+    refused: Vec<(TickItem, RuntimeError)>,
+}
+
+/// The one item a [`TickReport::refused`] entry belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum TickItem {
+    /// A command being admitted or reduced.
+    Command(CommandId),
+    /// An effect being dispatched or reconciled.
+    Effect(OperationId),
+    /// A run's own lifecycle step, such as finishing a cancellation.
+    Run(RunId),
 }
 
 impl TickReport {
@@ -161,12 +175,25 @@ impl TickReport {
     pub fn fenced(&self) -> &[(OperationId, FenceRefusal)] {
         &self.fenced
     }
+    /// One command's, effect's or run's typed refusal, in the order the tick
+    /// refused them.
+    ///
+    /// The tick recorded each one and went on. Only the journal's own refusal
+    /// (a full or refused file) and a clock that cannot be placed end the
+    /// tick, so one tenant's refused command never skips reconciliation or
+    /// cancellation for another tenant (larry#329).
+    #[must_use]
+    pub fn refused(&self) -> &[(TickItem, RuntimeError)] {
+        &self.refused
+    }
+
     /// Whether the tick changed nothing.
     ///
     /// A refused reach is a non-event: it wrote no journal entry, dispatched
     /// nothing and published nothing. A tick whose only activity was fence
     /// refusals is therefore idle, and [`TickReport::fenced`] is where the
-    /// refusal is read.
+    /// refusal is read. A recorded per-item denial is not idle: it is an
+    /// answer the operator must read.
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.admitted.is_empty()
@@ -174,6 +201,7 @@ impl TickReport {
             && self.denied.is_empty()
             && self.reconciled.is_empty()
             && self.receipts.is_empty()
+            && self.refused.is_empty()
     }
 }
 
@@ -360,10 +388,10 @@ where
 
     /// Runs one bounded, deterministic tick.
     ///
-    /// # Errors
-    ///
-    /// Propagates every typed refusal from the stages below, then the
-    /// journal's sync refusal (larry#75).
+    /// Each command's, effect's or run's typed refusal is recorded in the
+    /// report and the tick goes on; only a journal refusal or a clock that
+    /// cannot be placed ends it (larry#329). Then the journal's sync refusal is
+    /// returned (larry#75).
     pub fn tick(&mut self) -> Result<TickReport, RuntimeError> {
         // The tick counter advances before any stage runs, so the stages agree
         // on which tick they are in and the reconciliation gate below can
@@ -380,185 +408,38 @@ where
     }
 
     /// The tick's three stages, in order.
+    ///
+    /// Each stage records one item's refusal in `report` and goes on with the
+    /// next item; a journal or clock refusal ends the tick here (larry#329).
     fn stages(&mut self) -> Result<TickReport, RuntimeError> {
         let at = sample(&self.clock)?;
         let mut report = TickReport::default();
         self.pump_ready(at, &mut report)?;
         self.pump_reconciliation(at, &mut report)?;
-        self.pump_cancellation()?;
+        self.pump_cancellation(&mut report)?;
         Ok(report)
+    }
+
+    /// Records one item's refusal in the report, or ends the tick when the
+    /// refusal is the journal's or the clock's own (larry#329).
+    pub(super) fn refuse(
+        &self,
+        report: &mut TickReport,
+        item: TickItem,
+        error: RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        if error.ends_the_tick() {
+            return Err(error);
+        }
+        report.refused.push((item, error));
+        Ok(())
     }
 
     // ── stage 2: admit, gate, reserve, dispatch, observe ────────────────────
 
-    /// Admits queued commands in deterministic order within the tick bound.
-    ///
-    /// Durably admitted commands go first, in journal order, then the ready
-    /// queue, under one budget (E28).
-    fn pump_ready(&mut self, at: SystemTime, report: &mut TickReport) -> Result<(), RuntimeError> {
-        let budget = self.promote_admitted(self.settings.max_runs_per_tick, at, report)?;
-        for _ in 0..budget {
-            let Some(queued) = self.ready.pop_front() else {
-                return Ok(());
-            };
-            let ReadyCommand { command, display } = queued;
-            let id = command.id();
-            let tenant = command.tenant();
-            let kind = command.content().kind();
-            let payload = command.content().payload().to_vec();
-            let proposal: WorkProposal = lgwks_std::json::from_slice(&payload)?;
-            self.ensure_run_tenant(proposal.run(), tenant)?;
-
-            if kind == CommandKind::Submit && self.journal.command(id).is_none() {
-                self.validate_display(&command, &proposal, display.as_ref(), at)?;
-            }
-            if self.journal.command(id).is_none() && self.admitted.len() >= MAX_READY_WORK {
-                // A command that may have to wait has no room to: it stays
-                // queued for the next tick rather than being dropped.
-                self.ready.push_front(ReadyCommand { command, display });
-                return Ok(());
-            }
-            let kept = command.clone();
-            let acceptance = self.journal.accept_command(command)?;
-            if acceptance == CommandAcceptance::DuplicateReplay {
-                report.duplicates.push(id);
-                continue;
-            }
-            let Some(command) = self.hold_or_pass(proposal.run(), kept, display.as_ref(), at)
-            else {
-                continue;
-            };
-            report.admitted.push(id);
-            let held = Admitted::new(proposal.run(), command, display);
-            // A command that fails to record its acceptance returns to the
-            // back of the pending set: it is journaled, so it must be held
-            // (larry#219).
-            self.reduce(held, self.admitted.len(), at, report)?;
-        }
-        Ok(())
-    }
-
-    /// Gates and durably reserves a proposal before reaching its owner.
-    fn admit_work(
-        &mut self,
-        tenant: TenantId,
-        proposal: &WorkProposal,
-        content: larry_contracts::ids::ContentDigest,
-        display: Option<&DisplayedEffect>,
-        at: SystemTime,
-        report: &mut TickReport,
-    ) -> Result<(), RuntimeError> {
-        let run = proposal.run();
-        // A display approved at an earlier epoch is not a standing entitlement.
-        // The command may have waited in the pending set since it was shown,
-        // and a revocation since then withdraws the generation it approved
-        // (larry#332). A ready command is checked at admission already; this
-        // re-check is what covers the held one when its reduce finally comes.
-        if let Some(shown) = display
-            && shown.epoch != self.fence.epoch()?
-        {
-            return Err(BindingError::Changed {
-                field: BindingField::SecurityEpoch,
-            }
-            .into());
-        }
-        // Admissibility is decided from the runtime's own run table, never
-        // inferred from the projection alone: recording the command already
-        // created a run view, so a projection-based check would read `Draft`
-        // and skip the admission step. A tracked run still in `Draft` was
-        // tracked by a question asked before its work (E30) and was never
-        // admitted.
-        let is_new = !self.runs.contains_key(&run)
-            || matches!(self.projection.run_state(run), None | Some(RunState::Draft));
-        self.track_run(run, tenant)?;
-
-        if is_new {
-            self.advance(run, TransitionEvent::Admit)?;
-        }
-        self.advance(run, TransitionEvent::Start)?;
-        self.advance(run, TransitionEvent::EnterReconciling)?;
-
-        if self.projection.effect_count(run) >= MAX_EFFECTS_PER_RUN {
-            return Err(RuntimeError::EffectLimitReached {
-                run,
-                capacity: MAX_EFFECTS_PER_RUN,
-            });
-        }
-        if self.live.contains_key(&proposal.operation()) {
-            return Err(RuntimeError::DuplicateOperation {
-                operation: proposal.operation(),
-            });
-        }
-        // A question bound to this effect is the only way past it: an
-        // approval covering its exact content and scopes, never a timeout
-        // (D25, E30).
-        if let Err(reason) = self.approved(tenant, proposal, content, at) {
-            report.denied.push((proposal.operation(), reason));
-            self.advance(run, TransitionEvent::Fail)?;
-            return Ok(());
-        }
-
-        // The admission epoch comes from the fence and the tenant from the run
-        // table, never from the proposal: a command cannot declare the security
-        // generation it is admitted under or the tenant it is admitted for, so
-        // a hostile generator cannot name a generation that outlives a
-        // revocation, or record an effect — or re-attribute a run after a
-        // restart — to a tenant it does not own (D42, E63). The pinned budget
-        // snapshot is that tenant's own remainder, so the decision bounds one
-        // tenant's spend and never another's (larry#208).
-        let tenant = self.tenant_of(run)?;
-        let mut pinned = self.pinned_inputs(tenant, proposal, at);
-        if let Some(shown) = display {
-            shown.constrain(&mut pinned);
-        }
-        let admitted_at = pinned.request.observed_at();
-        let valid_until = pinned.validity.valid_until;
-        let authorization = match crate::gate::authorize(&pinned) {
-            Ok(record) => record,
-            Err(RuntimeError::Denied { operation, reason }) => {
-                report.denied.push((operation, reason));
-                self.advance(run, TransitionEvent::Fail)?;
-                return Ok(());
-            }
-            Err(other) => return Err(other),
-        };
-
-        // Reservation: the intent is durable *before* the effect can leave,
-        // and the budget is deducted against the same pinned snapshot that was
-        // just recorded, so replay re-derives the identical decision.
-        let intent = proposal.intent(tenant, self.fence.epoch()?);
-        let intent = match display {
-            Some(shown) => intent.with_binding(*shown.binding()),
-            None => intent,
-        };
-        let proof = crate::gate::Proof::issue(&pinned, &self.clock);
-        self.record_intent(run, intent, authorization)?;
-        // One budget per tenant (larry#208): the cost comes out of this run's
-        // own tenant's counter, never a pool the other tenants share.
-        let remaining = self
-            .budgets
-            .entry(tenant)
-            .or_insert(self.settings.initial_budget);
-        *remaining = remaining.saturating_sub(proposal.cost());
-        report.authorized.push(intent.operation);
-        self.live.insert(
-            intent.operation,
-            LiveEffect {
-                intent,
-                proof,
-                // Nothing has reached the owner yet: the reservation is
-                // durable, and the reach that follows is what sets this.
-                sent: false,
-                dispatches: 0,
-                reconciliations: 0,
-                dispatched_at_tick: self.tick_count,
-                admitted_at,
-                valid_until,
-            },
-        );
-
-        self.dispatch(run, intent, at, report)
-    }
+    // `pump_ready`, `admit_ready` and `admit_work` live in `admission`, the
+    // module that owns command admission, and record one command's refusal in
+    // the report without ending the tick (larry#329).
 
     /// Records an observed outcome and, when it may terminate the effect,
     /// publishes the disposition.

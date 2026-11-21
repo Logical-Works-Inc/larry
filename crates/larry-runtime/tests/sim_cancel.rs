@@ -15,7 +15,7 @@ use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 
-use larry_runtime::runtime::TickReport;
+use larry_runtime::runtime::{TickItem, TickReport};
 
 use seed::step;
 use sim_kit::{Offer, Sim, dispatch, read_work, reader, reopen, replay};
@@ -148,10 +148,15 @@ fn sim_cancel_work_after_untracked_cancel_refused() -> Outcome {
         assert_state(runtime.projection(), run(6), RunState::Cancelled)?;
         let late = read_work(6, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(7, &late)?;
+        let tick = runtime.tick()?;
         assert!(
-            matches!(runtime.tick(), Err(RuntimeError::Transition(_))),
-            "work after cancel refused"
+            tick.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(7))
+                    && matches!(&entry.1, RuntimeError::Transition(_))
+            }),
+            "work after cancel is a typed denial: {tick:?}"
         );
+        assert_state(runtime.projection(), run(6), RunState::Cancelled)?;
         Ok((
             runtime.projection().receipts().len(),
             runtime.journal().len(),
@@ -186,9 +191,13 @@ fn sim_cancel_foreign_cancel_of_open_run_refused() -> Outcome {
             ),
         )?;
         runtime.submit(command)?;
+        let tick = runtime.tick()?;
         assert!(
-            matches!(runtime.tick(), Err(RuntimeError::RunTenantMismatch { .. })),
-            "foreign cancel refused"
+            tick.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(9))
+                    && matches!(&entry.1, RuntimeError::RunTenantMismatch { .. })
+            }),
+            "foreign cancel is a typed denial: {tick:?}"
         );
         assert_state(runtime.projection(), run(8), RunState::Reconciling)?;
         Ok((

@@ -170,6 +170,7 @@ fn e65_a_held_submit_refuses_a_revocation_since_its_display() -> Result {
 
     runtime.submit(steer_on(1, 3, 1)?)?;
     let second = work_on(1, 2, 1)?;
+    let second_id = second.id();
     let shown = runtime.display(&second, holder(), &[grant(1, &[Scope::FileRead], 5, seed)?])?;
     runtime.submit_displayed(second, shown)?;
     let held = runtime.tick()?;
@@ -189,20 +190,33 @@ fn e65_a_held_submit_refuses_a_revocation_since_its_display() -> Result {
         SecurityEpoch::new(1),
         "the fence moved past the display"
     );
-    let refused = runtime.tick();
+    // A second tenant's effect is shown and queued at the new generation: the
+    // held submission's denial must not stop it (larry#329).
+    let other = work_on(2, 4, 2)?;
+    let shown = runtime.display(&other, holder(), &[grant(2, &[Scope::FileRead], 5, seed)?])?;
+    runtime.submit_displayed(other, shown)?;
+    let report = runtime.tick()?;
     assert!(
-        matches!(
-            refused,
-            Err(RuntimeError::Binding(BindingError::Changed {
-                field: BindingField::SecurityEpoch
-            }))
-        ),
-        "the held submission is refused for the epoch it was displayed under: {refused:?}"
+        report.refused().iter().any(|entry| {
+            entry.0 == larry_runtime::runtime::TickItem::Command(second_id)
+                && matches!(
+                    &entry.1,
+                    RuntimeError::Binding(BindingError::Changed {
+                        field: BindingField::SecurityEpoch
+                    })
+                )
+        }),
+        "the held submission is a recorded denial for its display epoch: {report:?}"
     );
     assert_eq!(
         runtime.owner().executed().len(),
-        1,
-        "the withdrawn generation dispatches nothing"
+        2,
+        "the second tenant's effect still reaches its owner"
+    );
+    assert_eq!(
+        runtime.owner().executed().last().map(|entry| entry.0),
+        Some(TenantId::from_bytes([2; 16])),
+        "the dispatched effect is the second tenant's"
     );
     Ok(())
 }
@@ -228,15 +242,26 @@ fn runtime(seed: u64, change_on: u64) -> Result<TestRuntime> {
     )?)
 }
 
-/// Names the exact field and verifies a human-readable recovery instruction.
-fn assert_swap(
+/// Names the exact field and verifies the denial is a typed tick entry rather
+/// than an error that ends the tick for every tenant (larry#329).
+fn assert_refused(
     result: &std::result::Result<larry_runtime::runtime::TickReport, RuntimeError>,
     field: BindingField,
 ) {
     assert!(
-        matches!(*result, Err(RuntimeError::Binding(BindingError::Changed { field: ref got })) if *got == field),
-        "expected exact field {field:?}, got {result:?}"
+        result.is_ok(),
+        "the tick must go on with a recorded denial, got {result:?}"
     );
+    if let Ok(report) = result.as_ref() {
+        assert!(
+            report.refused().iter().any(|entry| matches!(
+                &entry.1,
+                RuntimeError::Binding(BindingError::Changed { field: got }) if *got == field
+            )),
+            "expected a recorded {field:?} denial, got {:?}",
+            report.refused()
+        );
+    }
 }
 
 /// Trace identity contains actual recorded commands and events, in order.
@@ -269,7 +294,7 @@ fn swap_journey(seed: u64, change_on: u64) -> Result<ContentDigest> {
     )?;
     let shown = *display.binding();
     runtime.submit_displayed(command, display)?;
-    assert_swap(&runtime.tick(), swapped_field(seed));
+    assert_refused(&runtime.tick(), swapped_field(seed));
     assert!(
         runtime.owner().executed().is_empty(),
         "swap must execute nothing, seed {seed}"
@@ -399,12 +424,16 @@ fn e65_missing_and_cross_command_display_refuse() -> Result {
     let mut runtime = runtime(9, 0)?;
     let first = command(1, 1, &[Scope::FileRead], ReconciliationStrategy::Queryable)?;
     runtime.submit(first.clone())?;
+    let report = runtime.tick()?;
     assert!(
-        matches!(
-            runtime.tick(),
-            Err(RuntimeError::Binding(BindingError::MissingDisplay))
-        ),
-        "display cannot be omitted"
+        report.refused().iter().any(|entry| {
+            entry.0 == larry_runtime::runtime::TickItem::Command(first.id())
+                && matches!(
+                    &entry.1,
+                    RuntimeError::Binding(BindingError::MissingDisplay)
+                )
+        }),
+        "display cannot be omitted: {report:?}"
     );
     assert!(runtime.journal().is_empty(), "missing display cannot admit");
     let display = runtime.display(&first, holder(), &[grant(1, &[Scope::FileRead], 5, 9)?])?;
@@ -552,7 +581,7 @@ fn e65_bounds_epochs_and_integrity() -> Result {
         SecurityEpoch::new(1),
         "host moves epoch"
     );
-    assert_swap(&runtime.tick(), BindingField::SecurityEpoch);
+    assert_refused(&runtime.tick(), BindingField::SecurityEpoch);
     assert!(
         runtime.journal().is_empty(),
         "stale display is refused before admission"
@@ -653,13 +682,18 @@ fn e65_unsupported_owner_and_malformed_display_refuse() -> Result {
         Some(&lgwks_std::json::to_value(&display.binding().digest())?),
         "rendered identity is the retained identity"
     );
+    let command_id = command.id();
     runtime.submit_displayed(command, display)?;
+    let refused = runtime.tick()?;
     assert!(
-        matches!(
-            runtime.tick(),
-            Err(RuntimeError::Binding(BindingError::UnsupportedOwner))
-        ),
-        "resolve-only owner must refuse atomic dispatch"
+        refused.refused().iter().any(|entry| {
+            entry.0 == larry_runtime::runtime::TickItem::Command(command_id)
+                && matches!(
+                    &entry.1,
+                    RuntimeError::Binding(BindingError::UnsupportedOwner)
+                )
+        }),
+        "resolve-only owner must refuse atomic dispatch as a typed denial: {refused:?}"
     );
     runtime.tick()?;
     assert_eq!(runtime.owner().legacy_calls, 0, "no legacy fallback");

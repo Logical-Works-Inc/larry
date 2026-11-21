@@ -2,7 +2,7 @@
 
 use super::{
     AtomicOwner, BindingError, EffectIntent, ProjectionBackend, ReconciliationStrategy, Result,
-    Runtime, RuntimeError, SEEDS, Scope, TestRuntime, assert_swap, clock_at, command, grant,
+    Runtime, RuntimeError, SEEDS, Scope, TestRuntime, assert_refused, clock_at, command, grant,
     holder, replay_authorizations, restore, runtime, settings, success_journey, swap_journey,
     swapped_field, trace,
 };
@@ -93,7 +93,7 @@ fn sim_e65_retry_after_restore_keeps_binding() -> Result {
         let epoch = restored.fence().epoch()?;
         restored.fence_mut().authenticate(epoch)?;
         let before = trace(restored.journal());
-        assert_swap(&restored.tick(), swapped_field(seed));
+        assert_refused(&restored.tick(), swapped_field(seed));
         assert_eq!(
             trace(restored.journal()),
             before,
