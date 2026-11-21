@@ -527,11 +527,18 @@ fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
 #[test]
 fn a_noisy_command_is_truncated_not_blocked() -> TestResult {
     // Three mebibytes of output are cut to the cap; the command still completes.
+    //
+    // `dd count=N` counts blocks read, not bytes: a read that returns fewer than `bs` bytes is
+    // one whole block, so `yes x | dd bs=1024 count=3072` writes fewer than 3 MiB whenever the
+    // shell's own pipe hands it a partial block, and the exact count below then missed by that
+    // much (larry#319: 650 bytes short under load; a 10 KiB target fed in small writes measured
+    // 212 to 1322 bytes on both hosts). `/dev/zero` always fills a read, so this command writes
+    // 3,145,728 bytes on every host.
     let (state, origin) = fixture()?;
     let task = task_json(
         origin.path(),
         "HEAD",
-        r#"[["sh","-c","yes x | dd bs=1024 count=3072 2>/dev/null"]]"#,
+        r#"[["sh","-c","dd if=/dev/zero bs=1024 count=3072 2>/dev/null"]]"#,
     );
     let report = report_of(&run_exec(state.path(), &task, None)?)?;
     let result = result_at(&report, 0)?;
@@ -550,6 +557,22 @@ fn a_noisy_command_is_truncated_not_blocked() -> TestResult {
         number_of(result, "stdout_dropped")?,
         2_097_152,
         "the dropped count is exact: 3145728 bytes less the 1048576 kept"
+    );
+    // The report states the bytes the stream yielded, so kept plus dropped is checked against
+    // the stream's own length and no byte can be silently unaccounted (larry#319).
+    let yielded = number_of(result, "stdout_bytes")?;
+    assert_eq!(
+        yielded, 3_145_728,
+        "the command wrote 3145728 bytes and the report says how many it read"
+    );
+    let marker = format!(
+        "\n[larry: {} bytes dropped]\n",
+        number_of(result, "stdout_dropped")?
+    );
+    assert_eq!(
+        number_of(result, "stdout_dropped")? + i64::try_from(kept.saturating_sub(marker.len()))?,
+        yielded,
+        "kept plus dropped is every byte the command wrote"
     );
     assert_eq!(
         number_of(result, "exit_code")?,
