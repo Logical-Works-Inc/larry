@@ -9,6 +9,11 @@ use super::style::{Line, Span, Style, ellipsize, sanitize, text_width, wrap};
 /// Output lines a finished command shows under it; the rest is counted.
 pub(crate) const OUTPUT_TAIL: usize = 5;
 
+/// Most characters one kept output row holds; a row draws at most the chat column's width,
+/// and the artifact pane keeps the same bound (`super::pane::ROW_CHARS`), so a large output
+/// costs a bounded number of bytes (larry#337).
+pub(crate) const MAX_TAIL_CHARS: usize = 512;
+
 /// One transcript entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Entry {
@@ -22,8 +27,11 @@ pub(crate) enum Entry {
         command: String,
         /// `exit status 0`, `timed out…`, as the model was shown it.
         status: String,
-        /// Its output lines, stdout then stderr.
+        /// The output lines drawn under it: the last [`OUTPUT_TAIL`], each at most
+        /// [`MAX_TAIL_CHARS`] characters.
         output: Vec<String>,
+        /// Output lines the entry did not keep.
+        hidden: usize,
         /// Whether it exited 0.
         passed: bool,
     },
@@ -144,6 +152,24 @@ fn header_lines(header: &Header, width: usize) -> Vec<Line> {
 }
 
 impl Entry {
+    /// A finished command from its parts: the status, the last [`OUTPUT_TAIL`] output lines,
+    /// each at most [`MAX_TAIL_CHARS`] characters, and how many lines the entry did not keep,
+    /// so a large output costs a bounded number of bytes (larry#337).
+    pub(crate) fn ran(command: String, status: &str, output: Vec<String>, passed: bool) -> Self {
+        let start = output.len().saturating_sub(OUTPUT_TAIL);
+        Self::Ran {
+            command,
+            status: cut(status),
+            output: output
+                .into_iter()
+                .skip(start)
+                .map(|line| cut(&line))
+                .collect(),
+            hidden: start,
+            passed,
+        }
+    }
+
     /// The lines this entry paints in a column `width` cells wide.
     pub(crate) fn lines(&self, width: usize) -> Vec<Line> {
         let indent = vec![Span::new("  ", Style::PLAIN)];
@@ -157,8 +183,9 @@ impl Entry {
                 ref command,
                 ref status,
                 ref output,
+                hidden,
                 passed,
-            } => ran_lines(command, status, output, passed, width),
+            } => ran_lines(command, status, output, hidden, passed, width),
             Self::Declined(ref command) => {
                 let mark = vec![
                     Span::new("• ", Style::WARN),
@@ -182,12 +209,19 @@ impl Entry {
     }
 }
 
+/// `text` cut to [`MAX_TAIL_CHARS`] characters.
+fn cut(text: &str) -> String {
+    text.chars().take(MAX_TAIL_CHARS).collect()
+}
+
 /// The lines of a finished command: `• Ran <command>`, then its status when it
-/// failed, then the last [`OUTPUT_TAIL`] output lines, each cut to one row.
+/// failed, then the last [`OUTPUT_TAIL`] output lines, each cut to one row, and the count
+/// of the lines its entry did not keep.
 fn ran_lines(
     command: &str,
     status: &str,
     output: &[String],
+    hidden: usize,
     passed: bool,
     width: usize,
 ) -> Vec<Line> {
@@ -200,11 +234,10 @@ fn ran_lines(
     if !passed {
         tail.push(vec![Span::new(ellipsize(status, room), Style::BAD)]);
     }
-    let hidden = output.len().saturating_sub(OUTPUT_TAIL);
     if hidden > 0 {
         tail.push(vec![Span::new(format!("… +{hidden} lines"), Style::MUTED)]);
     }
-    for line in output.iter().skip(hidden) {
+    for line in output {
         tail.push(vec![Span::new(ellipsize(line, room), Style::MUTED)]);
     }
     if tail.is_empty() {

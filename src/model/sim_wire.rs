@@ -176,6 +176,11 @@ fn a_refusal_keeps_the_gateways_code_and_reads_a_bounded_body() {
         "a b c",
         "a control character is blanked"
     );
+    assert_eq!(
+        refusal_detail("{\"error\":{\"message\":\"a\u{202e}bc\u{2066}d\u{2069}\"}}".as_bytes()),
+        "a bc d ",
+        "a bidi control is blanked, so a refusal cannot reorder a terminal (CVE-2021-42574)"
+    );
     let long_code = format!(r#"{{"error":{{"code":"{}"}}}}"#, "c".repeat(100));
     assert_eq!(
         refusal_detail(long_code.as_bytes()).chars().count(),
