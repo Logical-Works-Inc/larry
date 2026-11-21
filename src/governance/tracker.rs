@@ -4,12 +4,12 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use lgwks_std::json::{self, Value};
 
 use super::patterns::Patterns;
+use super::read::{self, ReadFault};
 use super::{pyjson, pystr};
 
 /// The directory holding the tracker files, relative to the repository root.
@@ -43,6 +43,16 @@ pub enum TrackerError {
         /// The admitted bound in bytes.
         limit: u64,
     },
+    /// A file, or a directory on its path, is a symbolic link (CWE-59, larry#336).
+    Symlink {
+        /// The file that is a link.
+        path: PathBuf,
+    },
+    /// A file is not a regular file: a FIFO, device or socket (larry#336).
+    NotRegular {
+        /// The file that is not regular.
+        path: PathBuf,
+    },
     /// A file is not valid UTF-8; the text is CPython's codec message.
     NotUtf8 {
         /// The file that is not UTF-8.
@@ -73,6 +83,12 @@ impl fmt::Display for TrackerError {
             Self::TooLarge { ref path, limit } => {
                 write!(f, "{} exceeds {limit} bytes", path.display())
             }
+            Self::Symlink { ref path } => {
+                write!(f, "{} is a symbolic link", path.display())
+            }
+            Self::NotRegular { ref path } => {
+                write!(f, "{} is not a regular file", path.display())
+            }
             Self::NotUtf8 { ref cause, .. } => f.write_str(cause),
             Self::Data(ref error) => write!(f, "{error}"),
             Self::MissingToken => f.write_str("template is missing the __TRACKER_DATA__ token"),
@@ -93,22 +109,38 @@ fn directory(root: &Path) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
-/// Reads one bounded UTF-8 file of the tracker directory.
-fn read_bounded(path: &Path) -> Result<String, TrackerError> {
-    let read_error = |cause: std::io::Error| TrackerError::Read {
-        path: path.to_path_buf(),
-        cause: cause.to_string(),
+/// A tracker file's path relative to the governed root, as the reader and its refusals name it.
+fn relative(name: &str) -> PathBuf {
+    TRACKER_DIRECTORY
+        .iter()
+        .fold(PathBuf::new(), |path, part| path.join(part))
+        .join(name)
+}
+
+/// Reads one bounded UTF-8 file of the tracker directory through the governance reader.
+fn read_bounded(root: &Path, relative: &Path) -> Result<String, TrackerError> {
+    let named = || relative.to_path_buf();
+    let bytes = match read::read_bounded(root, relative, MAX_TRACKER_BYTES) {
+        Ok(bytes) => bytes,
+        Err(ReadFault::Missing(cause) | ReadFault::Unreadable(cause)) => {
+            return Err(TrackerError::Read {
+                path: named(),
+                cause: cause.to_string(),
+            });
+        }
+        Err(ReadFault::Symlink) => return Err(TrackerError::Symlink { path: named() }),
+        Err(ReadFault::NotRegular { .. }) => {
+            return Err(TrackerError::NotRegular { path: named() });
+        }
+        Err(ReadFault::TooLarge { .. }) => {
+            return Err(TrackerError::TooLarge {
+                path: named(),
+                limit: MAX_TRACKER_BYTES,
+            });
+        }
     };
-    let metadata = fs::metadata(path).map_err(read_error)?;
-    if metadata.len() > MAX_TRACKER_BYTES {
-        return Err(TrackerError::TooLarge {
-            path: path.to_path_buf(),
-            limit: MAX_TRACKER_BYTES,
-        });
-    }
-    let bytes = fs::read(path).map_err(read_error)?;
     String::from_utf8(bytes).map_err(|error| TrackerError::NotUtf8 {
-        path: path.to_path_buf(),
+        path: named(),
         cause: pystr::utf8_error(error.as_bytes(), &error.utf8_error()),
     })
 }
@@ -125,13 +157,13 @@ fn render_with(data: &Value, template: &str) -> Result<String, TrackerError> {
 
 /// Parses the tracker data file under `root`.
 fn load_data(root: &Path) -> Result<Value, TrackerError> {
-    let text = read_bounded(&directory(root).join(DATA_NAME))?;
+    let text = read_bounded(root, &relative(DATA_NAME))?;
     json::from_str::<Value>(&text).map_err(TrackerError::Data)
 }
 
 /// Renders the page for the tracker under `root`: the template first, then the data.
 pub(crate) fn render(root: &Path) -> Result<String, TrackerError> {
-    let template = read_bounded(&directory(root).join(TEMPLATE_NAME))?;
+    let template = read_bounded(root, &relative(TEMPLATE_NAME))?;
     let data = load_data(root)?;
     render_with(&data, &template)
 }
@@ -161,7 +193,7 @@ pub fn is_current(root: &Path) -> Result<bool, TrackerError> {
     if !output.is_file() {
         return Ok(false);
     }
-    Ok(read_bounded(&output)? == expected)
+    Ok(read_bounded(root, &relative(OUTPUT_NAME))? == expected)
 }
 
 /// Port of the generator's `tracker_errors`: an unreadable or unrenderable tracker, a stale or
@@ -182,7 +214,7 @@ pub(crate) fn drift_errors(root: &Path, spec: &str, patterns: &Patterns) -> Vec<
             "progress tracker: tools/tracker/index.html is missing",
         ));
     } else {
-        match read_bounded(&rendered) {
+        match read_bounded(root, &relative(OUTPUT_NAME)) {
             Ok(actual) if actual == expected => {}
             Ok(_) => errors.push(String::from(
                 "progress tracker: tools/tracker/index.html is stale — regenerate with `larry tracker`",
@@ -287,10 +319,11 @@ fn counts_equal(total: Option<&Value>, count: usize) -> bool {
         return false;
     };
     if number.as_u64().is_some() || number.as_i64().is_some() {
-        return match u64::try_from(count) {
-            Ok(wide) => number.as_u64() == Some(wide),
-            Err(_) => false,
+        // A count wider than `u64` can equal no tracked total, so the answer is false by its range.
+        let Ok(wide) = u64::try_from(count) else {
+            return false;
         };
+        return number.as_u64() == Some(wide);
     }
     number
         .as_f64()
