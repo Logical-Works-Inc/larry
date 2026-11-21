@@ -4,8 +4,9 @@
 //!
 //! The mechanism is the platform's own wrapper in front of the command's argv:
 //! `/usr/bin/sandbox-exec -p <profile>` on macOS (reads are open except beneath the
-//! state directory, which holds the receipt key; writes are denied everywhere but
-//! the workspace's tree, its scratch directory and the devices a shell writes),
+//! state directory, which holds the receipt key, and the session's own copy beneath
+//! it stays readable; writes are denied everywhere but the workspace's tree, its
+//! scratch directory and the devices a shell writes),
 //! and `/usr/bin/setpriv` with a Landlock allowlist on Linux (reads beneath every
 //! path but the state directory and `/proc`, read and write beneath the tree and
 //! scratch directory). Every descendant of the command inherits it. Source:
@@ -18,12 +19,15 @@
 //!
 //! The state directory is not a read root (larry#322, ADR 0080): `executor.db`
 //! holds the receipt signing seed, so a command that read it could seal receipts
-//! `larry verify` accepts. The executor also holds `LARRY_MODEL_KEY` and every
-//! `LARRY_KEY_*` in its own environment, and Rust 2024 makes `std::env::remove_var`
-//! unsafe, which this workspace forbids, so the kernel keeps the command from the
-//! environment instead: Linux reads no `/proc` entry but the command's own process
-//! directory and the host's tunables, and macOS denies the kernel interface that
-//! returns a process's arguments and environment.
+//! `larry verify` accepts. The one path beneath it a command reads is the session's
+//! own copy (`<state>/ws/<task>`), whose git directory sits beside the work tree
+//! because the clone names it separately; without it every `git` command in the copy
+//! failed to resolve its repository. The executor also holds `LARRY_MODEL_KEY` and
+//! every `LARRY_KEY_*` in its own environment, and Rust 2024 makes
+//! `std::env::remove_var` unsafe, which this workspace forbids, so the kernel keeps
+//! the command from the environment instead: Linux reads no `/proc` entry but the
+//! command's own process directory and the host's tunables, and macOS denies the
+//! kernel interface that returns a process's arguments and environment.
 //!
 //! Every other read and the network are not confined: the person approves each
 //! command, and Nova owns the fuller sandbox (logicalworks-crates#846). A
@@ -140,6 +144,14 @@ pub enum ConfineError {
         /// Why it could not be resolved.
         source: io::Error,
     },
+    /// The workspace copy is not a directory beneath the state directory, so a read
+    /// exception for it would open the state directory and the key store in it.
+    NotBeneath {
+        /// The workspace copy.
+        workspace: PathBuf,
+        /// The state directory.
+        state: PathBuf,
+    },
     /// The estate refused the profile or the rules: not UTF-8, a control byte, over a bound.
     Invalid(io::Error),
     /// The wrapper ran and did not confine, or did not run at all.
@@ -170,6 +182,15 @@ impl fmt::Display for ConfineError {
                 )
             }
             Self::Invalid(ref cause) => write!(out, "the confinement was refused: {cause}"),
+            Self::NotBeneath {
+                ref workspace,
+                ref state,
+            } => write!(
+                out,
+                "the workspace copy {} is not beneath the state directory {}, so confining the state would open it",
+                workspace.display(),
+                state.display()
+            ),
             Self::Probe { ref detail } => {
                 write!(out, "the confinement does not hold on this host: {detail}")
             }
@@ -182,7 +203,10 @@ impl std::error::Error for ConfineError {
         match *self {
             Self::Path { ref source, .. } => Some(source),
             Self::Invalid(ref cause) => Some(cause),
-            Self::Unsupported { .. } | Self::MissingWrapper { .. } | Self::Probe { .. } => None,
+            Self::Unsupported { .. }
+            | Self::MissingWrapper { .. }
+            | Self::NotBeneath { .. }
+            | Self::Probe { .. } => None,
         }
     }
 }
@@ -234,14 +258,20 @@ fn quoted(value: &str) -> String {
     out
 }
 
-/// The macOS argv prefix: deny every read beneath `state` but `tree` and `scratch`,
-/// and every write but beneath those two and the devices.
-fn seatbelt(state: &str, tree: &str, scratch: &str) -> Result<Vec<String>, ConfineError> {
+/// The macOS argv prefix: deny every read beneath `state` but the session's own copy
+/// (`workspace`, which holds the tree and the scratch directory), and every write but
+/// beneath the tree and scratch directory and to the devices.
+fn seatbelt(
+    state: &str,
+    workspace: &str,
+    tree: &str,
+    scratch: &str,
+) -> Result<Vec<String>, ConfineError> {
     let mut source = String::from("(version 1)(allow default)(deny file-read* (require-all");
     source.push_str(" (subpath \"");
     source.push_str(&quoted(state));
     source.push_str("\") (require-not (require-any");
-    for path in [tree, scratch] {
+    for path in [workspace, tree, scratch] {
         source.push_str(" (subpath \"");
         source.push_str(&quoted(path));
         source.push_str("\")");
@@ -323,12 +353,19 @@ fn grantable(path: &Path, state: &Path) -> Result<Option<PathBuf>, ConfineError>
     Ok((!state.starts_with(&resolved)).then_some(resolved))
 }
 
-/// The Linux argv prefix: read the roots above, read and write beneath `tree` and `scratch`.
-fn landlock(state: &Path, tree: &str, scratch: &str) -> Result<Vec<String>, ConfineError> {
+/// The Linux argv prefix: read the roots above and the session's own copy, read and write
+/// beneath `tree` and `scratch`.
+fn landlock(
+    state: &Path,
+    workspace: &Path,
+    tree: &str,
+    scratch: &str,
+) -> Result<Vec<String>, ConfineError> {
     let mut rules = LandlockRules::new();
     for root in read_roots(state)? {
         rules.allow(root, PathAccess::Read);
     }
+    rules.allow(workspace, PathAccess::Read);
     rules.allow(tree, PathAccess::ReadWrite);
     rules.allow(scratch, PathAccess::ReadWrite);
     rules.validate().map_err(ConfineError::Invalid)?;
@@ -358,7 +395,8 @@ fn landlock(state: &Path, tree: &str, scratch: &str) -> Result<Vec<String>, Conf
 }
 
 /// One workspace's confinement: writes land beneath its tree and scratch directory only,
-/// and nothing reads beneath `state` but those two.
+/// and nothing reads beneath `state` but the session's own copy, its tree and its scratch
+/// directory.
 #[derive(Debug, Clone)]
 pub(crate) struct Confine {
     /// The workspace's work tree, as the kernel resolves it.
@@ -372,7 +410,8 @@ pub(crate) struct Confine {
 impl Confine {
     /// The confinement of `platform` over `state`, `tree` and `scratch`, all existing
     /// directories. Nothing is spawned: the estate's validation refuses a path or a
-    /// profile that could not confine anything, and a platform with no wrapper is refused.
+    /// profile that could not confine anything, a tree whose copy is not beneath the
+    /// state directory is refused, and a platform with no wrapper is refused.
     pub(crate) fn new(
         platform: Platform,
         state: &Path,
@@ -381,10 +420,31 @@ impl Confine {
     ) -> Result<Self, ConfineError> {
         let state = resolved(state)?;
         let tree = resolved(tree)?;
+        // The session's own copy is the one path beneath the state directory a command
+        // reads: the workspace lays the tree down beside the clone's git directory and
+        // the scratch directory (larry#322, ADR 0080).
+        let workspace = tree
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| ConfineError::Path {
+                path: tree.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "the workspace copy is the tree's parent directory",
+                ),
+            })?;
+        if state.starts_with(&workspace) {
+            return Err(ConfineError::NotBeneath { workspace, state });
+        }
         let scratch = resolved(scratch)?;
         let prefix = match platform {
-            Platform::Macos => seatbelt(text(&state)?, text(&tree)?, text(&scratch)?)?,
-            Platform::Linux => landlock(&state, text(&tree)?, text(&scratch)?)?,
+            Platform::Macos => seatbelt(
+                text(&state)?,
+                text(&workspace)?,
+                text(&tree)?,
+                text(&scratch)?,
+            )?,
+            Platform::Linux => landlock(&state, &workspace, text(&tree)?, text(&scratch)?)?,
             Platform::Other => {
                 return Err(ConfineError::Unsupported {
                     platform: platform.name(),

@@ -50,14 +50,16 @@ fn layout(label: &str, name: &str) -> Result<(Scratch, PathBuf, PathBuf, PathBuf
     Ok((root, state, tree, tmp))
 }
 
-/// The Seatbelt profile the reference spelling writes for `state`, `tree` and `tmp`.
-fn reference_profile(state: &Path, tree: &Path, tmp: &Path) -> String {
+/// The Seatbelt profile the reference spelling writes for `state`, the session's `copy`,
+/// `tree` and `tmp`.
+fn reference_profile(state: &Path, copy: &Path, tree: &Path, tmp: &Path) -> String {
     format!(
         "(version 1)(allow default)(deny file-read* (require-all (subpath \"{}\") (require-not \
-         (require-any (subpath \"{}\") (subpath \"{}\")))))(deny file-write* (require-not \
-         (require-any (subpath \"{}\") (subpath \"{}\") (literal \"/dev/null\") (literal \
-         \"/dev/tty\"))))(deny sysctl-read (sysctl-name \"kern.procargs2\"))",
+         (require-any (subpath \"{}\") (subpath \"{}\") (subpath \"{}\")))))(deny file-write* \
+         (require-not (require-any (subpath \"{}\") (subpath \"{}\") (literal \"/dev/null\") \
+         (literal \"/dev/tty\"))))(deny sysctl-read (sysctl-name \"kern.procargs2\"))",
         state.display(),
+        copy.display(),
         tree.display(),
         tmp.display(),
         tree.display(),
@@ -111,6 +113,7 @@ fn shell(script: &str) -> [String; 3] {
 #[test]
 fn sim_confine_argv_per_platform_is_exact() -> TestResult {
     let (_root, state, tree, tmp) = layout("argv", "w")?;
+    let copy = tree.parent().ok_or("the workspace copy")?;
     let command = [String::from("echo"), String::from("hi there")];
     let mac = Confine::new(Platform::Macos, &state, &tree, &tmp)?;
     assert_eq!(
@@ -118,7 +121,7 @@ fn sim_confine_argv_per_platform_is_exact() -> TestResult {
         vec![
             String::from(SANDBOX_EXEC),
             String::from("-p"),
-            reference_profile(&state, &tree, &tmp),
+            reference_profile(&state, copy, &tree, &tmp),
             String::from("echo"),
             String::from("hi there"),
         ]
@@ -152,12 +155,13 @@ make-reg,make-sock,make-fifo,make-block,make-sym,refer,truncate";
         .filter_map(|rule| rule.strip_prefix(&read_prefix))
         .collect();
     let tail: Vec<String> = vec![
+        format!("path-beneath:{read}:{}", copy.display()),
         format!("path-beneath:{write}:{}", tree.display()),
         format!("path-beneath:{write}:{}", tmp.display()),
         String::from("path-beneath:write-file,read-file,truncate:/dev/null"),
     ];
     assert_eq!(
-        rules.get(rules.len().saturating_sub(3)..),
+        rules.get(rules.len().saturating_sub(4)..),
         Some(
             tail.iter()
                 .map(String::as_str)
@@ -165,8 +169,22 @@ make-reg,make-sock,make-fifo,make-block,make-sym,refer,truncate";
                 .as_slice()
         )
     );
-    assert_eq!(reads.len() + 3, rules.len(), "the other rules are reads");
-    check_read_roots(&reads, &state)?;
+    assert_eq!(
+        reads.len() + 3,
+        rules.len(),
+        "the other rules are the copy's read rule and reads"
+    );
+    let copy_path = copy.display().to_string();
+    assert!(
+        reads.contains(&copy_path.as_str()),
+        "the session's copy is a read rule: {reads:?}"
+    );
+    let roots: Vec<&str> = reads
+        .iter()
+        .copied()
+        .filter(|rule| *rule != copy_path.as_str())
+        .collect();
+    check_read_roots(&roots, &state)?;
     assert_eq!(mac.tree(), tree.as_path());
     assert_eq!(linux.scratch(), tmp.as_path());
     Ok(())
@@ -251,6 +269,12 @@ fn sim_confine_each_refusal_gets_its_exact_variant() -> TestResult {
     assert!(matches!(
         Confine::new(Platform::Macos, &state, &gone, &tmp),
         Err(ConfineError::Path { .. })
+    ));
+    // A copy that is not beneath the state directory, here the state itself, would open it.
+    let copy = tree.parent().ok_or("the workspace copy")?;
+    assert!(matches!(
+        Confine::new(Platform::Macos, copy, &tree, &tmp),
+        Err(ConfineError::NotBeneath { .. })
     ));
     // A path that is not UTF-8 cannot be written into a profile or a rule.
     assert!(matches!(
@@ -402,6 +426,22 @@ fn sim_confine_kernel_refuses_the_state_directory_for_every_seed() -> TestResult
         assert!(
             inside.status.success() && inside.stdout == b"readable",
             "seed {seed}: the work tree is not readable"
+        );
+        // The session's own copy stays readable: its git directory is what every `git`
+        // command in the tree resolves first, and it sits beside the tree (larry#322).
+        let copy = tree.parent().ok_or("the workspace copy")?;
+        let git = copy.join("git");
+        std::fs::create_dir_all(&git)?;
+        std::fs::write(git.join("HEAD"), b"ref: refs/heads/base\n")?;
+        let resolved = run_confined(
+            &confine,
+            &shell(&format!("cat {}/git/HEAD", copy.display())),
+            &path,
+            &tmp,
+        )?;
+        assert!(
+            resolved.status.success() && resolved.stdout == b"ref: refs/heads/base\n",
+            "seed {seed}: the copy's git directory is not readable"
         );
         let routes = [
             format!("cat {}", db.display()),

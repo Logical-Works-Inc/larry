@@ -34,16 +34,22 @@ environment, but a same-user process reads the parent's through
 
 - macOS: the profile keeps `(allow default)` and adds
   `(deny file-read* (require-all (subpath "<state>") (require-not
-  (require-any (subpath "<tree>") (subpath "<scratch>")))))`, so the store
-  and the other workspaces are unreadable while the command's own tree and
-  scratch directory stay readable. It also adds
+  (require-any (subpath "<copy>") (subpath "<tree>") (subpath
+  "<scratch>")))))`, so the store and the other workspaces are unreadable
+  while the command's own copy stays readable. It also adds
   `(deny sysctl-read (sysctl-name "kern.procargs2"))`, the interface that
   returns a process's arguments and environment.
 - Linux: the read root is no longer `/`. The roots are every child of `/`
   resolved, minus the state directory's top component (an allowlist cannot
   subtract a child of a granted path), and minus `/proc`, where only
-  `/proc/self` and `/proc/sys` are granted. The tree and scratch directory
-  keep their read-write rules, which carry read as well.
+  `/proc/self` and `/proc/sys` are granted. The copy is a read rule of its
+  own, and the tree and scratch directory keep their read-write rules,
+  which carry read as well.
+- The copy is `<state>/ws/<task>`, the tree's parent: the clone names its
+  git directory there (`--separate-git-dir`) so a command cannot commit,
+  and every `git` command in the tree reads its way to it. Without the
+  copy's rule the whole copy failed to resolve as a repository, which the
+  e2e suites caught as a refused `git commit` with the wrong reason.
 - The key is still read once at start into the typed settings
   (`process_env`'s snapshot). It is not removed from the process
   environment: Rust 2024 makes `std::env::remove_var` `unsafe`, and the
@@ -51,14 +57,18 @@ environment, but a same-user process reads the parent's through
   which is the stronger place: neither `/proc/<pid>/environ` nor
   `KERN_PROCARGS2` reports a removal done inside a live process anyway.
 - `Confine::new` takes the state directory beside the tree and the scratch
-  directory, and resolves all three, because both profiles match the path
-  the kernel resolves (`/tmp` is `/private/tmp` on macOS).
+  directory, and resolves them, because both profiles match the path
+  the kernel resolves (`/tmp` is `/private/tmp` on macOS). It refuses a
+  tree whose copy is not beneath the state directory, since the exception
+  would then open the store itself.
 
 ## Consequences
 
 - A confined command can read neither the signing seed nor another
   workspace, and it cannot read the environment of the executor that
-  spawned it, on both kernels.
+  spawned it, on both kernels. Its own copy stays readable, so `git
+  status`, `git log` and `git diff` work in the tree and `git commit` is
+  still refused: the git directory is outside the writable tree.
 - On Linux a command loses every `/proc` entry but its own and the host's
   tunables: `ps` cannot list other processes. On macOS `ps e` reports no
   environment. Every other read and the network stay open (ADR 0046).
