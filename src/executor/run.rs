@@ -61,12 +61,22 @@ struct Captured {
     tail: Vec<u8>,
     /// The bytes between the head and the tail: counted, never kept.
     dropped: u64,
+    /// Every byte the stream yielded: the head, the dropped bytes and the tail together. The
+    /// report states it, so a person can check that kept plus dropped is what the command wrote
+    /// and no byte went unaccounted (larry#319).
+    bytes: u64,
 }
 
 impl Captured {
     /// Adds the next bytes of the stream. The head fills first; the tail keeps the most recent
-    /// `TAIL_BYTES`, and what it pushes out is counted as dropped.
+    /// `TAIL_BYTES`, and what it pushes out is counted as dropped. Every byte added is counted in
+    /// `bytes`, so kept plus dropped is the stream's own length (larry#319).
     fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let added = u64::try_from(bytes.len()).map_err(io::Error::other)?;
+        self.bytes = self
+            .bytes
+            .checked_add(added)
+            .ok_or_else(|| io::Error::other("the stream byte count overflowed"))?;
         let room = HEAD_BYTES.saturating_sub(self.head.len());
         let (head, tail) = bytes.split_at(room.min(bytes.len()));
         self.head.extend_from_slice(head);
@@ -125,6 +135,10 @@ pub(crate) struct CommandResult {
     stdout_dropped: u64,
     /// Bytes of standard error dropped between its head and its tail.
     stderr_dropped: u64,
+    /// Every byte of standard output the command wrote, kept or dropped (larry#319).
+    stdout_bytes: u64,
+    /// Every byte of standard error the command wrote, kept or dropped (larry#319).
+    stderr_bytes: u64,
     /// Whether either stream dropped bytes.
     truncated: bool,
     /// Wall-clock duration in milliseconds; measured, never used to control the run.
@@ -185,6 +199,8 @@ impl CommandResult {
             "stderr": self.stderr,
             "stdout_dropped": self.stdout_dropped,
             "stderr_dropped": self.stderr_dropped,
+            "stdout_bytes": self.stdout_bytes,
+            "stderr_bytes": self.stderr_bytes,
             "truncated": self.truncated,
             "duration_ms": self.duration_ms,
         })
@@ -270,6 +286,7 @@ pub(crate) fn run_command(
     let status = status.map_err(|source| spawn_failure(program, source))?;
     await_group_gone(&clock, pgid)?;
     ledger.remove(&identity)?;
+    let (stdout_bytes, stderr_bytes) = (stdout.bytes, stderr.bytes);
     let (stdout_text, stdout_dropped) = stdout.into_text();
     let (stderr_text, stderr_dropped) = stderr.into_text();
     let elapsed = started_at.elapsed();
@@ -287,6 +304,8 @@ pub(crate) fn run_command(
         stderr: stderr_text,
         stdout_dropped,
         stderr_dropped,
+        stdout_bytes,
+        stderr_bytes,
         truncated: stdout_dropped > 0 || stderr_dropped > 0,
         duration_ms,
     })
