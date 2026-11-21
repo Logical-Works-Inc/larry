@@ -108,6 +108,13 @@ fn ask(pty: &mut Pty<'_>) -> Journey {
     pty.wait_for(ASK)
 }
 
+/// Types a task and waits for the frame to show the session working.
+fn working(pty: &mut Pty<'_>) -> Journey {
+    pty.wait_for(READY)?;
+    pty.send("write hello.txt\r")?;
+    pty.wait_for("Working")
+}
+
 /// What one frame left once Ctrl+C closed it.
 struct Ran {
     /// The binary's exit status.
@@ -214,6 +221,38 @@ fn sim_session_declined_command_never_runs() -> Journey {
     Ok(())
 }
 
+/// A key typed before the question is painted never answers it, and Enter alone declines
+/// (larry#325): the model call is held, so the `y` is read while the frame still shows Working,
+/// the frame shows it in the box, and the next request tells the model the command was declined.
+#[test]
+fn tui_journey_a_key_typed_before_the_question_never_runs_the_command() -> Journey {
+    let config = Config {
+        script: vec![Some(Fault::Delay)],
+        ..scripted(53, &[COMMAND, r#"{"done":"left it alone"}"#])
+    };
+    let ran = frame(config, |pty, mock, _| {
+        working(pty)?;
+        // The box takes "zzy" while the model is held, so its `y` answers no question.
+        pty.send("zzy")?;
+        pty.wait_for("zzy")?;
+        mock.release_delayed();
+        pty.wait_for(ASK)?;
+        pty.send("\r")?;
+        pty.wait_for("left it alone")?;
+        let told = mock
+            .requests()
+            .get(1)
+            .is_some_and(|body| String::from_utf8_lossy(body).contains(DECLINED));
+        assert!(told, "the model is told the command was declined");
+        pty.send(CLEAR)?;
+        pty.wait_for(READY)?;
+        Ok(())
+    })?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    assert!(!wrote(&ran), "a key typed before the question ran it");
+    Ok(())
+}
+
 /// A gateway that answers 401 with escapes, a bell and 4 KiB of text (`Fault::HostileRefusal`,
 /// larry#128): the frame shows a notice, no byte of the hostile text reaches the terminal as an
 /// escape or a bell, nothing runs, and the operator's key went as its bearer token.
@@ -224,8 +263,7 @@ fn sim_tui_gateway_refusal_shows_typed_notice() -> Journey {
         ..scripted(5, &[COMMAND])
     };
     let ran = frame(config, |pty, mock, _| {
-        pty.wait_for(READY)?;
-        pty.send("write hello.txt\r")?;
+        working(pty)?;
         pty.wait_for("expired")?;
         let first = mock.authorizations().into_iter().next().flatten();
         assert_eq!(first.as_deref(), Some("Bearer tui-key"), "the route's key");
@@ -257,9 +295,7 @@ fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
         ..scripted(9, &[COMMAND])
     };
     let ran = frame(config, |pty, mock, _| {
-        pty.wait_for(READY)?;
-        pty.send("write hello.txt\r")?;
-        pty.wait_for("Working")?;
+        working(pty)?;
         pty.send("\x1b")?;
         pty.wait_for("Stopping")?;
         mock.release_delayed();
