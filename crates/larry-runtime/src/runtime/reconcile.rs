@@ -111,6 +111,17 @@ where
                     self.reach_owner(live.intent, OwnerReach::Observe, at, report)?
                 }
                 larry_contracts::effect::ReconciliationAction::LeaveUnknown => {
+                    // This action asks no owner: the strategy declares the
+                    // unknown permanent, so there is nothing to observe and
+                    // nothing to retry. Recording the `Unknown` therefore
+                    // spends one unit of the reconciliation budget, the one
+                    // bound on how long an effect left open keeps producing
+                    // that record. Without it a fenced effect — never sent,
+                    // so it stays open under `!live.sent` — appends one
+                    // outcome every tick until the journal fills (larry#330).
+                    if let Some(open) = self.live.get_mut(&operation) {
+                        open.reconciliations = open.reconciliations.saturating_add(1);
+                    }
                     Some(EffectOutcome::Unknown { operation })
                 }
                 other => return Err(RuntimeError::UnsupportedReconciliationAction(other)),
