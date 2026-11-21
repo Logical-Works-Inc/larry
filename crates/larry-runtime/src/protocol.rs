@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use larry_contracts::ids::TenantId;
+use larry_contracts::ids::{TenantId, WorkerId};
 
 /// Minimum protocol version accepted by this runtime.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;
@@ -62,10 +62,16 @@ pub struct ProtocolOffer(
     BTreeSet<ProtocolCapability>,
     bool,
     bool,
+    Option<WorkerId>,
 );
 
 impl ProtocolOffer {
     /// Creates a protocol offer for one tenant.
+    ///
+    /// The offer carries no principal until [`Self::authenticated`] sets one.
+    /// A client declares its capabilities; the host names the worker a question
+    /// is answered by, and an offer without one can never raise or answer a
+    /// question (E30, larry#331).
     #[must_use]
     pub fn new(
         tenant_id: TenantId,
@@ -80,21 +86,38 @@ impl ProtocolOffer {
             offered_capabilities,
             is_headless,
             needs_human_answer,
+            None,
         )
+    }
+
+    /// Binds the host-authenticated principal this offer presents. Only this
+    /// worker's answer counts, and a question a client asks can never be
+    /// approved by its requester (E30, larry#331).
+    #[must_use]
+    pub fn authenticated(mut self, principal: WorkerId) -> Self {
+        self.5 = Some(principal);
+        self
+    }
+
+    /// The host-authenticated principal, when the host set one.
+    pub(crate) const fn principal(&self) -> Option<WorkerId> {
+        self.5
     }
 }
 
 impl ProtocolOffer {
     /// Whether the offering client can put a question before a human and
-    /// carry the answer back: it offers `HumanQuestion` and is not headless
-    /// (E30, E47).
+    /// carry the answer back: it offers `HumanQuestion`, is not headless and
+    /// presents a host-authenticated principal (E30, E47, larry#331).
     ///
     /// # Errors
     ///
     /// [`ProtocolError::CapabilityMissing`] without `HumanQuestion`, then
-    /// [`ProtocolError::HeadlessQuestion`] for a headless client.
+    /// [`ProtocolError::HeadlessQuestion`] for a headless client, then
+    /// [`ProtocolError::NoPrincipal`] for an offer the host did not bind to a
+    /// worker.
     pub(crate) fn serves_questions(&self) -> Result<(), ProtocolError> {
-        let &Self(_, _, ref capabilities, headless, _) = self;
+        let &Self(_, _, ref capabilities, headless, _, principal) = self;
         if !capabilities.contains(&ProtocolCapability::HumanQuestion) {
             return Err(ProtocolError::CapabilityMissing {
                 capability: ProtocolCapability::HumanQuestion,
@@ -102,6 +125,9 @@ impl ProtocolOffer {
         }
         if headless {
             return Err(ProtocolError::HeadlessQuestion);
+        }
+        if principal.is_none() {
+            return Err(ProtocolError::NoPrincipal);
         }
         Ok(())
     }
@@ -145,6 +171,9 @@ pub enum ProtocolError {
     },
     /// A human question cannot be handled by a headless client.
     HeadlessQuestion,
+    /// A question or an answer arrived from an offer with no
+    /// host-authenticated principal, so no worker's answer could count.
+    NoPrincipal,
     /// The offer and command belong to different tenants.
     TenantMismatch {
         /// Tenant named by the offer.
@@ -192,6 +221,9 @@ impl fmt::Display for ProtocolError {
             Self::HeadlessQuestion => formatter.write_str(
                 "human question cannot be served headlessly; attach an authorized response surface or remove the question requirement",
             ),
+            Self::NoPrincipal => formatter.write_str(
+                "human question needs the host-authenticated principal; bind one with ProtocolOffer::authenticated",
+            ),
             Self::TenantMismatch {
                 negotiated,
                 command,
@@ -229,7 +261,7 @@ pub(crate) fn negotiate(
     offer: &ProtocolOffer,
     supported: ProtocolVersionRange,
 ) -> Result<NegotiatedProtocol, ProtocolError> {
-    let &ProtocolOffer(tenant_id, ref range, ref capabilities, headless, needs_answer) = offer;
+    let &ProtocolOffer(tenant_id, ref range, ref capabilities, headless, needs_answer, _) = offer;
     let &ProtocolVersionRange(offered_min, offered_max) = range;
     let supported_min = supported.minimum();
     let supported_max = supported.maximum();

@@ -26,7 +26,7 @@ use larry_contracts::binding::{BindingError, BindingField};
 use larry_contracts::command::{Command, CommandAcceptance, CommandKind};
 use larry_contracts::effect::TerminalDisposition;
 use larry_contracts::event::EventKind;
-use larry_contracts::ids::{ContentDigest, RunId, TenantId};
+use larry_contracts::ids::{ContentDigest, RunId, TenantId, WorkerId};
 use larry_contracts::state::{RunState, TransitionEvent};
 
 use super::display::ReadyCommand;
@@ -171,6 +171,7 @@ where
         &mut self,
         command: Command,
         display: Option<DisplayedEffect>,
+        principal: Option<WorkerId>,
     ) -> Result<CommandAcceptance, RuntimeError> {
         // The ceiling is checked before the payload is decoded or journalled:
         // an oversized command costs one length read and leaves nothing held
@@ -202,8 +203,10 @@ where
             if matches!(kind, CommandKind::Ask | CommandKind::Answer) {
                 // A question or an answer counts as of its durable admission,
                 // so it is judged against this instant before it is written.
+                // An answer must come from the offer's authenticated principal
+                // (E30, larry#331).
                 let at = sample(&self.clock)?;
-                self.check_question(&command, at)?;
+                self.check_question(&command, at, principal)?;
             }
         }
         let held = command.clone();

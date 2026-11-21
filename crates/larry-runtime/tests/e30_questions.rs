@@ -62,8 +62,8 @@ fn offer(
     )
 }
 
-/// A client with a human at it.
-fn human(tenant_id: TenantId) -> ProtocolOffer {
+/// A client with a human at it, authenticated as `principal`.
+fn human_as(tenant_id: TenantId, principal: WorkerId) -> ProtocolOffer {
     offer(
         tenant_id,
         &[
@@ -72,6 +72,12 @@ fn human(tenant_id: TenantId) -> ProtocolOffer {
         ],
         false,
     )
+    .authenticated(principal)
+}
+
+/// A client with a human at it, authenticated as `worker(1)`.
+fn human(tenant_id: TenantId) -> ProtocolOffer {
+    human_as(tenant_id, worker(1))
 }
 
 fn world(owner: ScriptedOwner) -> Result<(TestRuntime, Clock), Box<dyn std::error::Error>> {
@@ -276,7 +282,7 @@ fn e30_concurrent_questions_keep_exact_bindings_and_unrelated_waits() -> Outcome
     );
 
     rt.submit_protocol(
-        &human(t1),
+        &human_as(t1, r2),
         answer(36, t1, 21, r2, sb, Decision::Reject)?,
         None,
     )?;
@@ -506,6 +512,122 @@ fn e30_pending_questions_refuse_past_their_bound_and_recover() -> Outcome {
         None,
     )?;
     rt.submit_protocol(&human(t1), extra, None)?;
+    Ok(())
+}
+
+/// A client cannot approve its own question. An `Ask` that names one worker as
+/// both requester and respondent is refused typed before it is written, and an
+/// answer declares the respondent but arrives from another principal is
+/// refused with nothing reserved.
+#[test]
+fn e30_a_client_that_asks_and_answers_itself_is_refused_and_nothing_is_reserved() -> Outcome {
+    let (mut rt, _clock) = world(ScriptedOwner::new())?;
+    let t1 = tenant(1);
+    let r1 = worker(1);
+    let item = work(10, t1, run(1), 1, 1)?;
+    let subject = subject_of(&item, run(1), 1);
+    let expires = epoch()?
+        .checked_add(Duration::from_secs(OPEN_SECS))
+        .ok_or("fixture expiry overflow")?;
+    let alone = Question::new(
+        subject,
+        r1,
+        r1,
+        expires,
+        [Scope::FileRead].into_iter().collect(),
+    );
+    let asked = command(command_id(20), t1, CommandKind::Ask, &alone)?;
+    assert_eq!(
+        refused(rt.submit_protocol(&human_as(t1, r1), asked, None)),
+        Some(QuestionError::RequesterIsRespondent),
+        "a question a client answers itself is refused typed"
+    );
+    assert!(rt.journal().is_empty(), "a refused question writes nothing");
+    assert_eq!(
+        rt.remaining_budget(t1),
+        100,
+        "a refused question reserves nothing"
+    );
+    assert_eq!(
+        refused(rt.submit_protocol(
+            &human_as(t1, r1),
+            answer(30, t1, 20, r1, subject, approve_read())?,
+            None
+        )),
+        Some(QuestionError::UnknownQuestion {
+            question: command_id(20)
+        }),
+        "a refused question never enters the book"
+    );
+    assert!(rt.journal().is_empty());
+
+    // A real question names another worker. An answer that declares that
+    // respondent but arrives from the requester's principal counts for nothing.
+    rt.submit_protocol(
+        &human_as(t1, r1),
+        ask(21, t1, subject, worker(2), OPEN_SECS)?,
+        None,
+    )?;
+    let before = rt.journal().len();
+    assert_eq!(
+        refused(rt.submit_protocol(
+            &human_as(t1, r1),
+            answer(31, t1, 21, worker(2), subject, approve_read())?,
+            None
+        )),
+        Some(QuestionError::BindingMismatch {
+            question: command_id(21)
+        }),
+        "the authenticated principal is not the respondent"
+    );
+    assert_eq!(
+        rt.journal().len(),
+        before,
+        "a refused answer writes nothing"
+    );
+    Ok(())
+}
+
+/// An answer taken before expiry is consent only for a use before expiry: the
+/// `Submit` it holds is denied `NotApproved` when it is reduced past
+/// `expires_at`, and nothing is reserved.
+#[test]
+fn e30_an_approval_used_after_expiry_is_not_approved() -> Outcome {
+    let (mut rt, clock) = world(ScriptedOwner::new())?;
+    let t1 = tenant(1);
+    let r1 = worker(1);
+    let item = work(10, t1, run(1), 1, 1)?;
+    let subject = subject_of(&item, run(1), 1);
+    rt.submit_protocol(&human(t1), ask(20, t1, subject, r1, 10)?, None)?;
+    rt.submit_protocol(&human(t1), item, None)?;
+    assert!(
+        rt.tick()?.authorized().is_empty(),
+        "the effect waits for its answer"
+    );
+    // The answer is taken before expiry...
+    rt.submit_protocol(
+        &human(t1),
+        answer(30, t1, 20, r1, subject, approve_read())?,
+        None,
+    )?;
+    // ...and the Submit it holds is reduced after it.
+    clock.advance(Duration::from_secs(10))?;
+    let tick = rt.tick()?;
+    assert_eq!(
+        tick.denied(),
+        &[(operation(1), DenialReason::NotApproved)],
+        "{tick:?}"
+    );
+    assert_eq!(
+        rt.owner().dispatched(),
+        &[],
+        "an expired approval reaches no owner"
+    );
+    assert_eq!(
+        rt.remaining_budget(t1),
+        100,
+        "an expired approval reserves nothing"
+    );
     Ok(())
 }
 
