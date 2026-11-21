@@ -9,7 +9,9 @@ mod support;
 use std::time::Duration;
 
 use larry_contracts::authority::Scope;
-use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy, TerminalDisposition};
+use larry_contracts::effect::{
+    EffectOutcome, MAX_EFFECT_ATTEMPTS, ReconciliationStrategy, TerminalDisposition,
+};
 use larry_contracts::state::RunState;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
@@ -675,6 +677,32 @@ fn sim_reconcile_a_refused_retry_leaves_reconciliation_and_the_journal_stops_gro
             "the journal stops growing once the retry is refused"
         );
         Ok(witness_tally(&rt))
+    })
+}
+
+/// Source: larry#330. A fenced effect left unknown must not append an outcome
+/// every tick; the reconciliation budget is the one bound.
+#[test]
+fn sim_reconcile_a_fenced_unknown_records_at_most_the_attempt_budget() -> Outcome {
+    replay(192_u64..200, |seed| -> Sim<usize> {
+        let mut worst = 0_usize;
+        for strategy in [
+            ReconciliationStrategy::RequiresHuman,
+            ReconciliationStrategy::AlwaysCompensate,
+        ] {
+            let mut rt: TestRuntime = mk_rec(ScriptedOwner::new())?;
+            rt.offer(30, &read_work(30, 1, strategy))?;
+            assert!(rt.fence_mut().revoke(operation(30))?);
+            assert_eq!(rt.tick()?.fenced().len(), 1, "seed {seed}: fenced");
+            let before = rt.journal().len();
+            for _ in 0..10_000 {
+                rt.tick()?;
+            }
+            let grown = rt.journal().len().saturating_sub(before);
+            assert!(grown <= usize::from(MAX_EFFECT_ATTEMPTS), "seed {seed}");
+            worst = worst.max(grown);
+        }
+        Ok(worst)
     })
 }
 
