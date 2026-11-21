@@ -152,6 +152,9 @@ pub enum EventKind {
     EffectOutcomeRecorded,
     /// A terminal receipt was published.
     TerminalReceiptPublished,
+    /// A durably accepted command was refused at its reduce, so a restart can
+    /// say why it never ran (larry#371, ADR 0078).
+    CommandRefused,
 }
 
 impl EventKind {
@@ -164,6 +167,7 @@ impl EventKind {
             Self::EffectIntentRecorded => 2,
             Self::EffectOutcomeRecorded => 3,
             Self::TerminalReceiptPublished => 4,
+            Self::CommandRefused => 5,
         }
     }
 }
@@ -347,9 +351,14 @@ mod tests {
         assert_eq!(validate_append(None, EventSequence::FIRST), Ok(()));
     }
 
+    /// The sequence space is the `u64` representation itself, and its overflow
+    /// answer is a typed refusal, never a wrap: this test drives that
+    /// saturation at the last representable number.
+    const LAST_REPRESENTABLE: u64 = u64::MAX;
+
     #[test]
     fn e35_sequence_exhaustion_is_typed_never_wrapped() {
-        let last = EventSequence::new(u64::MAX);
+        let last = EventSequence::new(LAST_REPRESENTABLE);
         assert_eq!(last.successor(), Err(SequenceError::Exhausted));
         assert_eq!(assign_sequence(Some(last)), Err(SequenceError::Exhausted));
         assert_eq!(
