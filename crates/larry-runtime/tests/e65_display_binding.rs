@@ -9,6 +9,7 @@ mod simulation;
 #[path = "support/atomic.rs"]
 mod atomic;
 
+use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime};
 
 use atomic::{AtomicOwner, holder, resolved, swapped_field};
@@ -96,6 +97,114 @@ fn command(
             lgwks_std::json::to_vec(&proposal)?.into_boxed_slice(),
         ),
     )?)
+}
+
+/// A `Submit` for `run_number`'s run, carrying an operation and command
+/// identity of its own, so two submissions can share one run.
+fn work_on(run_number: u64, number: u64, tenant_byte: u8) -> Result<Command> {
+    let tenant = TenantId::from_bytes([tenant_byte; 16]);
+    let proposal = WorkProposal::new(
+        RunId::from_bytes(identity(run_number, tenant_byte)),
+        tenant,
+        OperationId::from_bytes(identity(number, tenant_byte)),
+        [Scope::FileRead].into_iter().collect(),
+        3,
+        BudgetUnit::Requests,
+        ReconciliationStrategy::Queryable,
+    );
+    Ok(Command::new(
+        CommandId::from_bytes(identity(number, tenant_byte)),
+        tenant,
+        Vec::new(),
+        CommandContent::new(
+            CommandKind::Submit,
+            lgwks_std::json::to_vec(&proposal)?.into_boxed_slice(),
+        ),
+    )?)
+}
+
+/// A correction for `run_number`'s run: no scope and no cost, so it changes
+/// nothing when it is finally promoted.
+fn steer_on(run_number: u64, number: u64, tenant_byte: u8) -> Result<Command> {
+    let tenant = TenantId::from_bytes([tenant_byte; 16]);
+    let proposal = WorkProposal::new(
+        RunId::from_bytes(identity(run_number, tenant_byte)),
+        tenant,
+        OperationId::from_bytes(identity(number, tenant_byte)),
+        BTreeSet::new(),
+        0,
+        BudgetUnit::Requests,
+        ReconciliationStrategy::Queryable,
+    );
+    Ok(Command::new(
+        CommandId::from_bytes(identity(number, tenant_byte)),
+        tenant,
+        Vec::new(),
+        CommandContent::new(
+            CommandKind::Steer,
+            lgwks_std::json::to_vec(&proposal)?.into_boxed_slice(),
+        ),
+    )?)
+}
+
+/// larry#332: a displayed submission held behind a correction is reduced only
+/// after the fence moved to a new epoch. It must not dispatch on the withdrawn
+/// generation: the display's epoch is re-checked at the reduce, not trusted
+/// from the moment it was shown.
+#[test]
+fn e65_a_held_submit_refuses_a_revocation_since_its_display() -> Result {
+    let seed = 7;
+    let mut owner = AtomicOwner::new(seed, 0);
+    owner.lose_reply = true;
+    let mut runtime: TestRuntime = Runtime::new(settings(seed)?, owner, clock_at(seed)?)?;
+
+    // The first effect stays unknown, so its run is not settled and a
+    // correction for that run holds the second submission behind it.
+    let first = work_on(1, 1, 1)?;
+    let shown = runtime.display(&first, holder(), &[grant(1, &[Scope::FileRead], 5, seed)?])?;
+    runtime.submit_displayed(first, shown)?;
+    assert!(
+        runtime.tick()?.receipts().is_empty(),
+        "the first effect stays unknown"
+    );
+
+    runtime.submit(steer_on(1, 3, 1)?)?;
+    let second = work_on(1, 2, 1)?;
+    let shown = runtime.display(&second, holder(), &[grant(1, &[Scope::FileRead], 5, seed)?])?;
+    runtime.submit_displayed(second, shown)?;
+    let held = runtime.tick()?;
+    assert!(
+        held.authorized().is_empty(),
+        "the correction holds the second submission"
+    );
+    assert_eq!(
+        runtime.owner().executed().len(),
+        1,
+        "only the first effect reached the owner"
+    );
+
+    let epoch = runtime.fence_mut().advance_epoch()?;
+    assert_eq!(
+        epoch,
+        SecurityEpoch::new(1),
+        "the fence moved past the display"
+    );
+    let refused = runtime.tick();
+    assert!(
+        matches!(
+            refused,
+            Err(RuntimeError::Binding(BindingError::Changed {
+                field: BindingField::SecurityEpoch
+            }))
+        ),
+        "the held submission is refused for the epoch it was displayed under: {refused:?}"
+    );
+    assert_eq!(
+        runtime.owner().executed().len(),
+        1,
+        "the withdrawn generation dispatches nothing"
+    );
+    Ok(())
 }
 
 /// Host snapshot admits all test scopes; each display still needs one grant.

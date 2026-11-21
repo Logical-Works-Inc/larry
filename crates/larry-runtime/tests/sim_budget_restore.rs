@@ -24,8 +24,8 @@ use larry_runtime::journal::Journal;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::runtime::restore;
 
-use sim_kit::{Offer, Sim, fresh_journal, read_work, remove, replay};
-use support::{TestRuntime, clock, settings};
+use sim_kit::{Offer, Sim, fresh_journal, read_work, reader, remove, replay};
+use support::{TestRuntime, clock, operation, settings};
 
 /// Fallible test outcome; setup failures propagate instead of panicking.
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -92,6 +92,97 @@ fn sim_a_restart_spends_the_recorded_dispatch_budget() -> Outcome {
             "seed {seed}: {restarts} restarts must add no dispatch past the record, saw {total}"
         );
         Ok((spent, restarts))
+    })?;
+    Ok(())
+}
+
+/// The journal a crash leaves when it lands inside the owner call of the
+/// `reach`th dispatch: every earlier record is durable, the reach is not. The
+/// sim drives the real reach and then restores from the snapshot taken before
+/// it, which is the exact state a process that died there would leave.
+fn crash_after_reaches(seed: u64) -> Sim<(usize, usize)> {
+    let reach = match seed.checked_rem(u64::from(MAX_EFFECT_ATTEMPTS)) {
+        Some(offset) => usize::try_from(offset)?.saturating_add(1),
+        None => 1,
+    };
+    let mut runtime = reader(ScriptedOwner::new(), 100)?;
+    runtime.offer(
+        1,
+        &read_work(1, 1, ReconciliationStrategy::IdempotentRetrySafe),
+    )?;
+    let mut snapshot = runtime.journal().clone();
+    for _ in 0..reach {
+        snapshot = runtime.journal().clone();
+        runtime.tick()?;
+    }
+    let before_crash = runtime.owner().dispatched().len();
+    assert_eq!(
+        before_crash, reach,
+        "seed {seed}: every attempt before the crash reached the owner"
+    );
+    let mut restored: TestRuntime = restore(
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+        ScriptedOwner::new(),
+        clock()?,
+        snapshot,
+    )?;
+    let epoch = restored.fence().epoch()?;
+    restored.fence_mut().authenticate(epoch)?;
+    for _ in 0..=usize::from(MAX_EFFECT_ATTEMPTS) {
+        restored.tick()?;
+    }
+    let total = before_crash.saturating_add(restored.owner().dispatched().len());
+    assert!(
+        total <= usize::from(MAX_EFFECT_ATTEMPTS),
+        "seed {seed}: a crash inside dispatch {reach} must not buy an attempt past \
+         the budget of {MAX_EFFECT_ATTEMPTS}, saw {total}"
+    );
+    Ok((reach, total))
+}
+
+/// A never-sent Queryable effect left open spends its reconciliation budget on
+/// `Unknown` records; a restart must not recharge that budget (larry#332).
+fn restart_unknowns(seed: u64) -> Sim<usize> {
+    let mut runtime = reader(ScriptedOwner::new(), 100)?;
+    runtime.offer(2, &read_work(2, 1, ReconciliationStrategy::Queryable))?;
+    assert!(
+        runtime.fence_mut().revoke(operation(2))?,
+        "seed {seed}: the first mutating reach is fenced, so the effect was never sent"
+    );
+    runtime.tick()?;
+    for _ in 0..usize::from(MAX_EFFECT_ATTEMPTS).saturating_mul(2) {
+        runtime.tick()?;
+    }
+    let mut restored: TestRuntime = restore(
+        settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
+        ScriptedOwner::new(),
+        clock()?,
+        runtime.into_journal(),
+    )?;
+    let epoch = restored.fence().epoch()?;
+    restored.fence_mut().authenticate(epoch)?;
+    let before = restored.journal().len();
+    for _ in 0..usize::from(MAX_EFFECT_ATTEMPTS).saturating_mul(2) {
+        restored.tick()?;
+    }
+    let added = restored.journal().len().saturating_sub(before);
+    assert_eq!(
+        added, 0,
+        "seed {seed}: a restart must not buy an `Unknown` record past the budget"
+    );
+    Ok(added)
+}
+
+/// larry#332: for 1,000 seeds, a crash at every dispatch point leaves total
+/// owner reaches at or below `MAX_EFFECT_ATTEMPTS`, and a restart adds no
+/// `Unknown` record past the reconciliation budget. One seed decides every
+/// identity, the clock and the crash point; the same seed replays exactly.
+#[test]
+fn sim_a_crash_at_every_point_never_spends_past_the_budget() -> Outcome {
+    replay(0_u64..1_000, |seed| -> Sim<(usize, usize, usize)> {
+        let (reach, dispatched) = crash_after_reaches(seed)?;
+        let unknowns = restart_unknowns(seed)?;
+        Ok((reach, dispatched, unknowns))
     })?;
     Ok(())
 }
