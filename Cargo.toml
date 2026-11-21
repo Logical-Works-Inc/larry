@@ -62,6 +62,11 @@ lgwks_deps = { version = "=7.3.0", default-features = false }
 # test sources with its tree-sitter grammar and takes its byte, node, depth and time bounds;
 # 6.1.0 is the newest release. `lang-rust` selects the Rust grammar and the parser it needs.
 lgwks_ast = { version = "=6.1.0", default-features = false }
+# Handle-relative mode reset for the workspace sweep (larry#366): `Dir` holds a descriptor but has no
+# call that resets a child's mode from it, so the sweep opens with `openat` and resets through
+# `chmodat`/`O_PATH` itself. Already in the lock through `lgwks_std` `fs-raw`, so this adds no crate.
+# Estate gap: Logical-Works-Inc/logicalworks-crates#1113; retire this edge when the call lands.
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs"] }  # gap: Logical-Works-Inc/logicalworks-crates#1113
 thiserror = "=2.0.21"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # The runtime gate (larry#164): the executor submits every task through it, so
 # a task body runs only inside the runtime's authorized owner call.
@@ -93,6 +98,10 @@ lgwks_ast = { workspace = true, features = ["lang-rust"] }
 crossterm = { version = "=0.29.0", default-features = false, features = ["events", "bracketed-paste"] }  # gap: Logical-Works-Inc/logicalworks-crates#1067
 # Display width (UAX #11) for wrapping CJK, emoji and combining marks in the frame; no dependencies.
 unicode-width = "=0.2.3"  # gap: Logical-Works-Inc/logicalworks-crates#1067
+
+[target.'cfg(unix)'.dependencies]
+# The executor's workspace sweep resets directory modes through held descriptors (larry#366).
+rustix = { workspace = true }
 
 [features]
 # The local reranker (larry#150): Candle runs the pinned Qwen3 reranker and the Hugging Face

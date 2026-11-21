@@ -28,7 +28,10 @@ pub(crate) fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
 /// One git command for `dir`, with the host out of the way (larry#269): the global file is
 /// `/dev/null` and the system file is off, so no user or machine config, template or hook is
 /// read; `main` is the branch default, signing is off, an empty `core.hooksPath` runs no hooks,
-/// and the author and committer are fixed. Every test git call is built here.
+/// and the author and committer are fixed. A repository variable inherited from the process that
+/// runs the suite — a pre-commit hook exports `GIT_DIR` — is cleared, so a fixture commits into
+/// its own directory and never into the repository that started it (larry#366). Every test git
+/// call is built here.
 pub(super) fn git_command(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
@@ -37,6 +40,10 @@ pub(super) fn git_command(dir: &Path) -> Command {
         .args(["-c", "init.defaultBranch=main"])
         .args(["-c", "commit.gpgsign=false"])
         .args(["-c", "core.hooksPath="])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "t")
@@ -185,5 +192,29 @@ fn a_hostile_home_gitconfig_changes_nothing() -> Result<(), Box<dyn Error>> {
         "the host's template reached the repository"
     );
     assert!(!marker.exists(), "the host's pre-commit hook ran");
+    Ok(())
+}
+
+/// The issue's proof (larry#366): a repository variable a pre-commit hook exports is removed
+/// from every fixture git call, so a fixture can never commit into the repository that started
+/// the suite.
+#[test]
+fn an_inherited_git_dir_is_cleared() -> Result<(), Box<dyn Error>> {
+    let dir = TempDir::new()?;
+    let command = git_command(dir.path());
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        let cleared = command
+            .get_envs()
+            .any(|(key, value)| key.to_str() == Some(name) && value.is_none());
+        assert!(
+            cleared,
+            "{name} must be removed from every fixture git call"
+        );
+    }
     Ok(())
 }
