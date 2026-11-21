@@ -14,6 +14,7 @@ use lgwks_std::seeded::Seeded;
 use super::documents::{self, Documents};
 use super::error::GovernanceError;
 use super::patterns::{INVENTORIES, Inventory, Patterns};
+use super::read::{self, ReadFault};
 use super::sim_support::{
     Scratch, SimError, SimResult, append, assert_refused, count_of, each_seed, errors_of, loaded,
     pick, replace_once, text_of, top_level, whole_of, with_patterns,
@@ -674,6 +675,48 @@ fn sim_a_fifo_is_refused_by_name() -> SimResult {
         }
     }
     Ok(())
+}
+
+/// A symlink swapped over the final file between the reader's check and its open is refused:
+/// the open follows no final link (larry#359, CWE-367).
+#[cfg(unix)]
+#[test]
+fn sim_a_swapped_symlink_between_the_check_and_the_open_is_refused_by_name() -> SimResult {
+    const SWAPPED: &str = "tools/tracker/tracker.json";
+    let scratch = Scratch::new("swap-link")?;
+    scratch.write(SWAPPED, b"{}")?;
+    scratch.write("target.json", b"{\"stolen\":true}")?;
+    let target = scratch.path().join("target.json");
+    let result = read::read_bounded_with(scratch.path(), Path::new(SWAPPED), 4096, |at| {
+        fs::remove_file(at)?;
+        std::os::unix::fs::symlink(&target, at)
+    });
+    match result {
+        Err(ReadFault::Symlink) => Ok(()),
+        other => Err(SimError::Absent(format!("a symlink refusal, got {other:?}")).into()),
+    }
+}
+
+/// A FIFO swapped over the final file between the reader's check and its open is refused in
+/// bounded time: the open is non-blocking and judges the opened file (larry#359, CWE-367).
+#[cfg(unix)]
+#[test]
+fn sim_a_swapped_fifo_between_the_check_and_the_open_is_refused_by_name() -> SimResult {
+    const SWAPPED: &str = "tools/tracker/tracker.json";
+    let scratch = Scratch::new("swap-fifo")?;
+    scratch.write(SWAPPED, b"{}")?;
+    let result = read::read_bounded_with(scratch.path(), Path::new(SWAPPED), 4096, |at| {
+        fs::remove_file(at)?;
+        let status = std::process::Command::new("mkfifo").arg(at).status()?;
+        if status.success() {
+            return Ok(());
+        }
+        Err(std::io::Error::other(format!("mkfifo refused: {status}")))
+    });
+    match result {
+        Err(ReadFault::NotRegular { directory: false }) => Ok(()),
+        other => Err(SimError::Absent(format!("a FIFO refusal, got {other:?}")).into()),
+    }
 }
 
 /// A `docs` directory that is a link to a real directory is refused by name, not read through

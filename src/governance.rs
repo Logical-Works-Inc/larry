@@ -23,6 +23,8 @@ mod sim_governance;
 mod sim_markdown;
 #[cfg(test)]
 mod sim_parsers;
+#[cfg(all(test, unix))]
+mod sim_read;
 #[cfg(test)]
 pub(crate) mod sim_support;
 #[cfg(test)]
