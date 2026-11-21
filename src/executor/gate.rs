@@ -393,7 +393,7 @@ pub(super) fn admit_and_run(
     key: &lgwks_std::sign::SecretKey,
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
-    if recovered_evidence(&settings.state_dir, task_id) {
+    if recovered_evidence(&settings.state_dir, task_id)? {
         // This request was already dispatched once and its executor died inside
         // it. The journal it left is the evidence; the retry answers from it and
         // nothing here reaches the world again (larry#182 defect 3).

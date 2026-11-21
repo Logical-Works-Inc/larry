@@ -16,7 +16,7 @@ use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
 use super::super::gate::{policy, task_settings};
-use super::{JOURNALS_DIR, journal_live, journal_path, recover};
+use super::{JOURNALS_DIR, journal_live, journal_path, recover, recovered_evidence};
 
 /// What every simulation here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -52,18 +52,18 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
     std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     let id = "018f0000-0000-7000-8000-000000000001";
     assert!(
-        !journal_live(&state, &scopes, id),
+        !journal_live(&state, &scopes, id)?,
         "an absent journal is not live"
     );
     let path = journal_path(&state, id);
     let held = Journal::open(&path, capacity)?;
     assert!(
-        journal_live(&state, &scopes, id),
+        journal_live(&state, &scopes, id)?,
         "a journal whose lock is held is live"
     );
     drop(held);
     assert!(
-        !journal_live(&state, &scopes, id),
+        !journal_live(&state, &scopes, id)?,
         "a journal whose lock was released is not live"
     );
     Ok(())
@@ -208,6 +208,47 @@ fn sim_two_state_directories_never_set_aside_each_others_journals() -> TestResul
             right_count,
             "seed {seed}: the right directory sets aside its own journals afterwards"
         );
+    }
+    Ok(())
+}
+
+/// The hidden file: a journal whose lock cannot be probed is a typed journal error, never
+/// "dead", and evidence whose directory cannot be searched is a typed journals error, never
+/// "absent" (larry#334).
+#[cfg(unix)]
+#[test]
+fn sim_a_probe_error_is_typed_and_never_dead_or_absent() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (scopes, _capacity) = settings()?;
+    let state = scratch_directory()?;
+    let journals = state.join(JOURNALS_DIR);
+    std::fs::create_dir_all(&journals)?;
+    let id = "018f0000-0000-7000-8000-000000000005";
+    let path = journal_path(&state, id);
+    std::fs::write(&path, b"not a journal")?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))?;
+    match journal_live(&state, &scopes, id) {
+        Err(ExecError::Journal(_)) => {}
+        Ok(live) => {
+            return Err(
+                format!("a journal whose lock cannot be probed answered live={live}").into(),
+            );
+        }
+        Err(other) => {
+            return Err(format!("the probe error is not typed as a journal error: {other}").into());
+        }
+    }
+    std::fs::set_permissions(&journals, std::fs::Permissions::from_mode(0o000))?;
+    let hidden = recovered_evidence(&state, id);
+    std::fs::set_permissions(&journals, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    match hidden {
+        Err(ExecError::Journals(_)) => {}
+        Ok(found) => return Err(format!("a stat error answered absent={}", !found).into()),
+        Err(other) => {
+            return Err(format!("the stat error is not typed as a journals error: {other}").into());
+        }
     }
     Ok(())
 }

@@ -9,7 +9,10 @@
 
 use lgwks_std::seeded::Seeded;
 
-use super::{hold_origin, sweep, sweep_origins};
+use super::super::ExecError;
+use super::{
+    hold_origin, origin_lock_path, remove_workspace, strands, sweep, sweep_dir, sweep_origins,
+};
 
 /// What every simulation here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -191,5 +194,171 @@ fn sim_a_second_sweep_removes_nothing_more_for_every_seed() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+/// The blocked remover: a workspace whose removal fails is kept and reported as one typed
+/// fault, and every other dead workspace is still removed, so one entry never refuses the next
+/// start (larry#334).
+#[test]
+fn sim_a_refused_workspace_is_one_typed_fault_and_the_sweep_goes_on() -> TestResult {
+    let state = scratch_directory()?;
+    let ws = state.join("ws");
+    std::fs::create_dir_all(ws.join("refused"))?;
+    std::fs::create_dir_all(ws.join("removed"))?;
+    let faults = sweep_dir(
+        &ws,
+        &[],
+        |_name| Ok(false),
+        |path| {
+            if path.ends_with("refused") {
+                return Err(ExecError::Workspace(std::io::Error::other(
+                    "the directory is held open",
+                )));
+            }
+            remove_workspace(path)
+        },
+    )?;
+    assert_eq!(faults.len(), 1, "the refused workspace is one typed fault");
+    assert!(
+        ws.join("refused").is_dir(),
+        "an entry that still fails is kept, never removed as someone else's"
+    );
+    assert!(
+        !ws.join("removed").exists(),
+        "every other dead workspace is still removed"
+    );
+    Ok(())
+}
+
+/// The names the interleaved sims make: a kept entry beside every swept one, so a sweep that
+/// stopped at the first fault would leave swept ones behind in any listing order.
+const INTERLEAVED: usize = PAIRS.saturating_mul(2);
+
+/// The kept entries among the interleaved ones: every odd index.
+const PAIRS: usize = 4;
+
+/// Interleaved probe faults: every odd workspace's probe errors and is kept as a fault, and
+/// every even one is still removed, whatever order the directory lists them in (larry#334).
+#[test]
+fn sim_every_probe_fault_is_kept_and_every_dead_neighbour_is_removed() -> TestResult {
+    let state = scratch_directory()?;
+    let ws = state.join("ws");
+    for index in 0..INTERLEAVED {
+        std::fs::create_dir_all(ws.join(format!("run-{index}")))?;
+    }
+    let faults = sweep_dir(
+        &ws,
+        &[],
+        |name| {
+            let odd = name
+                .strip_prefix("run-")
+                .and_then(|digits| digits.parse::<usize>().ok())
+                .is_some_and(|index| index % 2 == 1);
+            if odd {
+                return Err(ExecError::Workspace(std::io::Error::other("unprovable")));
+            }
+            Ok(false)
+        },
+        remove_workspace,
+    )?;
+    assert_eq!(faults.len(), PAIRS, "each probe fault is one typed fault");
+    for index in 0..INTERLEAVED {
+        assert_eq!(
+            ws.join(format!("run-{index}")).is_dir(),
+            index % 2 == 1,
+            "run-{index}: a probe fault is kept and a dead workspace is removed"
+        );
+    }
+    Ok(())
+}
+
+/// Interleaved lock faults: an origin lock that cannot be opened (a symlink loop, `ELOOP` even
+/// for root) is kept as a fault, and every unheld lock beside it is still removed (larry#334).
+#[cfg(unix)]
+#[test]
+fn sim_every_unreadable_origin_lock_is_kept_and_every_unheld_one_removed() -> TestResult {
+    let state = scratch_directory()?;
+    let eval = state.join("eval");
+    std::fs::create_dir_all(&eval)?;
+    let locks: Vec<_> = (0..INTERLEAVED)
+        .map(|index| origin_lock_path(&eval, &format!("origin-{DEAD_PID}-{index}")))
+        .collect();
+    for (index, lock) in locks.iter().enumerate() {
+        if index % 2 == 1 {
+            std::os::unix::fs::symlink(lock, lock)?;
+        } else {
+            std::fs::write(lock, b"")?;
+        }
+    }
+    let faults = sweep_origins(&state)?;
+    assert_eq!(
+        faults.len(),
+        PAIRS,
+        "each unreadable lock is one typed fault"
+    );
+    for (index, lock) in locks.iter().enumerate() {
+        assert_eq!(
+            lock.symlink_metadata().is_ok(),
+            index % 2 == 1,
+            "lock {index}: an unreadable lock is kept and an unheld one is removed"
+        );
+    }
+    Ok(())
+}
+
+/// A workspace already gone is not stranded; every other refusal strands it, so the counter
+/// the next start reads is exact (larry#334).
+#[test]
+fn only_a_removal_that_left_the_tree_behind_strands_it() {
+    let gone = std::io::Error::from(std::io::ErrorKind::NotFound);
+    let held = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    assert!(!strands(&Ok(())), "a removed tree is not stranded");
+    assert!(
+        !strands(&Err(ExecError::Workspace(gone))),
+        "a tree already gone is not stranded"
+    );
+    assert!(
+        strands(&Err(ExecError::Workspace(held))),
+        "a refused removal strands the tree"
+    );
+    assert!(
+        strands(&Err(ExecError::Journals(std::io::Error::other("other")))),
+        "a refusal that is not the file system's own strands it too"
+    );
+}
+
+/// The unprovable owner: a liveness probe that errors keeps its workspace, because an unknown
+/// owner may be live; a probed-dead neighbour is still removed (larry#334).
+#[test]
+fn sim_a_probe_error_keeps_its_workspace_and_the_sweep_goes_on() -> TestResult {
+    let state = scratch_directory()?;
+    let ws = state.join("ws");
+    std::fs::create_dir_all(ws.join("unknown"))?;
+    std::fs::create_dir_all(ws.join("dead"))?;
+    let faults = sweep_dir(
+        &ws,
+        &[],
+        |name| match name {
+            "unknown" => Err(ExecError::Workspace(std::io::Error::other(
+                "the lock could not be probed",
+            ))),
+            _ => Ok(false),
+        },
+        remove_workspace,
+    )?;
+    assert_eq!(
+        faults.len(),
+        1,
+        "the unprovable workspace is one typed fault"
+    );
+    assert!(
+        ws.join("unknown").is_dir(),
+        "a probe error is never read as dead"
+    );
+    assert!(
+        !ws.join("dead").exists(),
+        "a workspace the probe says is dead is still removed"
+    );
     Ok(())
 }

@@ -158,6 +158,9 @@ pub enum ExecError {
     Unsealed(RuntimeError),
     /// The task journals directory could not be created, listed or tidied (larry#75).
     Journals(std::io::Error),
+    /// A task journal's lock could not be probed, so the run's liveness is unknown and
+    /// is never reported as dead (larry#334).
+    Journal(RuntimeError),
     /// A terminal session was refused before anything ran (larry#93).
     Session(SessionError),
     /// A variable Larry reads holds bytes that are not UTF-8: it is refused,
@@ -265,6 +268,7 @@ impl fmt::Display for ExecError {
                 "exec run finished but its record is not durable, so no report is returned: {cause}"
             ),
             Self::Journals(ref cause) => write!(out, "exec journals: {cause}"),
+            Self::Journal(ref cause) => write!(out, "exec journal: {cause}"),
             Self::Session(ref cause) => write!(out, "session: {cause}"),
             Self::NotUnicode { ref name } => {
                 write!(out, "exec {name} is not UTF-8; set it to UTF-8 text")
@@ -301,6 +305,7 @@ impl std::error::Error for ExecError {
             Self::Gate(ref cause) => Some(cause),
             Self::Unsealed(ref cause) => Some(cause),
             Self::Journals(ref cause) => Some(cause),
+            Self::Journal(ref cause) => Some(cause),
             Self::Session(ref cause) => Some(cause),
             Self::Confine(ref cause) => Some(cause),
             Self::KeyMissing
@@ -517,9 +522,13 @@ impl Settings {
         workspace::seed_origin(&self.state_dir, &self.path, dir)
     }
 
-    /// Removes the origins a dead `larry eval` left under the state directory.
+    /// Removes the origins a dead `larry eval` left under the state directory. An origin
+    /// that cannot be settled is reported and kept, never a refusal of the eval (larry#334).
     pub(crate) fn sweep_origins(&self) -> Result<(), ExecError> {
-        workspace::sweep_origins(&self.state_dir)
+        for fault in workspace::sweep_origins(&self.state_dir)? {
+            fault.report();
+        }
+        Ok(())
     }
 }
 
@@ -593,9 +602,11 @@ fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), 
     ledger.reap(&clock)?;
     let state = settings.state_dir.as_path();
     let policy = &settings.policy;
-    sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
-        Ok(recovery::journal_live(state, policy, task))
-    })?;
+    for fault in sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
+        recovery::journal_live(state, policy, task)
+    })? {
+        fault.report();
+    }
     recovery::recover(&settings.state_dir, &settings.policy)?;
     Ok((ledger, key))
 }
