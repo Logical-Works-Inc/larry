@@ -36,7 +36,7 @@ use super::{DisplayedEffect, Runtime, TickItem, TickReport};
 use crate::error::RuntimeError;
 use crate::journal::{Journal, JournalEntry};
 use crate::owner::EffectOwner;
-use crate::payload::{CommandAcceptedPayload, WorkProposal};
+use crate::payload::{CommandAcceptedPayload, CommandRefusal, WorkProposal};
 use crate::projection::{EffectPhase, ProjectionBackend};
 use crate::{MAX_EFFECTS_PER_RUN, MAX_READY_WORK};
 
@@ -354,9 +354,20 @@ where
             };
             left = left.saturating_sub(1);
             let id = next.command.id();
-            report.admitted.push(id);
             if let Err(error) = self.reduce(next, index, at, report) {
                 self.refuse(report, TickItem::Command(id), error)?;
+                // A failed acceptance record puts the command back at this
+                // index, so the loop steps past it: one failure costs one slot
+                // of the tick's budget, never the whole tick. A refusal after
+                // the acceptance is durable leaves the set, so the command now
+                // at this index is the next one and is reduced (larry#371).
+                let put_back = self
+                    .admitted
+                    .get(index)
+                    .is_some_and(|admitted| admitted.command.id() == id);
+                if put_back {
+                    index = index.saturating_add(1);
+                }
             }
         }
         Ok(left)
@@ -407,6 +418,10 @@ where
             );
             return Err(error);
         }
+        // Only an accepted command is reported as admitted: one whose
+        // acceptance record failed stays pending and is named as refused
+        // (larry#371).
+        report.admitted.push(id);
         match kind {
             CommandKind::Submit => self.submit_work(&command, display.as_ref(), at, report),
             CommandKind::Cancel => self.request_cancellation(tenant, run),
@@ -474,7 +489,6 @@ where
             return Ok(true);
         }
         if let Some(command) = self.hold_or_pass(proposal.run(), kept, display.as_ref(), at) {
-            report.admitted.push(id);
             let held = Admitted::new(proposal.run(), command, display);
             // A command that fails to record its acceptance returns to the
             // back of the pending set: it is journaled, so it must be held
@@ -487,13 +501,14 @@ where
     /// Gates and durably reserves a proposal before reaching its owner.
     pub(super) fn admit_work(
         &mut self,
-        tenant: TenantId,
+        command: &Command,
         proposal: &WorkProposal,
         content: ContentDigest,
         display: Option<&DisplayedEffect>,
         at: SystemTime,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
+        let (tenant, command_id) = (command.tenant(), command.id());
         let run = proposal.run();
         // A display approved at an earlier epoch is not a standing entitlement.
         // The command may have waited in the pending set since it was shown,
@@ -503,6 +518,15 @@ where
         if let Some(shown) = display
             && shown.epoch != self.fence.epoch()?
         {
+            // The command's acceptance is already durable, so the refusal is
+            // recorded beside it: the report dies with the process, and a
+            // restart must still say why the command never ran (larry#371).
+            self.record_command_refused(
+                command_id,
+                tenant,
+                run,
+                CommandRefusal::StaleDisplayEpoch,
+            )?;
             return Err(BindingError::Changed {
                 field: BindingField::SecurityEpoch,
             }

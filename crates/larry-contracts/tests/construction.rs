@@ -38,6 +38,9 @@ fn canonical_kind_tags_preserve_existing_command_and_event_digests()
         (EventKind::EffectIntentRecorded, 2),
         (EventKind::EffectOutcomeRecorded, 3),
         (EventKind::TerminalReceiptPublished, 4),
+        // larry#371, ADR 0078: a durably accepted command's refusal is its own
+        // recorded fact, appended after the existing vocabulary.
+        (EventKind::CommandRefused, 5),
     ] {
         let event = Event::new(
             tenant,
