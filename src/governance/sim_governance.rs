@@ -6,16 +6,19 @@
 //! Requirement: every mutation is refused with its exact error, and every legal change passes.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::path::Path;
 
 use lgwks_std::seeded::Seeded;
 
-use super::documents::Documents;
+use super::documents::{self, Documents};
+use super::error::GovernanceError;
 use super::patterns::{INVENTORIES, Inventory, Patterns};
 use super::sim_support::{
-    SimError, SimResult, append, assert_refused, count_of, each_seed, errors_of, loaded, pick,
-    replace_once, text_of, top_level, whole_of, with_patterns,
+    Scratch, SimError, SimResult, append, assert_refused, count_of, each_seed, errors_of, loaded,
+    pick, replace_once, text_of, top_level, whole_of, with_patterns,
 };
-use super::{ANCHORS, execution_section};
+use super::{ANCHORS, execution_section, receipts, tracker};
 
 /// Seeds each control runs; each seed validates the whole tree once.
 const SEEDS: u64 = 16;
@@ -614,5 +617,85 @@ fn sim_inventory_can_grow() -> SimResult {
         );
         Ok(())
     })?;
+    Ok(())
+}
+
+// Bounded governance reads (larry#336): a link anywhere on a governed path, a FIFO and a device are
+// refused by name before anything is read. Source: CWE-59 (link following), CWE-400 (uncontrolled
+// resource consumption) and POSIX `mkfifo(3)`. Requirement: the refusal names the path, returns in
+// bounded time (a FIFO or device is never opened), and holds bounded memory (the read stops one
+// byte past its bound).
+
+/// The refused receipt's path, as its message names it.
+const DEVICE_RECEIPT: &str = "tools/receipts/leak.json";
+/// The tracker data file the FIFO case refuses.
+const FIFO_DATA: &str = "tools/tracker/tracker.json";
+
+/// A link to a device of length zero is refused by name: it is never opened, so the read cannot run
+/// to no end (larry#336).
+#[cfg(unix)]
+#[test]
+fn sim_a_link_to_a_device_is_refused_by_name() -> SimResult {
+    let scratch = Scratch::new("read-device")?;
+    let directory = scratch.path().join("tools").join("receipts");
+    fs::create_dir_all(&directory)?;
+    std::os::unix::fs::symlink(Path::new("/dev/zero"), directory.join("leak.json"))?;
+    let errors = receipts::receipt_errors(scratch.path());
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains(DEVICE_RECEIPT) && error.contains("symbolic link")),
+        "a device behind a link is refused by name: {errors:?}"
+    );
+    Ok(())
+}
+
+/// A FIFO is refused by name without a blocking open (larry#336).
+#[cfg(unix)]
+#[test]
+fn sim_a_fifo_is_refused_by_name() -> SimResult {
+    let scratch = Scratch::new("read-fifo")?;
+    scratch.write("tools/tracker/template.html", b"__TRACKER_DATA__")?;
+    let status = std::process::Command::new("mkfifo")
+        .arg(scratch.path().join(FIFO_DATA))
+        .status()?;
+    assert!(status.success(), "mkfifo refused: {status}");
+    match tracker::render(scratch.path()) {
+        Err(tracker::TrackerError::NotRegular { path }) => assert!(
+            path.ends_with(FIFO_DATA),
+            "the FIFO is named: {}",
+            path.display()
+        ),
+        Ok(_) => {
+            return Err(SimError::Absent(String::from("a FIFO refusal, got a render")).into());
+        }
+        Err(other) => {
+            return Err(SimError::Absent(format!("a FIFO refusal, got {other:?}")).into());
+        }
+    }
+    Ok(())
+}
+
+/// A `docs` directory that is a link to a real directory is refused by name, not read through
+/// (larry#336).
+#[cfg(unix)]
+#[test]
+fn sim_a_symlinked_docs_directory_is_refused_by_name() -> SimResult {
+    let scratch = Scratch::new("read-docs-link")?;
+    scratch.write("real/note.md", b"# Note\n")?;
+    std::os::unix::fs::symlink(scratch.path().join("real"), scratch.path().join("docs"))?;
+    match documents::load(scratch.path()) {
+        Err(GovernanceError::Symlink { relative }) => assert!(
+            relative.starts_with("docs/"),
+            "the document under the linked directory is named: {relative}"
+        ),
+        Ok(_) => {
+            return Err(SimError::Absent(String::from(
+                "a refusal of the linked docs directory, got a load",
+            ))
+            .into());
+        }
+        Err(other) => return Err(SimError::Refused(other).into()),
+    }
     Ok(())
 }

@@ -20,6 +20,11 @@ pub(crate) enum GovernanceError {
         /// The directory, relative to the root.
         relative: String,
     },
+    /// A governed name is not a regular file: a FIFO, device or socket (larry#336).
+    NotRegular {
+        /// The entry, relative to the root.
+        relative: String,
+    },
     /// A document is past the 2 MiB bound.
     TooLarge {
         /// The document, relative to the root.
@@ -102,6 +107,9 @@ impl fmt::Display for GovernanceError {
             Self::IsDirectory { ref relative } => {
                 write!(out, "[Errno 21] Is a directory: {relative}")
             }
+            Self::NotRegular { ref relative } => {
+                write!(out, "not a regular file: {relative}")
+            }
             Self::TooLarge { ref relative } => {
                 write!(out, "document exceeds byte limit: {relative}")
             }
@@ -153,6 +161,7 @@ impl std::error::Error for GovernanceError {
             Self::Source { ref cause, .. } => Some(cause),
             Self::Symlink { .. }
             | Self::IsDirectory { .. }
+            | Self::NotRegular { .. }
             | Self::TooLarge { .. }
             | Self::TooMany { .. }
             | Self::NotUtf8 { .. }
