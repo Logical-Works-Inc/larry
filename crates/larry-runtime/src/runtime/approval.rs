@@ -70,9 +70,10 @@ impl Subject {
 pub struct Question {
     /// The effect in question.
     subject: Subject,
-    /// Who asks.
+    /// Who asks; it can never be the respondent.
     requester: WorkerId,
-    /// The only identity whose answer counts.
+    /// The only identity whose answer counts: the respondent must answer
+    /// through an offer the host authenticated as this worker.
     respondent: WorkerId,
     /// The instant past which no answer is taken and nothing is approved.
     expires_at: SystemTime,
@@ -82,7 +83,8 @@ pub struct Question {
 
 impl Question {
     /// Asks `respondent`, on behalf of `requester`, about `subject` until
-    /// `expires_at`, offering `scopes`.
+    /// `expires_at`, offering `scopes`. Admission refuses a question whose
+    /// `requester` is its `respondent`: a worker cannot approve its own work.
     #[must_use]
     pub const fn new(
         subject: Subject,
@@ -118,7 +120,8 @@ pub enum Decision {
 pub struct Answer {
     /// The `Ask` command this answers.
     question: CommandId,
-    /// Who answers; it must be the question's respondent.
+    /// Who answers; it must be the question's respondent and the offer's
+    /// host-authenticated principal.
     respondent: WorkerId,
     /// The effect the respondent saw; it must be the question's.
     subject: Subject,
@@ -177,6 +180,13 @@ pub enum QuestionError {
     },
     /// The question expires no later than it is asked.
     ExpiredWhenAsked,
+    /// The question's respondent is its requester, so no answer can count.
+    RequesterIsRespondent,
+    /// The answer arrived from an offer with no host-authenticated principal.
+    UnboundPrincipal {
+        /// The question.
+        question: CommandId,
+    },
     /// No question has this identity.
     UnknownQuestion {
         /// The identity the answer named.
@@ -221,6 +231,13 @@ impl fmt::Display for QuestionError {
                 write!(f, "operation {operation} already has a question")
             }
             Self::ExpiredWhenAsked => f.write_str("the question expires before it is asked"),
+            Self::RequesterIsRespondent => f.write_str(
+                "the question's responder is its requester; a worker cannot approve itself",
+            ),
+            Self::UnboundPrincipal { question } => write!(
+                f,
+                "the answer to question {question} arrived with no authenticated principal"
+            ),
             Self::UnknownQuestion { question } => write!(f, "no question {question}"),
             Self::BindingMismatch { question } => write!(
                 f,
@@ -274,9 +291,16 @@ struct Asked {
 
 impl Asked {
     /// Where the question stands at `at`, its run `closed` or not.
+    ///
+    /// An approval is consent only for a use before `expires_at`: a `Submit`
+    /// reduced at or past expiry is denied `NotApproved`, never dispatched on
+    /// an answer taken earlier (E30, larry#331).
     fn status(&self, at: SystemTime, closed: bool) -> QuestionStatus {
         match self.decision {
-            Some(Decision::Approve(ref scopes)) => QuestionStatus::Approved(scopes.clone()),
+            Some(Decision::Approve(ref scopes)) if at < self.question.expires_at => {
+                QuestionStatus::Approved(scopes.clone())
+            }
+            Some(Decision::Approve(_)) => QuestionStatus::TimedOut,
             Some(Decision::Reject) => QuestionStatus::Rejected,
             None if closed => QuestionStatus::Cancelled,
             None if at >= self.question.expires_at => QuestionStatus::TimedOut,
@@ -323,9 +347,17 @@ impl Book {
                 }
             }
             CommandKind::Answer => {
+                // The journal's answer counts only under the same binding the
+                // admission enforced: the respondent is the question's
+                // respondent and not its requester, and the effect is the
+                // question's. A restore therefore re-derives the verdict from
+                // the record alone (E30, larry#331).
                 if let Ok(answer) = lgwks_std::json::from_slice::<Answer>(payload)
                     && let Some(asked) = self.asked.get_mut(&answer.question)
                     && asked.decision.is_none()
+                    && answer.respondent == asked.question.respondent
+                    && answer.respondent != asked.question.requester
+                    && answer.subject == asked.question.subject
                 {
                     asked.decision = Some(answer.decision);
                 }
@@ -370,11 +402,14 @@ where
             .count()
     }
 
-    /// Checks an `Ask` or `Answer` before the journal takes it.
+    /// Checks an `Ask` or `Answer` before the journal takes it. An answer is
+    /// judged against `principal`, the host-authenticated worker the offer
+    /// presents, so a client cannot name an identity it does not hold.
     pub(super) fn check_question(
         &self,
         command: &Command,
         at: SystemTime,
+        principal: Option<WorkerId>,
     ) -> Result<(), RuntimeError> {
         let payload = command.content().payload();
         let kind = command.content().kind();
@@ -384,15 +419,16 @@ where
         }
         if kind == CommandKind::Answer {
             let answer: Answer = lgwks_std::json::from_slice(payload)?;
-            return self.check_answer(command.tenant(), &answer, at);
+            return self.check_answer(command.tenant(), &answer, at, principal);
         }
         // Every other kind carries no question; admission judges it on its own
         // terms and refuses a kind it does not support.
         Ok(())
     }
 
-    /// An `Ask` expires after it is asked, targets an open run, is its
-    /// effect's only question, and fits the pending bound.
+    /// An `Ask` names a respondent other than its requester, expires after it
+    /// is asked, targets an open run, is its effect's only question, and fits
+    /// the pending bound.
     fn check_ask(
         &self,
         tenant: TenantId,
@@ -400,6 +436,9 @@ where
         at: SystemTime,
     ) -> Result<(), RuntimeError> {
         let subject = question.subject;
+        if question.requester == question.respondent {
+            return Err(QuestionError::RequesterIsRespondent.into());
+        }
         if question.expires_at <= at {
             return Err(QuestionError::ExpiredWhenAsked.into());
         }
@@ -423,16 +462,21 @@ where
         Ok(())
     }
 
-    /// An `Answer` matches its question's tenant, respondent and effect, is
-    /// its first, arrives before expiry on an open run, and approves only
-    /// offered scopes.
+    /// An `Answer` is its question's first, from the respondent the question
+    /// names and no other principal, never from the question's requester,
+    /// about the question's exact effect, before expiry on an open run, and
+    /// approves only offered scopes.
     fn check_answer(
         &self,
         tenant: TenantId,
         answer: &Answer,
         at: SystemTime,
+        principal: Option<WorkerId>,
     ) -> Result<(), RuntimeError> {
         let question = answer.question;
+        let Some(principal) = principal else {
+            return Err(QuestionError::UnboundPrincipal { question }.into());
+        };
         let asked = self
             .questions
             .asked
@@ -440,9 +484,13 @@ where
             .ok_or(QuestionError::UnknownQuestion { question })?;
         if asked.tenant != tenant
             || asked.question.respondent != answer.respondent
+            || answer.respondent != principal
             || asked.question.subject != answer.subject
         {
             return Err(QuestionError::BindingMismatch { question }.into());
+        }
+        if asked.question.requester == principal {
+            return Err(QuestionError::RequesterIsRespondent.into());
         }
         if asked.decision.is_some() {
             return Err(QuestionError::AlreadyAnswered { question }.into());
