@@ -372,7 +372,7 @@ const SENTINEL_MODE: u32 = 0o640;
 /// A directory judged a directory is swapped for a link to a file outside the tree before its
 /// mode is reset, and that file's mode stays byte-identical. Source: CWE-367 (TOCTOU) and CWE-59
 /// (link following); the child that left the command's process group is still alive while the
-/// workspace drops, so the swap window is real (larry#334, larry#366).
+/// workspace drops, so the swap window is real (larry#334, larry#366, ADR 0081).
 #[cfg(unix)]
 #[test]
 fn sim_a_link_swapped_in_between_the_check_and_the_reset_keeps_the_sentinels_mode() -> TestResult {

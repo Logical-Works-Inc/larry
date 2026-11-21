@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0078: the workspace sweep resets modes through held descriptors"
+title: "ADR 0081: the workspace sweep resets modes through held descriptors"
 description: Why the workspace mode reset walks held directory descriptors and never changes a mode by path, and how each platform applies a no-follow reset.
-resource: /docs/adr/0078-the-workspace-sweep-resets-modes-through-held-descriptors.md
+resource: /docs/adr/0081-the-workspace-sweep-resets-modes-through-held-descriptors.md
 tags: [larry, adr, workspace, security]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: larry#366 sims and leftover journeys on Oracle Linux, clippy, 2026-11-21}
@@ -11,7 +11,7 @@ stale_after: 2027-02-21
 sources: [larry#366, larry#334, /docs/adr/0075-bounded-drain-and-leftover-sweep.md, /docs/adr/0074-governance-open-from-a-held-directory-descriptor.md, /INVARIANTS.md, https://cwe.mitre.org/data/definitions/367.html, https://cwe.mitre.org/data/definitions/59.html]
 ---
 
-# 0078: the workspace sweep resets modes through held descriptors
+# 0081: the workspace sweep resets modes through held descriptors
 
 Status: accepted, 2026-11-21 (larry#366). It replaces the mode reset of ADR 0075 and keeps its rule.
 
