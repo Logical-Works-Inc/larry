@@ -1,14 +1,17 @@
 //! The shipped `larry` binary on a real PTY, and the screen it paints (larry#239).
 //!
-//! `script(1)` supplies the terminal, 32x120, `TERM=xterm-256color`, with only the fixed PATH,
-//! TERM and the caller's settings set. The screen model keeps the terminal's rules: CUP moves the
-//! cursor, ED clears, OSC is skipped, printable text lands at the cursor. Source: ECMA-48 (CSI,
-//! OSC), POSIX `script(1)` and `kill(2)`. `tests/e2e_journey.rs` includes this file.
+//! `script(1)` supplies the terminal, 32x120, `TERM=xterm-256color`, with only the PATH built
+//! from where its tools resolved, TERM and the caller's settings set. The screen model keeps the
+//! terminal's rules: CUP moves the cursor, ED clears, OSC is skipped, printable text lands at the
+//! cursor. Source: ECMA-48 (CSI, OSC), POSIX `script(1)` and `kill(2)`. `tests/e2e_journey.rs`
+//! includes this file.
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
-use std::path::Path;
+use std::fmt;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::{Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
@@ -19,10 +22,145 @@ pub(crate) type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 #[path = "deadline.rs"]
 pub(crate) mod deadline;
 
-/// The PATH every terminal's shell gets: the directories the journeys' tools live in, never the
-/// host's PATH (larry#269). `script`, `sh`, `stty`, `git`, `cp` and `sleep` live under one of
-/// these on macOS and Linux, so the frame behaves the same on any host that runs the suite.
-pub(crate) const TEST_PATH: &str = "/usr/bin:/bin";
+/// The directories the tool lookup searches, in the order it prefers them: the places `sh`,
+/// `git`, `script`, `stty`, `cp` and `sleep` live on macOS, Linux, Homebrew and NixOS. The host's
+/// PATH and shell configuration are never read (larry#269, larry#296).
+const TOOL_DIRS: [&str; 6] = [
+    "/usr/bin",
+    "/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/nix/var/nix/profiles/default/bin",
+    "/run/current-system/sw/bin",
+];
+/// The tools the journeys' terminal runs: the two this module starts, and the four a journey's
+/// command calls by name.
+const TOOLS: [&str; 6] = ["sh", "git", "script", "stty", "cp", "sleep"];
+
+/// Why the terminal's tools could not be resolved into a PATH: a typed setup refusal that names
+/// the tool, so a host without one says so instead of failing later with "not found" (larry#296).
+#[derive(Debug)]
+pub(crate) enum SetupError {
+    /// No searched directory holds the tool.
+    Missing {
+        /// The tool's name.
+        tool: &'static str,
+        /// Every directory the lookup searched, in order.
+        searched: Vec<PathBuf>,
+    },
+    /// A candidate's metadata could not be read.
+    Unreadable {
+        /// The tool being looked up.
+        tool: &'static str,
+        /// The candidate path.
+        path: PathBuf,
+        /// The operating system's refusal.
+        cause: io::Error,
+    },
+}
+
+impl fmt::Display for SetupError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Missing { tool, ref searched } => {
+                let dirs: Vec<String> = searched
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect();
+                write!(
+                    out,
+                    "the terminal needs `{tool}`, which these directories do not hold: {}",
+                    dirs.join(":")
+                )
+            }
+            Self::Unreadable {
+                tool,
+                ref path,
+                ref cause,
+            } => write!(
+                out,
+                "the terminal cannot read the candidate `{}` for `{tool}`: {cause}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SetupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Unreadable { ref cause, .. } => Some(cause),
+            Self::Missing { .. } => None,
+        }
+    }
+}
+
+/// The executable for `tool` in the first of `search` that holds one: a plain stat of each
+/// candidate, never `which` and never a shell, so no host configuration is read (larry#296).
+fn find_tool(tool: &'static str, search: &[PathBuf]) -> Result<PathBuf, SetupError> {
+    for dir in search {
+        let candidate = dir.join(tool);
+        match is_executable(&candidate) {
+            Ok(true) => return Ok(candidate),
+            Ok(false) => {}
+            Err(cause) => {
+                return Err(SetupError::Unreadable {
+                    tool,
+                    path: candidate,
+                    cause,
+                });
+            }
+        }
+    }
+    Err(SetupError::Missing {
+        tool,
+        searched: search.to_vec(),
+    })
+}
+
+/// Whether `path` is a file some user may execute; a path that is not there is the plain case,
+/// and any other refusal propagates.
+fn is_executable(path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt as _;
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_file() && meta.permissions().mode() & 0o111 != 0),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(cause) => Err(cause),
+    }
+}
+
+/// The PATH every terminal's shell gets: the directories the tools were found in, resolved once
+/// from [`TOOL_DIRS`], never the host's PATH (larry#269, larry#296).
+pub(crate) fn test_path() -> Result<&'static str, SetupError> {
+    static RESOLVED: OnceLock<String> = OnceLock::new();
+    let resolved = match RESOLVED.get() {
+        Some(path) => path,
+        None => {
+            let built = build_test_path()?;
+            RESOLVED.get_or_init(move || built)
+        }
+    };
+    Ok(resolved.as_str())
+}
+
+/// Builds the terminal's PATH from where each of [`TOOLS`] resolves, in [`TOOL_DIRS`]' order.
+fn build_test_path() -> Result<String, SetupError> {
+    let search: Vec<PathBuf> = TOOL_DIRS.iter().map(|dir| PathBuf::from(*dir)).collect();
+    let mut found: Vec<PathBuf> = Vec::new();
+    for tool in TOOLS {
+        found.push(find_tool(tool, &search)?);
+    }
+    let dirs: Vec<String> = search
+        .iter()
+        .filter(|dir| {
+            found
+                .iter()
+                .any(|tool| tool.parent() == Some(dir.as_path()))
+        })
+        .map(|dir| dir.display().to_string())
+        .collect();
+    Ok(dirs.join(":"))
+}
 /// Terminal rows.
 const ROWS: usize = 32;
 /// Terminal columns.
@@ -206,14 +344,15 @@ pub(crate) fn replied(before: Option<&str>, now: &str, text: &str) -> Result<boo
 }
 
 impl<'scope> Pty<'scope> {
-    /// Starts the shipped binary in a fresh 32x120 terminal in `cwd`, with only the fixed PATH,
-    /// TERM and `env` set. The shell prints its own PID before it execs the binary, so the PID is
-    /// the binary's.
+    /// Starts the shipped binary in a fresh 32x120 terminal in `cwd`, with only the PATH its
+    /// tools resolved into, TERM and `env` set. The shell prints its own PID before it execs the
+    /// binary, so the PID is the binary's.
     pub(crate) fn open<'env>(
         owner: &'scope Scope<'scope, 'env>,
         cwd: &Path,
         env: &[(&str, OsString)],
     ) -> Journey<Self> {
+        let path = test_path()?;
         let inner = format!(
             "stty rows {ROWS} cols {COLUMNS}; printf 'LARRYPID:%s:END' $$; exec '{}'",
             env!("CARGO_BIN_EXE_larry")
@@ -224,7 +363,7 @@ impl<'scope> Pty<'scope> {
         } else {
             command.args(["-q", "/dev/null", "sh", "-c", &inner]);
         }
-        command.env_clear().env("PATH", TEST_PATH).current_dir(cwd);
+        command.env_clear().env("PATH", path).current_dir(cwd);
         for &(name, ref value) in env {
             command.env(name, value);
         }
@@ -405,6 +544,50 @@ fn a_wait_refuses_text_that_was_on_screen_before_the_keys() {
     assert!(replied(Some(board), opened, "Workspace handoff").is_err());
     assert_eq!(replied(None, board, "Workspace handoff"), Ok(true));
     assert_eq!(replied(None, board, "remember this"), Ok(false));
+}
+
+/// A tool lookup finds a `git` under a prefix of its own and refuses a missing one by name, so a
+/// host that keeps git outside the standard directories says which tool it lacks instead of
+/// failing later with "not found" (larry#296). The prefix is the integration tests' one temp
+/// guard; nothing here reads the clock, the host's PATH or its shell configuration.
+#[test]
+fn a_tool_lookup_finds_a_git_under_its_own_prefix_and_names_a_missing_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    let prefix = crate::origin::TempDir::new()?;
+    let bin = prefix.path().join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let git = bin.join("git");
+    std::fs::write(&git, "#!/bin/sh\nexit 0\n")?;
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let search = [bin, PathBuf::from("/usr/bin")];
+    match find_tool("git", &search) {
+        Ok(found) => assert_eq!(found, git, "the lookup finds the git under its own prefix"),
+        Err(cause) => return Err(format!("the lookup refused a present git: {cause}").into()),
+    }
+    let empty = prefix.path().join("empty");
+    std::fs::create_dir_all(&empty)?;
+    let Err(refusal) = find_tool("git", &[empty]) else {
+        return Err("the lookup found a git where no directory holds one".into());
+    };
+    match refusal {
+        SetupError::Missing { tool: "git", .. } => {}
+        SetupError::Missing { tool, .. } => {
+            return Err(format!("the refusal names `{tool}`, not git").into());
+        }
+        SetupError::Unreadable {
+            tool, ref cause, ..
+        } => {
+            return Err(format!("the lookup could not read `{tool}`: {cause}").into());
+        }
+    }
+    assert!(
+        refusal.to_string().contains("git"),
+        "the refusal names the tool: {refusal}"
+    );
+    Ok(())
 }
 
 /// The screen model places text by CUP, clears on ED, skips OSC by BEL or ST, decodes UTF-8
