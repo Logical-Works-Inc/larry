@@ -11,7 +11,7 @@ use super::buffer::Buffer;
 use super::cells::{Entry, Header, OUTPUT_TAIL, split_observation};
 use super::composer::Composer;
 use super::style::{Style, text_width};
-use super::worker::Event;
+use super::worker::{Decision, Event};
 
 /// Seeds each simulation runs.
 const SEEDS: u64 = 256;
@@ -340,7 +340,7 @@ fn sim_ran_tail_counts_hidden_lines_and_marks_failures() {
     }
 }
 
-/// A header for the transcript-bound simulation.
+/// A header for the simulations.
 fn header() -> Header {
     Header {
         version: String::from("0.0.0"),
@@ -483,4 +483,96 @@ fn sim_grid_writes_outside_the_grid_change_nothing() {
         assert_eq!(end, width, "seed {seed}: cut at the right edge");
         assert_eq!(grid.row_text(row), "z".repeat(width));
     }
+}
+
+/// The text an app's frame paints, row by row.
+fn shown(app: &App) -> String {
+    let frame = app.draw();
+    (0..frame.buffer.height())
+        .map(|row| frame.buffer.row_text(row))
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+/// The question's own bounds (larry#325): on every screen a person can answer on, a command of
+/// every height still paints the title and its first row, and the middle a crop took is one
+/// marker row that counts it exactly, so nobody reads a command from its tail.
+#[test]
+fn sim_tui_asking_never_crops_the_question_or_the_first_command_row() {
+    for width in [120, 80] {
+        for height in 2..=64 {
+            for rows in 1_usize..=64 {
+                let command = (1..=rows)
+                    .map(|row| format!("cmd {row}"))
+                    .collect::<Vec<String>>()
+                    .join("\n");
+                let mut app = App::new(header(), Vec::new(), width, height);
+                app.handle(Input::Key(Key::Char('x')));
+                app.handle(Input::Key(Key::Enter));
+                app.handle(Input::Worker(Event::Ask(command)));
+                let screen = shown(&app);
+                assert!(
+                    screen.contains("Run this command?"),
+                    "{width}x{height}, {rows} rows: {screen:?}"
+                );
+                assert!(
+                    screen.contains("$ cmd 1"),
+                    "{width}x{height}, {rows} rows: {screen:?}"
+                );
+                let painted = screen.lines().filter(|row| row.contains("cmd ")).count();
+                let cut = screen
+                    .lines()
+                    .find(|row| row.contains(" cut …"))
+                    .and_then(|row| row.split_whitespace().nth(1))
+                    .and_then(|count| count.parse::<usize>().ok());
+                let fits = rows.saturating_add(3) <= height;
+                assert_eq!(
+                    cut.is_some(),
+                    !fits && height >= 3,
+                    "{width}x{height}, {rows} rows: the cut is named once: {screen:?}"
+                );
+                if height >= 5 {
+                    let shown = match cut {
+                        Some(count) => painted.saturating_add(count),
+                        None => painted,
+                    };
+                    assert_eq!(shown, rows, "{width}x{height}, {rows} rows: {screen:?}");
+                }
+                if height >= 5 {
+                    assert!(
+                        screen.contains("› No"),
+                        "{width}x{height}, {rows} rows: the answer starts at No: {screen:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A key read before the frame that paints the question answers nothing and is counted, so a
+/// key typed while the model worked can never consent to a command nobody read; once a frame
+/// has painted the question, Enter alone confirms the highlighted answer, which is No
+/// (larry#325).
+#[test]
+fn sim_tui_a_key_before_the_questions_frame_is_discarded() {
+    let mut app = App::new(header(), Vec::new(), 100, 30);
+    app.handle(Input::Key(Key::Char('x')));
+    app.handle(Input::Key(Key::Enter));
+    app.handle(Input::Worker(Event::Ask(String::from("rm -rf /"))));
+    let early = app.handle(Input::Key(Key::Char('y')));
+    assert!(
+        early.is_empty(),
+        "a y read before the question decided {early:?}"
+    );
+    let painted = shown(&app);
+    assert!(
+        painted.contains("ignored (1 so far)"),
+        "the drop is counted: {painted:?}"
+    );
+    let answer = app.handle(Input::Key(Key::Enter));
+    assert_eq!(
+        answer,
+        vec![super::app::Effect::Decide(Decision::Decline)],
+        "Enter alone runs nothing"
+    );
 }

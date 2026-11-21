@@ -363,6 +363,7 @@ fn sim_tui_esc_answers_a_question_with_decline() {
         let started = app.handle(Input::Key(Key::Enter));
         assert_eq!(started, vec![super::app::Effect::Start(String::from("x"))]);
         app.handle(Input::Worker(Event::Ask(String::from("rm -rf /"))));
+        app.draw();
         let answer = app.handle(Input::Key(Key::Esc));
         assert_eq!(
             answer,
@@ -562,6 +563,7 @@ fn sim_tui_apply_or_discard_answers_the_review() {
         app.handle(Input::Key(Key::Char('x')));
         app.handle(Input::Key(Key::Enter));
         app.handle(Input::Worker(Event::Review(summary.clone())));
+        app.draw();
         assert!(app.busy(), "seed {seed}");
         let (key, want) = match rng.pick(9) {
             0 => (Key::Char('y'), Some(Decision::Run)),
@@ -600,6 +602,7 @@ fn sim_tui_apply_toggle_confirms_the_highlight() {
     app.handle(Input::Worker(Event::Review(vec![String::from(
         "1 file changed, +1 -0",
     )])));
+    app.draw();
     assert!(app.handle(Input::Key(Key::Left)).is_empty());
     assert!(app.handle(Input::Key(Key::Right)).is_empty());
     let effects = app.handle(Input::Key(Key::Left));

@@ -6,13 +6,19 @@
 //!
 //! Phases: idle (the composer takes a task), working (a session runs; Esc
 //! interrupts), asking (the session waits on the person: y runs, a runs and
-//! stops asking for this run, n declines), stopping (interrupted; the running
-//! command, if any, ends first). Esc never leaves a phase it does not own: it
-//! closes the slash popup, declines a question or interrupts a task.
+//! stops asking for this run, n declines, and Enter confirms the highlighted
+//! answer, which starts at No), stopping (interrupted; the running command, if
+//! any, ends first). A key read before the frame that paints a question answers
+//! nothing: it is dropped and counted, so a key typed while the model worked
+//! can never consent to a command nobody has read (larry#325). Esc never leaves
+//! a phase it does not own: it closes the slash popup, declines a question or
+//! interrupts a task.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use super::ask::{fit, marked, offer};
 use super::buffer::{Buffer, Frame};
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
@@ -150,6 +156,12 @@ pub(crate) struct App {
     hint: Option<String>,
     /// The artifact pane's state: the task's output, diff and receipt (larry#244).
     pane: Pane,
+    /// Frames painted since the frame started (larry#325).
+    frames: Cell<u64>,
+    /// The frame that painted the question now asked, `None` until one carries it.
+    painted: Cell<Option<u64>>,
+    /// Keys dropped because they were read before the question's frame was painted.
+    early: usize,
 }
 
 /// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
@@ -185,44 +197,6 @@ pub(crate) fn hints(items: &[&str], width: usize) -> Line {
     vec![Span::new(text, Style::MUTED)]
 }
 
-/// The marker and style of a row of choices, highlighted or not.
-fn marked(on: bool) -> (&'static str, Style) {
-    if on {
-        ("›", Style::ACCENT.bold())
-    } else {
-        (" ", Style::PLAIN)
-    }
-}
-
-/// What is asked: the title, the answers in the order ←/→ walks them, and the footer keys.
-type Offer = (
-    &'static str,
-    &'static [(Decision, &'static str)],
-    &'static [&'static str],
-);
-
-/// The question about a command that `running`, or the review of the session's change.
-/// A review has no "always": the diff of the person's own folder is asked about every time.
-fn offer(running: bool) -> Offer {
-    if running {
-        (
-            "△ Run this command?",
-            &[
-                (Decision::Run, "Yes"),
-                (Decision::Always, "Always"),
-                (Decision::Decline, "No"),
-            ],
-            &["y yes", "a always", "n no", "←/→ select", "enter confirm"],
-        )
-    } else {
-        (
-            "△ Apply this change to your folder?",
-            &[(Decision::Run, "Apply"), (Decision::Decline, "Discard")],
-            &["y apply", "n discard", "←/→ select", "enter confirm"],
-        )
-    }
-}
-
 /// `said`, or `fallback` when the session said nothing.
 fn or_said(said: Option<String>, fallback: &str) -> String {
     match said {
@@ -249,6 +223,9 @@ impl App {
             said: None,
             hint: None,
             pane: Pane::new(),
+            frames: Cell::new(0),
+            painted: Cell::new(None),
+            early: 0,
         }
     }
 
@@ -306,7 +283,8 @@ impl App {
     fn event(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Ask(command) => {
-                self.phase = Phase::Asking(Some(command), Decision::Run);
+                self.phase = Phase::Asking(Some(command), Decision::Decline);
+                self.painted.set(None);
                 self.scroll = 0;
             }
             Event::Started(command) => {
@@ -341,6 +319,7 @@ impl App {
                     summary.iter().map(|line| sanitize(line, false)).collect(),
                 ));
                 self.phase = Phase::Asking(None, Decision::Decline);
+                self.painted.set(None);
                 self.scroll = 0;
             }
             Event::Handed { line, applied } => {
@@ -384,6 +363,14 @@ impl App {
         }
         if let Phase::Asking(ref command, choice) = self.phase {
             let command = command.clone();
+            if self.painted.get().is_none() {
+                self.early = self.early.saturating_add(1);
+                self.hint = Some(format!(
+                    "A key typed before the question was shown was ignored ({} so far).",
+                    self.early
+                ));
+                return Vec::new();
+            }
             return self.answer(key, command, choice);
         }
         match key {
@@ -641,23 +628,27 @@ impl App {
         ])
     }
 
-    /// The bottom block (status, popup or question, composer, footer) and the
-    /// cursor's column and row in it.
-    fn bottom(&self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
+    /// The bottom block (status, popup or question, composer, footer), the cursor's column and
+    /// row in it, and the leading rows a crop must keep (the question's title and first row).
+    fn bottom(&self, width: usize) -> (Vec<Line>, Option<(usize, usize)>, usize) {
         let mut rows: Vec<Line> = Vec::new();
         if let Some(status) = self.status_row() {
             rows.push(status);
         }
-        // A screen too narrow for the pane keeps the change as one line (larry#244).
-        if split(self.width, self.height).artifact.is_none()
+        // A screen too narrow for the pane keeps the change as one line (larry#244); while a
+        // question is open its title and first command row outrank that line (larry#325).
+        if !matches!(self.phase, Phase::Asking(..))
+            && split(self.width, self.height).artifact.is_none()
             && let Some(summary) = self.pane.summary()
         {
             rows.push(vec![Span::new(ellipsize(&summary, width), Style::MUTED)]);
         }
         let mut cursor = None;
+        let mut keep = 0_usize;
         let footer: &[&str] = if let Phase::Asking(ref command, choice) = self.phase {
             let (title, answers, keys) = offer(command.is_some());
             rows.push(vec![Span::new(title, Style::WARN.bold())]);
+            let body = rows.len();
             let lead = vec![Span::new("$ ", Style::MUTED)];
             let rest = vec![Span::new("  ", Style::PLAIN)];
             for text in command.iter().map(|command| sanitize_shown(command)) {
@@ -665,6 +656,11 @@ impl App {
                     rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
                 }
             }
+            keep = if rows.len() > body {
+                body.saturating_add(1)
+            } else {
+                body
+            };
             rows.push(
                 answers
                     .iter()
@@ -705,18 +701,23 @@ impl App {
             None => hints(footer, width),
         };
         rows.push(foot);
-        (rows, cursor)
+        (rows, cursor, keep)
     }
 
     /// The frame for the current state.
     pub(crate) fn draw(&self) -> Frame {
+        if self.painted.get().is_none() && matches!(self.phase, Phase::Asking(..)) {
+            self.painted.set(Some(self.frames.get()));
+        }
+        self.frames.set(self.frames.get().saturating_add(1));
         let mut buffer = Buffer::new(self.width, self.height);
         let regions = split(buffer.width(), buffer.height());
         let chat = regions.chat;
         let left = chat.x.saturating_add(1);
         let right = chat.right().saturating_sub(1).max(left.saturating_add(1));
         let width = right.saturating_sub(left);
-        let (bottom, cursor) = self.bottom(width);
+        let (bottom, cursor, keep) = self.bottom(width);
+        let bottom = fit(bottom, keep, chat.height);
         let bottom_rows = bottom.len().min(chat.height);
         let area = chat.height.saturating_sub(bottom_rows);
         let rows = self.transcript();

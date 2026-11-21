@@ -11,6 +11,7 @@
 //! session's events, and writes only the cells each frame changed ([`buffer`]).
 
 mod app;
+mod ask;
 mod buffer;
 mod cells;
 mod composer;
