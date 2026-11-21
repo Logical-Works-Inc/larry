@@ -124,26 +124,100 @@ pub(crate) fn line_width(line: &[Span]) -> usize {
         .fold(0, usize::saturating_add)
 }
 
-/// Whether `character` reorders text around it (Unicode bidi controls): a
-/// command shown with one could read differently from the command that runs.
-const fn is_bidi_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-    )
+/// Every Unicode 16 general-category `Cf` character, and the `Zl` and `Zp` separators, as
+/// one sorted table of inclusive ranges. Source: Unicode 16.0.0
+/// `extracted/DerivedGeneralCategory.txt` (https://www.unicode.org/Public/16.0.0/ucd/).
+/// A `Cf` character draws nothing, so a command shown with one reads differently from the
+/// command that runs (CVE-2021-42574), and `Zl`/`Zp` break a line the frame never counted.
+const INVISIBLE: [(char, char); 22] = [
+    ('\u{00ad}', '\u{00ad}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061c}', '\u{061c}'),
+    ('\u{06dd}', '\u{06dd}'),
+    ('\u{070f}', '\u{070f}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08e2}', '\u{08e2}'),
+    ('\u{180e}', '\u{180e}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{2028}', '\u{2029}'),
+    ('\u{202a}', '\u{202e}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{fff9}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0001}', '\u{e0001}'),
+    ('\u{e0020}', '\u{e007f}'),
+];
+
+/// Whether `character` draws nothing or breaks a line: `Cf`, `Zl` or `Zp`.
+fn is_invisible(character: char) -> bool {
+    INVISIBLE
+        .iter()
+        .any(|&(start, end)| (start..=end).contains(&character))
 }
 
-/// `text` with every control and bidi character removed and each tab made
-/// four spaces; newlines stay when `keep_newlines`. Model replies, command
-/// output and pasted text cross this before they reach a cell, so none of them
-/// can move the cursor, change the title or recolour the frame.
+/// Pushes the visible stand-in for one dropped character: `⟨U+200B⟩`.
+fn push_marker(out: &mut String, character: char) {
+    out.push('⟨');
+    out.push_str("U+");
+    let code = u32::from(character);
+    let digits: u32 = if code > 0xfffff {
+        6
+    } else if code > 0xffff {
+        5
+    } else {
+        4
+    };
+    for index in 0..digits {
+        let shift = digits
+            .saturating_sub(1)
+            .saturating_sub(index)
+            .saturating_mul(4);
+        let nibble = match code.checked_shr(shift) {
+            Some(value) => value & 0xf,
+            None => 0,
+        };
+        let digit = match char::from_digit(nibble, 16) {
+            Some(digit) => digit.to_ascii_uppercase(),
+            None => '0',
+        };
+        out.push(digit);
+    }
+    out.push('⟩');
+}
+
+/// `text` with every control, bidi, format and separator character removed and each tab
+/// made four spaces; newlines stay when `keep_newlines`. Model replies, command output and
+/// pasted text cross this before they reach a cell, so none of them can move the cursor,
+/// change the title, recolour the frame or hide a character from the person.
 pub(crate) fn sanitize(text: &str, keep_newlines: bool) -> String {
+    filtered(text, keep_newlines, false)
+}
+
+/// [`sanitize`] for a command the person approves: each dropped character is shown as
+/// `⟨U+XXXX⟩`, so the command on screen is the command that runs (larry#337).
+pub(crate) fn sanitize_shown(text: &str) -> String {
+    filtered(text, true, true)
+}
+
+/// `text` filtered for a cell: tabs become spaces, and every control, `Cf`, `Zl` or `Zp`
+/// character is dropped, or shown as a marker when `mark`.
+fn filtered(text: &str, keep_newlines: bool, mark: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
             '\n' if keep_newlines => out.push('\n'),
             '\t' => out.push_str("    "),
-            _ if character.is_control() || is_bidi_control(character) => {}
+            _ if character.is_control() || is_invisible(character) => {
+                if mark {
+                    push_marker(&mut out, character);
+                }
+            }
             _ => out.push(character),
         }
     }
@@ -277,4 +351,26 @@ pub(crate) fn ellipsize(text: &str, width: usize) -> String {
         out.push('…');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{push_marker, sanitize, sanitize_shown};
+
+    /// A marker names four hex digits in the Basic Multilingual Plane and six above it, each
+    /// sanitizer keeps the flags its caller asks for, and every dropped format character is
+    /// named (larry#337). Sources: Unicode 16.0.0 `DerivedGeneralCategory.txt`; CVE-2021-42574.
+    #[test]
+    fn sim_markers_name_every_dropped_character_and_the_sanitizers_keep_their_flags() {
+        let mut at_the_top = String::new();
+        push_marker(&mut at_the_top, '\u{ffff}');
+        assert_eq!(at_the_top, "⟨U+FFFF⟩");
+        let mut above = String::new();
+        push_marker(&mut above, '\u{e0041}');
+        assert_eq!(above, "⟨U+E0041⟩");
+        assert_eq!(sanitize("a\u{200b}b", false), "ab");
+        assert_eq!(sanitize("a\nb", true), "a\nb");
+        assert_eq!(sanitize_shown("a\nb"), "a\nb");
+        assert_eq!(sanitize_shown("a\u{200b}b"), "a⟨U+200B⟩b");
+    }
 }

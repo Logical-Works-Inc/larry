@@ -203,12 +203,21 @@ fn refusal_detail(body: &[u8]) -> String {
     bounded(&reason, MAX_DETAIL_CHARS)
 }
 
-/// `text` with every control character replaced by a space, at most `most`
+/// Whether `character` reorders text around it: the Unicode bidi controls. A refusal that
+/// carries one can read differently from the text it names (CVE-2021-42574).
+const fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// `text` with every control or bidi character replaced by a space, at most `most`
 /// characters long.
 fn bounded(text: &str, most: usize) -> String {
     text.chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || is_bidi_control(character) {
                 ' '
             } else {
                 character

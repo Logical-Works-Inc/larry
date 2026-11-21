@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::app::{App, Input, Key, compact, hints};
+use super::app::{App, Input, Key, MAX_ENTRIES, compact, hints};
 use super::buffer::Buffer;
 use super::cells::{Entry, Header, OUTPUT_TAIL, split_observation};
 use super::composer::Composer;
@@ -313,12 +313,7 @@ fn sim_ran_tail_counts_hidden_lines_and_marks_failures() {
         let (status, parsed) = split_observation(&observation);
         assert_eq!(status, "exit status 3");
         assert_eq!(parsed, output, "seed {seed}: the parser keeps every line");
-        let entry = Entry::Ran {
-            command: String::from("make"),
-            status,
-            output: parsed,
-            passed,
-        };
+        let entry = Entry::ran(String::from("make"), &status, parsed, passed);
         let text: Vec<String> = entry
             .lines(60)
             .iter()
@@ -342,6 +337,121 @@ fn sim_ran_tail_counts_hidden_lines_and_marks_failures() {
         );
         let shown = text.iter().filter(|row| row.contains("line ")).count();
         assert_eq!(shown, lines.min(OUTPUT_TAIL), "seed {seed}: {text:?}");
+    }
+}
+
+/// A header for the simulations.
+fn header() -> Header {
+    Header {
+        version: String::from("0.0.0"),
+        model: Ok(String::from("sim-model")),
+        directory: String::from("~/sim"),
+        blocked: None,
+    }
+}
+
+/// Bytes the transcript keeps in its entries' text.
+fn transcript_bytes(entries: &std::collections::VecDeque<Entry>) -> usize {
+    entries
+        .iter()
+        .map(|entry| match *entry {
+            Entry::Ran {
+                ref command,
+                ref status,
+                ref output,
+                ..
+            } => command
+                .len()
+                .saturating_add(status.len())
+                .saturating_add(output.iter().map(String::len).sum::<usize>()),
+            Entry::User(ref text)
+            | Entry::Declined(ref text)
+            | Entry::Said(ref text)
+            | Entry::Notice(_, ref text) => text.len(),
+            Entry::Info(ref rows) => rows.iter().map(String::len).sum(),
+            Entry::Header(_) => 0,
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// The byte bound a full transcript holds however large its command outputs were (larry#337):
+/// 512 entries of at most six rows of 512 characters, four bytes a character, plus a command.
+const TRANSCRIPT_BOUND: usize = 8 * 1024 * 1024;
+
+/// A transcript of 512 large outputs stays under [`TRANSCRIPT_BOUND`] (larry#337). Each event
+/// prints 32 lines of 1,024 characters: 16 MiB before the fix, because a `Ran` entry kept every
+/// output line and every frame re-wrapped them all.
+#[test]
+fn sim_tui_a_full_transcript_of_large_outputs_stays_bounded() {
+    let line = "x".repeat(1024);
+    let output: String = (0..32)
+        .map(|_| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let observation = format!("exit 0\nstdout:\n{output}\nstderr:\n");
+    let mut app = App::new(header(), Vec::new(), 120, 34);
+    for _ in 0..MAX_ENTRIES {
+        app.handle(Input::Worker(Event::Finished {
+            observation: observation.clone(),
+            passed: true,
+        }));
+    }
+    let stored = transcript_bytes(app.entries());
+    assert!(
+        stored < TRANSCRIPT_BOUND,
+        "the transcript holds {stored} bytes, past the {TRANSCRIPT_BOUND} byte bound"
+    );
+}
+
+/// A command the person approves shows every character the sanitizer drops as a
+/// `⟨U+XXXX⟩` marker, so the command on screen is the one that runs (larry#337).
+#[test]
+fn sim_tui_an_approved_command_shows_each_dropped_character() {
+    use super::style::sanitize_shown;
+    for (shown, want) in [
+        ("rm\u{200b} -rf /", "rm⟨U+200B⟩ -rf /"),
+        ("a\u{202e}b", "a⟨U+202E⟩b"),
+        ("line\u{2028}break", "line⟨U+2028⟩break"),
+        ("a\u{9b}b", "a⟨U+009B⟩b"),
+    ] {
+        assert_eq!(sanitize_shown(shown), want, "{shown:?}");
+    }
+    let mut app = App::new(header(), Vec::new(), 100, 30);
+    app.handle(Input::Worker(Event::Ask(String::from("echo a\u{200b}b"))));
+    let frame = app.draw();
+    let rows: String = (0..frame.buffer.height())
+        .map(|row| frame.buffer.row_text(row))
+        .collect();
+    assert!(rows.contains("⟨U+200B⟩"), "{rows:?}");
+    assert!(!rows.contains('\u{200b}'), "{rows:?}");
+}
+
+/// Names in a review and the hand-off line are the folder's, not Larry's: whatever they hold,
+/// no painted row carries an escape, a bidi control or a format character.
+#[test]
+fn sim_tui_apply_review_lines_are_sanitized() {
+    use super::sim_tui::{HOSTILE, Seeded};
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::new(seed);
+        let mut app = App::new(header(), Vec::new(), 60 + rng.pick(160), 20 + rng.pick(40));
+        let lines: Vec<String> = (0..1 + rng.pick(4))
+            .map(|_round| rng.word(&HOSTILE).to_owned())
+            .collect();
+        app.handle(Input::Worker(Event::Review(lines)));
+        app.handle(Input::Worker(Event::Handed {
+            line: rng.word(&HOSTILE).to_owned(),
+            applied: rng.pick(2) == 1,
+        }));
+        let frame = app.draw();
+        for row in 0..frame.buffer.height() {
+            let text = frame.buffer.row_text(row);
+            assert!(
+                !text
+                    .chars()
+                    .any(|ch| ch == '\u{1b}' || ('\u{202A}'..='\u{202E}').contains(&ch)),
+                "seed {seed} row {row}: {text:?}"
+            );
+        }
     }
 }
 
@@ -372,16 +482,6 @@ fn sim_grid_writes_outside_the_grid_change_nothing() {
         );
         assert_eq!(end, width, "seed {seed}: cut at the right edge");
         assert_eq!(grid.row_text(row), "z".repeat(width));
-    }
-}
-
-/// A header for a simulated app.
-fn header() -> Header {
-    Header {
-        version: String::from("0.0.0"),
-        model: Ok(String::from("sim-model")),
-        directory: String::from("~/sim"),
-        blocked: None,
     }
 }
 

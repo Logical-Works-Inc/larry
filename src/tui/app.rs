@@ -24,7 +24,7 @@ use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
 use super::layout::split;
 use super::pane::Pane;
-use super::style::{Line, Span, Style, ellipsize, sanitize, text_width, wrap};
+use super::style::{Line, Span, Style, ellipsize, sanitize, sanitize_shown, text_width, wrap};
 use super::worker::{Decision, Ended, Event};
 
 /// Most transcript entries kept; the oldest goes first.
@@ -306,12 +306,7 @@ impl App {
                 };
                 let (status, output) = split_observation(&observation);
                 self.pane.finished(&command, &status, &output, passed);
-                self.push(Entry::Ran {
-                    command,
-                    status,
-                    output,
-                    passed,
-                });
+                self.push(Entry::ran(command, &status, output, passed));
                 self.phase = match self.phase {
                     Phase::Stopping(_) => Phase::Stopping(false),
                     Phase::Idle | Phase::Working(_) | Phase::Asking(..) => Phase::Working(None),
@@ -656,7 +651,7 @@ impl App {
             let body = rows.len();
             let lead = vec![Span::new("$ ", Style::MUTED)];
             let rest = vec![Span::new("  ", Style::PLAIN)];
-            for text in command.iter().map(|command| sanitize(command, true)) {
+            for text in command.iter().map(|command| sanitize_shown(command)) {
                 for line in text.split_terminator('\n') {
                     rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
                 }

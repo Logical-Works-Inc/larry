@@ -62,8 +62,10 @@ impl Seeded {
     }
 }
 
-/// Text a hostile model or command might print: escapes, controls, bidi, wide.
-pub(super) const HOSTILE: [&str; 8] = [
+/// Text a hostile model or command might print: escapes, controls, bidi, wide and
+/// every invisible format character that could hide a difference between the command
+/// shown and the command that runs (larry#337).
+pub(super) const HOSTILE: [&str; 16] = [
     "\x1b]0;owned\x07",
     "\x1b[2J\x1b[H",
     "\x1b[31mred\x1b[0m",
@@ -72,6 +74,14 @@ pub(super) const HOSTILE: [&str; 8] = [
     "表示幅のテスト😀",
     "e\u{301}\u{301}\u{301}",
     "\r\x08\x08\x00tab\there",
+    "\u{9b}31m4:3R",
+    "\x1b]8;;https://evil.example\x1b\\click\x1b]8;;\x1b\\",
+    "\x1b]52;c;ZWNobyBoaQ==\x07",
+    "\x1bP1;2|payload\x1b\\",
+    "ad\u{200b}min\u{200c}\u{200d}",
+    "hy\u{00ad}phen\u{feff}",
+    "a\u{e0041}\u{e0042}\u{e007f}b",
+    "line\u{2028}para\u{2029}graph",
 ];
 
 /// A header for a simulated run.
@@ -210,7 +220,36 @@ fn sim_tui_hostile_output_cannot_write_escapes() -> Result<(), Box<dyn std::erro
             "seed {seed}: an OSC reached the wire"
         );
         for banned in [
-            '\u{7}', '\u{8}', '\0', '\r', '\u{202e}', '\u{2066}', '\u{2069}',
+            '\u{7}',
+            '\u{8}',
+            '\0',
+            '\r',
+            '\u{9b}',
+            '\u{00ad}',
+            '\u{200b}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202a}',
+            '\u{202b}',
+            '\u{202c}',
+            '\u{202d}',
+            '\u{202e}',
+            '\u{2060}',
+            '\u{2061}',
+            '\u{2062}',
+            '\u{2063}',
+            '\u{2064}',
+            '\u{2066}',
+            '\u{2067}',
+            '\u{2068}',
+            '\u{2069}',
+            '\u{feff}',
+            '\u{e0041}',
+            '\u{e007f}',
         ] {
             assert!(
                 !text.contains(banned),
@@ -572,34 +611,7 @@ fn sim_tui_apply_toggle_confirms_the_highlight() {
     assert_eq!(confirmed.first(), Some(&Effect::Decide(Decision::Run)));
 }
 
-/// Names in a review and the hand-off line are the folder's, not Larry's: whatever they hold,
-/// no painted row carries an escape or a bidi control.
-#[test]
-fn sim_tui_apply_review_lines_are_sanitized() {
-    for seed in 0..SEEDS {
-        let mut rng = Seeded::new(seed);
-        let mut app = App::new(header(), Vec::new(), 60 + rng.pick(160), 20 + rng.pick(40));
-        let lines: Vec<String> = (0..1 + rng.pick(4))
-            .map(|_round| rng.word(&HOSTILE).to_owned())
-            .collect();
-        app.handle(Input::Worker(Event::Review(lines)));
-        app.handle(Input::Worker(Event::Handed {
-            line: rng.word(&HOSTILE).to_owned(),
-            applied: rng.pick(2) == 1,
-        }));
-        let frame = app.draw();
-        for row in 0..frame.buffer.height() {
-            let text = frame.buffer.row_text(row);
-            assert!(
-                !text
-                    .chars()
-                    .any(|ch| ch == '\u{1b}' || ('\u{202A}'..='\u{202E}').contains(&ch)),
-                "seed {seed} row {row}: {text:?}"
-            );
-        }
-    }
-}
-
+/// Names in a review and the hand-off line are sanitized in `sim_parts`.
 #[test]
 fn tui_error_variants_name_their_cause() {
     use std::error::Error as _;
