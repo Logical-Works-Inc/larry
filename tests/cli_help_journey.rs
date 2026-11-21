@@ -281,3 +281,37 @@ fn route_add_errors_name_the_field_once() -> TestResult {
     }
     Ok(())
 }
+
+/// More arguments than the command line takes is a typed refusal naming the bound,
+/// never a silent truncation (larry#338).
+#[test]
+fn more_arguments_than_the_bound_is_refused() -> TestResult {
+    let bound = 32_usize;
+    let mut words: Vec<&str> = vec!["help"];
+    words.extend(std::iter::repeat_n("unused", bound));
+    let output = spawn_larry_args(&words, &[], b"")?.wait_with_output()?;
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "one argument past the bound is a refusal"
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(stderr.lines().count(), 1, "one refusal line: {stderr:?}");
+    assert!(
+        stderr.contains(&bound.to_string()),
+        "the refusal names the bound: {stderr:?}"
+    );
+    assert!(output.stdout.is_empty(), "nothing runs past the bound");
+    // At the bound itself the word still runs: the refusal starts one past it.
+    let mut at_bound: Vec<&str> = vec!["help"];
+    at_bound.extend(std::iter::repeat_n("unused", bound - 1));
+    let output = spawn_larry_args(&at_bound, &[], b"")?.wait_with_output()?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the bound is admitted: {}",
+        stderr_of(&output)
+    );
+    assert!(!output.stdout.is_empty(), "help prints at the bound");
+    Ok(())
+}

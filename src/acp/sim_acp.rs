@@ -9,13 +9,16 @@
 //! saboteur (no reply both result and error, no update for a session never opened,
 //! no log line but a cancel's, the agent never fails).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use lgwks_std::json::{self, Value, json};
 use lgwks_std::seeded::Seeded;
 
-use super::{PromptFault, instruction, serve_bounded};
-use crate::executor::ExecError;
+use super::{Agent, Book, Entry, PromptFault, Updates, instruction, serve_bounded};
+use crate::executor::{ExecError, Observer};
 use crate::json_at::At;
 use crate::mcp::wire;
 use crate::sim_error::SimError;
@@ -551,5 +554,122 @@ fn sim_acp_weird_bytes_ids_are_valid_exactly_when_string_or_integer() -> SimResu
             other => return Err(format!("seed {seed}: {literal} gave {other:?}").into()),
         }
     }
+    Ok(())
+}
+
+/// A session as the reader opens it: numbered from zero, nothing cancelled.
+fn live(cwd: &str) -> Entry {
+    Entry {
+        cwd: PathBuf::from(cwd),
+        prompts: 0,
+        started: 0,
+        cancelled: BTreeSet::new(),
+        abandoned: false,
+    }
+}
+
+/// Whether a running prompt of `session`, numbered `prompt_no`, sees a stop.
+fn stops(book: &Book, session: &str, prompt_no: u64) -> bool {
+    let mut sink = Vec::new();
+    Updates {
+        out: &mut sink,
+        session,
+        book,
+        prompt_no,
+        failed: None,
+    }
+    .cancelled()
+}
+
+/// A protocol stream whose client stopped reading: every write fails at once.
+struct GoneClient;
+impl std::io::Write for GoneClient {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "client gone",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "client gone",
+        ))
+    }
+}
+
+/// A reply the client cannot read means the client is gone: a write fault abandons
+/// every live session, so no prompt runs on to its bound (larry#338; ACP v1 leaves
+/// the stdio transport's death to the agent).
+#[test]
+fn sim_acp_a_write_fault_abandons_every_live_session() -> SimResult {
+    let cwd = tmp()?;
+    let book: Book = Mutex::new(BTreeMap::from([
+        (String::from("first"), live(&cwd)),
+        (String::from("second"), live(&cwd)),
+    ]));
+    let mut gone = GoneClient;
+    {
+        let mut updates = Updates {
+            out: &mut gone,
+            session: "first",
+            book: &book,
+            prompt_no: 1,
+            failed: None,
+        };
+        updates.update(&json!({"sessionUpdate": "agent_message_chunk"}));
+        assert!(updates.failed.is_some(), "the fault is recorded");
+    }
+    for session in ["first", "second"] {
+        assert!(
+            stops(&book, session, 1),
+            "{session} stops: the client is gone"
+        );
+    }
+    Ok(())
+}
+
+/// A cancel binds to the prompt it follows: the running prompt stops, and a prompt
+/// queued behind it keeps its own decision (larry#338).
+#[test]
+fn sim_acp_a_cancel_stops_the_prompt_it_follows_and_no_queued_prompt() -> SimResult {
+    let cwd = tmp()?;
+    let mut running = live(&cwd);
+    running.prompts = 2;
+    running.started = 1;
+    running.cancelled.insert(1);
+    let book: Book = Mutex::new(BTreeMap::from([(String::from("only"), running)]));
+    for (prompt_no, expected) in [(1_u64, true), (2, false)] {
+        assert_eq!(
+            stops(&book, "only", prompt_no),
+            expected,
+            "prompt {prompt_no} of the session"
+        );
+    }
+    Ok(())
+}
+
+/// A session the agent has just opened is live: no cancel and no abandonment stops
+/// its prompt until the client leaves or sends one (larry#338).
+#[test]
+fn sim_acp_a_new_session_starts_live() -> SimResult {
+    let cwd = tmp()?;
+    let settings = Err(ExecError::StateDirUnset);
+    let book: Book = Mutex::new(BTreeMap::new());
+    let mut agent = Agent {
+        settings: &settings,
+        book: &book,
+        initialized: false,
+        opened: 0,
+    };
+    let id = json!(1);
+    let opened = json!({"cwd": cwd, "mcpServers": []});
+    let reply = agent.new_session(&id, opened.as_object());
+    let session = reply
+        .member("/result/sessionId")
+        .and_then(Value::as_str)
+        .ok_or("a session id")?;
+    assert!(!stops(&book, session, 1), "a fresh session runs its prompt");
     Ok(())
 }
