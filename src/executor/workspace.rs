@@ -7,7 +7,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, TryLockError};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -265,11 +267,89 @@ static STRANDED: AtomicU64 = AtomicU64::new(0);
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        if let Err(cause) = std::fs::remove_dir_all(&self.root)
-            && cause.kind() != io::ErrorKind::NotFound
-        {
+        if strands(&remove_workspace(&self.root)) {
             STRANDED.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+/// Whether a removal left a workspace behind: a tree already gone is not stranded, and every
+/// other refusal is, so the next start's sweep collects it (larry#334).
+fn strands(removed: &Result<(), ExecError>) -> bool {
+    match *removed {
+        Ok(()) => false,
+        Err(ExecError::Workspace(ref error)) => error.kind() != io::ErrorKind::NotFound,
+        Err(ref other) => {
+            // A refusal that is not the file system's own is still a stranded tree; it is
+            // named on the operator's channel, because a destructor cannot return it.
+            let mut err = io::stderr().lock();
+            let written = writeln!(err, "larry exec: workspace not removed: {other}");
+            drop(written);
+            true
+        }
+    }
+}
+
+/// The mode every directory is reset to before a workspace is removed: owner rwx.
+const OWNER_RWX: u32 = 0o700;
+
+/// Removes a workspace after resetting every directory beneath it to owner rwx. A command
+/// may have left a directory with no permission, and removing a tree has to list each
+/// directory, so the tree was otherwise undeletable and the next start refused every run
+/// (larry#334).
+fn remove_workspace(root: &Path) -> Result<(), ExecError> {
+    reset_directory_modes(root).map_err(ExecError::Workspace)?;
+    std::fs::remove_dir_all(root).map_err(ExecError::Workspace)
+}
+
+/// Resets `root` and every directory beneath it to owner rwx, following no symlink. An
+/// explicit stack, never recursion: a command can nest directories past any stack (larry#334).
+#[cfg(unix)]
+fn reset_directory_modes(root: &Path) -> io::Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        if !std::fs::symlink_metadata(&directory)?.is_dir() {
+            continue;
+        }
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(OWNER_RWX))?;
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if std::fs::symlink_metadata(&path)?.file_type().is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A target with no modes to reset removes the tree as it is; the executor builds only where
+/// commands run in a process group, so this arm exists to keep the walk portable (larry#334).
+#[cfg(not(unix))]
+fn reset_directory_modes(_root: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// One sweep entry that could not be settled: the directory is kept and this is why. A
+/// per-entry refusal is reported as a typed event and never refuses the run (larry#334).
+#[derive(Debug)]
+pub(crate) struct SweepFault {
+    /// The entry the sweep left in place.
+    entry: PathBuf,
+    /// Why it could not be settled.
+    cause: ExecError,
+}
+
+impl SweepFault {
+    /// Reports the fault as one typed JSON line on standard error, the operator's channel.
+    pub(crate) fn report(&self) {
+        let event = lgwks_std::json::json!({
+            "sweep": "kept",
+            "entry": format!("{}", self.entry.display()),
+            "refused": self.cause.to_string(),
+        });
+        let mut err = io::stderr().lock();
+        let written = writeln!(err, "{event}");
+        drop(written);
     }
 }
 
@@ -432,22 +512,33 @@ pub(crate) fn seed_origin(state: &Path, path_env: &str, dir: &Path) -> Result<()
 /// `live` is the caller's liveness proof, because a run id carries no process id
 /// any more (larry#182 defect 3): the executor asks its journals' locks, and
 /// `larry eval`'s origins have no journal at all.
+///
+/// Returns the entries kept because they could not be settled: a per-entry refusal
+/// is reported and skipped, never a refusal of the run (larry#334).
 pub(crate) fn sweep(
     state: &Path,
     live: &[String],
     owner_live: impl Fn(&str) -> Result<bool, ExecError>,
-) -> Result<(), ExecError> {
-    sweep_dir(&state.join("ws"), live, owner_live)
+) -> Result<Vec<SweepFault>, ExecError> {
+    sweep_dir(&state.join("ws"), live, owner_live, remove_workspace)
 }
 
 /// Removes every `<state>/eval/origin-<pid>-<n>` directory whose `larry eval` holds no
 /// lock: a kill -9 runs no destructor, so its origins outlive it (larry#87). The lock
 /// is the proof of a live eval, never the pid in the name (larry#214), and the stale
 /// lock files of removed origins go with them.
-pub(crate) fn sweep_origins(state: &Path) -> Result<(), ExecError> {
+///
+/// Returns the entries kept because they could not be settled (larry#334).
+pub(crate) fn sweep_origins(state: &Path) -> Result<Vec<SweepFault>, ExecError> {
     let eval = state.join("eval");
-    sweep_dir(&eval, &[], |origin| origin_held(&eval, origin))?;
-    remove_unheld_locks(&eval)
+    let mut faults = sweep_dir(
+        &eval,
+        &[],
+        |origin| origin_held(&eval, origin),
+        remove_workspace,
+    )?;
+    faults.extend(remove_unheld_locks(&eval)?);
+    Ok(faults)
 }
 
 /// The lock file of origin `name` under `eval`: a sibling of the origin directory, so
@@ -503,11 +594,14 @@ fn origin_held(eval: &Path, name: &str) -> Result<bool, ExecError> {
     }
 }
 
-/// Removes every origin lock file under `eval` that no live holder keeps.
-fn remove_unheld_locks(eval: &Path) -> Result<(), ExecError> {
+/// Removes every origin lock file under `eval` that no live holder keeps. A lock file
+/// whose probe or removal fails is kept and returned, never a refusal of the sweep
+/// (larry#334).
+fn remove_unheld_locks(eval: &Path) -> Result<Vec<SweepFault>, ExecError> {
     let Some(entries) = listing(eval)? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let mut faults = Vec::new();
     for entry in entries {
         let entry = entry.map_err(ExecError::Workspace)?;
         let name = entry.file_name();
@@ -517,11 +611,27 @@ fn remove_unheld_locks(eval: &Path) -> Result<(), ExecError> {
         else {
             continue;
         };
-        if !origin_held(eval, origin)? {
-            std::fs::remove_file(entry.path()).map_err(ExecError::Workspace)?;
+        let held = match origin_held(eval, origin) {
+            Ok(held) => held,
+            Err(cause) => {
+                faults.push(SweepFault {
+                    entry: entry.path(),
+                    cause,
+                });
+                continue;
+            }
+        };
+        if held {
+            continue;
+        }
+        if let Err(cause) = std::fs::remove_file(entry.path()).map_err(ExecError::Workspace) {
+            faults.push(SweepFault {
+                entry: entry.path(),
+                cause,
+            });
         }
     }
-    Ok(())
+    Ok(faults)
 }
 
 /// The entries of `root`, or `None` when it does not exist: a state directory that has
@@ -535,30 +645,60 @@ fn listing(root: &Path) -> Result<Option<std::fs::ReadDir>, ExecError> {
 }
 
 /// Removes every directory under `root` that `live` does not name and whose owner is gone.
-/// Only directories are candidates; a file under `root` is nobody's.
+/// Only directories are candidates; a file under `root` is nobody's. An entry whose liveness
+/// probe errors is kept (its owner may be live and unprovable), and an entry that cannot be
+/// removed is kept: either way it is one typed fault, never a refusal of the run (larry#334).
 fn sweep_dir(
     root: &Path,
     live: &[String],
     owner_live: impl Fn(&str) -> Result<bool, ExecError>,
-) -> Result<(), ExecError> {
+    remove: impl Fn(&Path) -> Result<(), ExecError>,
+) -> Result<Vec<SweepFault>, ExecError> {
     let Some(entries) = listing(root)? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let mut faults = Vec::new();
     for entry in entries {
         let entry = entry.map_err(ExecError::Workspace)?;
         let name = entry.file_name();
         let Some(text) = name.to_str() else {
             continue;
         };
-        if !entry.file_type().map_err(ExecError::Workspace)?.is_dir() {
+        match entry.file_type().map_err(ExecError::Workspace) {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(cause) => {
+                faults.push(SweepFault {
+                    entry: entry.path(),
+                    cause,
+                });
+                continue;
+            }
+        }
+        if live.iter().any(|id| id.as_str() == text) {
             continue;
         }
-        if live.iter().any(|id| id.as_str() == text) || owner_live(text)? {
+        let owned = match owner_live(text) {
+            Ok(owned) => owned,
+            Err(cause) => {
+                faults.push(SweepFault {
+                    entry: entry.path(),
+                    cause,
+                });
+                continue;
+            }
+        };
+        if owned {
             continue;
         }
-        std::fs::remove_dir_all(entry.path()).map_err(ExecError::Workspace)?;
+        if let Err(cause) = remove(&entry.path()) {
+            faults.push(SweepFault {
+                entry: entry.path(),
+                cause,
+            });
+        }
     }
-    Ok(())
+    Ok(faults)
 }
 
 /// Seeded adversarial simulations of the sweep (larry#182 defect 3).

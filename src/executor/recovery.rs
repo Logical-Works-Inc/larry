@@ -61,16 +61,29 @@ pub(super) fn journal_path(state: &Path, task_id: &str) -> PathBuf {
 /// sets its evidence aside. The workspace sweep asks this before it removes a
 /// run's workspace, so a live run keeps it between its clone and its first
 /// command (larry#182 defect 3).
-pub(super) fn journal_live(state: &Path, policy: &BTreeSet<Scope>, task_id: &str) -> bool {
+///
+/// # Errors
+///
+/// [`ExecError::Journals`] when the path cannot be stat'ed, and [`ExecError::Journal`]
+/// when the lock cannot be probed: an unknown liveness is never reported as dead
+/// (larry#334).
+pub(super) fn journal_live(
+    state: &Path,
+    policy: &BTreeSet<Scope>,
+    task_id: &str,
+) -> Result<bool, ExecError> {
     let path = journal_path(state, task_id);
-    if !path.exists() {
-        return false;
+    if !path.try_exists().map_err(ExecError::Journals)? {
+        return Ok(false);
     }
     let capacity = task_settings(policy).journal_capacity;
-    matches!(
-        Journal::open(&path, capacity),
-        Err(RuntimeError::Durable(JournalError::Locked { .. }))
-    )
+    match Journal::open(&path, capacity) {
+        Err(RuntimeError::Durable(JournalError::Locked { .. })) => Ok(true),
+        Ok(_) => Ok(false),
+        // A probe that fails for any other reason proves nothing about the run, so it
+        // is its own typed answer rather than "dead" (larry#334).
+        Err(cause) => Err(ExecError::Journal(cause)),
+    }
 }
 
 /// Whether `task_id`'s run already has evidence this state directory kept: a
@@ -78,10 +91,16 @@ pub(super) fn journal_live(state: &Path, policy: &BTreeSet<Scope>, task_id: &str
 /// A retry that derives this run id is answered from that evidence and never runs
 /// the body again, because the earlier run's outcome is exactly what nobody observed
 /// (larry#182 defect 3).
-pub(super) fn recovered_evidence(state: &Path, task_id: &str) -> bool {
+///
+/// # Errors
+///
+/// [`ExecError::Journals`] when the evidence cannot be stat'ed, so an unreadable
+/// directory is never read as absent (larry#334).
+pub(super) fn recovered_evidence(state: &Path, task_id: &str) -> Result<bool, ExecError> {
     journal_path(state, task_id)
         .with_extension(RECOVERED_EXT)
-        .exists()
+        .try_exists()
+        .map_err(ExecError::Journals)
 }
 
 /// The owner a recovered run is restored with. The task body died with the
