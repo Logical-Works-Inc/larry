@@ -442,11 +442,13 @@ fn tui_journey_apply_writes_the_diff_into_the_folder() -> Journey {
     Ok(())
 }
 
-/// The terminal's shell gets the fixed PATH, never the host's (larry#269): the model's command
-/// writes `$PATH` inside the confined copy and the review shows it as `/usr/bin:/bin`, so a host
-/// tool that shadows `git`, `sh` or `sleep` cannot change what a journey runs.
+/// The terminal's shell gets the PATH built from where its tools resolve, never the host's
+/// (larry#269, larry#296): the model's command writes `$PATH` inside the confined copy and the
+/// review shows exactly that PATH, so a host tool that shadows `git`, `sh` or `sleep` cannot
+/// change what a journey runs.
 #[test]
 fn the_terminal_gets_the_fixed_path_not_the_host() -> Journey {
+    let expected = pty::test_path()?;
     let replies = [
         r#"{"command":"printf '%s' \"$PATH\" > path.txt"}"#,
         r#"{"done":"read the path"}"#,
@@ -455,7 +457,7 @@ fn the_terminal_gets_the_fixed_path_not_the_host() -> Journey {
         ask(pty)?;
         pty.send("y")?;
         pty.wait_for(REVIEW)?;
-        pty.wait_for("/usr/bin:/bin")?;
+        pty.wait_for(expected)?;
         pty.send("n")?;
         pty.wait_for("read the path")
     })?;

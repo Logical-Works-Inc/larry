@@ -13,7 +13,7 @@ use std::fmt;
 use std::io;
 use std::mem::discriminant;
 use std::num::TryFromIntError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -354,6 +354,8 @@ enum CancelSimError {
     WitnessPanicked,
     /// The command's record lacks a field the run needs.
     Missing(&'static str),
+    /// A tree still present after its guard dropped, named so the leak can be found.
+    Leaked(PathBuf),
     /// A lane of the seed sweep failed outright.
     Lane(LaneError),
 }
@@ -374,6 +376,7 @@ impl fmt::Display for CancelSimError {
             Self::Io(ref cause) => write!(out, "scratch or probe: {cause}"),
             Self::WitnessPanicked => out.write_str("the ledger witness thread panicked"),
             Self::Missing(what) => write!(out, "missing: {what}"),
+            Self::Leaked(ref path) => write!(out, "the tree {} outlived its guard", path.display()),
             Self::Lane(ref cause) => write!(out, "seed sweep: {cause}"),
         }
     }
@@ -517,12 +520,17 @@ fn run_one(when: When, seed: u64, path_env: &str) -> Result<String, CancelSimErr
     drop(state);
     drop(work);
     let trace = outcome?;
-    for path in [state_path, work_path] {
-        if path.exists() {
-            return Err(std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty).into());
-        }
-    }
+    leaked_tree([state_path, work_path])?;
     Ok(trace)
+}
+
+/// Refuses with the first of `paths` still there, naming it: a tree the run's guards left behind
+/// says which tree leaked (larry#296).
+fn leaked_tree(paths: [PathBuf; 2]) -> Result<(), CancelSimError> {
+    match paths.into_iter().find(|path| path.exists()) {
+        Some(path) => Err(CancelSimError::Leaked(path)),
+        None => Ok(()),
+    }
 }
 
 /// Every seed's trace hash, in seed order.
@@ -700,4 +708,23 @@ fn sim_a_panic_inside_run_command_ends_the_witness_and_reports_the_panic() {
             "the run must reach the injected fault inside run_command, not fail at setup: {cause}"
         );
     }
+}
+
+/// A tree still present after its guard dropped is refused with its own path in the message, so
+/// a leaked run says which tree to look at (larry#296). The tree is the crate's scratch guard,
+/// which removes it when the test ends.
+#[test]
+fn a_tree_still_present_after_its_guard_names_its_path_in_the_refusal() -> TestResult {
+    let tree = scratch("leak")?;
+    let absent = tree.join("absent");
+    let refusal = match leaked_tree([tree.to_path_buf(), absent]) {
+        Err(cause) => cause,
+        Ok(()) => return Err("the check passed over a tree that is still there".into()),
+    };
+    let named = tree.to_string_lossy();
+    assert!(
+        refusal.to_string().contains(named.as_ref()),
+        "the refusal names the leaked tree {named}: {refusal}"
+    );
+    Ok(())
 }
