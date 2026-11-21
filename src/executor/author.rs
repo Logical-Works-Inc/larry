@@ -72,13 +72,14 @@ impl Brief {
 }
 
 /// A path the model may write: non-empty, bounded, NUL-free, relative, made of
-/// normal components only (no `.`, `..`, root or prefix), none of them `.git`.
+/// normal components only (no `.`, `..`, root or prefix), none of them `.git` in any
+/// case (larry#335: a case-insensitive file system would otherwise reach `.git`).
 pub(crate) fn is_writable_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= MAX_PATH_BYTES
         && !path.contains('\0')
         && Path::new(path).components().all(|part| match part {
-            Component::Normal(name) => name != ".git",
+            Component::Normal(name) => !name.eq_ignore_ascii_case(".git"),
             Component::CurDir
             | Component::ParentDir
             | Component::RootDir
@@ -303,18 +304,29 @@ fn user_turn(shared: Option<&str>, goal: &str, path: &str, current: Option<&str>
 }
 
 /// `tree` joined with `path`, refused when any component that already exists is a symlink:
-/// a clone may carry a symlink that points outside the workspace.
-fn checked_target(tree: &Path, path: &str) -> Result<PathBuf, ExecError> {
+/// a clone may carry a symlink that points outside the workspace. The workspace copy checks
+/// every ancestor of each write with it too, so an untracked symlink cannot shadow a tracked
+/// directory name (larry#335, CWE-59).
+pub(crate) fn checked_target<P: AsRef<Path>>(tree: &Path, path: P) -> Result<PathBuf, ExecError> {
+    let relative = path.as_ref();
     let mut target = tree.to_path_buf();
-    for part in Path::new(path).components() {
+    for part in relative.components() {
         target.push(part);
         match fs::symlink_metadata(&target) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(refused(path, AuthorFault::Symlink));
+                return Err(refused(
+                    &relative.display().to_string(),
+                    AuthorFault::Symlink,
+                ));
             }
             Ok(_) => {}
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
-            Err(cause) => return Err(refused(path, AuthorFault::Io(cause))),
+            Err(cause) => {
+                return Err(refused(
+                    &relative.display().to_string(),
+                    AuthorFault::Io(cause),
+                ));
+            }
         }
     }
     Ok(target)
