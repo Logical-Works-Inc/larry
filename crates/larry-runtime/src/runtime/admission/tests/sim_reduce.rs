@@ -23,7 +23,7 @@ use crate::journal::{Journal, JournalEntry};
 use crate::owner::fixture::ScriptedOwner;
 use crate::payload::CommandAcceptedPayload;
 use crate::projection::ProjectionBackend;
-use crate::runtime::{Runtime, restore};
+use crate::runtime::{Runtime, TickItem, restore};
 
 /// Tenant `who` (0 is A, 1 is B) and its `index`th submission for `seed`.
 fn work(seed: u64, who: u8, index: u8) -> Result<(Command, RunId), Box<dyn std::error::Error>> {
@@ -536,5 +536,48 @@ fn sim_a_reduce_failure_interleaved_with_a_second_tenants_retries_never_crosses_
         seen.insert(first);
     }
     assert_eq!(seen.len(), 24, "every seed leaves its own trace");
+    Ok(())
+}
+
+/// larry#371, review of PR #374: a pending command refused after its
+/// acceptance is durable leaves the pending set, so the command behind it
+/// slides into its slot, and the loop must reduce that one in the same tick.
+/// Tenant A's second `Submit` names a run that is no longer a draft; tenant
+/// B's `Submit` waits behind it. For every seed, B is reduced in that tick.
+#[test]
+fn sim_a_refusal_after_acceptance_never_skips_the_next_pending_command() -> Outcome {
+    for seed in 0..32_u64 {
+        let mut runtime = memory(ScriptedOwner::new())?;
+        let (first, run_a) = work(seed, 0, 0)?;
+        runtime.ack(first)?;
+        runtime.tick()?;
+        let again = command(
+            CommandId::from_bytes(ids(0x7f, seed)),
+            CommandKind::Submit,
+            &work_body(
+                run_a,
+                TenantId::from_bytes(ids(2, seed)),
+                OperationId::from_bytes(ids(0x4f, seed)),
+            ),
+        )?;
+        let (behind, _) = work(seed, 1, 0)?;
+        let (again_id, behind_id) = (again.id(), behind.id());
+        runtime.ack(again)?;
+        runtime.ack(behind)?;
+        assert_eq!(pending(&runtime), [again_id, behind_id], "seed {seed}");
+        let report = runtime.tick()?;
+        assert!(
+            report
+                .refused()
+                .iter()
+                .any(|entry| entry.0 == TickItem::Command(again_id)),
+            "seed {seed}: the second submit of a live run is refused: {report:?}"
+        );
+        assert!(
+            report.admitted().contains(&behind_id),
+            "seed {seed}: the command behind the refusal is reduced in the same tick: {report:?}"
+        );
+        assert!(pending(&runtime).is_empty(), "seed {seed}: nothing is left");
+    }
     Ok(())
 }

@@ -532,6 +532,6 @@ where
             return Ok(());
         }
         let content = command.content().digest();
-        self.admit_work(tenant, &proposal, content, display, at, report)
+        self.admit_work(command, &proposal, content, display, at, report)
     }
 }

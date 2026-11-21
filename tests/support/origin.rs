@@ -9,6 +9,7 @@
 //! (larry#269).
 
 use std::error::Error;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -30,7 +31,27 @@ pub(crate) fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
 /// read; `main` is the branch default, signing is off, an empty `core.hooksPath` runs no hooks,
 /// and the author and committer are fixed. Every test git call is built here.
 pub(super) fn git_command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+    git_command_over(
+        Command::new("git"),
+        dir,
+        std::env::vars_os().map(|(key, _)| key),
+    )
+}
+
+/// [`git_command`] over `command`, which may already carry the environment the test process
+/// inherited (the hostile case the test below builds), with `inherited` naming those variables.
+fn git_command_over(
+    mut command: Command,
+    dir: &Path,
+    inherited: impl IntoIterator<Item = OsString>,
+) -> Command {
+    // A hook's GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE or GIT_COMMON_DIR would point every
+    // fixture call at the host repository (larry#375), so no inherited GIT_* variable passes.
+    for key in inherited {
+        if key.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(key);
+        }
+    }
     command
         .arg("-C")
         .arg(dir)
@@ -185,5 +206,57 @@ fn a_hostile_home_gitconfig_changes_nothing() -> Result<(), Box<dyn Error>> {
         "the host's template reached the repository"
     );
     assert!(!marker.exists(), "the host's pre-commit hook ran");
+    Ok(())
+}
+
+/// larry#375: a commit hook runs the tests with `GIT_DIR` and `GIT_INDEX_FILE` set (absolute
+/// in a git worktree), so a fixture call that keeps them writes the host repository: a fixture
+/// `git init` set `core.bare=true` on `~/larry/.git` and a fixture commit landed on a worker
+/// branch (2026-11-21). Here the fixture is built with both pointing at a second repository,
+/// the host, which must keep its config and its one commit while the fixture gets its own.
+#[test]
+fn a_hook_git_dir_never_reaches_the_host_repository() -> Result<(), Box<dyn Error>> {
+    let host = TempDir::new()?;
+    origin_repo(host.path())?;
+    let host_git = host.path().join(".git");
+    let hooked = |dir: &Path| {
+        let mut command = Command::new("git");
+        command
+            .env("GIT_DIR", &host_git)
+            .env("GIT_INDEX_FILE", host_git.join("index"));
+        git_command_over(
+            command,
+            dir,
+            [OsString::from("GIT_DIR"), OsString::from("GIT_INDEX_FILE")],
+        )
+    };
+    let fixture = TempDir::new()?;
+    origin_repo_with(&hooked, fixture.path())?;
+    commit_all_with(&hooked, fixture.path(), "fixture")?;
+    let host_says = |args: &[&str]| git_text(&git_command, host.path(), args);
+    assert_eq!(
+        host_says(&["config", "--get", "core.bare"])?,
+        "false",
+        "the host stays a work tree"
+    );
+    assert_eq!(
+        host_says(&["rev-list", "--count", "HEAD"])?,
+        "1",
+        "no fixture commit lands on the host"
+    );
+    assert_eq!(
+        host_says(&["log", "-1", "--format=%s"])?,
+        "init",
+        "the host's own commit is its head"
+    );
+    assert!(
+        fixture.path().join(".git").is_dir(),
+        "the fixture gets its own repository"
+    );
+    assert_eq!(
+        git_text(&git_command, fixture.path(), &["log", "-1", "--format=%s"])?,
+        "fixture",
+        "the fixture's commit is in the fixture"
+    );
     Ok(())
 }

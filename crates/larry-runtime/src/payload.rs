@@ -1,9 +1,10 @@
 //! The typed payloads carried by recorded events.
 //!
-//! `contracts::event::EventKind` is a closed five-variant vocabulary; the
-//! specification owns it and this crate may not extend it. Each payload here
-//! is the body of exactly one of those kinds, encoded as JSON through the
-//! `lgwks_std/json` edge (the same serde re-export `larry-contracts` uses).
+//! `contracts::event::EventKind` is a closed vocabulary; the specification owns
+//! it and this crate may not extend it (a new kind is a specification change,
+//! as ADR 0078 recorded for `CommandRefused`). Each payload here is the body of
+//! exactly one of those kinds, encoded as JSON through the `lgwks_std/json` edge
+//! (the same serde re-export `larry-contracts` uses).
 //!
 //! The payloads are chosen so that the journal is *self-checking*: a
 //! [`TransitionPayload`] carries both the event offered and the state the
@@ -241,6 +242,38 @@ const fn spent_budget() -> u8 {
 pub struct ReceiptPayload {
     /// The immutable terminal receipt.
     pub receipt: TerminalReceipt,
+}
+
+/// Why a durably accepted command never ran.
+///
+/// The command's `CommandAccepted` fact is authoritative, so a refusal that
+/// leaves it in the journal must outlive the process too: a restart reads the
+/// reason from the record rather than from a report the dead process held
+/// (larry#371, ADR 0078).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
+pub enum CommandRefusal {
+    /// The display the command was admitted with named a security epoch the
+    /// fence has since left, so the reduce dispatched nothing.
+    StaleDisplayEpoch,
+}
+
+/// The body of a [`EventKind::CommandRefused`](larry_contracts::event::EventKind::CommandRefused)
+/// record: the command, its run and the typed reason it never ran.
+///
+/// Crate-private: the journal is the only reader, and the public view of the
+/// fact is [`crate::projection::FoldProjection::refusals`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
+#[non_exhaustive]
+pub(crate) struct CommandRefusedPayload {
+    /// The accepted command that never ran.
+    pub(crate) command: CommandId,
+    /// The run the command targets.
+    pub(crate) run: RunId,
+    /// The typed reason it never ran.
+    pub(crate) reason: CommandRefusal,
 }
 
 impl CommandAcceptedPayload {
