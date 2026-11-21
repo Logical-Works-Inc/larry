@@ -15,8 +15,8 @@ use crate::error::RuntimeError;
 use crate::journal::JournalEntry;
 use crate::owner::EffectOwner;
 use crate::payload::{
-    CommandAcceptedPayload, IntentPayload, OutcomePayload, ReceiptPayload, TransitionPayload,
-    WorkProposal,
+    CommandAcceptedPayload, CommandRefusal, CommandRefusedPayload, IntentPayload, OutcomePayload,
+    ReceiptPayload, TransitionPayload, WorkProposal,
 };
 use crate::projection::ProjectionBackend;
 
@@ -98,6 +98,27 @@ where
         let payload = CommandAcceptedPayload { command, run, kind };
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
+    }
+
+    /// Records why a durably accepted command never ran.
+    ///
+    /// The acceptance fact is already in the journal and stays there, so the
+    /// refusal beside it is what a restart reads; the in-memory report alone
+    /// dies with the process (larry#371, ADR 0078).
+    pub(super) fn record_command_refused(
+        &mut self,
+        command: CommandId,
+        tenant: TenantId,
+        run: RunId,
+        reason: CommandRefusal,
+    ) -> Result<(), RuntimeError> {
+        let payload = CommandRefusedPayload {
+            command,
+            run,
+            reason,
+        };
+        let bytes = lgwks_std::json::to_vec(&payload)?;
+        self.record_event(tenant, run, EventKind::CommandRefused, bytes)
     }
 
     /// Records both the offered transition and its derived state.

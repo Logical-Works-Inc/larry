@@ -20,14 +20,15 @@ use larry_contracts::effect::{
     EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt, terminal_disposition,
 };
 use larry_contracts::event::{Event, EventKind};
-use larry_contracts::ids::{OperationId, RunId, TenantId};
+use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::ReplayRecord;
 use larry_contracts::state::{RunState, TransitionEvent, transition};
 
 use crate::error::RuntimeError;
 use crate::journal::{Journal, JournalEntry};
 use crate::payload::{
-    CommandAcceptedPayload, IntentPayload, OutcomePayload, ReceiptPayload, TransitionPayload,
+    CommandAcceptedPayload, CommandRefusal, CommandRefusedPayload, IntentPayload, OutcomePayload,
+    ReceiptPayload, TransitionPayload,
 };
 
 /// Where one effect stands, as far as the journal records.
@@ -223,6 +224,8 @@ pub struct FoldProjection {
     reserved: BTreeMap<TenantId, u64>,
     /// Reservations in recorded order.
     intents: Vec<EffectIntent>,
+    /// Refusals of durably accepted commands, in recorded order (larry#371).
+    refusals: Vec<(CommandId, CommandRefusal)>,
     /// Maximum number of tracked run views.
     capacity: usize,
 }
@@ -243,6 +246,7 @@ impl FoldProjection {
             authorizations: Vec::new(),
             reserved: BTreeMap::new(),
             intents: Vec::new(),
+            refusals: Vec::new(),
             capacity,
         }
     }
@@ -257,6 +261,15 @@ impl FoldProjection {
     #[must_use]
     pub fn runs(&self) -> &BTreeMap<RunId, RunView> {
         &self.runs
+    }
+
+    /// Why a durably accepted command never ran, in recorded order.
+    ///
+    /// The report a caller reads dies with the process; this fact is folded
+    /// from the journal, so a restart answers the same question (larry#371).
+    #[must_use]
+    pub fn refusals(&self) -> &[(CommandId, CommandRefusal)] {
+        &self.refusals
     }
 
     /// Folds one command-accepted record.
@@ -334,6 +347,16 @@ impl FoldProjection {
         Ok(())
     }
 
+    /// Folds one refusal of a durably accepted command. Nothing about the run
+    /// changed; the fact says why the command never ran, and a restart reads
+    /// it from the journal (larry#371).
+    fn fold_command_refused(&mut self, event: &Event) -> Result<(), RuntimeError> {
+        let payload: CommandRefusedPayload = lgwks_std::json::from_slice(event.payload())?;
+        self.entry(event.run(), event)?;
+        self.refusals.push((payload.command, payload.reason));
+        Ok(())
+    }
+
     /// Finds or admits a bounded run view and validates event sequencing.
     fn entry(&mut self, run: RunId, event: &Event) -> Result<&mut RunView, RuntimeError> {
         if !self.runs.contains_key(&run) && self.runs.len() >= self.capacity {
@@ -374,6 +397,7 @@ impl ProjectionBackend for FoldProjection {
         self.authorizations.clear();
         self.reserved.clear();
         self.intents.clear();
+        self.refusals.clear();
         for entry in journal.entries() {
             if let JournalEntry::Event(ref event) = *entry {
                 self.apply(event)?;
@@ -389,6 +413,7 @@ impl ProjectionBackend for FoldProjection {
             EventKind::EffectIntentRecorded => self.fold_intent(event),
             EventKind::EffectOutcomeRecorded => self.fold_outcome(event),
             EventKind::TerminalReceiptPublished => self.fold_receipt(event),
+            EventKind::CommandRefused => self.fold_command_refused(event),
             other => Err(RuntimeError::UnsupportedEvent(other)),
         }
     }
