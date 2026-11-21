@@ -47,9 +47,11 @@ and the projection must end the tick.
   `TickItem` entry for the caller that is still running.
 - `FoldProjection` folds the fact into its refusal list and changes no run
   state, because no state changed. `restore` therefore carries it.
-- `promote_admitted` steps past a command whose reduce refused: the command
-  stays pending at its place, one slot of the tick's budget is spent, and
-  the next command is reduced in the same tick.
+- `promote_admitted` steps past a command whose acceptance record failed:
+  the command stays pending at its place, one slot of the tick's budget is
+  spent, and the next command is reduced in the same tick. A command refused
+  after its acceptance is durable has left the pending set, so the loop does
+  not step: the command that took its slot is the next one, and it is reduced.
 - A command is named in `TickReport::admitted` only once its acceptance
   record is durable; one that failed is named as refused, never both.
 - `FoldDivergence` stays one item's refusal, as ADR 0073 decided: it is
@@ -58,6 +60,7 @@ and the projection must end the tick.
 - Tests: `sim_a_command_whose_accept_fails_is_reduced_once_and_the_tick_goes_on`,
   `sim_a_stale_display_refusal_survives_a_restart_as_a_journal_fact`,
   `a_fold_divergence_is_a_recorded_refusal_and_the_tick_goes_on`,
+  `sim_a_refusal_after_acceptance_never_skips_the_next_pending_command`,
   `canonical_kind_tags_preserve_existing_command_and_event_digests`.
 
 ## Consequences

@@ -355,11 +355,19 @@ where
             left = left.saturating_sub(1);
             let id = next.command.id();
             if let Err(error) = self.reduce(next, index, at, report) {
-                // `reduce` put the command back at this index, so the loop
-                // steps past it: one failed acceptance costs one slot of the
-                // tick's budget, never the whole tick (larry#371).
                 self.refuse(report, TickItem::Command(id), error)?;
-                index = index.saturating_add(1);
+                // A failed acceptance record puts the command back at this
+                // index, so the loop steps past it: one failure costs one slot
+                // of the tick's budget, never the whole tick. A refusal after
+                // the acceptance is durable leaves the set, so the command now
+                // at this index is the next one and is reduced (larry#371).
+                let put_back = self
+                    .admitted
+                    .get(index)
+                    .is_some_and(|admitted| admitted.command.id() == id);
+                if put_back {
+                    index = index.saturating_add(1);
+                }
             }
         }
         Ok(left)
