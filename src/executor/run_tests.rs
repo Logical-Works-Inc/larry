@@ -94,6 +94,19 @@ fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult
             u64::try_from(dropped)?,
             "seed {seed}: the dropped count is exact"
         );
+        // The report states the stream's own length, and kept plus dropped is all of it: no
+        // byte is neither kept nor counted (larry#319).
+        assert_eq!(
+            captured.bytes,
+            u64::try_from(total)?,
+            "seed {seed}: every byte the stream yielded is counted"
+        );
+        let kept = u64::try_from(captured.head.len().saturating_add(captured.tail.len()))?;
+        assert_eq!(
+            captured.dropped.saturating_add(kept),
+            captured.bytes,
+            "seed {seed}: kept plus dropped is the bytes the stream yielded"
+        );
         let head_end = total.min(HEAD_BYTES);
         assert_eq!(
             captured.head.as_slice(),
