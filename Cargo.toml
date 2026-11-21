@@ -72,7 +72,10 @@ larry-runtime = { path = "crates/larry-runtime" }
 [dependencies]
 larry-contracts = { path = "crates/larry-contracts" }
 larry-runtime = { workspace = true }
-lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign", "pattern"] }
+lgwks_std = { workspace = true, features = ["json", "http", "process", "hash", "sign", "pattern", "fs-raw"] }
+# `fs-raw` (larry#359) is the estate's handle-relative `fs::capability::Dir`: the governance
+# reader opens each governed file with `openat`/`O_NOFOLLOW`/`O_NONBLOCK` from a held descriptor,
+# so a link or FIFO swapped in between its check and its open is refused.
 # The runtime gate's clock (larry#164), and `larry serve` (larry#88, ADR 0021):
 # the app edge (`edge`) serves the routes, and `signal` stops it on SIGTERM.
 # The estate owns HTTP serving, so no Loco here; the crate count and cold build
