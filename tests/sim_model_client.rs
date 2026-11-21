@@ -23,6 +23,8 @@ mod mock_model;
 mod sim_lanes;
 
 use std::error::Error;
+use std::io::Write;
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -266,6 +268,45 @@ fn a_client_error_is_never_retried() -> TestResult {
         })?;
     }
     Ok(())
+}
+
+/// larry#327: a gateway that answers `302` must not have its `Location`
+/// followed, or the tenant's prompt reaches a host the route never chose. The
+/// second listener is never accepted, so a followed redirect would queue a
+/// request there: `accept` after the call counts it, and zero is the promise.
+#[test]
+fn a_redirect_is_returned_and_never_followed() -> TestResult {
+    let target = TcpListener::bind(("127.0.0.1", 0))?;
+    target.set_nonblocking(true)?;
+    let target_url = format!("http://{}/v1/chat/completions", target.local_addr()?);
+    let origin = TcpListener::bind(("127.0.0.1", 0))?;
+    let origin_addr = origin.local_addr()?;
+    std::thread::scope(|scope| -> TestResult {
+        let _server = scope.spawn(move || {
+            let refused = (|| -> Result<(), Box<dyn Error + Send + Sync>> {
+                let (mut stream, _) = origin.accept()?;
+                http_wire::read_request(&mut stream, 65_536)?;
+                let reply = http_wire::render(302, &[("Location", target_url)], b"", 0);
+                stream.write_all(&reply)?;
+                Ok(())
+            })();
+            assert!(refused.is_ok(), "the origin mock failed: {refused:?}");
+        });
+        let table = with(
+            settings(&base_of(origin_addr), "test-key"),
+            &[("LARRY_MODEL_TIMEOUT_MS", "2000")],
+        );
+        let outcome = client_from(table)?.complete(&[user("do not move this")]);
+        assert!(
+            matches!(outcome, Err(ModelError::Client { status: 302, .. })),
+            "a 3xx is the answer, never followed: {outcome:?}"
+        );
+        assert!(
+            target.accept().is_err(),
+            "the client dialled the redirect target, carrying the prompt past the route"
+        );
+        Ok(())
+    })
 }
 
 #[test]

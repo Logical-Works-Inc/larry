@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use lgwks_std::http::{self, BodyPolicy, Error as HttpError, FailureKind, Options};
+use lgwks_std::http::{self, BodyPolicy, Error as HttpError, FailureKind, Options, RedirectPolicy};
 
 use super::config::ModelConfig;
 use super::wire;
@@ -178,6 +178,9 @@ impl ModelClient {
             .deadline(self.config.timeout())
             .max_body_bytes(MAX_REPLY_BYTES)
             .body_policy(BodyPolicy::Whole)
+            // A gateway must never move the prompt to a host the route did not
+            // name: the 3xx is the answer, not a step to follow (larry#327).
+            .redirect_policy(RedirectPolicy::NoFollow)
             // `Options` already sends a `User-Agent` of its own; the setter replaces it,
             // where a `header` would add a second one.
             .user_agent(USER_AGENT)
