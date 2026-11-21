@@ -21,6 +21,9 @@ use json_at::At;
 
 #[path = "support/acp_agent.rs"]
 mod acp_agent;
+#[path = "support/acp_session.rs"]
+mod acp_session;
+use acp_session::{SESSION_POLICY, agent, operator, scripted};
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/larry_child.rs"]
@@ -33,22 +36,18 @@ mod origin;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use acp_agent::{Agent, kinds, message_text, prompt, said};
+use acp_agent::{kinds, message_text, prompt, said};
 use lgwks_std::json::{self, Value, json};
-use mock_model::{Config, Fault, Handle};
+use mock_model::{Config, Fault};
 use origin::{TempDir, fixture};
 
 /// What every test here returns.
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
-
-/// Every scope a session needs, `model.command` among them: what an operator
-/// sets inside a Harbor task container.
-const SESSION_POLICY: &str = "file.read,file.write,process.spawn,model.invoke,model.command";
 
 /// Timed runs of the Harbor task.
 const SAMPLES: u64 = 16;
@@ -56,43 +55,6 @@ const SAMPLES: u64 = 16;
 /// The task's verifier, as Harbor runs it after the agent: reward 1 when the
 /// working directory holds `hello.txt` with exactly `hello`.
 const TEST_SH: &str = "#!/bin/sh\nmkdir -p \"$LOGS/verifier\"\nif [ \"$(cat \"$WORKDIR/hello.txt\" 2>/dev/null)\" = hello ]; then echo 1 > \"$LOGS/verifier/reward.txt\"; else echo 0 > \"$LOGS/verifier/reward.txt\"; fi\n";
-
-/// The settings an operator exports: the state directory, the mock gateway and,
-/// when given, the policy.
-fn operator(state: &Path, mock: &Handle, policy: Option<&str>) -> Vec<(&'static str, OsString)> {
-    let mut env = vec![
-        ("LARRY_STATE_DIR", state.as_os_str().to_owned()),
-        (
-            "LARRY_MODEL_URL",
-            OsString::from(format!("http://{}/v1", mock.addr())),
-        ),
-        ("LARRY_MODEL", OsString::from("mock-model")),
-        ("LARRY_MODEL_KEY", OsString::from("acp-key")),
-        ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
-    ];
-    if let Some(policy) = policy {
-        env.push(("LARRY_POLICY", OsString::from(policy)));
-    }
-    env
-}
-
-/// Starts `larry acp` under `operator`'s settings.
-fn agent(state: &Path, mock: &Handle, policy: Option<&str>) -> TestResult<Agent> {
-    let env = operator(state, mock, policy);
-    let pairs: Vec<(&str, &OsStr)> = env
-        .iter()
-        .map(|pair| (pair.0, pair.1.as_os_str()))
-        .collect();
-    Agent::start(&pairs)
-}
-
-/// A mock whose replies are `contents`, in order.
-fn scripted(seed: u64, contents: &[&str]) -> Config {
-    Config {
-        contents: contents.iter().map(|text| (*text).to_owned()).collect(),
-        ..Config::seeded(seed)
-    }
-}
 
 /// Runs `larry <subcommand>` to completion with only `env` set and `input` on
 /// stdin; returns the exit code and stdout.
@@ -631,6 +593,159 @@ fn a_request_before_initialize_and_a_relative_cwd_are_refused() -> TestResult {
         assert_eq!(*relative.at("/error/code")?, -32602, "relative cwd");
         assert_eq!(mock.served(), 0, "no model call");
         assert_eq!(acp.finish()?, Some(0), "clean exit");
+        Ok(())
+    })
+}
+
+/// Writes one protocol message as its line and flushes it.
+fn send_line(out: &mut impl Write, message: &Value) -> TestResult {
+    let mut line = message.to_string();
+    line.push('\n');
+    out.write_all(line.as_bytes())?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Reads one protocol message from `input`.
+fn recv_line(input: &mut impl BufRead) -> TestResult<Value> {
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Err("larry acp closed its output".into());
+    }
+    Ok(json::from_str(&line)?)
+}
+
+/// A client that dies mid-prompt stops the session (larry#338): closing its output
+/// makes the next reply a write fault, which cancels every live session, so the
+/// running command is killed and no further model call or command runs.
+#[test]
+fn a_client_that_dies_mid_prompt_stops_the_session() -> TestResult {
+    let (state, work) = fixture()?;
+    let fifo = work.path().join("gate.fifo");
+    assert!(
+        Command::new("mkfifo").arg(&fifo).status()?.success(),
+        "mkfifo"
+    );
+    let replies = [
+        r#"{"command":"head -c 1 gate.fifo"}"#,
+        r#"{"command":"touch after.txt"}"#,
+        r#"{"done":"finished"}"#,
+    ];
+    mock_model::run(scripted(53, &replies), |mock| -> TestResult {
+        let env = operator(state.path(), mock, Some(SESSION_POLICY));
+        let pairs: Vec<(&str, &OsStr)> = env
+            .iter()
+            .map(|pair| (pair.0, pair.1.as_os_str()))
+            .collect();
+        let (mut child, mut stdin, mut out) = larry_child::start("acp", &pairs, Stdio::null())?;
+        send_line(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":0,"method":"initialize",
+                "params":{"protocolVersion":1}}),
+        )?;
+        assert_eq!(
+            *recv_line(&mut out)?.at("/result/protocolVersion")?,
+            1,
+            "version 1"
+        );
+        send_line(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":1,"method":"session/new",
+                "params":{"cwd":work.path().to_string_lossy(),"mcpServers":[]}}),
+        )?;
+        let opened = recv_line(&mut out)?;
+        let session = opened
+            .member("/result/sessionId")
+            .and_then(Value::as_str)
+            .ok_or("session/new names its session")?
+            .to_owned();
+        send_line(&mut stdin, &prompt(2, &session, "wait"))?;
+        loop {
+            let update = recv_line(&mut out)?;
+            if update
+                .member("/params/update/sessionUpdate")
+                .and_then(Value::as_str)
+                == Some("tool_call")
+            {
+                break;
+            }
+        }
+        // The client dies: its reply stream is closed, so the next update is a write
+        // fault, and its input ends here too.
+        drop(out);
+        drop(stdin);
+        // Release the gated command (one byte ends it) so a session that never saw
+        // the fault can end.
+        let mut open = fs::OpenOptions::new();
+        open.read(true).write(true);
+        let mut gate = open.open(&fifo)?;
+        gate.write_all(b"g")?;
+        child.wait()?;
+        assert_eq!(mock.served(), 1, "no model call after the client died");
+        assert!(
+            !work.path().join("after.txt").exists(),
+            "no command after the client died"
+        );
+        Ok(())
+    })
+}
+
+/// A queued second prompt never clears the running prompt's cancel (larry#338): a
+/// cancel binds to the prompt it follows, so the running session still stops.
+#[test]
+fn a_queued_prompt_does_not_clear_the_running_prompts_cancel() -> TestResult {
+    let (state, work) = fixture()?;
+    let fifo = work.path().join("gate.fifo");
+    assert!(
+        Command::new("mkfifo").arg(&fifo).status()?.success(),
+        "mkfifo"
+    );
+    let replies = [
+        r#"{"command":"head -c 1 gate.fifo"}"#,
+        r#"{"command":"touch after.txt"}"#,
+        r#"{"done":"A done"}"#,
+    ];
+    mock_model::run(scripted(59, &replies), |mock| -> TestResult {
+        let mut console = agent(state.path(), mock, Some(SESSION_POLICY))?;
+        let handle = console.open(work.path())?;
+        console.send(&prompt(2, &handle, "wait"))?;
+        let first = console.recv()?;
+        assert_eq!(
+            *first.at("/params/update/sessionUpdate")?,
+            "tool_call",
+            "running"
+        );
+        // The cancel is meant for the running prompt.
+        console.send(&json!({"jsonrpc":"2.0","method":"session/cancel",
+            "params":{"sessionId":handle}}))?;
+        // A second prompt for the same session queues behind it. Numbering it must
+        // not clear the running prompt's cancel.
+        console.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt",
+            "params":{"sessionId":handle,"prompt":[]}}))?;
+        // A cancel for a session this process never opened is read after the queued
+        // prompt, so its log line proves the reader has numbered the queued prompt.
+        console.send(&json!({"jsonrpc":"2.0","method":"session/cancel",
+            "params":{"sessionId":"sentinel"}}))?;
+        console.logged("session sentinel cancel requested")?;
+        // The byte lets the gated command end; the running prompt must still have
+        // been cancelled.
+        let mut open = fs::OpenOptions::new();
+        open.read(true).write(true);
+        let mut gate = open.open(&fifo)?;
+        gate.write_all(b"g")?;
+        let (seen, reply) = console.until(&json!(2))?;
+        assert_eq!(mock.served(), 1, "the queued prompt made no model call");
+        assert_eq!(*reply.at("/result/stopReason")?, "cancelled", "{reply}");
+        assert_eq!(
+            kinds(&seen),
+            ["tool_call_update"],
+            "the running command ends"
+        );
+        assert!(
+            !work.path().join("after.txt").exists(),
+            "no command after the cancel"
+        );
+        assert_eq!(console.finish()?, Some(0), "end of input is a clean exit");
         Ok(())
     })
 }

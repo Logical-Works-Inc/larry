@@ -14,12 +14,15 @@
 //! Larry connects to none of the `mcpServers` a client names and advertises no
 //! authentication method, no `loadSession`, and no image or audio input. Framing
 //! and envelope checks are `larry mcp`'s own (`mcp::wire`). A reader thread holds
-//! the input so a `session/cancel` lands while a prompt runs: it flags the session,
-//! and logs one line on standard error, which ACP leaves to the agent. The inbox
-//! between the two holds at most 64 frames, so a client that floods while a prompt
-//! runs waits on its own pipe; a process holds at most 16 sessions.
+//! the input so a `session/cancel` lands while a prompt runs: it numbers each
+//! prompt and binds a cancel to the prompt it follows, so a queued prompt never
+//! clears a running one's cancel, and it logs one line on standard error, which
+//! ACP leaves to the agent. End of input, or a reply that cannot be written,
+//! abandons every live session so a client that dies stops its runs (larry#338).
+//! The inbox between the two holds at most 64 frames, so a client that floods
+//! while a prompt runs waits on its own pipe; a process holds at most 16 sessions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -45,8 +48,17 @@ const MAX_TITLE_CHARS: usize = 256;
 struct Entry {
     /// The directory every command runs in.
     cwd: PathBuf,
-    /// Whether the client cancelled the prompt that is running.
-    cancelled: bool,
+    /// How many `session/prompt` frames the reader has numbered for this session.
+    prompts: u64,
+    /// How many `session/prompt` frames the agent has started for this session.
+    /// Frames arrive in reader order, so a prompt's agent number is the reader's.
+    started: u64,
+    /// The prompt numbers a `session/cancel` followed. A cancel binds to the prompt
+    /// it follows, so a queued prompt never clears a running prompt's cancel
+    /// (larry#338).
+    cancelled: BTreeSet<u64>,
+    /// The client hung up or a reply could not be written: every prompt stops.
+    abandoned: bool,
 }
 
 /// The sessions, shared by the reader thread (which flags cancels) and the agent.
@@ -130,6 +142,9 @@ where
             };
             if let Err(cause) = written {
                 failed = Some(cause);
+                // A reply the client cannot read is a client that is gone: every
+                // live session stops instead of running on to its bound (larry#338).
+                abandon_all(&book);
             }
         }
         if let Some(cause) = failed {
@@ -139,8 +154,8 @@ where
     })
 }
 
-/// Reads frames into the inbox until end of input, flagging each `session/cancel`
-/// on the way so it lands while a prompt runs.
+/// Reads frames into the inbox until end of input, numbering each prompt and
+/// binding each cancel on the way so it lands while a prompt runs.
 ///
 /// # Errors
 ///
@@ -155,7 +170,10 @@ fn read_loop<R: BufRead, L: Write>(
     loop {
         let frame = wire::read_frame(&mut reader, max);
         let end = !matches!(frame, Ok(Frame::Line(_) | Frame::Oversized));
-        let logged = log_cancel(&frame, book, &mut log);
+        let logged = match frame {
+            Ok(Frame::Line(ref bytes)) => mark(bytes, book, &mut log),
+            _ => Ok(()),
+        };
         inbox.send(frame)?;
         if let Err(cause) = logged {
             // A cancel whose acknowledgement could not be logged ends the stream
@@ -163,23 +181,18 @@ fn read_loop<R: BufRead, L: Write>(
             return inbox.send(Err(cause));
         }
         if end {
+            // End of input, or a read fault, is a client that is gone: every live
+            // session stops instead of running on to its bound (larry#338).
+            abandon_all(book);
             return Ok(());
         }
     }
 }
 
-/// Flags a line frame's cancel and logs its acknowledgement; any other frame
-/// carries no cancel.
-fn log_cancel<L: Write>(frame: &io::Result<Frame>, book: &Book, log: &mut L) -> io::Result<()> {
-    if let Ok(Frame::Line(ref bytes)) = *frame {
-        mark(bytes, book, log)?;
-    }
-    Ok(())
-}
-
-/// Applies a frame's effect on a session's cancel flag in stream order: a
-/// `session/prompt` clears it and a `session/cancel` sets it, so a cancel sent
-/// after a prompt always reaches that prompt, however far behind the agent runs.
+/// Applies a frame's effect on a session's prompt numbers in stream order: a
+/// `session/prompt` takes the next number, and a `session/cancel` binds to the
+/// prompt it follows, so a queued prompt never clears a running one's cancel
+/// (larry#338).
 ///
 /// # Errors
 ///
@@ -204,14 +217,34 @@ fn mark<L: Write>(bytes: &[u8], book: &Book, log: &mut L) -> io::Result<()> {
         return Ok(());
     };
     if let Some(entry) = locked(book).get_mut(session) {
-        entry.cancelled = cancel;
+        if cancel {
+            entry.cancelled.insert(entry.prompts);
+        } else {
+            entry.prompts = entry.prompts.saturating_add(1);
+        }
     }
     if cancel {
-        // The cancel flag is already set; the log line is the observable
-        // acknowledgement that it was read, and a failed write is reported.
+        // The cancel is recorded; the log line is the observable acknowledgement
+        // that it was read, and a failed write is reported.
         writeln!(log, "larry acp: session {session} cancel requested")?;
     }
     Ok(())
+}
+
+/// Marks every session abandoned, so every prompt running in this process stops:
+/// the client that would read their replies is gone (larry#338).
+fn abandon_all(book: &Book) {
+    for entry in locked(book).values_mut() {
+        entry.abandoned = true;
+    }
+}
+
+/// Forgets the cancel decisions of prompts that ended; a queued prompt's decision
+/// stays until that prompt runs (larry#338).
+fn clear_finished(book: &Book, session: &str, through: u64) {
+    if let Some(entry) = locked(book).get_mut(session) {
+        entry.cancelled = entry.cancelled.split_off(&through.saturating_add(1));
+    }
 }
 
 /// Writes one message as its line and flushes.
@@ -347,7 +380,10 @@ impl Agent<'_> {
             session.clone(),
             Entry {
                 cwd: cwd.to_path_buf(),
-                cancelled: false,
+                prompts: 0,
+                started: 0,
+                cancelled: BTreeSet::new(),
+                abandoned: false,
             },
         );
         wire::result(id, json!({ "sessionId": session }))
@@ -370,9 +406,13 @@ impl Agent<'_> {
                 "sessionId must be a string",
             ));
         };
-        // The reader cleared this session's cancel flag as it read this prompt.
-        let cwd = match locked(self.book).get(session) {
-            Some(entry) => entry.cwd.clone(),
+        // This prompt's number, in the order the reader numbered the same
+        // `session/prompt` frames (larry#338).
+        let (cwd, prompt_no) = match locked(self.book).get_mut(session) {
+            Some(entry) => {
+                entry.started = entry.started.saturating_add(1);
+                (entry.cwd.clone(), entry.started)
+            }
             None => return Ok(wire::error(id, wire::INVALID_PARAMS, "unknown session")),
         };
         let instruction = match instruction(params) {
@@ -383,30 +423,31 @@ impl Agent<'_> {
             out,
             session,
             book: self.book,
+            prompt_no,
             failed: None,
         };
         let settings = match *self.settings {
             Ok(ref settings) => settings,
             Err(ref reason) => {
                 updates.message(&reason.to_string());
+                clear_finished(self.book, session, prompt_no);
                 return updates.close(stopped(id, "refusal", None));
             }
         };
         // `larry acp` runs on the operator's isolated host under `model.command` (larry#93).
-        match run_session(&instruction, &cwd, settings, Isolation::Host, &mut updates) {
-            Ok(ended) => {
-                let reply = stopped(id, ended.stop.name(), Some(ended.report.json()));
-                updates.close(reply)
-            }
+        let reply = match run_session(&instruction, &cwd, settings, Isolation::Host, &mut updates) {
+            Ok(ended) => stopped(id, ended.stop.name(), Some(ended.report.json())),
             Err(ExecError::Session(cause)) => {
-                updates.close(wire::error(id, wire::INVALID_PARAMS, &cause.to_string()))
+                wire::error(id, wire::INVALID_PARAMS, &cause.to_string())
             }
             Err(cause @ ExecError::Route(_)) => {
                 updates.message(&cause.to_string());
-                updates.close(stopped(id, "refusal", None))
+                stopped(id, "refusal", None)
             }
-            Err(cause) => updates.close(wire::error(id, wire::INTERNAL_ERROR, &cause.to_string())),
-        }
+            Err(cause) => wire::error(id, wire::INTERNAL_ERROR, &cause.to_string()),
+        };
+        clear_finished(self.book, session, prompt_no);
+        updates.close(reply)
     }
 }
 
@@ -488,8 +529,10 @@ struct Updates<'a, W: Write> {
     out: &'a mut W,
     /// The session the updates belong to.
     session: &'a str,
-    /// Where the reader thread flags a cancel.
+    /// Where the reader thread numbers prompts and flags a cancel.
     book: &'a Book,
+    /// This prompt's number: a cancel binds to it, never to a later prompt.
+    prompt_no: u64,
     /// The first write fault; nothing more is written after it.
     failed: Option<io::Error>,
 }
@@ -506,6 +549,9 @@ impl<W: Write> Updates<'_, W> {
         );
         if let Err(cause) = send(&mut *self.out, &frame) {
             self.failed = Some(cause);
+            // The client can no longer read a reply: it is gone, so every live
+            // session stops rather than running to its bound (larry#338).
+            abandon_all(self.book);
         }
     }
 
@@ -569,7 +615,7 @@ impl<W: Write> Observer for Updates<'_, W> {
     fn cancelled(&self) -> bool {
         locked(self.book)
             .get(self.session)
-            .is_some_and(|entry| entry.cancelled)
+            .is_some_and(|entry| entry.abandoned || entry.cancelled.contains(&self.prompt_no))
     }
 }
 

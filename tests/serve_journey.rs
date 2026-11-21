@@ -20,7 +20,7 @@
 mod serve_cli;
 
 use std::error::Error;
-use std::io::{self, Write as _};
+use std::io::{self, BufRead, BufReader, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -512,5 +512,73 @@ fn a_key_store_past_the_cap_refuses_startup() -> TestResult {
     );
     let (status, stderr) = serving.signal_and_wait("TERM")?;
     assert!(status.success(), "stops clean at the cap: {stderr}");
+    Ok(())
+}
+
+/// A closed log pipe must not stop the host (larry#338): when a SIGHUP reload line
+/// cannot be written, `larry serve` reports it on stderr and keeps serving.
+#[test]
+fn a_reload_whose_log_line_fails_keeps_serving_and_reports_on_stderr() -> TestResult {
+    let state = fresh_state_dir()?;
+    let key = issue_key(&state, "acme")?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+        .arg("serve")
+        .env_clear()
+        .env("PATH", std::env::var("PATH")?)
+        .env("LARRY_SERVE_ADDR", "127.0.0.1:0")
+        .env("LARRY_STATE_DIR", state.path())
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().ok_or("stdout was not piped")?;
+    let mut serving = String::new();
+    {
+        let mut reader = BufReader::new(stdout);
+        reader.read_line(&mut serving)?;
+    } // Dropping the reader closes the host's log pipe.
+    let printed: Value = json::from_str(serving.trim_end())?;
+    let addr: SocketAddr = printed
+        .get("serving")
+        .and_then(Value::as_str)
+        .ok_or("the serving line names its address")?
+        .strip_prefix("http://")
+        .ok_or("the serving address is http")?
+        .parse()?;
+    assert!(
+        Command::new("kill")
+            .arg("-HUP")
+            .arg(child.id().to_string())
+            .status()?
+            .success(),
+        "sighup"
+    );
+    let mut log = BufReader::new(child.stderr.take().ok_or("stderr was not piped")?);
+    let mut report = String::new();
+    log.read_line(&mut report)?;
+    assert!(
+        report.contains("reload line could not be written"),
+        "the failed reload line is reported on stderr: {report:?}"
+    );
+    assert_eq!(
+        get(addr, "/healthz", None)?.0,
+        200,
+        "the host keeps serving after the failed print"
+    );
+    assert_eq!(
+        get(addr, ACME_PROBE, Some(&key))?,
+        (200, probe_body()),
+        "the reload's failure changed no key"
+    );
+    assert!(
+        Command::new("kill")
+            .arg("-TERM")
+            .arg(child.id().to_string())
+            .status()?
+            .success(),
+        "sigterm"
+    );
+    assert_eq!(child.wait()?.code(), Some(0), "a stop still exits 0");
     Ok(())
 }

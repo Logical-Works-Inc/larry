@@ -489,6 +489,11 @@ enum Refusal {
     /// Arguments `larry help` does not describe: an unknown word, or a listed
     /// word with arguments it does not take.
     Unknown,
+    /// More arguments than the command line takes, named by the bound.
+    TooMany {
+        /// The most arguments a command line may carry.
+        limit: usize,
+    },
     /// The subcommand ran and failed; the cause keeps its type and source.
     Failed {
         /// The words that name the command, or empty when the cause names it.
@@ -502,6 +507,10 @@ impl fmt::Display for Refusal {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Unknown => out.write_str(UNKNOWN),
+            Self::TooMany { limit } => write!(
+                out,
+                "larry: more than {limit} arguments; run `larry help` for every subcommand and its LARRY_* variables"
+            ),
             Self::Failed {
                 context: "",
                 ref cause,
@@ -563,9 +572,24 @@ fn find(word: &str) -> Option<&'static Subcommand> {
     COMMANDS.iter().find(|command| command.name == name)
 }
 
+/// The command line's arguments, or a typed refusal past `MAX_ARGUMENTS`: a bound
+/// that silently drops arguments is no bound (larry#338).
+fn bounded(args: impl IntoIterator<Item = OsString>) -> Result<Vec<OsString>, Refusal> {
+    let args: Vec<OsString> = args
+        .into_iter()
+        .take(MAX_ARGUMENTS.saturating_add(1))
+        .collect();
+    if args.len() > MAX_ARGUMENTS {
+        Err(Refusal::TooMany {
+            limit: MAX_ARGUMENTS,
+        })
+    } else {
+        Ok(args)
+    }
+}
+
 fn main() -> ExitCode {
-    let args: Vec<OsString> = std::env::args_os().skip(1).take(MAX_ARGUMENTS).collect();
-    let outcome = match args.split_first() {
+    let outcome = bounded(std::env::args_os().skip(1)).and_then(|args| match args.split_first() {
         // A bare `larry` is the terminal session; help's first paragraph names it.
         None => ran("larry", larry_demo::tui::run()),
         // The table is the dispatcher: a word runs only through the row help prints.
@@ -573,7 +597,7 @@ fn main() -> ExitCode {
             Some(row) => (row.run)(rest),
             None => Err(Refusal::Unknown),
         },
-    };
+    });
     match outcome {
         Ok(status) => status,
         Err(refusal) => {
@@ -587,7 +611,9 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS, find, help_text};
+    use std::ffi::OsString;
+
+    use super::{COMMANDS, MAX_ARGUMENTS, Refusal, bounded, find, help_text};
 
     /// Every row is found by its own name and by no other, and help prints it
     /// once with its variables: the table is the dispatcher, so there is no
@@ -636,5 +662,21 @@ mod tests {
         for word in ["", "doctor", "--verbose", "HELP", "help me"] {
             assert!(find(word).is_none(), "{word:?} is not listed");
         }
+    }
+
+    /// The command line takes exactly the bound and refuses one past it, naming
+    /// the bound (larry#338).
+    #[test]
+    fn larry_takes_arguments_up_to_the_bound_and_refuses_the_next() {
+        let kept: Vec<OsString> = (0..MAX_ARGUMENTS).map(|_| OsString::from("x")).collect();
+        let kept = bounded(kept)
+            .map(|args| args.len())
+            .map_err(|refusal| refusal.to_string());
+        assert_eq!(kept, Ok(MAX_ARGUMENTS), "the bound itself is admitted");
+        let past: Vec<OsString> = (0..=MAX_ARGUMENTS).map(|_| OsString::from("x")).collect();
+        assert!(
+            matches!(bounded(past), Err(Refusal::TooMany { limit }) if limit == MAX_ARGUMENTS),
+            "one past the bound names it"
+        );
     }
 }
