@@ -25,7 +25,7 @@ use larry_runtime::journal::{Journal, JournalEntry};
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::projection::replay_authorizations;
-use larry_runtime::runtime::restore;
+use larry_runtime::runtime::{TickItem, restore};
 use lgwks_bot::journal::JournalError;
 use sim_kit::{
     Offer, Sim, dispatch, fresh_journal, read_work, reader, remove, reopen, replay, trace, work,
@@ -307,10 +307,16 @@ fn sim_crash_conflicting_retry_after_restore_refused() -> Outcome {
         let changed = read_work(12, 9, strat);
         match restored.submit(submit(command_id(12), &changed)?) {
             Err(RuntimeError::Command(_)) => {}
-            Ok(()) => assert!(
-                matches!(restored.tick(), Err(RuntimeError::Command(_))),
-                "conflicting retry refused at tick"
-            ),
+            Ok(()) => {
+                let tick = restored.tick()?;
+                assert!(
+                    tick.refused().iter().any(|entry| {
+                        entry.0 == TickItem::Command(command_id(12))
+                            && matches!(&entry.1, RuntimeError::Command(_))
+                    }),
+                    "conflicting retry is a typed denial after restore: {tick:?}"
+                );
+            }
             Err(other) => return Err(other.into()),
         }
         Ok(trace(restored.journal()))

@@ -342,6 +342,60 @@ impl RuntimeError {
     }
 }
 
+impl RuntimeError {
+    /// Whether this refusal ends the tick for every tenant (`true`) or belongs
+    /// to the one command, effect or run being processed (`false`).
+    ///
+    /// Only the journal's own refusals and the instant the tick pins before any
+    /// stage end a tick: a file that refused, a ceiling it reached, an outcome
+    /// it cannot prove, a bad setting, and a clock that cannot be placed. Every
+    /// other variant is one item's refusal: the tick records it in the
+    /// [`crate::runtime::TickReport`] and goes on, so one tenant's refused
+    /// command never skips reconciliation or cancellation for the others
+    /// (larry#329). The match has no wildcard arm, so a new variant must be
+    /// classified here before it compiles.
+    pub(crate) const fn ends_the_tick(&self) -> bool {
+        match *self {
+            Self::JournalFull { .. }
+            | Self::Durable(_)
+            | Self::DurableRepeat { .. }
+            | Self::DurabilityShort { .. }
+            | Self::ClockOutOfRange { .. }
+            | Self::ClockBeforeEpoch(_)
+            | Self::BadSetting { .. }
+            | Self::SettingUnreadable { .. } => true,
+            Self::Binding(_)
+            | Self::UnsupportedDecision(_)
+            | Self::UnsupportedCommand(_)
+            | Self::UnsupportedEvent(_)
+            | Self::UnsupportedDisposition(_)
+            | Self::UnsupportedReconciliationAction(_)
+            | Self::RunLimitReached { .. }
+            | Self::ReadyWorkFull { .. }
+            | Self::EffectLimitReached { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::Sequence(_)
+            | Self::Ordering(_)
+            | Self::Command(_)
+            | Self::Transition(_)
+            | Self::Authority(_)
+            | Self::Codec(_)
+            | Self::RunTenantMismatch { .. }
+            | Self::Denied { .. }
+            | Self::RunNotTracked { .. }
+            | Self::IntentNotDurable { .. }
+            | Self::DuplicateOperation { .. }
+            | Self::UnresolvableOutcome { .. }
+            | Self::ReceiptAlreadyPublished { .. }
+            | Self::FoldDivergence { .. }
+            | Self::EffectIdentity { .. }
+            | Self::Protocol(_)
+            | Self::Question(_)
+            | Self::Fence(_) => false,
+        }
+    }
+}
+
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {

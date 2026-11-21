@@ -14,7 +14,7 @@ use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 
-use larry_runtime::runtime::TickReport;
+use larry_runtime::runtime::{TickItem, TickReport};
 
 use seed::step;
 use sim_kit::{Offer, Sim, read_work, reader, reopen, replay, work};
@@ -81,9 +81,13 @@ fn sim_multitenant_same_run_bytes_refused_for_second_tenant() -> Outcome {
         let before = tenant_tally(&rt);
         let second = work(1, 2, 2, 5, ReconciliationStrategy::IdempotentRetrySafe);
         rt.offer(2, &second)?;
+        let tick = rt.tick()?;
         assert!(
-            matches!(rt.tick(), Err(RuntimeError::RunTenantMismatch { .. })),
-            "second tenant refused"
+            tick.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(2))
+                    && matches!(&entry.1, RuntimeError::RunTenantMismatch { .. })
+            }),
+            "second tenant is a typed denial: {tick:?}"
         );
         assert_eq!(
             tenant_tally(&rt),
@@ -157,7 +161,16 @@ fn sim_multitenant_run_tenant_mismatch_refused() -> Outcome {
         )?;
         match rt.submit(cmd) {
             Err(RuntimeError::Command(_)) | Err(RuntimeError::RunTenantMismatch { .. }) => {}
-            Ok(()) => assert!(rt.tick().is_err(), "trespassing submit refused"),
+            Ok(()) => {
+                let tick = rt.tick()?;
+                assert!(
+                    tick.refused().iter().any(|entry| {
+                        entry.0 == TickItem::Command(command_id(6))
+                            && matches!(&entry.1, RuntimeError::RunTenantMismatch { .. })
+                    }),
+                    "trespassing submit is a typed denial: {tick:?}"
+                );
+            }
             Err(other) => return Err(other.into()),
         }
         assert_eq!(
@@ -195,9 +208,13 @@ fn sim_multitenant_foreign_cancel_refused() -> Outcome {
             ),
         )?;
         rt.submit(cmd)?;
+        let tick = rt.tick()?;
         assert!(
-            matches!(rt.tick(), Err(RuntimeError::RunTenantMismatch { .. })),
-            "foreign cancel refused"
+            tick.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(8))
+                    && matches!(&entry.1, RuntimeError::RunTenantMismatch { .. })
+            }),
+            "foreign cancel is a typed denial: {tick:?}"
         );
         assert_eq!(tenant_tally(&rt), before, "refusal records no foreign fact");
         assert_state(rt.projection(), run(7), RunState::Completed)?;
@@ -480,13 +497,16 @@ fn sim_multitenant_conflicting_cancel_across_tenants_refused() -> Outcome {
         match rt.submit(cancel(command_id(25), &foreign)?) {
             Err(RuntimeError::Command(_)) => {}
             Ok(()) => {
-                let result = rt.tick();
+                let result = rt.tick()?;
                 assert!(
-                    matches!(
-                        &result,
-                        Err(RuntimeError::Command(_)) | Err(RuntimeError::RunTenantMismatch { .. })
-                    ),
-                    "cross-tenant cancel refused, got {result:?}"
+                    result.refused().iter().any(|entry| {
+                        entry.0 == TickItem::Command(command_id(25))
+                            && matches!(
+                                &entry.1,
+                                RuntimeError::Command(_) | RuntimeError::RunTenantMismatch { .. }
+                            )
+                    }),
+                    "cross-tenant cancel is a typed denial, got {result:?}"
                 );
             }
             Err(other) => return Err(other.into()),

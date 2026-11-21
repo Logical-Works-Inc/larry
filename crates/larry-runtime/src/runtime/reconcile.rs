@@ -7,7 +7,7 @@ use larry_contracts::effect::EffectOutcome;
 use larry_contracts::ids::{OperationId, RunId, TenantId};
 use larry_contracts::state::{RunState, TransitionEvent};
 
-use super::{LiveEffect, OwnerReach, Runtime, TickReport, retry};
+use super::{LiveEffect, OwnerReach, Runtime, TickItem, TickReport, retry};
 use crate::error::RuntimeError;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
@@ -21,6 +21,9 @@ where
     // ── stage 3: reconcile ──────────────────────────────────────────────────
 
     /// Reconciles open effects in stable operation order.
+    ///
+    /// One effect's refusal is recorded in `report` and reconciliation goes on
+    /// with the next effect, unless it is the journal's own refusal (larry#329).
     pub(super) fn pump_reconciliation(
         &mut self,
         at: SystemTime,
@@ -37,7 +40,14 @@ where
             let Some(live) = self.live.get(&operation).cloned() else {
                 continue;
             };
-            let Some(outcome) = self.reconcile_one(&live, operation, at, report)? else {
+            let outcome = match self.reconcile_one(&live, operation, at, report) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.refuse(report, TickItem::Effect(operation), error)?;
+                    continue;
+                }
+            };
+            let Some(outcome) = outcome else {
                 // A fenced retry: no owner call and no recorded outcome, so
                 // the effect is not counted as reconciled. It stays visibly
                 // open — not resolved, not failed — exactly as an effect that
@@ -50,7 +60,9 @@ where
             // from the table the reach updated: a retry that actually happened
             // has set it, and a reach the fence refused has not.
             let sent = self.live.get(&operation).is_some_and(|live| live.sent);
-            self.settle(run, live.intent, outcome, sent, report)?;
+            if let Err(error) = self.settle(run, live.intent, outcome, sent, report) {
+                self.refuse(report, TickItem::Effect(operation), error)?;
+            }
         }
         Ok(())
     }
@@ -234,7 +246,12 @@ where
     /// receipt. Finishing over either would mark the run cancelled while an
     /// external effect that may have happened stays unlabelled (larry#119),
     /// so the run stays `Cancelling` until reconciliation resolves the effect.
-    pub(super) fn pump_cancellation(&mut self) -> Result<(), RuntimeError> {
+    /// One run's refused completion is recorded and the others still finish
+    /// (larry#329).
+    pub(super) fn pump_cancellation(
+        &mut self,
+        report: &mut TickReport,
+    ) -> Result<(), RuntimeError> {
         let cancelling: Vec<RunId> = self
             .runs
             .keys()
@@ -253,7 +270,9 @@ where
             if still_open {
                 continue;
             }
-            self.advance(run, TransitionEvent::FinishCancellation)?;
+            if let Err(error) = self.advance(run, TransitionEvent::FinishCancellation) {
+                self.refuse(report, TickItem::Run(run), error)?;
+            }
         }
         Ok(())
     }

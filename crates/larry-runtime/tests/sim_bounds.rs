@@ -23,7 +23,7 @@ use larry_runtime::journal::Journal;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
-use larry_runtime::runtime::{Runtime, RuntimeSettings};
+use larry_runtime::runtime::{Runtime, RuntimeSettings, TickItem};
 
 use seed::step;
 use sim_kit::{Offer, Sim, offer_runs, read_work, reader, replay, work};
@@ -186,12 +186,13 @@ fn sim_bounds_run_table_refuses_past_ceiling() -> Outcome {
         assert_eq!(runtime.tick()?.receipts().len(), 1, "first run receipts");
         let second = read_work(4, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(4, &second)?;
+        let report = runtime.tick()?;
         assert!(
-            matches!(
-                runtime.tick(),
-                Err(RuntimeError::RunLimitReached { capacity: 1 })
-            ),
-            "second tracked run refused"
+            report.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(4))
+                    && matches!(&entry.1, RuntimeError::RunLimitReached { capacity: 1 })
+            }),
+            "second tracked run is a typed denial: {report:?}"
         );
         assert_state(
             runtime.projection(),
@@ -271,9 +272,13 @@ fn sim_bounds_second_effect_on_open_run_refused() -> Outcome {
         )?;
         let second = work(8, 1, 9, 1, ReconciliationStrategy::Queryable);
         runtime.offer(9, &second)?;
+        let report = runtime.tick()?;
         assert!(
-            matches!(runtime.tick(), Err(RuntimeError::Transition(_))),
-            "an open run admits no second effect"
+            report.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(9))
+                    && matches!(&entry.1, RuntimeError::Transition(_))
+            }),
+            "an open run admits no second effect: {report:?}"
         );
         Ok(bound_counts(&runtime))
     })
@@ -295,9 +300,13 @@ fn sim_bounds_second_effect_on_completed_run_refused() -> Outcome {
         )?;
         let second = work(10, 1, 11, 1, ReconciliationStrategy::IdempotentRetrySafe);
         runtime.offer(11, &second)?;
+        let report = runtime.tick()?;
         assert!(
-            matches!(runtime.tick(), Err(RuntimeError::Transition(_))),
-            "a terminal run admits no second effect"
+            report.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(11))
+                    && matches!(&entry.1, RuntimeError::Transition(_))
+            }),
+            "a terminal run admits no second effect: {report:?}"
         );
         Ok(bound_counts(&runtime))
     })

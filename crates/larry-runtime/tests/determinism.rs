@@ -21,7 +21,7 @@ use larry_runtime::payload::TransitionPayload;
 use larry_runtime::projection::{
     EffectPhase, FoldProjection, ProjectionBackend, replay_authorizations,
 };
-use larry_runtime::runtime::{Runtime, restore};
+use larry_runtime::runtime::{Runtime, TickItem, restore};
 
 use support::{
     TestRuntime, assert_state, command_id, operation, proposal, run, runtime_with, seeded,
@@ -219,10 +219,13 @@ fn an_unknown_wire_strategy_is_refused_before_dispatch() -> Result<(), Box<dyn s
         ),
     )?;
     runtime.submit(command)?;
-    let result = runtime.tick();
+    let report = runtime.tick()?;
     assert!(
-        matches!(result, Err(RuntimeError::Codec(_))),
-        "unknown strategy must be a typed codec refusal: {result:?}"
+        report.refused().iter().any(|entry| {
+            entry.0 == TickItem::Command(command_id(1))
+                && matches!(&entry.1, RuntimeError::Codec(_))
+        }),
+        "unknown strategy must be a typed codec denial that ends no tick: {report:?}"
     );
     assert_eq!(runtime.owner().dispatched(), &[]);
     assert_eq!(runtime.projection().receipts(), &[]);
