@@ -11,11 +11,12 @@ use std::path::Path;
 use lgwks_std::json::{self, Value};
 
 use super::pystr;
+use super::read::{self, ReadFault};
 
-/// The reranker model every receipt must name.
-const RERANKER_MODEL: &str = "Qwen/Qwen3-Reranker-0.6B";
-/// The pinned model revision every receipt must name.
-const RERANKER_REVISION: &str = "e61197ed45024b0ed8a2d74b80b4d909f1255473";
+/// The pinned reranker identity every receipt must name, as data: the model id on the first line and
+/// its 40-hex revision on the second, the one home `larry-rerank` also reads (ADR 0013). A checker
+/// compares the identity a receipt records; ADR 0039's "no model is compiled in" governs execution.
+const MODEL_PIN: &str = include_str!("../rerank/model.pin");
 /// Largest number of receipt files admitted.
 const MAX_RECEIPTS: usize = 4096;
 /// Largest admitted receipt, in bytes.
@@ -40,14 +41,31 @@ const DIGEST_PAIRS: [[&str; 2]; 2] = [
 /// refused as `invalid identity or shape`, where CPython raised a `TypeError` and gave no report.
 pub(crate) fn receipt_errors(root: &Path) -> Vec<String> {
     let directory = root.join("tools").join("receipts");
-    let mut names: Vec<String> = match fs::read_dir(&directory) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.ends_with(".json"))
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut names: Vec<String> = Vec::new();
+    match fs::read_dir(&directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(cause) => {
+                        return vec![format!(
+                            "reranker receipts: cannot list the receipts directory: {cause}"
+                        )];
+                    }
+                };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".json") {
+                    names.push(name);
+                }
+            }
+        }
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+        Err(cause) => {
+            return vec![format!(
+                "reranker receipts: cannot read the receipts directory: {cause}"
+            )];
+        }
+    }
     names.sort();
     if names.is_empty() {
         return vec![String::from("reranker receipts: none retained")];
@@ -59,7 +77,7 @@ pub(crate) fn receipt_errors(root: &Path) -> Vec<String> {
     let mut phases = BTreeSet::new();
     for name in &names {
         let relative = format!("tools/receipts/{name}");
-        match receipt_phase(&directory.join(name)) {
+        match receipt_phase(root, &relative) {
             Ok(phase) => {
                 phases.insert(phase);
             }
@@ -81,6 +99,10 @@ pub(crate) fn receipt_errors(root: &Path) -> Vec<String> {
 enum ReceiptFault {
     /// The file could not be read.
     Unreadable(io::Error),
+    /// The file, or a directory on its path, is a symbolic link (larry#336).
+    Symlink,
+    /// The file is not a regular file: a FIFO or a device (larry#336).
+    NotRegular,
     /// The file is past the 1 MiB bound.
     TooLarge,
     /// The file is not UTF-8; CPython's codec text.
@@ -97,6 +119,8 @@ impl fmt::Display for ReceiptFault {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Unreadable(ref cause) => write!(out, "{cause}"),
+            Self::Symlink => out.write_str("is a symbolic link"),
+            Self::NotRegular => out.write_str("is not a regular file"),
             Self::TooLarge => write!(out, "exceeds {MAX_RECEIPT_BYTES} bytes"),
             Self::NotUtf8(ref codec) => out.write_str(codec),
             Self::Json(ref cause) => write!(out, "{cause}"),
@@ -107,18 +131,25 @@ impl fmt::Display for ReceiptFault {
 }
 
 /// Reads one receipt and returns its phase, or why it is refused.
-fn receipt_phase(path: &Path) -> Result<String, ReceiptFault> {
-    let metadata = fs::metadata(path).map_err(ReceiptFault::Unreadable)?;
-    if metadata.len() > MAX_RECEIPT_BYTES {
-        return Err(ReceiptFault::TooLarge);
-    }
-    let bytes = fs::read(path).map_err(ReceiptFault::Unreadable)?;
+fn receipt_phase(root: &Path, relative: &str) -> Result<String, ReceiptFault> {
+    let bytes = match read::read_bounded(root, Path::new(relative), MAX_RECEIPT_BYTES) {
+        Ok(bytes) => bytes,
+        Err(ReadFault::Missing(cause) | ReadFault::Unreadable(cause)) => {
+            return Err(ReceiptFault::Unreadable(cause));
+        }
+        Err(ReadFault::Symlink) => return Err(ReceiptFault::Symlink),
+        Err(ReadFault::NotRegular { .. }) => return Err(ReceiptFault::NotRegular),
+        Err(ReadFault::TooLarge { .. }) => return Err(ReceiptFault::TooLarge),
+    };
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text,
         Err(error) => return Err(ReceiptFault::NotUtf8(pystr::utf8_error(&bytes, &error))),
     };
     let receipt: Value = json::from_str(text).map_err(ReceiptFault::Json)?;
     let Some(object) = receipt.as_object() else {
+        return Err(ReceiptFault::Shape);
+    };
+    let Some((pinned_model, pinned_revision)) = pinned_identity() else {
         return Err(ReceiptFault::Shape);
     };
     let keys: BTreeSet<&str> = object.iter().map(|(key, _)| key).collect();
@@ -138,8 +169,8 @@ fn receipt_phase(path: &Path) -> Result<String, ReceiptFault> {
     let revision = receipt_string(&receipt, "revision");
     let phase_ok = matches!(phase.as_deref(), Some("pre-exec" | "post-exec"));
     if !phase_ok
-        || model.as_deref() != Some(RERANKER_MODEL)
-        || revision.as_deref() != Some(RERANKER_REVISION)
+        || model.as_deref() != Some(pinned_model)
+        || revision.as_deref() != Some(pinned_revision)
     {
         return Err(ReceiptFault::Shape);
     }
@@ -147,6 +178,18 @@ fn receipt_phase(path: &Path) -> Result<String, ReceiptFault> {
         return Err(ReceiptFault::Bounds);
     }
     phase.ok_or(ReceiptFault::Shape)
+}
+
+/// The pinned identity [`MODEL_PIN`] names: the model id on its first line and the revision on its
+/// second. `None` when the data is not exactly two non-empty lines.
+fn pinned_identity() -> Option<(&'static str, &'static str)> {
+    let mut lines = MODEL_PIN.lines();
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(model), Some(revision), None) if !model.is_empty() && !revision.is_empty() => {
+            Some((model, revision))
+        }
+        _ => None,
+    }
 }
 
 /// The string at `key`, or `None` when absent or not a string.
@@ -186,14 +229,16 @@ fn integer(receipt: &Value, key: &str) -> Option<u64> {
     receipt.get(key).and_then(Value::as_u64)
 }
 
-/// `max_seconds`, when present, is an integer in `1..=3600`.
+/// `max_seconds`, when present, is an integer in `1..=3600`. The receipt schema makes it optional:
+/// an absent field is a receipt that declares no limit, and every other absent key is refused by
+/// the shape check before this one runs.
 fn seconds_hold(receipt: &Value) -> bool {
-    match receipt.get("max_seconds") {
-        None => true,
-        Some(value) => value
+    if let Some(value) = receipt.get("max_seconds") {
+        return value
             .as_u64()
-            .is_some_and(|seconds| (1..=3600).contains(&seconds)),
+            .is_some_and(|seconds| (1..=3600).contains(&seconds));
     }
+    true
 }
 
 /// Both digests of `pair` are 64 lowercase hex digits.

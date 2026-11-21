@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use lgwks_ast::{Language, MAX_SOURCE_BYTES, Parsed, try_parse};
 
 use super::error::GovernanceError;
+use super::read::{self, ReadFault};
 use syntax::{crate_root, follow_names, is_test_code, verdicts};
 
 /// The one guard of the crate's tests and the one guard of the integration tests. Each empties its
@@ -567,7 +568,7 @@ fn scan(canonical_root: &Path, path: &Path, relative: &str, inherited_test: bool
         errors: Vec::new(),
         follows: Vec::new(),
     };
-    let contents = match read_source(path) {
+    let contents = match read_source(canonical_root, relative) {
         Ok(SourceRead::Contents(contents)) => contents,
         Ok(SourceRead::TooLarge(bytes)) => {
             scanned.errors.push(
@@ -718,15 +719,22 @@ fn resolve_follow(target: &Path) -> io::Result<PathBuf> {
     std::fs::canonicalize(target)
 }
 
-/// Reads one source file within the reader's byte bound.
-fn read_source(path: &Path) -> io::Result<SourceRead> {
-    let metadata = std::fs::metadata(path)?;
-    let bytes = match usize::try_from(metadata.len()) {
-        Ok(bytes) => bytes,
-        Err(_) => usize::MAX,
+/// Reads one source file within the reader's byte bound, through the governance reader that refuses
+/// a link anywhere on the path and requires a regular file.
+fn read_source(root: &Path, relative: &str) -> io::Result<SourceRead> {
+    let Ok(limit) = u64::try_from(MAX_SOURCE_BYTES) else {
+        return Ok(SourceRead::TooLarge(MAX_SOURCE_BYTES));
     };
-    if bytes > MAX_SOURCE_BYTES {
-        return Ok(SourceRead::TooLarge(bytes));
+    match read::read_bounded(root, Path::new(relative), limit) {
+        Ok(bytes) => Ok(SourceRead::Contents(bytes)),
+        Err(ReadFault::TooLarge { bytes }) => {
+            let Ok(bytes) = usize::try_from(bytes) else {
+                return Ok(SourceRead::TooLarge(usize::MAX));
+            };
+            Ok(SourceRead::TooLarge(bytes))
+        }
+        Err(ReadFault::Missing(cause) | ReadFault::Unreadable(cause)) => Err(cause),
+        Err(ReadFault::Symlink) => Err(io::Error::other("a symbolic link is never followed")),
+        Err(ReadFault::NotRegular { .. }) => Err(io::Error::other("not a regular file")),
     }
-    std::fs::read(path).map(SourceRead::Contents)
 }

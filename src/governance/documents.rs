@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind, Read};
-use std::path::{Path, PathBuf};
+use std::io::{self, ErrorKind};
+use std::path::Path;
 
 use super::error::GovernanceError;
 use super::pystr;
+use super::read::{self, ReadFault};
 
 /// The top-level documents, in the Python `DOCUMENTS` order.
 pub(crate) const DOCUMENTS: [&str; 7] = [
@@ -157,23 +158,20 @@ fn body(text: &str) -> &str {
 
 /// Loads every governed document under `root`, refusing the whole set on the first violation.
 pub(crate) fn load(root: &Path) -> Result<Documents, GovernanceError> {
-    let mut paths: Vec<(String, PathBuf)> = DOCUMENTS
-        .iter()
-        .map(|name| (String::from(*name), root.join(name)))
-        .collect();
+    let mut paths: Vec<String> = DOCUMENTS.iter().map(|name| String::from(*name)).collect();
     let mut nested = Vec::new();
     let docs_root = root.join(DOCS_DIRECTORY);
     if docs_root.is_dir() {
         collect_markdown(root, &docs_root, &mut nested)?;
     }
-    nested.sort_by(|left, right| left.0.split('/').cmp(right.0.split('/')));
+    nested.sort_by(|left, right| left.split('/').cmp(right.split('/')));
     paths.extend(nested);
     let mut documents = Documents {
         order: Vec::new(),
         texts: BTreeMap::new(),
     };
-    for (relative, path) in paths {
-        if let Some(text) = read_one(&relative, &path)? {
+    for relative in paths {
+        if let Some(text) = read_one(root, &relative)? {
             documents.order.push(relative.clone());
             documents.texts.insert(relative, text);
         }
@@ -204,7 +202,7 @@ fn unreadable(relative: &str, cause: io::Error) -> GovernanceError {
 fn collect_markdown(
     root: &Path,
     directory: &Path,
-    found: &mut Vec<(String, PathBuf)>,
+    found: &mut Vec<String>,
 ) -> Result<(), GovernanceError> {
     let shown = relative_of(root, directory);
     let entries = fs::read_dir(directory).map_err(|cause| unreadable(&shown, cause))?;
@@ -214,7 +212,7 @@ fn collect_markdown(
         let relative = relative_of(root, &path);
         let named_md = entry.file_name().to_string_lossy().ends_with(".md");
         if named_md {
-            found.push((relative.clone(), path.clone()));
+            found.push(relative.clone());
             if found.len().saturating_add(DOCUMENTS.len()) > MAX_DOCUMENTS {
                 return Err(GovernanceError::TooMany {
                     limit: MAX_DOCUMENTS,
@@ -241,27 +239,28 @@ fn relative_of(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Reads one admitted document. `Ok(None)` skips a missing top-level file; every refusal names
-/// the document, as the Python loader's messages do, and a decode error quotes CPython's codec.
-fn read_one(relative: &str, path: &Path) -> Result<Option<String>, GovernanceError> {
+/// Reads one admitted document through the bounded, link-refusing reader. `Ok(None)` skips a
+/// missing top-level file; every refusal names the document, as the Python loader's messages do,
+/// and a decode error quotes CPython's codec.
+fn read_one(root: &Path, relative: &str) -> Result<Option<String>, GovernanceError> {
     let named = || String::from(relative);
-    if is_symlink(path, relative)? {
-        return Err(GovernanceError::Symlink { relative: named() });
-    }
-    if !path.exists() {
-        return Ok(None);
-    }
-    if path.is_dir() {
-        return Err(GovernanceError::IsDirectory { relative: named() });
-    }
-    let file = fs::File::open(path).map_err(|cause| unreadable(relative, cause))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_DOCUMENT_BYTES_WIDE.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|cause| unreadable(relative, cause))?;
-    if bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(GovernanceError::TooLarge { relative: named() });
-    }
+    let bytes = match read::read_bounded(root, Path::new(relative), MAX_DOCUMENT_BYTES_WIDE) {
+        Ok(bytes) => bytes,
+        Err(ReadFault::Missing(_)) => return Ok(None),
+        Err(ReadFault::Symlink) => {
+            return Err(GovernanceError::Symlink { relative: named() });
+        }
+        Err(ReadFault::NotRegular { directory: true }) => {
+            return Err(GovernanceError::IsDirectory { relative: named() });
+        }
+        Err(ReadFault::NotRegular { directory: false }) => {
+            return Err(GovernanceError::NotRegular { relative: named() });
+        }
+        Err(ReadFault::TooLarge { .. }) => {
+            return Err(GovernanceError::TooLarge { relative: named() });
+        }
+        Err(ReadFault::Unreadable(cause)) => return Err(unreadable(relative, cause)),
+    };
     match String::from_utf8(bytes) {
         Ok(text) => Ok(Some(text)),
         Err(error) => Err(GovernanceError::NotUtf8 {
