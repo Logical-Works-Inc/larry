@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0067: a command's report states the bytes the stream yielded"
+title: "ADR 0068: a command's report states the bytes the stream yielded"
 description: Why the report carries stdout_bytes and stderr_bytes, and why the noisy journey writes a fixed 3 MiB from /dev/zero.
-resource: /docs/adr/0067-a-short-pipe-read-is-a-block.md
+resource: /docs/adr/0068-a-short-pipe-read-is-a-block.md
 tags: [larry, adr, executor, truncation]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: larry#319 reproduction on macOS 27.3 and Ubuntu (GNU coreutils 9.4), 2026-11-21}
@@ -11,7 +11,7 @@ stale_after: 2027-02-21
 sources: [larry#206, larry#319, /INVARIANTS.md, https://pubs.opengroup.org/onlinepubs/9699919799/utilities/dd.html]
 ---
 
-# 0067: a command's report states the bytes the stream yielded
+# 0068: a command's report states the bytes the stream yielded
 
 Status: accepted, 2026-11-21 (larry#319).
 
