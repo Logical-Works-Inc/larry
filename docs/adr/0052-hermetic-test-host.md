@@ -37,8 +37,9 @@ The suite read the machine it ran on. Each of these changed a result:
   committer are fixed. The origin fixture and `commit_all` take their commands from it, and the
   `git status` call in `tests/e2e_journey.rs` does too. The builder's environment can be replaced
   by a caller, which is how one test hands the whole fixture a hostile `HOME`.
-- The terminal gets `TEST_PATH`, `/usr/bin:/bin`: the directories the journeys' tools live in on
-  macOS and Linux, never the host's PATH.
+- The terminal's PATH is built from where a hermetic lookup resolved `sh`, `git`, `script`,
+  `stty`, `cp` and `sleep`: one fixed directory list in `tests/support/pty.rs` is statted, never
+  the host's PATH or shell configuration, and a missing tool is a typed setup error naming it.
 - Peak RSS is the probe's own `ps` sample, shared by `tests/support/ps.rs`, taken while the check
   runs. No new crate and no `unsafe` call; `getrusage` would need both.
 - The serving line and every later line are read by a named thread the `Serving` owns, and the
