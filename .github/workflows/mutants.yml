@@ -22,6 +22,22 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The lane's published settings. The verdict reads these lines from the
+    # base branch's copy of this file with `git show`, never from the pull
+    # request's copy, so a PR that edits them does not move its own verdict
+    # (larry#339). K: mutants per shard. A shard pays its setup, then one
+    # incremental build and one run of the root package's tests per surviving
+    # mutant (about 2.5 minutes measured on a cold cache), so K = 2 is the
+    # ESTIMATE that ends a shard inside 5 minutes warm (ADR 0064). Past
+    # 96 shards a shard holds more than K mutants. A shard of 3 ends inside its
+    # 15-minute timeout: the slowest viable mutant measured 220 s (PR #342,
+    # run 44578190558), and shards of 4 or more were cut at the timeout. A plan
+    # past 96 x 3 fails here, by name, in minutes (ADR 0066).
+    env:
+      MUTANTS_FLOOR: 60
+      MUTANTS_PER_SHARD: 2
+      MUTANTS_MAX_SHARDS: 96
+      MUTANTS_SHARD_CAPACITY: 3
     outputs:
       count: ${{ steps.plan.outputs.count }}
       shards: ${{ steps.plan.outputs.shards }}
@@ -43,18 +59,6 @@ jobs:
         id: plan
         env:
           BASE_REF: ${{ github.base_ref }}
-          # K: mutants per shard. A shard pays its setup, then one incremental
-          # build and one run of the root package's tests per surviving mutant
-          # (about 2.5 minutes measured on a cold cache), so K = 2 is the
-          # ESTIMATE that ends a shard inside 5 minutes warm (ADR 0064).
-          MUTANTS_PER_SHARD: 2
-          # Past 96 shards a shard holds more than K mutants. A shard of 3 ends
-          # inside its 15-minute timeout: the slowest viable mutant measured
-          # 220 s (PR #342, run 44578190558), and shards of 4 or more were cut
-          # at the timeout. A plan past 96 x 3 fails here, by name, in minutes
-          # (ADR 0066).
-          MUTANTS_MAX_SHARDS: 96
-          MUTANTS_SHARD_CAPACITY: 3
         run: |
           set -euo pipefail
           # -M: a moved file plans mutants only on the lines it changed. Without
@@ -125,7 +129,7 @@ jobs:
       - timeout-minutes: 3
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: cargo-mutants@27.1.0,nextest
+          tool: cargo-mutants@27.1.0,nextest@0.9.152
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: mutants-diff
@@ -166,6 +170,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # The floor and the caps are the base branch's, never the pull request's:
+      # on a pull_request event this workflow file is the head's, so a PR would
+      # otherwise lower the floor that judges it (larry#339).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+      - name: Read the floor and the caps from the base ref
+        id: settings
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth 1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git show "origin/${BASE_REF}:.github/workflows/mutants.yml" > base-mutants.yml
+          # The base ref publishes each setting once, as `NAME: <number>`.
+          setting() { sed -n "s/^ *$1: *\([0-9][0-9]*\)$/\1/p" base-mutants.yml; }
+          for name in MUTANTS_FLOOR MUTANTS_MAX_SHARDS MUTANTS_SHARD_CAPACITY; do
+            value="$(setting "$name")"
+            case "$value" in
+              '' | *[!0-9]*)
+                echo "::error::the base ref's $name is not one number: there is no verdict (fail closed)"
+                exit 1
+                ;;
+            esac
+            echo "${name}=$value" >> "$GITHUB_OUTPUT"
+          done
       # A missing artifact is judged below by count, so a download that finds
       # nothing is not allowed to hide behind its own error here.
       - if: ${{ needs.plan.outputs.shards != '' && needs.plan.outputs.shards != '0' }}
@@ -180,11 +210,17 @@ jobs:
           SHARD: ${{ needs.shard.result }}
           COUNT: ${{ needs.plan.outputs.count }}
           SHARDS: ${{ needs.plan.outputs.shards }}
-          FLOOR: 60
+          FLOOR: ${{ steps.settings.outputs.MUTANTS_FLOOR }}
+          MAX_SHARDS: ${{ steps.settings.outputs.MUTANTS_MAX_SHARDS }}
+          SHARD_CAPACITY: ${{ steps.settings.outputs.MUTANTS_SHARD_CAPACITY }}
         run: |
           set -uo pipefail
           if [ "$PLAN" != success ] || [ -z "$SHARDS" ]; then
             echo "::error::the plan job ended '$PLAN': there is no verdict (fail closed)"
+            exit 1
+          fi
+          if [ -z "$FLOOR" ] || [ -z "$MAX_SHARDS" ] || [ -z "$SHARD_CAPACITY" ] || [ -z "$COUNT" ]; then
+            echo "::error::the base ref's floor or caps were not read: there is no verdict (fail closed)"
             exit 1
           fi
           if [ "$SHARDS" = 0 ]; then
@@ -193,6 +229,13 @@ jobs:
             exit 0
           fi
           bad=0
+          # The base ref's capacity, not the pull request's: a plan that lists
+          # more mutants than the base branch allows is refused here.
+          capacity=$(( MAX_SHARDS * SHARD_CAPACITY ))
+          if [ "$COUNT" -gt "$capacity" ]; then
+            echo "::error::$COUNT mutants exceed the base ref's capacity of $capacity ($MAX_SHARDS shards of $SHARD_CAPACITY): split the pull request"
+            bad=1
+          fi
           if [ "$SHARD" != success ]; then
             echo "::error::a shard ended '$SHARD': its mutants are not judged (fail closed)"
             bad=1

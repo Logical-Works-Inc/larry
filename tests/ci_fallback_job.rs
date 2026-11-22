@@ -389,9 +389,114 @@ fn the_mutants_verdict_names_each_missed_mutant_and_the_denominator() -> Check {
         "the mutants left out of the score are printed beside it"
     );
     assert!(
-        verdict.contains("FLOOR: 60")
+        verdict.contains("FLOOR: ${{ steps.settings.outputs.MUTANTS_FLOOR }}")
             && verdict.contains("[ $(( caught * 100 )) -lt $(( FLOOR * viable )) ]"),
-        "caught over caught plus missed is held to a 60% floor in whole numbers"
+        "caught over caught plus missed is held to the base ref's floor in whole numbers"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_mutants_verdict_reads_the_floor_and_the_caps_from_the_base_ref() -> Check {
+    let text = workflow("mutants.yml")?;
+    let verdict = job(&text, "verdict")?;
+    assert!(
+        verdict.contains(
+            "git show \"origin/${BASE_REF}:.github/workflows/mutants.yml\" > base-mutants.yml"
+        ),
+        "the verdict reads the published settings from the base ref's copy of the workflow"
+    );
+    assert!(
+        verdict.contains("refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"),
+        "the base branch is fetched before it is read"
+    );
+    assert!(
+        verdict.contains("steps.settings.outputs.MUTANTS_FLOOR")
+            && verdict.contains("steps.settings.outputs.MUTANTS_MAX_SHARDS")
+            && verdict.contains("steps.settings.outputs.MUTANTS_SHARD_CAPACITY"),
+        "the floor and the caps come from the base ref, never the pull request's copy"
+    );
+    assert!(
+        verdict.contains("if [ \"$COUNT\" -gt \"$capacity\" ]"),
+        "the verdict holds the plan to the base ref's capacity"
+    );
+    assert!(
+        !verdict.contains("FLOOR: 60"),
+        "no floor is taken from the pull request's own checkout"
+    );
+    let plan = job(&text, "plan")?;
+    for published in [
+        "MUTANTS_FLOOR: 60",
+        "MUTANTS_MAX_SHARDS: 96",
+        "MUTANTS_SHARD_CAPACITY: 3",
+    ] {
+        assert!(
+            plan.contains(published),
+            "the base ref publishes {published}"
+        );
+    }
+    assert!(
+        !text.contains("pull_request_target"),
+        "the lane never runs with the target repository's token"
+    );
+    Ok(())
+}
+
+#[test]
+fn every_hosted_lane_pins_the_nextest_it_installs() -> Check {
+    for name in ["ci.yml", "sim.yml", "mutants.yml"] {
+        let text = workflow(name)?;
+        let mut installs = 0;
+        for line in text.lines().map(str::trim) {
+            let Some(tools) = line.strip_prefix("tool: ") else {
+                continue;
+            };
+            for tool in tools.split(',') {
+                let tool = tool.trim();
+                if tool.split('@').next() == Some("nextest") {
+                    installs += 1;
+                    assert!(
+                        tool.starts_with("nextest@"),
+                        "{name}: nextest is installed at a pinned version: {tool}"
+                    );
+                }
+            }
+        }
+        assert!(
+            installs > 0,
+            "{name}: the lane installs nextest at least once"
+        );
+    }
+    for name in ["ci.yml", "sim.yml"] {
+        assert!(
+            workflow(name)?.contains("nextest@0.9.152"),
+            "{name}: the pinned nextest is the measured one"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_advisory_job_checks_the_lockfile_on_every_pull_request() -> Check {
+    let text = workflow("ci.yml")?;
+    assert!(
+        text.contains("on:\n  push:\n    branches: [main]\n  pull_request:\n"),
+        "ci runs on every pull request"
+    );
+    let job = job(&text, "advisories")?;
+    assert!(
+        job.contains("cargo install cargo-deny --locked --version 0.22.0")
+            && job.contains("cargo deny check advisories"),
+        "the job installs the pinned checker and scans every advisory (larry#339)"
+    );
+    let deny = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("deny.toml"))?;
+    assert!(
+        deny.contains("[advisories]"),
+        "deny.toml holds the advisories policy"
+    );
+    assert!(
+        deny.contains("RUSTSEC-"),
+        "every accepted advisory is ignored by its id with a reason"
     );
     Ok(())
 }

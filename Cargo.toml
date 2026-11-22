@@ -67,7 +67,6 @@ lgwks_ast = { version = "=6.1.0", default-features = false }
 # `chmodat`/`O_PATH` itself. Already in the lock through `lgwks_std` `fs-raw`, so this adds no crate.
 # Estate gap: Logical-Works-Inc/logicalworks-crates#1113; retire this edge when the call lands.
 rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs"] }  # gap: Logical-Works-Inc/logicalworks-crates#1113
-thiserror = "=2.0.21"  # gap: Logical-Works-Inc/logicalworks-crates#842
 # The runtime gate (larry#164): the executor submits every task through it, so
 # a task body runs only inside the runtime's authorized owner call.
 larry-runtime = { path = "crates/larry-runtime" }
