@@ -6,7 +6,7 @@
 //! `/usr/bin/sandbox-exec -p <profile>` on macOS (reads are open except beneath the
 //! state directory, which holds the receipt key, and the session's own copy beneath
 //! it stays readable; writes are denied everywhere but the workspace's tree, its
-//! scratch directory and the devices a shell writes),
+//! scratch directory and the one device a shell writes),
 //! and `/usr/bin/setpriv` with a Landlock allowlist on Linux (reads beneath every
 //! path but the state directory and `/proc`, read and write beneath the tree and
 //! scratch directory). Every descendant of the command inherits it. Source:
@@ -50,8 +50,9 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// The util-linux wrapper that applies Landlock rules, then execs the command.
 const SETPRIV: &str = "/usr/bin/setpriv";
 
-/// The devices a shell writes, which the profile and the rules leave open.
-const DEVICES: [&str; 2] = ["/dev/null", "/dev/tty"];
+/// The one device a shell writes, which the profile leaves open: the person's terminal is not one
+/// (larry#323).
+const DEVICES: [&str; 1] = ["/dev/null"];
 
 /// The `/proc` entries a command reads instead of all of `/proc`, whose
 /// `/proc/<pid>/environ` holds the executor's own environment and its model keys
@@ -313,6 +314,10 @@ fn seatbelt(
         source.push_str("\")");
     }
     source.push_str(")))");
+    // The person's controlling terminal is no route to a command's paint or its keys
+    // (larry#323): Linux gives the command a session of its own, and here the profile refuses
+    // the device for reading, the write deny above having already left it out.
+    source.push_str("(deny file-read* (literal \"/dev/tty\"))");
     // The one kernel interface that returns another process's arguments and
     // environment (`KERN_PROCARGS2`), which `ps e` reads: the executor's holds its
     // model keys (larry#322).

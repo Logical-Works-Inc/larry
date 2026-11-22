@@ -5,11 +5,13 @@
 //! counts those bytes exactly, and one seed always yields one captured trace.
 //! Source: tail(1) and head(1), the end of a log is where its error is.
 
+use std::ffi::OsStr;
 use std::io::{self, Read};
+use std::path::Path;
 
 use lgwks_std::seeded::Seeded;
 
-use super::{CAPTURE_CHUNK, Captured, HEAD_BYTES, TAIL_BYTES, capture};
+use super::{CAPTURE_CHUNK, Captured, HEAD_BYTES, Place, TAIL_BYTES, capture, command_for};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -74,6 +76,32 @@ fn blake3_hex(bytes: &[u8]) -> String {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
     hasher.finalize().to_hex()
+}
+
+/// A command is launched through the host's session tool, so it starts in a session of its own
+/// with no controlling terminal, its leader the spawned pid the ledger and `killpg` name
+/// (larry#323); a host without the tool (macOS) keeps the process group and its confinement
+/// refuses `/dev/tty` instead.
+#[test]
+fn sim_a_command_starts_in_a_session_of_its_own() -> TestResult {
+    let command = [
+        String::from("/bin/sh"),
+        String::from("-c"),
+        String::from("true"),
+    ];
+    let (built, program) = command_for(&command, Place::Open(Path::new(".")), "/usr/bin:/bin")?;
+    let args: Vec<&OsStr> = built.get_args().collect();
+    let tool = "/usr/bin/setsid";
+    if Path::new(tool).is_file() {
+        assert_eq!(program, tool, "the session tool is the program");
+        assert_eq!(built.get_program(), OsStr::new(tool));
+        let expected: Vec<&OsStr> = command.iter().map(String::as_str).map(OsStr::new).collect();
+        assert_eq!(args, expected, "the command follows the session tool whole");
+    } else {
+        assert_eq!(program, "/bin/sh", "the command is the program");
+        assert_eq!(built.get_program(), OsStr::new("/bin/sh"));
+    }
+    Ok(())
 }
 
 /// Every seed keeps the exact head and tail, counts every dropped byte, and replays one trace.
