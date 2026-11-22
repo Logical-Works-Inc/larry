@@ -25,7 +25,8 @@ the characters Unicode 16.0.0 marks `Default_Ignorable_Code_Point` that are not 
 - U+034F COMBINING GRAPHEME JOINER (`Mn`).
 - U+115F, U+1160, U+3164 and U+FFA0, the Hangul fillers (`Lo`). They draw as blank space and are
   used in "invisible variable" homoglyph attacks.
-- U+FE00..U+FE0F and U+E0100..U+E01EF, the variation selectors (`Mn`).
+- U+FE00..U+FE0F, the variation selectors, and the variation selectors supplement
+  (VARIATION SELECTOR-17..VARIATION SELECTOR-256), all `Mn`.
 - U+17B4..U+17B5 and U+180B..U+180D, U+180F, the Khmer and Mongolian variation selectors (`Mn`).
 
 A command shown with one of them reads differently from the command that runs
