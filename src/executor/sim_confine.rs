@@ -14,8 +14,8 @@ use std::time::Duration;
 use lgwks_std::seeded::Seeded;
 
 use super::{
-    Confine, ConfineError, PROC_READS, Platform, SANDBOX_EXEC, SETPRIV, supported, supported_with,
-    text,
+    Confine, ConfineError, MAX_READ_ROOTS, PROC_READS, Platform, SANDBOX_EXEC, SETPRIV,
+    read_roots_below, supported, supported_with, text,
 };
 use crate::executor::Ledger;
 use crate::executor::run::{Place, run_command};
@@ -39,15 +39,50 @@ const PIECES: [&str; 9] = [
 ];
 
 /// A state directory holding a workspace as `Island` lays it out: the tree and the scratch
-/// directory under `<state>/ws/<name>`, beside the `executor.db` that holds the signing seed.
+/// directory under `<state>/ws/<name>`, beside the `executor.db` that holds the signing
+/// seed. The scratch root is the fake root the walk descends: it links the host's own
+/// program, library and configuration directories, so a confined command still runs, and
+/// the walk never reads `/tmp`, whose sibling count no test controls (larry#322).
 fn layout(label: &str, name: &str) -> Result<(Scratch, PathBuf, PathBuf, PathBuf), SimError> {
     let root = scratch(label)?;
+    link_shared(&root)?;
     let state = root.join("state");
     let tree = state.join("ws").join(name).join("tree");
     let tmp = state.join("ws").join(name).join("tmp");
     std::fs::create_dir_all(&tree)?;
     std::fs::create_dir_all(&tmp)?;
     Ok((root, state, tree, tmp))
+}
+
+/// Links the host's program, library and configuration directories into `root`, so a
+/// command confined by a walk from `root` still starts.
+fn link_shared(root: &Path) -> Result<(), SimError> {
+    for shared in ["bin", "sbin", "lib", "lib64", "usr", "etc"] {
+        let real = Path::new("/").join(shared);
+        if real.is_dir() {
+            std::os::unix::fs::symlink(&real, root.join(shared))?;
+        }
+    }
+    Ok(())
+}
+
+/// The confinement over a layout, its read walk rooted at the layout's fake root. Linux
+/// reads are then judged against paths the test built, never the host's `/tmp`, whose
+/// entry count would otherwise decide whether the allowlist fits (larry#322).
+fn confined(
+    platform: Platform,
+    state: &Path,
+    tree: &Path,
+    tmp: &Path,
+) -> Result<Confine, ConfineError> {
+    let root = state.parent().ok_or_else(|| ConfineError::Path {
+        path: state.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the layout's fake root is the state directory's parent",
+        ),
+    })?;
+    Confine::within(platform, root, state, tree, tmp)
 }
 
 /// The Seatbelt profile the reference spelling writes for `state`, the session's `copy`,
@@ -129,7 +164,7 @@ fn sim_confine_argv_per_platform_is_exact() -> TestResult {
     let read = "execute,read-file,read-dir";
     let write = "execute,write-file,read-file,read-dir,remove-dir,remove-file,make-char,make-dir,\
 make-reg,make-sock,make-fifo,make-block,make-sym,refer,truncate";
-    let linux = Confine::new(Platform::Linux, &state, &tree, &tmp)?;
+    let linux = confined(Platform::Linux, &state, &tree, &tmp)?;
     let argv = linux.wrap(&command);
     let head = [
         String::from(SETPRIV),
@@ -184,16 +219,16 @@ make-reg,make-sock,make-fifo,make-block,make-sym,refer,truncate";
         .copied()
         .filter(|rule| *rule != copy_path.as_str())
         .collect();
-    check_read_roots(&roots, &state)?;
+    check_read_roots(&roots, state.parent().ok_or("the fake root")?, &state)?;
     assert_eq!(mac.tree(), tree.as_path());
     assert_eq!(linux.scratch(), tmp.as_path());
     Ok(())
 }
 
-/// The read roots a Linux argv carries, judged against the host's own directories: the
-/// state directory is beneath none of them, every top-level directory is one of them or
-/// beneath one, and the `/proc` grants are the command's own entry and the host's tunables.
-fn check_read_roots(reads: &[&str], state: &Path) -> TestResult {
+/// The read roots a Linux argv carries, judged against the fake root the walk descends: the
+/// state directory is a root of none, every other child directory is a root or beneath one,
+/// and the `/proc` grants are the command's own entry and the host's tunables.
+fn check_read_roots(reads: &[&str], root: &Path, state: &Path) -> TestResult {
     let (top, proc_tail) = reads.split_at(reads.len().saturating_sub(PROC_READS.len()));
     assert_eq!(
         proc_tail, PROC_READS,
@@ -209,36 +244,29 @@ fn check_read_roots(reads: &[&str], state: &Path) -> TestResult {
     );
     let canonical = std::fs::canonicalize(state)?;
     assert!(
-        top.iter().all(|root| !canonical.starts_with(root)),
+        top.iter().all(|granted| !canonical.starts_with(granted)),
         "no read root holds the state directory: {top:?}"
     );
-    assert!(
-        top.contains(&"/usr"),
-        "the host's programs and libraries are readable: {top:?}"
-    );
-    // Every top-level directory the command may read is a root or beneath one, so a
-    // list cut short at any skipped entry loses a directory the host has.
-    let mut top_directories = 0_u64;
-    for entry in std::fs::read_dir("/")? {
+    // Every child directory beside the state directory is a root or beneath one, so a list
+    // cut short at any sibling loses a directory the command had.
+    let mut siblings = 0_u64;
+    for entry in std::fs::read_dir(root)? {
         let path = entry?.path();
         if !path.is_dir() {
             continue;
         }
         let real = std::fs::canonicalize(&path)?;
-        if real == Path::new("/proc") || canonical.starts_with(&real) {
+        if real == canonical || canonical.starts_with(&real) {
             continue;
         }
-        top_directories = top_directories.saturating_add(1);
+        siblings = siblings.saturating_add(1);
         assert!(
-            top.iter().any(|root| real.starts_with(root)),
+            top.iter().any(|granted| real.starts_with(granted)),
             "{} is not a read root and nothing grants it: {top:?}",
             real.display()
         );
     }
-    assert!(
-        top_directories > 1,
-        "the host's top-level directories were read"
-    );
+    assert!(siblings > 1, "the fake root's siblings were read");
     Ok(())
 }
 
@@ -349,7 +377,7 @@ fn sim_confine_profile_is_validated_by_the_estate_owner() -> TestResult {
         let mac = Confine::new(Platform::Macos, &state, &tree, &tmp)?;
         let profile = mac.prefix.get(2).ok_or("the profile")?;
         assert!(balanced(profile), "seed {seed} {name}: {profile}");
-        Confine::new(Platform::host(), &state, &tree, &tmp)?.probe(&path)?;
+        confined(Platform::host(), &state, &tree, &tmp)?.probe(&path)?;
     }
     Ok(())
 }
@@ -366,7 +394,7 @@ fn sim_confine_kernel_refuses_a_write_beside_the_tree() -> TestResult {
         let victim = beside.join("victim.txt");
         std::fs::write(&victim, format!("original {seed}"))?;
         let before = tree_digest(&beside, false)?;
-        let confine = Confine::new(Platform::host(), &state, &tree, &tmp)?;
+        let confine = confined(Platform::host(), &state, &tree, &tmp)?;
         let routes = [
             format!("printf x > {}/new.txt", beside.display()),
             format!("printf x > {}", victim.display()),
@@ -407,7 +435,7 @@ fn sim_confine_kernel_refuses_a_write_beside_the_tree() -> TestResult {
 
 /// The kernel refuses every read of the state directory, where `executor.db` holds one key
 /// and the tenant key digests, so no confined command recovers a signing seed, and the work
-/// tree stays readable (larry#322, ADR 0080).
+/// tree stays readable (larry#322, ADR 0081).
 #[test]
 fn sim_confine_kernel_refuses_the_state_directory_for_every_seed() -> TestResult {
     let path = path_env()?;
@@ -421,7 +449,7 @@ fn sim_confine_kernel_refuses_the_state_directory_for_every_seed() -> TestResult
         std::fs::write(&db, seed_bytes.as_bytes())?;
         let before = std::fs::read(&db)?;
         std::fs::write(tree.join("inside.txt"), b"readable")?;
-        let confine = Confine::new(Platform::host(), &state, &tree, &tmp)?;
+        let confine = confined(Platform::host(), &state, &tree, &tmp)?;
         let inside = run_confined(&confine, &shell("cat inside.txt"), &path, &tmp)?;
         assert!(
             inside.status.success() && inside.stdout == b"readable",
@@ -468,13 +496,13 @@ fn sim_confine_kernel_refuses_the_state_directory_for_every_seed() -> TestResult
 
 /// The executor's environment holds `LARRY_MODEL_KEY` and every `LARRY_KEY_*`, and a
 /// confined command cannot read the environment of the process that spawned it: Linux
-/// grants no `/proc` entry but the command's own (larry#322, ADR 0080).
+/// grants no `/proc` entry but the command's own (larry#322, ADR 0081).
 #[cfg(target_os = "linux")]
 #[test]
 fn sim_confine_kernel_hides_the_executors_environment() -> TestResult {
     let path = path_env()?;
     let (_root, state, tree, tmp) = layout("environ", "w")?;
-    let confine = Confine::new(Platform::host(), &state, &tree, &tmp)?;
+    let confine = confined(Platform::host(), &state, &tree, &tmp)?;
     let secret = "sk-larry-322-model-key";
     let inner = confine.wrap(&shell("cat /proc/$PPID/environ"));
     let mut command = Command::new("/bin/sh");
@@ -501,6 +529,165 @@ fn sim_confine_kernel_hides_the_executors_environment() -> TestResult {
     Ok(())
 }
 
+/// A confined command reads everywhere but the state directory: a directory beside the
+/// state directory's parent stays a read root, a sibling link into the state directory is
+/// never one, and a file in the state directory stays refused (larry#322, ADR 0081).
+#[test]
+fn sim_confine_reads_stay_open_beside_the_state() -> TestResult {
+    let root = scratch("beside")?;
+    let fake = root.join("fake");
+    let state = fake.join("a/b/state");
+    let tree = fake.join("proj/tree");
+    let tmp = fake.join("proj/tmp");
+    let keep = fake.join("a/keep");
+    for dir in [&state, &tree, &tmp, &keep] {
+        std::fs::create_dir_all(dir)?;
+    }
+    let note = keep.join("note.txt");
+    std::fs::write(&note, b"readable")?;
+    std::fs::write(state.join("executor.db"), b"signing seed beside")?;
+    let link = fake.join("a/deep");
+    std::os::unix::fs::symlink(&state, &link)?;
+    link_shared(&fake)?;
+    let roots = read_roots_below(&fake, &state)?;
+    assert!(
+        roots.iter().any(|granted| granted == &keep),
+        "a directory beside the state directory stays a read root: {roots:?}"
+    );
+    assert!(
+        roots
+            .iter()
+            .all(|granted| !granted.starts_with(&state) && !state.starts_with(granted)),
+        "no read root holds the state directory or lies beneath it, the link included: {roots:?}"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        match Confine::within(Platform::host(), &fake, &state, &tree, &tmp) {
+            Ok(confine) => {
+                let path = path_env()?;
+                kernel_reads_beside_the_state(&confine, &state, &path, &tmp, &note, &link)?;
+            }
+            Err(ConfineError::TooManyRoots { roots, bound }) => {
+                let mut errors = std::io::stderr().lock();
+                writeln!(
+                    errors,
+                    "{{\"metric\":\"kernel_skipped\",\"rules\":{roots},\"bound\":{bound}}}"
+                )?;
+            }
+            Err(other) => return Err(format!("the confinement failed: {other}").into()),
+        }
+    }
+    Ok(())
+}
+
+/// The kernel, not only the rule list: the file beside the state directory is read, the
+/// sibling link into it and the state directory itself are refused (larry#322).
+#[cfg(target_os = "linux")]
+fn kernel_reads_beside_the_state(
+    confine: &Confine,
+    state: &Path,
+    path: &str,
+    tmp: &Path,
+    note: &Path,
+    link: &Path,
+) -> TestResult {
+    let read = run_confined(
+        confine,
+        &shell(&format!("cat {}", note.display())),
+        path,
+        tmp,
+    )?;
+    assert!(
+        read.status.success() && read.stdout == b"readable",
+        "a file beside the state directory is readable: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let through = run_confined(
+        confine,
+        &shell(&format!("cat {}/executor.db", link.display())),
+        path,
+        tmp,
+    )?;
+    assert!(
+        !through.status.success()
+            && !String::from_utf8_lossy(&through.stdout).contains("signing seed"),
+        "a sibling link into the state directory is not a way in"
+    );
+    let db = run_confined(
+        confine,
+        &shell(&format!("cat {}/executor.db", state.display())),
+        path,
+        tmp,
+    )?;
+    assert!(
+        !db.status.success() && !String::from_utf8_lossy(&db.stdout).contains("signing seed"),
+        "the state directory is refused"
+    );
+    Ok(())
+}
+
+/// A state directory that is the walk's own root cannot be granted around: the walk would
+/// grant nothing and the command would read nothing. It is refused typed instead, never
+/// built into a confinement that denies the whole host (larry#322).
+#[test]
+fn sim_confine_a_state_at_the_walk_root_is_refused() {
+    assert!(matches!(
+        read_roots_below(Path::new("/"), Path::new("/")),
+        Err(ConfineError::StateAtRoot)
+    ));
+}
+
+/// The read-root count stays under its named bound with many siblings, and past it the
+/// confinement is refused typed rather than built unbounded (larry#322).
+#[test]
+fn sim_confine_read_roots_stay_under_their_bound() -> TestResult {
+    let root = scratch("many")?;
+    let state = root.join("state");
+    std::fs::create_dir_all(&state)?;
+    for n in 0..15 {
+        std::fs::create_dir_all(root.join(format!("sib-{n}")))?;
+    }
+    let mut errors = std::io::stderr().lock();
+    match read_roots_below(&root, &state) {
+        Ok(roots) => {
+            writeln!(
+                errors,
+                "{{\"metric\":\"read_roots\",\"siblings\":15,\"rules\":{}}}",
+                roots.len()
+            )?;
+            assert!(
+                roots.iter().any(|granted| granted == &root.join("sib-0")),
+                "a sibling of the state directory is a read root: {roots:?}"
+            );
+        }
+        // A host whose path to the state directory already holds more entries than the
+        // allowlist leaves is refused typed with both counts, never built past the bound.
+        Err(ConfineError::TooManyRoots { roots, bound }) => {
+            writeln!(
+                errors,
+                "{{\"metric\":\"read_roots_refused\",\"rules\":{roots},\"bound\":{bound}}}"
+            )?;
+        }
+        Err(other) => {
+            return Err(format!("the roots were refused for another reason: {other}").into());
+        }
+    }
+    let crowded = scratch("crowded")?;
+    let crowded_state = crowded.join("state");
+    std::fs::create_dir_all(&crowded_state)?;
+    for n in 0..=MAX_READ_ROOTS {
+        std::fs::create_dir_all(crowded.join(format!("sib-{n}")))?;
+    }
+    assert!(
+        matches!(
+            read_roots_below(&crowded, &crowded_state),
+            Err(ConfineError::TooManyRoots { .. })
+        ),
+        "past the bound the confinement is refused typed"
+    );
+    Ok(())
+}
+
 /// The p50, p95 and p99 of `samples`, by nearest rank.
 fn percentiles(samples: &mut [u64]) -> Option<[u64; 3]> {
     samples.sort_unstable();
@@ -521,7 +708,7 @@ fn percentiles(samples: &mut [u64]) -> Option<[u64; 3]> {
 fn bench_confine_overhead_is_measured_against_the_unconfined_spawn() -> TestResult {
     let path = path_env()?;
     let (root, _state, tree, tmp) = layout("overhead", "w")?;
-    let confine = Confine::new(Platform::host(), &_state, &tree, &tmp)?;
+    let confine = confined(Platform::host(), &_state, &tree, &tmp)?;
     let ledger = Ledger::open(&root)?;
     let command = shell(":");
     let mut plain = Vec::new();

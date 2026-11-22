@@ -17,7 +17,7 @@
 //! profile (logicalworks-crates#1075), so the two argv spellings are Larry's
 //! until it does.
 //!
-//! The state directory is not a read root (larry#322, ADR 0080): `executor.db`
+//! The state directory is not a read root (larry#322, ADR 0081): `executor.db`
 //! holds the receipt signing seed, so a command that read it could seal receipts
 //! `larry verify` accepts. The one path beneath it a command reads is the session's
 //! own copy (`<state>/ws/<task>`), whose git directory sits beside the work tree
@@ -58,6 +58,11 @@ const DEVICES: [&str; 2] = ["/dev/null", "/dev/tty"];
 /// (larry#322). A command still sees itself and the host's tunables; Landlock grants
 /// only directory rules, so a single summary file cannot be a rule of its own.
 const PROC_READS: [&str; 2] = ["/proc/self", "/proc/sys"];
+
+/// The most read roots the allowlist carries: the estate's `LandlockRules` holds 64
+/// rules, and the tree, the scratch directory, the device and the two `/proc` entries
+/// take five, so the roots get the rest (larry#322, ADR 0081).
+const MAX_READ_ROOTS: usize = 64 - 5;
 
 /// `setpriv`'s access list for read and execute.
 const READ_LIST: &str = "execute,read-file,read-dir";
@@ -154,6 +159,15 @@ pub enum ConfineError {
     },
     /// The estate refused the profile or the rules: not UTF-8, a control byte, over a bound.
     Invalid(io::Error),
+    /// The state directory's path needs more read rules than the allowlist holds.
+    TooManyRoots {
+        /// The roots the walk found.
+        roots: usize,
+        /// The most the allowlist holds.
+        bound: usize,
+    },
+    /// The state directory is the walk's own root, so nothing could be granted around it.
+    StateAtRoot,
     /// The wrapper ran and did not confine, or did not run at all.
     Probe {
         /// What the probe saw.
@@ -182,6 +196,14 @@ impl fmt::Display for ConfineError {
                 )
             }
             Self::Invalid(ref cause) => write!(out, "the confinement was refused: {cause}"),
+            Self::TooManyRoots { roots, bound } => write!(
+                out,
+                "the state directory needs {roots} read rules, more than the {bound} the confinement holds; put it where its path has fewer siblings"
+            ),
+            Self::StateAtRoot => write!(
+                out,
+                "the state directory is the root of the read walk, so no read rule can leave it open and close the state"
+            ),
             Self::NotBeneath {
                 ref workspace,
                 ref state,
@@ -206,6 +228,8 @@ impl std::error::Error for ConfineError {
             Self::Unsupported { .. }
             | Self::MissingWrapper { .. }
             | Self::NotBeneath { .. }
+            | Self::TooManyRoots { .. }
+            | Self::StateAtRoot
             | Self::Probe { .. } => None,
         }
     }
@@ -302,32 +326,56 @@ fn seatbelt(
     ])
 }
 
-/// The top-level paths Landlock grants read: every child of `/` but the one that
-/// holds the state directory, and the `/proc` entries in [`PROC_READS`] instead of
-/// all of `/proc`. An allowlist cannot subtract a child from a granted path, so the
-/// state directory's top component is simply never granted (larry#322, ADR 0080).
+/// The walk's roots beneath `root` and the `/proc` entries: the read roots Landlock grants.
+/// Walking from `/` down to the state directory's parent, at each level every child but the
+/// one on the path to the state directory, and the `/proc` entries in [`PROC_READS`]
+/// instead of all of `/proc`. An allowlist cannot subtract a child from a granted path, so
+/// the walk grants the state directory's siblings level by level and never the state
+/// directory itself (larry#322, ADR 0081).
 ///
-/// Each child is resolved, because a symlink (`/bin` and `/lib` on most hosts) is
-/// no rule path, and a child already beneath a granted child is dropped. The
-/// `/proc` entries keep their spelling: `/proc/self` names the wrapper's own
-/// process, which is the command's once it execs.
-fn read_roots(state: &Path) -> Result<Vec<PathBuf>, ConfineError> {
-    let root = Path::new("/");
-    let mut roots = Vec::new();
-    let entries = std::fs::read_dir(root).map_err(|source| ConfineError::Path {
-        path: root.to_path_buf(),
-        source,
+/// Each child is resolved, because a symlink (`/bin` and `/lib` on most hosts) is no rule
+/// path, and a child already beneath a granted child is dropped. The `/proc` entries keep
+/// their spelling: `/proc/self` names the wrapper's own process, which is the command's
+/// once it execs. `root` is `/` for every real confinement, and the simulations drive a
+/// fake root so their rules never depend on the host's own directories.
+fn read_roots_at(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineError> {
+    let mut kept = read_roots_below(root, state)?;
+    kept.extend(PROC_READS.iter().map(PathBuf::from));
+    Ok(kept)
+}
+
+/// The walk's read roots beneath `root`, with no `/proc` entries: the seam the
+/// simulations drive on a fake root, so the walk's shape never depends on the host's
+/// own directories (larry#322).
+fn read_roots_below(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineError> {
+    let state = resolved(state)?;
+    let below = state.strip_prefix(root).map_err(|source| {
+        ConfineError::Invalid(io::Error::new(io::ErrorKind::InvalidInput, source))
     })?;
-    for entry in entries {
-        let path = entry
-            .map_err(|source| ConfineError::Path {
-                path: root.to_path_buf(),
-                source,
-            })?
-            .path();
-        if let Some(root) = grantable(&path, state)? {
-            roots.push(root);
+    if below.as_os_str().is_empty() {
+        return Err(ConfineError::StateAtRoot);
+    }
+    let mut roots = Vec::new();
+    let mut level = root.to_path_buf();
+    for next in below.components() {
+        let skip = level.join(next.as_os_str());
+        for child in children(&level)? {
+            let allowed = if child == skip {
+                None
+            } else {
+                grantable(&child, &state)?
+            };
+            if let Some(root) = allowed {
+                roots.push(root);
+            }
         }
+        if roots.len() > MAX_READ_ROOTS {
+            return Err(ConfineError::TooManyRoots {
+                roots: roots.len(),
+                bound: MAX_READ_ROOTS,
+            });
+        }
+        level = skip;
     }
     roots.sort();
     roots.dedup();
@@ -338,32 +386,55 @@ fn read_roots(state: &Path) -> Result<Vec<PathBuf>, ConfineError> {
             kept.push(path);
         }
     }
-    kept.extend(PROC_READS.iter().map(PathBuf::from));
     Ok(kept)
 }
 
-/// A top-level path as one read root, or `None` when it cannot be one: `/proc`, which
-/// is granted entry by entry; a file, a device or a dangling link, which a rule on a
-/// file cannot name; and the state directory's own ancestor, which would grant it.
+/// The children of `level` in name order, so the rules never depend on directory order.
+fn children(level: &Path) -> Result<Vec<PathBuf>, ConfineError> {
+    let entries = std::fs::read_dir(level).map_err(|source| ConfineError::Path {
+        path: level.to_path_buf(),
+        source,
+    })?;
+    let mut out = Vec::new();
+    for entry in entries {
+        out.push(
+            entry
+                .map_err(|source| ConfineError::Path {
+                    path: level.to_path_buf(),
+                    source,
+                })?
+                .path(),
+        );
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// A path as one read root, or `None` when it cannot be one: `/proc`, which is granted
+/// entry by entry; a file, a device or a dangling link, which a rule on a file cannot
+/// name; and the state directory, anything beneath it or any ancestor of it, so a
+/// sibling link that resolves into the state directory grants nothing (larry#322).
 fn grantable(path: &Path, state: &Path) -> Result<Option<PathBuf>, ConfineError> {
     if path == Path::new("/proc") || !path.is_dir() {
         return Ok(None);
     }
     let resolved = resolved(path)?;
-    Ok((!state.starts_with(&resolved)).then_some(resolved))
+    let touches_state = state.starts_with(&resolved) || resolved.starts_with(state);
+    Ok((!touches_state).then_some(resolved))
 }
 
-/// The Linux argv prefix: read the roots above and the session's own copy, read and write
-/// beneath `tree` and `scratch`.
+/// The Linux argv prefix: read the roots at `root` and the session's own copy, read and
+/// write beneath `tree` and `scratch`.
 fn landlock(
+    root: &Path,
     state: &Path,
     workspace: &Path,
     tree: &str,
     scratch: &str,
 ) -> Result<Vec<String>, ConfineError> {
     let mut rules = LandlockRules::new();
-    for root in read_roots(state)? {
-        rules.allow(root, PathAccess::Read);
+    for allowed in read_roots_at(root, state)? {
+        rules.allow(allowed, PathAccess::Read);
     }
     rules.allow(workspace, PathAccess::Read);
     rules.allow(tree, PathAccess::ReadWrite);
@@ -418,11 +489,23 @@ impl Confine {
         tree: &Path,
         scratch: &Path,
     ) -> Result<Self, ConfineError> {
+        Self::within(platform, Path::new("/"), state, tree, scratch)
+    }
+
+    /// [`Self::new`] with the read walk rooted at `root`: the simulations drive a fake
+    /// root so their rules never depend on the host's own directories (larry#322).
+    fn within(
+        platform: Platform,
+        root: &Path,
+        state: &Path,
+        tree: &Path,
+        scratch: &Path,
+    ) -> Result<Self, ConfineError> {
         let state = resolved(state)?;
         let tree = resolved(tree)?;
         // The session's own copy is the one path beneath the state directory a command
         // reads: the workspace lays the tree down beside the clone's git directory and
-        // the scratch directory (larry#322, ADR 0080).
+        // the scratch directory (larry#322, ADR 0081).
         let workspace = tree
             .parent()
             .map(Path::to_path_buf)
@@ -444,7 +527,7 @@ impl Confine {
                 text(&tree)?,
                 text(&scratch)?,
             )?,
-            Platform::Linux => landlock(&state, &workspace, text(&tree)?, text(&scratch)?)?,
+            Platform::Linux => landlock(root, &state, &workspace, text(&tree)?, text(&scratch)?)?,
             Platform::Other => {
                 return Err(ConfineError::Unsupported {
                     platform: platform.name(),

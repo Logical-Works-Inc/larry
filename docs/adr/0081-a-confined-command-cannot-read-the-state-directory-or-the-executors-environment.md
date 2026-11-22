@@ -39,12 +39,21 @@ environment, but a same-user process reads the parent's through
   while the command's own copy stays readable. It also adds
   `(deny sysctl-read (sysctl-name "kern.procargs2"))`, the interface that
   returns a process's arguments and environment.
-- Linux: the read root is no longer `/`. The roots are every child of `/`
-  resolved, minus the state directory's top component (an allowlist cannot
-  subtract a child of a granted path), and minus `/proc`, where only
-  `/proc/self` and `/proc/sys` are granted. The copy is a read rule of its
-  own, and the tree and scratch directory keep their read-write rules,
-  which carry read as well.
+- Linux: the read root is no longer `/`. The roots walk from `/` down to
+  the state directory's parent: at each level every child but the one on
+  the path to the state directory, so a sibling stays readable and the
+  state directory and everything under it never is (an allowlist cannot
+  subtract a child of a granted path). `/proc` is not a root; only
+  `/proc/self` and `/proc/sys` are granted. The allowlist holds 64 rules
+  and the tree, the scratch directory, the device and the two `/proc`
+  entries take five, so `MAX_READ_ROOTS` is 59 and a path that needs more
+  is refused with `ConfineError::TooManyRoots` naming both counts. A path
+  is never a root when its resolved form is the state directory, beneath
+  it or an ancestor of it, so a sibling link into the state grants nothing,
+  and a state directory that is the walk's own root is refused
+  (`StateAtRoot`) rather than built into a confinement that reads nothing.
+  The copy is a read rule of its own, and the tree and scratch directory
+  keep their read-write rules, which carry read as well.
 - The copy is `<state>/ws/<task>`, the tree's parent: the clone names its
   git directory there (`--separate-git-dir`) so a command cannot commit,
   and every `git` command in the tree reads its way to it. Without the
@@ -69,6 +78,11 @@ environment, but a same-user process reads the parent's through
   spawned it, on both kernels. Its own copy stays readable, so `git
   status`, `git log` and `git diff` work in the tree and `git commit` is
   still refused: the git directory is outside the writable tree.
+- Every other read stays open, a state directory under `/home` included:
+  `~/.cargo` and `~/.rustup` remain readable, so a confined `cargo test`
+  works. Before the walk, closing the state directory's top component made
+  all of `/home` unreadable and the session refused no command it should
+  run but failed the ones it should.
 - On Linux a command loses every `/proc` entry but its own and the host's
   tunables: `ps` cannot list other processes. On macOS `ps e` reports no
   environment. Every other read and the network stay open (ADR 0046).
@@ -79,6 +93,11 @@ environment, but a same-user process reads the parent's through
 
 ## Rejected
 
+- Closing the top-level directory that holds the state directory. With
+  `LARRY_STATE_DIR` under `/home/<user>` it made all of `/home`
+  unreadable, `~/.cargo` and `~/.rustup` included, so a confined
+  `cargo test` failed in every Linux session; CI passed only because its
+  state directory sits in `/tmp`.
 - Moving the workspace out from under the state directory. It changes
   `Workspace::create`, the sweep, recovery and the journal path for one
   read rule, and the state directory would still hold keys a command can
