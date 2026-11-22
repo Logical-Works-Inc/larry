@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0084: a command never reaches the person's controlling terminal"
+title: "ADR 0086: a command never reaches the person's controlling terminal"
 description: Why each command starts in a session of its own on Linux and why the macOS profile refuses /dev/tty for reading and writing.
-resource: /docs/adr/0084-a-command-never-reaches-the-persons-terminal.md
+resource: /docs/adr/0086-a-command-never-reaches-the-persons-terminal.md
 tags: [larry, adr, confinement, security, terminal]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: the terminal journeys on macOS and Linux, failing on main then green, 2026-11-21}
@@ -11,7 +11,7 @@ stale_after: 2027-05-21
 sources: [larry#323, /INVARIANTS.md, util-linux setsid(1), POSIX setsid(2), Apple sandbox-exec(1), Linux landlock(7)]
 ---
 
-# 0084: a command never reaches the person's controlling terminal
+# 0086: a command never reaches the person's controlling terminal
 
 Status: accepted, 2026-11-21 (larry#323).
 
