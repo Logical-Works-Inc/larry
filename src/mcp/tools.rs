@@ -135,7 +135,7 @@ fn submit_task(arguments: &Map, executor: &Executor) -> Value {
         &checked.acceptance,
         checked.route,
     ) {
-        Ok(task) => task,
+        Ok(task) => task.confining_acceptance(),
         Err(error) => return tool_error("invalid_arguments", &error.to_string()),
     };
     let report: Report = match execute(&task, settings) {

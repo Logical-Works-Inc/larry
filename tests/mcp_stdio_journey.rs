@@ -15,6 +15,8 @@ use json_at::At;
 
 #[path = "mcp_stdio_journey/accepted.rs"]
 mod accepted;
+#[path = "mcp_stdio_journey/confine.rs"]
+mod confine;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 mod mcp_support;
@@ -24,6 +26,8 @@ mod mcp_task;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "support/tree_digest.rs"]
+mod tree_digest;
 
 use accepted::{check_accepted, check_model_side};
 use lgwks_std::json::{Value, json};
