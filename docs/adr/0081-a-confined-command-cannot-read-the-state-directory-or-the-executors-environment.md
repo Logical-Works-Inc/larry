@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0080: a confined command cannot read the state directory or the executor's environment"
+title: "ADR 0081: a confined command cannot read the state directory or the executor's environment"
 description: Why the Seatbelt profile and the Landlock allowlist deny the state directory and the executor's process entry, and why the key stays in the environment.
-resource: /docs/adr/0080-a-confined-command-cannot-read-the-state-directory-or-the-executors-environment.md
+resource: /docs/adr/0081-a-confined-command-cannot-read-the-state-directory-or-the-executors-environment.md
 tags: [larry, adr, confinement, security, state]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: the confine simulations on macOS and Linux, failing on main then green, 2026-11-21}
@@ -11,7 +11,7 @@ stale_after: 2027-05-21
 sources: [larry#322, /INVARIANTS.md, Apple sandbox-exec(1), Linux landlock(7), util-linux setpriv(1)]
 ---
 
-# 0080: a confined command cannot read the state directory or the executor's environment
+# 0081: a confined command cannot read the state directory or the executor's environment
 
 Status: accepted, 2026-11-21 (larry#322).
 
