@@ -63,9 +63,9 @@ impl Seeded {
 }
 
 /// Text a hostile model or command might print: escapes, controls, bidi, wide and
-/// every invisible format character that could hide a difference between the command
-/// shown and the command that runs (larry#337).
-pub(super) const HOSTILE: [&str; 16] = [
+/// every invisible or blank-drawing character that could hide a difference between the
+/// command shown and the command that runs (larry#337, larry#369).
+pub(super) const HOSTILE: [&str; 17] = [
     "\x1b]0;owned\x07",
     "\x1b[2J\x1b[H",
     "\x1b[31mred\x1b[0m",
@@ -82,6 +82,10 @@ pub(super) const HOSTILE: [&str; 16] = [
     "hy\u{00ad}phen\u{feff}",
     "a\u{e0041}\u{e0042}\u{e007f}b",
     "line\u{2028}para\u{2029}graph",
+    // One character from each group of Unicode 16.0.0 `Default_Ignorable_Code_Point` that is
+    // not already `Cf`: a combining grapheme joiner, a Hangul filler, a variation selector,
+    // a variation selector supplement and a Mongolian free variation selector (larry#369).
+    "a\u{034f}b\u{115f}\u{fe00}\u{e0100}\u{180b}c",
 ];
 
 /// A header for a simulated run.
@@ -255,6 +259,10 @@ fn sim_tui_hostile_output_cannot_write_escapes() -> Result<(), Box<dyn std::erro
                 !text.contains(banned),
                 "seed {seed}: {banned:?} reached the wire"
             );
+        }
+        // One from each `Default_Ignorable_Code_Point` group that is not `Cf` (larry#369).
+        for banned in ['\u{034f}', '\u{115f}', '\u{fe00}', '\u{e0100}', '\u{180b}'] {
+            assert!(!text.contains(banned), "seed {seed}: {banned:?}");
         }
     })?;
     Ok(())

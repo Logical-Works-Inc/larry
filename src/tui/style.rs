@@ -124,41 +124,58 @@ pub(crate) fn line_width(line: &[Span]) -> usize {
         .fold(0, usize::saturating_add)
 }
 
-/// Every Unicode 16 general-category `Cf` character, and the `Zl` and `Zp` separators, as
-/// one sorted table of inclusive ranges. Source: Unicode 16.0.0
+/// Every character that draws nothing, draws as blank or breaks a line: the union of Unicode
+/// 16.0.0 `Default_Ignorable_Code_Point` (which already holds every relevant `Cf`, plus marks and
+/// fillers such as U+034F, U+115F..U+1160, U+3164, U+FFA0 and the variation selectors), general
+/// category `Cf`, and the `Zl`/`Zp` separators, as one sorted table of inclusive, disjoint ranges.
+/// Sources: `Default_Ignorable_Code_Point` in `DerivedCoreProperties.txt` and
 /// `extracted/DerivedGeneralCategory.txt` (https://www.unicode.org/Public/16.0.0/ucd/).
-/// A `Cf` character draws nothing, so a command shown with one reads differently from the
-/// command that runs (CVE-2021-42574), and `Zl`/`Zp` break a line the frame never counted.
-const INVISIBLE: [(char, char); 22] = [
+/// Such a character draws nothing or as blank, so a command shown with one reads differently from
+/// the command that runs (CVE-2021-42574, "invisible variable" homoglyph attacks).
+const INVISIBLE: [(char, char); 25] = [
     ('\u{00ad}', '\u{00ad}'),
+    ('\u{034f}', '\u{034f}'),
     ('\u{0600}', '\u{0605}'),
     ('\u{061c}', '\u{061c}'),
     ('\u{06dd}', '\u{06dd}'),
     ('\u{070f}', '\u{070f}'),
     ('\u{0890}', '\u{0891}'),
     ('\u{08e2}', '\u{08e2}'),
-    ('\u{180e}', '\u{180e}'),
+    ('\u{115f}', '\u{1160}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180f}'),
     ('\u{200b}', '\u{200f}'),
-    ('\u{2028}', '\u{2029}'),
-    ('\u{202a}', '\u{202e}'),
-    ('\u{2060}', '\u{2064}'),
-    ('\u{2066}', '\u{206f}'),
+    ('\u{2028}', '\u{202e}'),
+    ('\u{2060}', '\u{206f}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{fe00}', '\u{fe0f}'),
     ('\u{feff}', '\u{feff}'),
-    ('\u{fff9}', '\u{fffb}'),
+    ('\u{ffa0}', '\u{ffa0}'),
+    ('\u{fff0}', '\u{fffb}'),
     ('\u{110bd}', '\u{110bd}'),
     ('\u{110cd}', '\u{110cd}'),
     ('\u{13430}', '\u{1343f}'),
     ('\u{1bca0}', '\u{1bca3}'),
     ('\u{1d173}', '\u{1d17a}'),
-    ('\u{e0001}', '\u{e0001}'),
-    ('\u{e0020}', '\u{e007f}'),
+    ('\u{e0000}', '\u{e0fff}'),
 ];
 
-/// Whether `character` draws nothing or breaks a line: `Cf`, `Zl` or `Zp`.
+/// Whether `character` draws nothing, draws as blank or breaks a line: default-ignorable, `Cf`,
+/// `Zl` or `Zp`. The table is sorted and disjoint, so this is a binary search.
 fn is_invisible(character: char) -> bool {
+    let code = u32::from(character);
     INVISIBLE
-        .iter()
-        .any(|&(start, end)| (start..=end).contains(&character))
+        .binary_search_by(|&(start, end)| {
+            let (start, end) = (u32::from(start), u32::from(end));
+            if code < start {
+                std::cmp::Ordering::Greater
+            } else if code > end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
 /// Pushes the visible stand-in for one dropped character: `⟨U+200B⟩`.
@@ -191,8 +208,8 @@ fn push_marker(out: &mut String, character: char) {
     out.push('⟩');
 }
 
-/// `text` with every control, bidi, format and separator character removed and each tab
-/// made four spaces; newlines stay when `keep_newlines`. Model replies, command output and
+/// `text` with every control, default-ignorable, format and separator character removed and each
+/// tab made four spaces; newlines stay when `keep_newlines`. Model replies, command output and
 /// pasted text cross this before they reach a cell, so none of them can move the cursor,
 /// change the title, recolour the frame or hide a character from the person.
 pub(crate) fn sanitize(text: &str, keep_newlines: bool) -> String {
@@ -205,8 +222,8 @@ pub(crate) fn sanitize_shown(text: &str) -> String {
     filtered(text, true, true)
 }
 
-/// `text` filtered for a cell: tabs become spaces, and every control, `Cf`, `Zl` or `Zp`
-/// character is dropped, or shown as a marker when `mark`.
+/// `text` filtered for a cell: tabs become spaces, and every control or invisible character
+/// (default-ignorable, `Cf`, `Zl`, `Zp`) is dropped, or shown as a marker when `mark`.
 fn filtered(text: &str, keep_newlines: bool, mark: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
@@ -355,7 +372,7 @@ pub(crate) fn ellipsize(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{push_marker, sanitize, sanitize_shown};
+    use super::{is_invisible, push_marker, sanitize, sanitize_shown};
 
     /// A marker names four hex digits in the Basic Multilingual Plane and six above it, each
     /// sanitizer keeps the flags its caller asks for, and every dropped format character is
@@ -372,5 +389,48 @@ mod tests {
         assert_eq!(sanitize("a\nb", true), "a\nb");
         assert_eq!(sanitize_shown("a\nb"), "a\nb");
         assert_eq!(sanitize_shown("a\u{200b}b"), "a⟨U+200B⟩b");
+    }
+
+    /// The one invisible table is sorted, disjoint and complete: every code point of every range
+    /// is dropped, every character this issue names is inside one, and a printable neighbour is
+    /// not. Sources: Unicode 16.0.0 `Default_Ignorable_Code_Point` in `DerivedCoreProperties.txt`
+    /// and `Cf`, `Zl`, `Zp` in `extracted/DerivedGeneralCategory.txt` (larry#369).
+    #[test]
+    fn sim_the_invisible_table_is_sorted_disjoint_and_complete() {
+        for (previous, next) in super::INVISIBLE.iter().zip(super::INVISIBLE.iter().skip(1)) {
+            assert!(
+                previous.1 < next.0,
+                "ranges overlap or are unordered at {:?}",
+                next.0
+            );
+        }
+        for &(start, end) in &super::INVISIBLE {
+            assert!(start <= end, "backwards range {start:?}..{end:?}");
+            for code in u32::from(start)..=u32::from(end) {
+                if let Some(character) = char::from_u32(code) {
+                    assert!(is_invisible(character), "{character:?} must be dropped");
+                }
+            }
+        }
+        for character in [
+            '\u{034f}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{ffa0}',
+            '\u{fe00}',
+            '\u{fe0f}',
+            '\u{e0100}',
+            '\u{e01ef}',
+            '\u{180b}',
+            '\u{180c}',
+            '\u{180d}',
+            '\u{180f}',
+        ] {
+            assert!(is_invisible(character), "{character:?} must be dropped");
+        }
+        for character in ['\u{0041}', '\u{ac00}'] {
+            assert!(!is_invisible(character), "{character:?} must be shown");
+        }
     }
 }
