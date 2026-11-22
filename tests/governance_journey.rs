@@ -8,7 +8,9 @@
 //! (nearest-rank percentiles) for the latency figures. Requirement: a governed tree passes and
 //! prints its counts; a broken one fails with every error on stderr; the report digests exactly
 //! the governed documents; a stale page is refused until regenerated; a kill -9 mid-write
-//! leaves a whole page; the checker never writes; local-ci runs no Python governance lane.
+//! leaves a whole page, and a write the kernel stops at a seeded file-size limit leaves a cut
+//! temporary page and the previous whole page; the checker never writes; local-ci runs no
+//! Python governance lane.
 
 #[path = "support/deadline.rs"]
 mod deadline;
@@ -55,6 +57,9 @@ const TRACKER_FILLER: usize = 3 * 1024 * 1024;
 /// because a loaded host can slow the debug binary's render; a finished child ends
 /// the wait at once.
 const WRITE_PATIENCE: Duration = Duration::from_secs(60);
+/// The signal a write past `RLIMIT_FSIZE` raises (25 on Linux and macOS): the kernel stops
+/// the writer inside the write, which is the mid-write kill this journey proves.
+const SIGXFSZ: i32 = 25;
 
 impl Tree {
     /// A governed fixture tree the checker passes on its own terms (larry#224, larry#270): the
@@ -274,8 +279,8 @@ fn a_stale_tracker_is_refused_until_regenerated() -> TestResult {
     Ok(())
 }
 
-/// Adds [`TRACKER_FILLER`] bytes to the tracker data, so its render is large enough for a
-/// kill to land inside the write and leave a partial temporary page behind.
+/// Adds [`TRACKER_FILLER`] bytes to the tracker data, so its render is longer than the seeded
+/// file-size limit the torn-write run is stopped at, and longer than one write on any host.
 fn grow_tracker(tree: &Tree) -> TestResult {
     let path = tree.at("tools/tracker/tracker.json");
     let mut data: Value = json::from_str(&fs::read_to_string(&path)?)?;
@@ -301,6 +306,41 @@ fn temp_pages(tree: &Tree) -> io::Result<Vec<(String, u64)>> {
     Ok(found)
 }
 
+/// Ends one tracker write inside the page write itself: the seed draws a file-size limit, so
+/// the kernel stops the child at that byte offset, the temporary page is cut partway, and an
+/// in-place write could not keep the cut out of the page. Returns the sizes of the temporary
+/// pages left.
+fn kill_inside_the_write(tree: &Tree, seed: u64) -> Result<Vec<u64>, Box<dyn Error>> {
+    let mut rng = Seeded::from_seed(seed);
+    // 8 to 2047 blocks of at most 1 KiB is at most 2 MiB, under the 3 MiB page on every shell.
+    let blocks = rng.below(2040)?.saturating_add(8);
+    let status = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            r#"ulimit -f {blocks} || exit 70; exec "$1" tracker --root "$2""#
+        ))
+        .arg("sh")
+        .arg(LARRY)
+        .arg(&*tree.path)
+        .env_clear()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.signal() != Some(SIGXFSZ) {
+        return Err(
+            format!("the size-limited tracker write ended {status:?}, not by SIGXFSZ").into(),
+        );
+    }
+    let pages: Vec<u64> = temp_pages(tree)?
+        .into_iter()
+        .map(|(_, size)| size)
+        .collect();
+    if pages.is_empty() {
+        return Err("the stopped tracker write left no temporary page".into());
+    }
+    Ok(pages)
+}
+
 #[test]
 fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     let tree = Tree::governed()?;
@@ -309,7 +349,6 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     edit_tracker(&tree, 61)?;
     grow_tracker(&tree)?;
     let mut observed = Vec::with_capacity(KILLS);
-    let mut partial = Vec::with_capacity(KILLS);
     for _ in 0..KILLS {
         let mut child = Command::new(LARRY)
             .args(["tracker", "--root"])
@@ -321,13 +360,8 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
         let deadline = Instant::now()
             .checked_add(WRITE_PATIENCE)
             .ok_or("the write deadline overflowed")?;
-        let mut appeared = None;
         loop {
-            if let Some(temp) = temp_pages(&tree)?.into_iter().next() {
-                appeared = Some(temp);
-                break;
-            }
-            if child.try_wait()?.is_some() {
+            if !temp_pages(&tree)?.is_empty() || child.try_wait()?.is_some() {
                 break;
             }
             if Instant::now() >= deadline {
@@ -338,13 +372,9 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
             child.kill()?;
         }
         child.wait()?;
-        if let Some((name, _)) = appeared
-            && let Some(left) = temp_pages(&tree)?.into_iter().find(|entry| entry.0 == name)
-        {
-            partial.push(left.1);
-        }
         observed.push(fs::read(&page)?);
     }
+    let partial = kill_inside_the_write(&tree, 61)?;
     let finished = larry(&["tracker"], &tree.path)?;
     assert_eq!(
         finished.status.code(),
@@ -353,14 +383,10 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     );
     let new = fs::read(&page)?;
     assert_ne!(new, old, "the edit changed the render");
-    assert!(
-        !partial.is_empty(),
-        "none of {KILLS} kills landed inside the write: no temporary page survived"
-    );
     let written = u64::try_from(new.len())?;
     assert!(
         partial.iter().any(|size| *size < written),
-        "every surviving temporary page was whole, so no kill was proved inside the write: {partial:?} of {written} bytes"
+        "the size-limited write was not cut inside the page: temporary pages {partial:?} of {written} bytes"
     );
     for (kill, seen) in observed.iter().enumerate() {
         assert!(
