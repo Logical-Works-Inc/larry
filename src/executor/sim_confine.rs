@@ -92,7 +92,10 @@ fn reference_profile(state: &Path, copy: &Path, tree: &Path, tmp: &Path) -> Stri
         "(version 1)(allow default)(deny file-read* (require-all (subpath \"{}\") (require-not \
          (require-any (subpath \"{}\") (subpath \"{}\") (subpath \"{}\")))))(deny file-write* \
          (require-not (require-any (subpath \"{}\") (subpath \"{}\") (literal \"/dev/null\"))))\
-         (deny file-read* (literal \"/dev/tty\"))(deny sysctl-read (sysctl-name \"kern.procargs2\"))",
+         (deny file-read* (literal \"/dev/tty\"))(deny sysctl-read (sysctl-name \"kern.procargs2\"))\
+         (deny mach-lookup)\
+         (allow mach-lookup (global-name \"com.apple.mDNSResponder\") (global-name \"com.apple.dnssd.service\"))\
+         (deny signal (require-not (require-any (target self) (target pgrp))))(deny process-exec (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") (literal \"/usr/bin/osascript\"))",
         state.display(),
         copy.display(),
         tree.display(),
@@ -752,3 +755,9 @@ fn bench_confine_overhead_is_measured_against_the_unconfined_spawn() -> TestResu
     assert_eq!((plain.len(), confined.len()), (SAMPLES, SAMPLES));
     Ok(())
 }
+
+/// The macOS channels a `(allow default)` profile can leave open, each judged on this host
+/// (larry#326): the exec, the Mach and the signal channel.
+#[cfg(target_os = "macos")]
+#[path = "sim_confine_macos.rs"]
+mod macos;

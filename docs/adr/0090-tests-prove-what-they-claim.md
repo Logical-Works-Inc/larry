@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0089: a test proves the claim its name and invariant make"
+title: "ADR 0090: a test proves the claim its name and invariant make"
 description: The seven larry#340 cases check what they say, or the claim is cut.
-resource: /docs/adr/0089-tests-prove-what-they-claim.md
+resource: /docs/adr/0090-tests-prove-what-they-claim.md
 tags: [larry, adr, tests, evidence]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: targeted nextest of the seven cases and one clippy run}
@@ -11,7 +11,7 @@ stale_after: 2027-02-21
 sources: [larry#340, larry#321, ADR 0013, ADR 0042, ADR 0053]
 ---
 
-# 0089: a test proves the claim its name and invariant make
+# 0090: a test proves the claim its name and invariant make
 
 Status: accepted, 2026-11-21 (larry#340)
 
