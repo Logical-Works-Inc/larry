@@ -93,8 +93,9 @@ fn reference_profile(state: &Path, copy: &Path, tree: &Path, tmp: &Path) -> Stri
          (require-any (subpath \"{}\") (subpath \"{}\") (subpath \"{}\")))))(deny file-write* \
          (require-not (require-any (subpath \"{}\") (subpath \"{}\") (literal \"/dev/null\"))))\
          (deny file-read* (literal \"/dev/tty\"))(deny sysctl-read (sysctl-name \"kern.procargs2\"))\
-         (deny mach-lookup)(deny signal (require-not (require-any (target self) (target pgrp))))\
-         (deny process-exec (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") (literal \"/usr/bin/osascript\"))",
+         (deny mach-lookup)\
+         (allow mach-lookup (global-name \"com.apple.mDNSResponder\") (global-name \"com.apple.dnssd.service\"))\
+         (deny signal (require-not (require-any (target self) (target pgrp))))(deny process-exec (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") (literal \"/usr/bin/osascript\"))",
         state.display(),
         copy.display(),
         tree.display(),

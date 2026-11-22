@@ -39,11 +39,16 @@ command" held only for the filesystem.
 The profile keeps `(allow default)` and adds three rules, each naming the
 operation of Apple's sandbox profile language (`sandbox-exec`):
 
-- `(deny mach-lookup)` denies a lookup of every launch service. The
-  allowlist is empty, and that is the measured answer: the shell verbs the PTY
-  journeys run (`printf`, `sleep`, `kill`) and `git` resolve no launch service,
-  so no service is left open on an assumption. A future journey that needs one
-  fails as a typed request, and the service is added with its own measurement.
+- `(deny mach-lookup)` denies a lookup of every launch service. Two are allowed
+  back by `global-name`, because a name lookup is itself a Mach client and
+  ADR 0046 keeps the network open (larry#326 review):
+  `com.apple.mDNSResponder` answers a `getaddrinfo` query, and
+  `com.apple.dnssd.service` is the DNS-SD browse service a resolver may reach
+  first. Without them a confined `curl`, `git fetch` or crate download by host
+  name fails before a byte is sent. Apple's profile language gives the last
+  matching rule the decision, so the allow follows the deny. No other service
+  was needed: a confined `curl` and `git ls-remote` by name measure clean, and
+  the sandbox log shows no further refusal.
 - `(deny signal (require-not (require-any (target self) (target pgrp))))` lets
   the command signal itself and its own process group, and refuses every
   process outside it. A shell still ends its own children; a command cannot
@@ -61,6 +66,11 @@ The Linux path is unchanged: Landlock grants filesystem rights and the wrapper
 - The three channels are refused by the kernel, and the folder beside the tree
   stays byte-identical through each attempt. `src/executor/sim_confine_macos.rs`'s
   three macOS simulations prove each channel; each failed on main.
+- A confined command resolves a host name and reads a local listener's body by
+  `http://localhost:<port>` (`sim_confine_macos_fetches_a_host_name`), so the
+  open network is reachable by name, not only by address.
+- `notifyutil -p` stays refused, so the resolver allow did not reopen the
+  launch services the deny closes.
 - The PTY journeys stay green on macOS: `cargo nextest run -p larry-demo
   --test e2e_journey` passes with the new profile.
 - The added cost is the profile text and three kernel rules. The wrapper

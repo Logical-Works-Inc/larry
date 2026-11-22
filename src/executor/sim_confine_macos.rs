@@ -26,6 +26,15 @@ const LAUNCHERS: [&[&str]; 3] = [
     &["/usr/bin/osascript", "-e", "return 1"],
 ];
 
+/// The launch services the profile allows, each by `global-name`, because a name lookup
+/// resolves through them on macOS (larry#326 review): `com.apple.mDNSResponder` answers a
+/// `getaddrinfo` query, and `com.apple.dnssd.service` is the DNS-SD browse service a
+/// resolver may reach first.
+const RESOLVER: [&str; 2] = ["com.apple.mDNSResponder", "com.apple.dnssd.service"];
+
+/// The body a local listener serves, so a confined fetch has something to prove it got.
+const BODY: &str = "larry-326-body";
+
 /// A folder beside the tree holding one file, and that folder's digest: the origin each
 /// channel simulation must leave byte-identical.
 fn beside_origin(root: &Path) -> Result<String, SimError> {
@@ -149,6 +158,121 @@ fn sim_confine_macos_refuses_a_signal_outside_the_group() -> TestResult {
         String::from_utf8_lossy(&own.stdout).contains("group-ok"),
         "the command cannot signal its own group: {}",
         String::from_utf8_lossy(&own.stderr)
+    );
+    assert_eq!(
+        tree_digest(&root.join("beside"), false)?,
+        before,
+        "the folder beside the tree stays byte-identical"
+    );
+    Ok(())
+}
+
+/// What the listener runs: accept one connection on `listener`, answer it with [`BODY`],
+/// and end. A client that ends without connecting is an error, so the test ends on the
+/// command's own exit rather than on a wall clock.
+fn serve_once(
+    listener: &std::net::TcpListener,
+    command: &mut std::process::Child,
+) -> Result<(), std::io::Error> {
+    use std::io::{Read as _, Write as _};
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                // A connection accepted from a non-blocking listener inherits the flag.
+                stream.set_nonblocking(false)?;
+                let mut request = [0_u8; 1024];
+                if stream.read(&mut request)? == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the command sent no request",
+                    ));
+                }
+                let response = format!(
+                    "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BODY}",
+                    BODY.len()
+                );
+                stream.write_all(response.as_bytes())?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if command.try_wait()?.is_some() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "the command ended without connecting",
+                    ));
+                }
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// The profile allows the host resolver's launch services by `global-name` (larry#326
+/// review): a name lookup on macOS goes through `com.apple.mDNSResponder`, and
+/// `com.apple.dnssd.service` is the browse service a resolver may reach first, while every
+/// other launch service stays refused. Apple's sandbox profile language orders rules, and
+/// the last one that matches decides, so the allow follows the deny.
+#[test]
+fn sim_confine_macos_allows_the_host_resolver() -> TestResult {
+    let (_root, state, tree, tmp) = layout("resolver", "w")?;
+    let confine = Confine::new(Platform::Macos, &state, &tree, &tmp)?;
+    let profile = confine.prefix.get(2).ok_or("the profile")?;
+    let deny = profile.find("(deny mach-lookup)").ok_or("the deny")?;
+    let allow = profile.find("(allow mach-lookup").ok_or("the allow")?;
+    for service in RESOLVER {
+        let named = format!("(global-name \"{service}\")");
+        let at = profile
+            .find(&named)
+            .ok_or_else(|| format!("the resolver service {service} is not allowed"))?;
+        assert!(
+            at > deny && at > allow,
+            "the allow for {service} precedes the deny, so the deny decides"
+        );
+    }
+    Ok(())
+}
+
+/// A confined command fetches a listener by host name and reads its body (larry#326
+/// review): `getaddrinfo` resolves `localhost`, so the network ADR 0046 leaves open stays
+/// reachable by name. A host whose resolver needs a Mach service the profile refuses fails
+/// this before it sends a byte.
+#[test]
+fn sim_confine_macos_fetches_a_host_name() -> TestResult {
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    let path = path_env()?;
+    let (root, state, tree, tmp) = layout("fetch", "w")?;
+    let before = beside_origin(&root)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let confine = Confine::new(Platform::Macos, &state, &tree, &tmp)?;
+    let argv = confine.wrap(&[
+        String::from("/usr/bin/curl"),
+        String::from("-sS"),
+        String::from("--max-time"),
+        String::from("10"),
+        format!("http://localhost:{port}/"),
+    ]);
+    let (program, arguments) = argv.split_first().ok_or("the wrapped argv")?;
+    let mut child = Command::new(program)
+        .args(arguments)
+        .current_dir(confine.tree())
+        .env_clear()
+        .env("PATH", &path)
+        .env("TMPDIR", &tmp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let served = serve_once(&listener, &mut child);
+    let fetched = child.wait_with_output()?;
+    served?;
+    let said = String::from_utf8_lossy(&fetched.stderr).into_owned();
+    let body = String::from_utf8_lossy(&fetched.stdout).into_owned();
+    assert!(
+        body.contains(BODY),
+        "the fetch got no body: {body:?} {said:?}"
     );
     assert_eq!(
         tree_digest(&root.join("beside"), false)?,

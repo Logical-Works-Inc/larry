@@ -330,10 +330,18 @@ fn seatbelt(
     // with the `target self` and `target pgrp` filters; `process-exec` names the program
     // exec'd, filtered by `literal`.
     //
-    // The Mach allowlist is empty, and that is the measured answer, not an omission: the
-    // shell verbs the PTY journeys run and `git` resolve no launch service, so every lookup
-    // is refused rather than an unmeasured set left open.
+    // The Mach allowlist is the host resolver, and nothing else (larry#326 review): a name
+    // lookup on macOS is a Mach client of `com.apple.mDNSResponder`, and
+    // `com.apple.dnssd.service` is the browse service a resolver may reach first, so a
+    // command must keep them or every `curl`, `git fetch` and crate download by host name
+    // fails before a byte is sent, against ADR 0046's open network. SBPL gives the last
+    // matching rule the decision, so the allow follows the deny. Every other launch service
+    // stays refused.
     source.push_str("(deny mach-lookup)");
+    source.push_str(
+        "(allow mach-lookup (global-name \"com.apple.mDNSResponder\") \
+         (global-name \"com.apple.dnssd.service\"))",
+    );
     source.push_str("(deny signal (require-not (require-any (target self) (target pgrp))))");
     source.push_str(
         "(deny process-exec (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") \
