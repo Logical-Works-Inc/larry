@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0083: the frame drops every default-ignorable character"
+title: "ADR 0084: the frame drops every default-ignorable character"
 description: Why the frame's invisible filter is the Unicode default-ignorable property together with Cf, Zl and Zp, and how the one table is proved.
-resource: /docs/adr/0083-the-frame-drops-every-default-ignorable-character.md
+resource: /docs/adr/0084-the-frame-drops-every-default-ignorable-character.md
 tags: [larry, adr, tui, security, unicode]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: larry#369 sims and marker test on Oracle Linux, clippy, 2026-11-21}
@@ -11,7 +11,7 @@ stale_after: 2027-02-21
 sources: [larry#369, /INVARIANTS.md, https://www.unicode.org/Public/16.0.0/ucd/DerivedCoreProperties.txt, https://www.unicode.org/Public/16.0.0/ucd/extracted/DerivedGeneralCategory.txt, https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-42574]
 ---
 
-# 0083: the frame drops every default-ignorable character
+# 0084: the frame drops every default-ignorable character
 
 Status: accepted, 2026-11-21 (larry#369). It widens the filter of ADR 0045's frame and keeps
 its marker rule.
