@@ -102,6 +102,12 @@ pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
 /// The prefix the estate capability names carry and a policy name omits.
 const CAPABILITY_PREFIX: &str = "larry.";
 
+/// The tenants one executor state directory serves: its own, because the
+/// tenant is derived from the directory (larry#182). Every shared runtime cap
+/// is whole to that one tenant, and the shipped path names the count rather
+/// than leaving a default nothing reached (larry#333, SD-1).
+const SERVED_TENANTS: usize = 1;
+
 /// The runtime settings one task runs under: the revision of the policy record
 /// it runs under, the executor's capabilities, one request, and the runtime's
 /// own default lease.
@@ -110,13 +116,15 @@ const CAPABILITY_PREFIX: &str = "larry.";
 /// always names the same revision and a changed policy names a different one,
 /// rather than a constant only this build knows (larry#212).
 pub(super) fn task_settings(policy: &BTreeSet<Scope>) -> RuntimeSettings {
-    RuntimeSettings::with_defaults(
+    let mut settings = RuntimeSettings::with_defaults(
         PolicySnapshot::new(policy_revision(policy), policy.clone()),
         CapabilitySnapshot::new(EXECUTOR_CAPABILITIES.iter().copied().collect()),
         ValiditySnapshot::new(SystemTime::UNIX_EPOCH),
         BudgetUnit::Requests,
         TASK_COST,
-    )
+    );
+    settings.max_tenants = SERVED_TENANTS;
+    settings
 }
 
 /// The revision of one policy record: a digest over the policy's own scope
@@ -660,7 +668,7 @@ mod tests {
 
     use larry_contracts::authority::Scope;
 
-    use super::{default_policy, policy_revision, task_settings, with_expiry};
+    use super::{SERVED_TENANTS, default_policy, policy_revision, task_settings, with_expiry};
 
     /// The executor's lease and the runtime's tick are one timeline: the live
     /// clock the executor passes reads after 2023, not 1970, and the validity
@@ -685,6 +693,29 @@ mod tests {
         assert_eq!(
             gap, run_settings.lease,
             "the validity sits one configured lease after the tick"
+        );
+        Ok(())
+    }
+
+    /// The executor's settings name the tenants one state directory serves, so
+    /// the runtime's shared caps divide by a value the shipped task path sets,
+    /// not by a default nothing reached (larry#333, SD-1).
+    #[test]
+    fn task_settings_name_the_tenants_the_executor_serves() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let settings = task_settings(&default_policy());
+        assert_eq!(
+            settings.max_tenants, SERVED_TENANTS,
+            "the task settings carry the tenant count"
+        );
+        assert_eq!(SERVED_TENANTS, 1, "one state directory is one tenant");
+        let tick = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_700_000_000))
+            .ok_or("tick instant overflow")?;
+        let carried = with_expiry(settings, tick)?;
+        assert_eq!(
+            carried.max_tenants, 1,
+            "the settings a task runs under carry it"
         );
         Ok(())
     }

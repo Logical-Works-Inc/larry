@@ -8,14 +8,14 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, TryLockError};
 use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ExecError;
 
+#[cfg(unix)]
+mod mode;
 mod snapshot;
 #[cfg(test)]
 pub(crate) use snapshot::ApplyFault;
@@ -290,43 +290,27 @@ fn strands(removed: &Result<(), ExecError>) -> bool {
     }
 }
 
-/// The mode every directory is reset to before a workspace is removed: owner rwx.
-const OWNER_RWX: u32 = 0o700;
+/// Resets `root` and every directory beneath it to owner rwx before the tree is removed
+/// (larry#334, larry#366).
+#[cfg(unix)]
+fn reset_modes(root: &Path) -> io::Result<()> {
+    mode::reset(root)
+}
+
+/// A target with no modes to reset removes the tree as it is; the executor builds only where
+/// commands run in a process group, so this arm exists to keep the walk portable (larry#334).
+#[cfg(not(unix))]
+fn reset_modes(_root: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Removes a workspace after resetting every directory beneath it to owner rwx. A command
 /// may have left a directory with no permission, and removing a tree has to list each
 /// directory, so the tree was otherwise undeletable and the next start refused every run
 /// (larry#334).
 fn remove_workspace(root: &Path) -> Result<(), ExecError> {
-    reset_directory_modes(root).map_err(ExecError::Workspace)?;
+    reset_modes(root).map_err(ExecError::Workspace)?;
     std::fs::remove_dir_all(root).map_err(ExecError::Workspace)
-}
-
-/// Resets `root` and every directory beneath it to owner rwx, following no symlink. An
-/// explicit stack, never recursion: a command can nest directories past any stack (larry#334).
-#[cfg(unix)]
-fn reset_directory_modes(root: &Path) -> io::Result<()> {
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        if !std::fs::symlink_metadata(&directory)?.is_dir() {
-            continue;
-        }
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(OWNER_RWX))?;
-        for entry in std::fs::read_dir(&directory)? {
-            let path = entry?.path();
-            if std::fs::symlink_metadata(&path)?.file_type().is_dir() {
-                pending.push(path);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// A target with no modes to reset removes the tree as it is; the executor builds only where
-/// commands run in a process group, so this arm exists to keep the walk portable (larry#334).
-#[cfg(not(unix))]
-fn reset_directory_modes(_root: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 /// One sweep entry that could not be settled: the directory is kept and this is why. A

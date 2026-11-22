@@ -1568,6 +1568,7 @@ dependencies = [
  "lgwks_bot",
  "lgwks_deps",
  "lgwks_std",
+ "rustix",
  "unicode-width",
 ]
 

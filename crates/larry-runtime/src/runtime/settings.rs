@@ -23,8 +23,9 @@ use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapsh
 use crate::error::RuntimeError;
 use crate::protocol::{MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, ProtocolVersionRange};
 use crate::{
-    DEFAULT_ADMISSION_LEASE, MAX_ADMISSION_LEASE, MAX_DISPLAY_GRANTS, MAX_JOURNAL_ENTRIES,
-    MAX_PENDING_QUESTIONS, MAX_RUNS_PER_TICK, MAX_SKEW_BOUND, MAX_TRACKED_RUNS,
+    DEFAULT_ADMISSION_LEASE, MAX_ADMISSION_LEASE, MAX_DISPLAY_GRANTS, MAX_JOURNAL_CAPACITY,
+    MAX_JOURNAL_ENTRIES, MAX_PENDING_QUESTIONS, MAX_RUN_CAPACITY, MAX_RUNS_PER_TICK,
+    MAX_SKEW_BOUND, MAX_TENANTS, MAX_TRACKED_RUNS,
 };
 
 /// The runtime's configuration: the pinned snapshots and the bounds.
@@ -63,6 +64,13 @@ pub struct RuntimeSettings {
     pub max_runs_per_tick: usize,
     /// The ceiling on pending questions.
     pub max_pending_questions: usize,
+    /// How many tenants share the run table, the pending set and the pending
+    /// questions. Each tenant may hold at most `capacity / max_tenants`, never
+    /// less than one, so one tenant cannot take a cap every tenant shares
+    /// (larry#333). The default of one leaves the whole cap to a single
+    /// tenant; a host serving several sets its tenant count before it builds
+    /// its runtime or restores one.
+    pub max_tenants: usize,
     /// The ceiling on the grants one display may offer.
     pub max_grants: usize,
     /// The largest payload one admitted command may carry, in bytes.
@@ -103,6 +111,10 @@ impl RuntimeSettings {
             run_capacity: MAX_TRACKED_RUNS,
             max_runs_per_tick: MAX_RUNS_PER_TICK,
             max_pending_questions: MAX_PENDING_QUESTIONS,
+            // One tenant is the old behaviour: every cap whole to the tenant
+            // that holds it, so a journal recorded before larry#333 replays the
+            // same refusals at the same instant.
+            max_tenants: 1,
             max_grants: MAX_DISPLAY_GRANTS,
             max_payload_bytes: MAX_BOUND_FIELD_BYTES,
             skew_bound: Duration::ZERO,
@@ -117,6 +129,23 @@ impl RuntimeSettings {
     #[must_use]
     pub const fn protocol_range(&self) -> ProtocolVersionRange {
         ProtocolVersionRange::new(self.min_protocol_version, self.max_protocol_version)
+    }
+
+    /// `capacity` divided by the declared tenant count, never less than one.
+    ///
+    /// One tenant cannot hold more than this of a cap every tenant shares
+    /// (larry#333). Integer division may leave a remainder no tenant may use;
+    /// a capacity below the tenant count gives every tenant one.
+    #[must_use]
+    pub(crate) const fn tenant_share(&self, capacity: usize) -> usize {
+        // `checked_div` keeps the lint set's ban on bare arithmetic; validate
+        // refuses a zero tenant count, and the floor keeps a capacity below
+        // the tenant count at one.
+        let share = match capacity.checked_div(self.max_tenants) {
+            Some(share) => share,
+            None => 1,
+        };
+        if share == 0 { 1 } else { share }
     }
 
     /// The settings with the skew allowance pinned into the validity snapshot
@@ -139,8 +168,16 @@ impl RuntimeSettings {
     /// [`RuntimeError::BadSetting`] naming the first field, its value and the
     /// range it must fall in.
     pub(super) fn validate(&self) -> Result<(), RuntimeError> {
-        in_range("journal_capacity", self.journal_capacity, 1, usize::MAX)?;
-        in_range("run_capacity", self.run_capacity, 1, usize::MAX)?;
+        // The declared ceiling binds: a host past it is told, as for
+        // `max_pending_questions` (larry#333, larry#295).
+        in_range(
+            "journal_capacity",
+            self.journal_capacity,
+            1,
+            MAX_JOURNAL_CAPACITY,
+        )?;
+        in_range("run_capacity", self.run_capacity, 1, MAX_RUN_CAPACITY)?;
+        in_range("max_tenants", self.max_tenants, 1, MAX_TENANTS)?;
         // The declared ceiling binds: a host past it is told, as for `max_grants` (larry#295).
         in_range(
             "max_pending_questions",
