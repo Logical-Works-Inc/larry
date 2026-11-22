@@ -6,7 +6,9 @@
 //! `/usr/bin/sandbox-exec -p <profile>` on macOS (reads are open except beneath the
 //! state directory, which holds the receipt key, and the session's own copy beneath
 //! it stays readable; writes are denied everywhere but the workspace's tree, its
-//! scratch directory and the one device a shell writes),
+//! scratch directory and the one device a shell writes; a launch service, a signal
+//! outside the command's own process group and the `open`, `launchctl` and `osascript`
+//! launchers are denied, larry#326),
 //! and `/usr/bin/setpriv` with a Landlock allowlist on Linux (reads beneath every
 //! path but the state directory and `/proc`, read and write beneath the tree and
 //! scratch directory). Every descendant of the command inherits it. Source:
@@ -322,6 +324,21 @@ fn seatbelt(
     // environment (`KERN_PROCARGS2`), which `ps e` reads: the executor's holds its
     // model keys (larry#322).
     source.push_str("(deny sysctl-read (sysctl-name \"kern.procargs2\"))");
+    // Three channels a `(allow default)` profile leaves open (larry#326). Apple's sandbox
+    // profile language names each operation this denies: `mach-lookup` is a request to a
+    // launch service, named by its `global-name`; `signal` names the process it signals,
+    // with the `target self` and `target pgrp` filters; `process-exec` names the program
+    // exec'd, filtered by `literal`.
+    //
+    // The Mach allowlist is empty, and that is the measured answer, not an omission: the
+    // shell verbs the PTY journeys run and `git` resolve no launch service, so every lookup
+    // is refused rather than an unmeasured set left open.
+    source.push_str("(deny mach-lookup)");
+    source.push_str("(deny signal (require-not (require-any (target self) (target pgrp))))");
+    source.push_str(
+        "(deny process-exec (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") \
+         (literal \"/usr/bin/osascript\"))",
+    );
     let profile = SandboxProfile::new(source);
     profile.validate().map_err(ConfineError::Invalid)?;
     Ok(vec![
