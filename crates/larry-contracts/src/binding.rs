@@ -1,5 +1,7 @@
 //! E65 canonical owner-resolved identity, independent of display prose.
 
+use std::fmt;
+
 use crate::authority::SecurityEpoch;
 use crate::ids::ContentDigest;
 
@@ -40,40 +42,71 @@ pub enum BindingField {
 }
 
 /// Typed failures of display binding; messages disclose no field contents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BindingError {
     /// A resolved identity no longer equals what was displayed.
-    #[error("display binding changed: {field:?}; display the current effect before submitting")]
     Changed {
         /// Deterministic first differing field.
         field: BindingField,
     },
     /// Hashing would exceed the declared work bound.
-    #[error("display field {field:?} exceeds {MAX_BOUND_FIELD_BYTES} bytes")]
     TooLarge {
         /// Oversized field.
         field: BindingField,
     },
     /// No immutable display was supplied for an external effect.
-    #[error("effect has no display binding; display it before submitting")]
     MissingDisplay,
     /// Owner cannot supply the required atomic binding contract.
-    #[error("owner does not support resolved compare-and-dispatch")]
     UnsupportedOwner,
     /// No single grant covers the complete effect.
-    #[error("no single grant covers this tenant, holder, scopes, cost, unit and expiry")]
     NoCoveringGrant,
     /// Bound limits apply before scanning the grant list.
-    #[error("grant list exceeds the bound of {capacity}")]
     TooManyGrants {
         /// The configured bound the list passed.
         capacity: usize,
     },
     /// A displayed grant has expired by the time of admission or dispatch.
-    #[error("display authority expired; obtain current authority and display again")]
     Expired,
 }
+
+impl fmt::Display for BindingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Changed { field } => write!(
+                f,
+                "display binding changed: {field:?}; display the current effect before submitting"
+            ),
+            Self::TooLarge { field } => write!(
+                f,
+                "display field {field:?} exceeds {} bytes",
+                MAX_BOUND_FIELD_BYTES
+            ),
+            Self::MissingDisplay => {
+                write!(
+                    f,
+                    "effect has no display binding; display it before submitting"
+                )
+            }
+            Self::UnsupportedOwner => {
+                write!(f, "owner does not support resolved compare-and-dispatch")
+            }
+            Self::NoCoveringGrant => write!(
+                f,
+                "no single grant covers this tenant, holder, scopes, cost, unit and expiry"
+            ),
+            Self::TooManyGrants { capacity } => {
+                write!(f, "grant list exceeds the bound of {capacity}")
+            }
+            Self::Expired => write!(
+                f,
+                "display authority expired; obtain current authority and display again"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BindingError {}
 
 /// Six domain-separated digests in fixed specification order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

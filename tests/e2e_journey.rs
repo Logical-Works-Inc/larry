@@ -8,6 +8,8 @@
 
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/journey.rs"]
+mod journey;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 #[path = "support/origin.rs"]
@@ -16,16 +18,18 @@ mod origin;
 mod ps;
 #[path = "support/pty.rs"]
 mod pty;
+#[path = "support/terminal_cases.rs"]
+mod terminal_cases;
 
-use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mock_model::{Config, Fault, Handle};
-use origin::{TempDir, fixture, git_command};
+use journey::{ASK, QUIT, READY, Ran, ask, frame, frame_in, operator, scripted, working};
+use mock_model::{Config, Fault};
+use origin::{fixture, git_command};
 use pty::deadline::await_event;
 use pty::{Journey, Pty};
 
@@ -33,10 +37,6 @@ use pty::{Journey, Pty};
 const IDLE: Duration = Duration::from_secs(5);
 /// Input round trips the probe times.
 const ROUND_TRIPS: usize = 20;
-/// The composer's placeholder: the frame is up and takes a task.
-const READY: &str = "Ask Larry to do something";
-/// The question Larry asks before a command.
-const ASK: &str = "Run this command?";
 /// The question Larry asks once the session ends with a change in its copy of the folder.
 const REVIEW: &str = "Apply this change";
 /// What the frame says once that change is in the person's folder.
@@ -45,26 +45,8 @@ const APPLIED: &str = "applied to your folder";
 const COMMAND: &str = r#"{"command":"printf 'hello\n' > hello.txt"}"#;
 /// What Larry tells the model about a declined command (`executor::session::DECLINED`).
 const DECLINED: &str = "not run: the person declined this command";
-/// Ctrl+C: quits from an empty composer.
-const QUIT: &str = "\x03";
 /// Ctrl+U: clears the composer.
 const CLEAR: &str = "\x15";
-
-/// The operator's settings for a terminal session against `mock` in `state`: the default
-/// policy, which holds no `model.command`, because each command runs in an isolated copy of the
-/// folder (larry#243).
-fn operator(state: &Path, mock: &Handle) -> Vec<(&'static str, OsString)> {
-    vec![
-        ("LARRY_STATE_DIR", state.as_os_str().to_owned()),
-        (
-            "LARRY_MODEL_URL",
-            format!("http://{}/v1", mock.addr()).into(),
-        ),
-        ("LARRY_MODEL", OsString::from("mock-model")),
-        ("LARRY_MODEL_KEY", OsString::from("tui-key")),
-        ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
-    ]
-}
 
 /// A digest of every entry beneath `root`, `.git` included: path, kind and bytes or link target.
 fn tree_hash(root: &Path) -> Journey<String> {
@@ -91,64 +73,6 @@ fn tree_hash(root: &Path) -> Journey<String> {
         }
     }
     Ok(hasher.finalize().to_hex())
-}
-
-/// A mock whose replies are `contents`, in order.
-fn scripted(seed: u64, contents: &[&str]) -> Config {
-    Config {
-        contents: contents.iter().map(|text| (*text).to_owned()).collect(),
-        ..Config::seeded(seed)
-    }
-}
-
-/// Types a task and waits for Larry's question about the model's first command.
-fn ask(pty: &mut Pty<'_>) -> Journey {
-    pty.wait_for(READY)?;
-    pty.send("write hello.txt\r")?;
-    pty.wait_for(ASK)
-}
-
-/// Types a task and waits for the frame to show the session working.
-fn working(pty: &mut Pty<'_>) -> Journey {
-    pty.wait_for(READY)?;
-    pty.send("write hello.txt\r")?;
-    pty.wait_for("Working")
-}
-
-/// What one frame left once Ctrl+C closed it.
-struct Ran {
-    /// The binary's exit status.
-    status: ExitStatus,
-    /// Every byte it wrote to the terminal.
-    wire: String,
-    /// The folder the session ran in.
-    work: TempDir,
-}
-
-/// The driver of one frame: types keys, waits for text, reads the mock.
-type Body<'body> = Box<dyn FnOnce(&mut Pty<'_>, &Handle, &Path) -> Journey + 'body>;
-
-/// One frame against a mock gateway in fresh folders.
-fn frame<'body>(
-    config: Config,
-    body: impl FnOnce(&mut Pty<'_>, &Handle, &Path) -> Journey + 'body,
-) -> Journey<Ran> {
-    let (state, work) = fixture()?;
-    frame_in(&state, work, config, Box::new(body))
-}
-
-/// One frame in `state` and `work`: `body` drives it, then Ctrl+C closes it and it is reaped.
-fn frame_in(state: &TempDir, work: TempDir, config: Config, body: Body<'_>) -> Journey<Ran> {
-    let (status, raw) = mock_model::run(config, |mock| -> Journey<(ExitStatus, Vec<u8>)> {
-        std::thread::scope(|owner| {
-            let mut pty = Pty::open(owner, work.path(), &operator(state.path(), mock))?;
-            body(&mut pty, mock, work.path())?;
-            pty.send(QUIT)?;
-            pty.finish()
-        })
-    })?;
-    let wire = String::from_utf8_lossy(&raw).into_owned();
-    Ok(Ran { status, wire, work })
 }
 
 /// Whether the model's command wrote its file in `ran`'s folder.

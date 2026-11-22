@@ -423,6 +423,11 @@ impl<'scope> Pty<'scope> {
         Ok(())
     }
 
+    /// The visible text of the screen right now, its rows joined by newlines.
+    pub(crate) fn screen_text(&self) -> String {
+        self.screen.text()
+    }
+
     /// Reads whatever arrives for `window` and returns its byte count.
     pub(crate) fn drain(&mut self, window: Duration) -> Journey<usize> {
         let before = self.raw.len();

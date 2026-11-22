@@ -18,7 +18,6 @@ serde = ["lgwks_std/json"]
 # readings, so this crate still reads no clock.
 lgwks_bot = { workspace = true }
 lgwks_std = { workspace = true, features = ["random", "hash"] }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true

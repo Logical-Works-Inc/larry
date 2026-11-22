@@ -69,11 +69,11 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Executor process groups, orphan reaping (larry#85) | `lgwks_std::process` | processkit: kill-on-drop dies with its owner under kill -9 |
 | Workspace directory mode reset before removal (larry#334, #366) | `lgwks_std::fs::capability::Dir` holds the walk; `rustix` =1.1.6 `openat`/`chmodat` until the estate adds a mode-reset call, gap crates#1113 | `std::fs::set_permissions` by path: follows a link swapped in after the check (CWE-367, CWE-59) |
 | Executor ledger of live groups (larry#85) | `lgwks_deps` `sqlite` | a pid file: no start instant, so a reused pid reads as live |
-| Typed errors | `thiserror` | estate has no derive |
+| Typed errors | hand-written `Display`, `Error` and `From` on the contract crate's eight error enums | `thiserror` (removed larry#339: its gap #842 closed) and the estate's `lgwks_macros::Error` derive, which does not forward a `#[from]` field as the source and would drop the cause chain |
 | Memory, durable product state | Logical-DB | any substitute store: refused |
 
 Gap issues (Logical-Works-Inc/logicalworks-crates): #848 web layer (`loco-rs`, `axum`, `sea-orm`,
-`async-trait`); #849 the SQLite links clash; #850 remote MCP (`rmcp`); #842 `thiserror`; #846 Nova's
+`async-trait`); #849 the SQLite links clash; #850 remote MCP (`rmcp`); #846 Nova's
 edges; #1113 a mode reset from a held `Dir`. Each new manifest line cites its issue.
 
 ## Where Loco is used, and where it is refused

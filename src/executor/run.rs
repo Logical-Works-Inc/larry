@@ -1,4 +1,5 @@
-//! One acceptance command in its own process group, under a timeout (larry#85).
+//! One acceptance command in its own process group and, where the host has `setsid`, its own
+//! session, under a timeout (larry#85, larry#323).
 
 use std::io::{self, Read};
 #[cfg(unix)]
@@ -229,10 +230,10 @@ pub(crate) enum Place<'a> {
     Confined(&'a Confine),
 }
 
-/// Runs `argv` in `place` in its own process group, with the environment cleared to
-/// PATH, HOME (the workspace), and LANG=C. The leader's exit, a timeout, or the person's
-/// cancel (`cancelled`, polled at most [`CANCEL_POLL`] apart, larry#242) kills the whole
-/// group; a timeout and an interrupt are reported as `timed_out` and `interrupted`,
+/// Runs `argv` in `place` in a process group of its own, and a session of its own where the host
+/// has `setsid`, with the environment cleared to PATH, HOME (the workspace), and LANG=C. The
+/// leader's exit, a timeout, or the person's cancel (`cancelled`, polled at most
+/// [`CANCEL_POLL`] apart, larry#242) kills the whole group; a timeout and an interrupt are reported as `timed_out` and `interrupted`,
 /// never both at once. The group waits read one deadline from the live clock this
 /// builds (`larry_runtime::live_clock`, larry#268), so no wait is decided by a count of
 /// yields.
@@ -347,10 +348,10 @@ pub(crate) fn run_command(
     })
 }
 
-/// The command that runs `argv` in `place`, and the program it starts, in its own process
-/// group with the environment cleared to PATH, HOME (the workspace) and LANG=C. A confined
-/// command is the platform's wrapper plus the model's argv, so the kernel confines it and
-/// everything it forks; the result still names the model's argv.
+/// The command that runs `argv` in `place`, and the program it starts, in a process group of its
+/// own (a session too where the host has `setsid`) with the environment cleared to PATH, HOME
+/// (the workspace) and LANG=C. A confined command is the platform's wrapper plus the model's argv,
+/// so the kernel confines it and everything it forks; the result still names the model's argv.
 fn command_for(
     argv: &[String],
     place: Place<'_>,
@@ -368,10 +369,18 @@ fn command_for(
             Some(confine.wrap(argv)),
         ),
     };
-    let launch: &[String] = match wrapped.as_deref() {
+    let mut launch: Vec<String> = match wrapped {
         Some(prefixed) => prefixed,
-        None => argv,
+        None => argv.to_vec(),
     };
+    // util-linux `setsid` starts the command in a session of its own, with no controlling
+    // terminal; macOS ships none, and there the confinement refuses `/dev/tty` (larry#323).
+    let session = Path::new("/usr/bin/setsid")
+        .is_file()
+        .then_some("/usr/bin/setsid");
+    if let Some(tool) = session {
+        launch.insert(0, String::from(tool));
+    }
     let Some((program, arguments)) = launch.split_first() else {
         return Err(empty());
     };
@@ -387,8 +396,10 @@ fn command_for(
     if let Some(directory) = scratch {
         command.env("TMPDIR", directory);
     }
-    #[cfg(unix)]
-    command.process_group(0);
+    if session.is_none() {
+        #[cfg(unix)]
+        command.process_group(0);
+    }
     Ok((command, program.clone()))
 }
 
