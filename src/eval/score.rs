@@ -316,7 +316,22 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
         .filter(|done| done.ending == Ending::Accepted)
         .map(|_| 1_u128)
         .sum();
-    let per_accepted = pico.checked_div(accepted_wide);
+    let cost_complete = outcomes.iter().all(|done| done.tokens.is_some());
+    let per_accepted = if cost_complete {
+        pico.checked_div(accepted_wide)
+    } else {
+        None
+    };
+    let per_accepted_usd = match per_accepted {
+        Some(value) => Value::String(usd(value).into()),
+        None if !cost_complete => Value::String(String::from("unknown").into()),
+        None => Value::Null,
+    };
+    let per_accepted_pico = match per_accepted {
+        Some(value) => Value::String(value.to_string().into()),
+        None if !cost_complete => Value::String(String::from("unknown").into()),
+        None => Value::Null,
+    };
     Scorecard {
         json: json!({
             "set": set,
@@ -338,9 +353,9 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
             "price_cache_write_declared": prices.cache_write.is_some(),
             "cost_usd": usd(pico),
             "cost_picousd": pico.to_string(),
-            "cost_per_accepted_task_usd": per_accepted.map(usd),
-            "cost_per_accepted_task_picousd": per_accepted.map(|value| value.to_string()),
-            "cost_complete": outcomes.iter().all(|done| done.tokens.is_some()),
+            "cost_per_accepted_task_usd": per_accepted_usd,
+            "cost_per_accepted_task_picousd": per_accepted_pico,
+            "cost_complete": cost_complete,
             "p50_micros": percentile(&micros, 50),
             "p95_micros": percentile(&micros, 95),
             "p99_micros": percentile(&micros, 99),

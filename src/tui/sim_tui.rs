@@ -16,7 +16,7 @@ use crate::sim_lanes::sweep_on;
 const PAINT_LANES: u64 = 1;
 
 use super::app::{App, Input, Key, MAX_ENTRIES};
-use super::buffer::{Buffer, Frame, render};
+use super::buffer::{Frame, render};
 use super::cells::Header;
 use super::layout::{CHAT_MAX, CHAT_MIN, SPLIT_MIN, split};
 use super::style::Style;
@@ -184,23 +184,9 @@ fn layout_chat_column_keeps_phone_ratio_and_reserves_artifact_pane() {
     assert_eq!(split(160, 52).chat.width, 48);
 }
 
-#[test]
-fn sim_tui_any_size_any_input_paints_inside_bounds() -> Result<(), Box<dyn std::error::Error>> {
-    sweep_on(PAINT_LANES, SEEDS, |_lane, seed| {
-        let (app, _) = drive(seed, 96);
-        let frame = app.draw();
-        let grid: &Buffer = &frame.buffer;
-        assert!(grid.width() <= super::buffer::MAX_COLUMNS);
-        assert!(grid.height() <= super::buffer::MAX_ROWS);
-        if let Some((x, y)) = frame.cursor {
-            assert!(
-                x < grid.width() && y < grid.height(),
-                "seed {seed}: cursor off grid"
-            );
-        }
-    })?;
-    Ok(())
-}
+#[cfg(test)]
+#[path = "sim_tui_chat.rs"]
+mod chat;
 
 #[test]
 fn sim_tui_hostile_output_cannot_write_escapes() -> Result<(), Box<dyn std::error::Error>> {

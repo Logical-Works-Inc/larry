@@ -49,50 +49,28 @@ const SAMPLES: usize = 32;
 /// The stdout cap the executor applies to each command, in bytes.
 const STDOUT_CAP: usize = 1_048_576;
 
-/// Seeds the kill simulation replays; each draws one kill point (larry#214).
-const KILL_SEEDS: [u64; 4] = [
-    0x5EED_0000_0000_0214,
-    0x5EED_0000_0000_0215,
-    0x5EED_0000_FFFF_0214,
-    0xDEAD_BEEF_CAFE_0214,
-];
-
-/// Most yields a seeded kill point waits after the group is recorded.
-const MAX_KILL_YIELDS: usize = 64;
-
 /// Seeds the busy-ledger simulation sweeps (larry#309).
 const BUSY_SEEDS: u64 = 8;
 
-/// For every seed, a kill -9 of the shipped executor at the seeded point, while its command's
-/// group runs, leaves no live group after the next start and no ledger row once it has
-/// reaped. Honest limit (ADR 0042): the window between spawn and the ledger insert lasts
-/// milliseconds and cannot be stopped from outside the process, so the kill points are seeded
-/// yield counts after the group is recorded. They prove the reap at varied points, not a hit
-/// inside that window.
+/// A kill -9 of the shipped executor after its command's group is recorded leaves no live
+/// group after the next start and no ledger row once it has reaped. The kill point is the
+/// fixture's own seam: `spawn_held_command` returns only once the command holds its group
+/// open on a fifo and the ledger names that group, so the kill lands inside the recorded
+/// run with no count of yields. Honest limit (ADR 0042): the window between spawn and the
+/// row is not closed and cannot be stopped from outside the process, so this proves the
+/// reap after the row, not a hit inside that window.
 #[test]
-fn sim_a_kill_at_every_point_between_spawn_and_insert_leaves_no_group_after_restart() -> TestResult
-{
-    for seed in KILL_SEEDS {
-        let mut seeded = Seeded::from_seed(seed);
-        let yields = seeded.index(MAX_KILL_YIELDS)?;
-        let (state, origin) = fixture()?;
-        let scratch = TempDir::new()?;
-        let (mut child, pid, _hold) =
-            spawn_held_command(state.path(), origin.path(), scratch.path())?;
-        for _ in 0..yields {
-            std::thread::yield_now();
-        }
-        child.kill()?;
-        child.wait()?;
-        let next = task_json(origin.path(), "HEAD", "[]");
-        report_of(&run_exec(state.path(), &next, None)?)?;
-        await_group_exit(pid).map_err(|cause| format!("seed {seed:#x}: {cause}"))?;
-        let rows = ledger_rows(&state.path().join("executor.db"))?;
-        assert_eq!(
-            rows, 0,
-            "seed {seed:#x}: the ledger holds no row after the reap"
-        );
-    }
+fn a_kill_after_the_recorded_group_leaves_no_group_after_restart() -> TestResult {
+    let (state, origin) = fixture()?;
+    let scratch = TempDir::new()?;
+    let (mut child, pid, _hold) = spawn_held_command(state.path(), origin.path(), scratch.path())?;
+    child.kill()?;
+    child.wait()?;
+    let next = task_json(origin.path(), "HEAD", "[]");
+    report_of(&run_exec(state.path(), &next, None)?)?;
+    await_group_exit(pid)?;
+    let rows = ledger_rows(&state.path().join("executor.db"))?;
+    assert_eq!(rows, 0, "the ledger holds no row after the reap");
     Ok(())
 }
 

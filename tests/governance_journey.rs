@@ -23,8 +23,8 @@ use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::clock::Clock;
@@ -36,50 +36,27 @@ use temp_dir::TempDir;
 /// What every journey returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// The repository the journeys copy from.
-const ROOT: &str = env!("CARGO_MANIFEST_DIR");
-/// The shipped binary.
-const LARRY: &str = env!("CARGO_BIN_EXE_larry");
-/// The top-level governed documents.
-const DOCUMENTS: [&str; 7] = [
-    "README.md",
-    "index.md",
-    "specification.md",
-    "research-ledger.md",
-    "AGENTS.md",
-    "GOVERNANCE.md",
-    "log.md",
-];
-/// The directories copied whole beside the documents.
-const COPIED: [&str; 3] = ["docs", "tools/receipts", "tools/tracker"];
+#[path = "support/governed_tree.rs"]
+mod governed_tree;
+
+use governed_tree::{
+    DOCUMENTS, LARRY, ROOT, Tree, digests, edit_tracker, files_under, larry, text,
+};
+
 /// Timed checks for the latency figures.
 const RUNS: usize = 32;
 /// Kills of a tracker write the killed-write journey makes.
 const KILLS: usize = 16;
-
-/// A temporary copy of the governed files, removed when dropped: the guard is the one temp
-/// directory of the integration tests (larry#267).
-struct Tree {
-    /// The copy's root.
-    path: TempDir,
-}
+/// Filler added to the tracker data so its render is large enough for a kill to land
+/// inside the write: the data, template and page each stay under the 4 MiB bound.
+const TRACKER_FILLER: usize = 3 * 1024 * 1024;
+/// How long one kill waits for the tracker's temporary page: the write's own event,
+/// ended by one deadline, never a count of probes (INVARIANTS, larry#294). Generous
+/// because a loaded host can slow the debug binary's render; a finished child ends
+/// the wait at once.
+const WRITE_PATIENCE: Duration = Duration::from_secs(60);
 
 impl Tree {
-    /// A fresh copy of every file `larry governance` and `larry tracker` read. The guard makes the
-    /// directory empty, so a copy never inherits another run's files.
-    fn governed() -> Result<Tree, Box<dyn Error>> {
-        let tree = Tree {
-            path: TempDir::new()?,
-        };
-        for name in DOCUMENTS {
-            fs::copy(Path::new(ROOT).join(name), tree.at(name))?;
-        }
-        for directory in COPIED {
-            copy_files(&Path::new(ROOT).join(directory), &tree.at(directory))?;
-        }
-        Ok(tree)
-    }
-
     /// A governed fixture tree the checker passes on its own terms (larry#224, larry#270): the
     /// latency figures are measured on it. `fixture::governed` writes every document; only the
     /// retained receipts are copied from the checkout, a frozen set since the reranker mandate
@@ -98,89 +75,6 @@ impl Tree {
         );
         Ok(tree)
     }
-
-    /// The path of `relative` inside the copy.
-    fn at(&self, relative: &str) -> PathBuf {
-        self.path.join(relative)
-    }
-}
-
-/// Copies every Markdown, JSON and HTML file under `from` to the same place under `to`: the
-/// kinds the gate reads, never a host's ignored build litter.
-fn copy_files(from: &Path, to: &Path) -> io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let read = [".md", ".json", ".html"]
-            .iter()
-            .any(|suffix| name.ends_with(suffix));
-        if kind.is_dir() {
-            copy_files(&entry.path(), &to.join(entry.file_name()))?;
-        } else if !kind.is_symlink() && read {
-            fs::copy(entry.path(), to.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
-
-/// Every file under `root`, `/`-separated and relative, sorted.
-fn files_under(root: &Path, directory: &Path, found: &mut Vec<String>) -> io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            files_under(root, &path, found)?;
-        } else {
-            let relative = path.strip_prefix(root).map_err(io::Error::other)?;
-            let parts: Vec<String> = relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            found.push(parts.join("/"));
-        }
-    }
-    found.sort();
-    Ok(())
-}
-
-/// Every file of the tree with its BLAKE3 digest.
-fn digests(tree: &Tree) -> Result<Vec<(String, String)>, Box<dyn Error>> {
-    let mut names = Vec::new();
-    files_under(&tree.path, &tree.path, &mut names)?;
-    let mut digested = Vec::with_capacity(names.len());
-    for name in names {
-        let bytes = fs::read(tree.at(&name))?;
-        digested.push((name, hash::blake3(&bytes).to_hex()));
-    }
-    Ok(digested)
-}
-
-/// Runs the shipped `larry` with `args` from `directory`, with only `PATH` set.
-fn larry(args: &[&str], directory: &Path) -> Result<Output, Box<dyn Error>> {
-    Ok(Command::new(LARRY)
-        .args(args)
-        .current_dir(directory)
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .stdin(Stdio::null())
-        .output()?)
-}
-
-/// A stream as text.
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-/// Sets one cell's percentage in the tree's tracker data, by text, so the file stays as written.
-fn edit_tracker(tree: &Tree, pct: u32) -> TestResult {
-    let path = tree.at("tools/tracker/tracker.json");
-    let data = fs::read_to_string(&path)?;
-    let edited = data.replacen("\"pct\": 0,", &format!("\"pct\": {pct},"), 1);
-    assert_ne!(edited, data, "the tracker data has a zero cell to edit");
-    fs::write(path, edited)?;
-    Ok(())
 }
 
 #[test]
@@ -380,13 +274,42 @@ fn a_stale_tracker_is_refused_until_regenerated() -> TestResult {
     Ok(())
 }
 
+/// Adds [`TRACKER_FILLER`] bytes to the tracker data, so its render is large enough for a
+/// kill to land inside the write and leave a partial temporary page behind.
+fn grow_tracker(tree: &Tree) -> TestResult {
+    let path = tree.at("tools/tracker/tracker.json");
+    let mut data: Value = json::from_str(&fs::read_to_string(&path)?)?;
+    let object = data
+        .as_object_mut()
+        .ok_or("the tracker data is an object")?;
+    let filler = "x".repeat(TRACKER_FILLER);
+    object.insert(String::from("_probe"), Value::String(filler.into()));
+    fs::write(&path, json::to_string(&data)?)?;
+    Ok(())
+}
+
+/// The tracker's temporary pages left in its directory: each name and its byte count.
+fn temp_pages(tree: &Tree) -> io::Result<Vec<(String, u64)>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(tree.at("tools/tracker"))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(".index.html.") && name.ends_with(".tmp") {
+            found.push((name, entry.metadata()?.len()));
+        }
+    }
+    Ok(found)
+}
+
 #[test]
 fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     let tree = Tree::governed()?;
     let page = tree.at("tools/tracker/index.html");
     let old = fs::read(&page)?;
     edit_tracker(&tree, 61)?;
+    grow_tracker(&tree)?;
     let mut observed = Vec::with_capacity(KILLS);
+    let mut partial = Vec::with_capacity(KILLS);
     for _ in 0..KILLS {
         let mut child = Command::new(LARRY)
             .args(["tracker", "--root"])
@@ -395,8 +318,31 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        child.kill()?;
+        let deadline = Instant::now()
+            .checked_add(WRITE_PATIENCE)
+            .ok_or("the write deadline overflowed")?;
+        let mut appeared = None;
+        loop {
+            if let Some(temp) = temp_pages(&tree)?.into_iter().next() {
+                appeared = Some(temp);
+                break;
+            }
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
         child.wait()?;
+        if let Some((name, _)) = appeared
+            && let Some(left) = temp_pages(&tree)?.into_iter().find(|entry| entry.0 == name)
+        {
+            partial.push(left.1);
+        }
         observed.push(fs::read(&page)?);
     }
     let finished = larry(&["tracker"], &tree.path)?;
@@ -407,6 +353,15 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     );
     let new = fs::read(&page)?;
     assert_ne!(new, old, "the edit changed the render");
+    assert!(
+        !partial.is_empty(),
+        "none of {KILLS} kills landed inside the write: no temporary page survived"
+    );
+    let written = u64::try_from(new.len())?;
+    assert!(
+        partial.iter().any(|size| *size < written),
+        "every surviving temporary page was whole, so no kill was proved inside the write: {partial:?} of {written} bytes"
+    );
     for (kill, seen) in observed.iter().enumerate() {
         assert!(
             *seen == old || *seen == new,
@@ -633,18 +588,18 @@ fn governance_check_latency_and_peak_rss_stay_in_budget() -> TestResult {
         percentile(&samples, 95),
         percentile(&samples, 99),
     );
-    let rss = peak_rss_kib(&tree.path)?;
+    let rss = peak_rss_kib(&tree.path)?.ok_or(
+        "the ps probe took no sample of the governance check, so its peak RSS is unproved",
+    )?;
     let figures = format!(
-        "governance over {RUNS} runs on the fixture tree: p50 {p50:?} p95 {p95:?} p99 {p99:?}, peak RSS {rss:?} KiB (ps sample)\n"
+        "governance over {RUNS} runs on the fixture tree: p50 {p50:?} p95 {p95:?} p99 {p99:?}, peak RSS {rss} KiB (ps sample)\n"
     );
     io::stderr().lock().write_all(figures.as_bytes())?;
     assert!(
         p99 < Duration::from_secs(5),
         "one check stays well inside the 5-minute gate budget: p99 {p99:?}"
     );
-    if let Some(kib) = rss {
-        assert!(kib < 256 * 1024, "one check stays under 256 MiB: {kib} KiB");
-    }
+    assert!(rss < 256 * 1024, "one check stays under 256 MiB: {rss} KiB");
     Ok(())
 }
 
