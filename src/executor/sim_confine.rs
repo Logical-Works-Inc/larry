@@ -562,21 +562,30 @@ fn sim_confine_reads_stay_open_beside_the_state() -> TestResult {
     );
     #[cfg(target_os = "linux")]
     {
-        match Confine::within(Platform::host(), &fake, &state, &tree, &tmp) {
-            Ok(confine) => {
-                let path = path_env()?;
-                kernel_reads_beside_the_state(&confine, &state, &path, &tmp, &note, &link)?;
-            }
-            Err(ConfineError::TooManyRoots { roots, bound }) => {
-                let mut errors = std::io::stderr().lock();
-                writeln!(
-                    errors,
-                    "{{\"metric\":\"kernel_skipped\",\"rules\":{roots},\"bound\":{bound}}}"
-                )?;
-            }
-            Err(other) => return Err(format!("the confinement failed: {other}").into()),
-        }
+        let confine = Confine::within(Platform::host(), &fake, &state, &tree, &tmp)?;
+        let path = path_env()?;
+        kernel_reads_beside_the_state(&confine, &state, &path, &tmp, &note, &link)?;
     }
+    Ok(())
+}
+
+/// A shared scratch directory, sticky and world-writable like `/tmp`, is never walked: its
+/// entries are other processes' transient directories, and one that vanishes between the
+/// rule list and the exec refuses the spawn, so no rule names it (larry#322).
+#[test]
+fn sim_confine_a_shared_scratch_level_grants_no_siblings() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = scratch("scratch-level")?;
+    let shared = root.join("shared");
+    let state = shared.join("state");
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(shared.join("beside"))?;
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777))?;
+    let roots = read_roots_below(&root, &state)?;
+    assert!(
+        !roots.iter().any(|granted| granted.starts_with(&shared)),
+        "no read root names an entry of a shared scratch directory: {roots:?}"
+    );
     Ok(())
 }
 

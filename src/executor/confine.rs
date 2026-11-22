@@ -359,14 +359,20 @@ fn read_roots_below(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineEr
     let mut level = root.to_path_buf();
     for next in below.components() {
         let skip = level.join(next.as_os_str());
-        for child in children(&level)? {
-            let allowed = if child == skip {
-                None
-            } else {
-                grantable(&child, &state)?
-            };
-            if let Some(root) = allowed {
-                roots.push(root);
+        // A shared scratch directory, sticky and world-writable like `/tmp`, is never
+        // enumerated: its entries are other processes' transient directories, and one that
+        // vanishes between the rule list and the exec refuses the spawn, while a busy host
+        // overruns the allowlist (larry#322, ADR 0081).
+        if !shared(&level)? {
+            for child in children(&level)? {
+                let allowed = if child == skip {
+                    None
+                } else {
+                    grantable(&child, &state)?
+                };
+                if let Some(root) = allowed {
+                    roots.push(root);
+                }
             }
         }
         if roots.len() > MAX_READ_ROOTS {
@@ -387,6 +393,20 @@ fn read_roots_below(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineEr
         }
     }
     Ok(kept)
+}
+
+/// Whether `level` is a shared scratch directory: sticky and world-writable, so any local
+/// user creates entries in it and removes them at will (larry#322).
+fn shared(level: &Path) -> Result<bool, ConfineError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = std::fs::metadata(level)
+        .map_err(|source| ConfineError::Path {
+            path: level.to_path_buf(),
+            source,
+        })?
+        .permissions()
+        .mode();
+    Ok(mode & 0o1002 == 0o1002)
 }
 
 /// The children of `level` in name order, so the rules never depend on directory order.

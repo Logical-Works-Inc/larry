@@ -51,7 +51,10 @@ environment, but a same-user process reads the parent's through
   is never a root when its resolved form is the state directory, beneath
   it or an ancestor of it, so a sibling link into the state grants nothing,
   and a state directory that is the walk's own root is refused
-  (`StateAtRoot`) rather than built into a confinement that reads nothing.
+  (`StateAtRoot`). A level that is a shared scratch directory (sticky and
+  world-writable, `/tmp` on every host) is never walked: its entries belong
+  to other processes, one vanishing between the rule list and the exec
+  refuses the spawn, and a busy host's entries overran the 64-rule list.
   The copy is a read rule of its own, and the tree and scratch directory
   keep their read-write rules, which carry read as well.
 - The copy is `<state>/ws/<task>`, the tree's parent: the clone names its
