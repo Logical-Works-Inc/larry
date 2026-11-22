@@ -40,6 +40,11 @@ const DECLARED_MAX_GRANTS: usize = 64;
 const DECLARED_MAX_SKEW: Duration = Duration::from_secs(60);
 const DECLARED_MAX_LEASE: Duration = Duration::from_secs(3_600);
 const DECLARED_MAX_QUESTIONS: usize = 256;
+/// The stated ceilings the journal, run table and tenant count accept
+/// (larry#333); retyped here for the same reason as the others.
+const DECLARED_MAX_JOURNAL_CAPACITY: usize = 1_048_576;
+const DECLARED_MAX_RUN_CAPACITY: usize = 65_536;
+const DECLARED_MAX_TENANTS: usize = 65_536;
 
 /// Fallible test outcome; setup failures propagate instead of panicking.
 type Outcome = Result<(), Box<dyn std::error::Error>>;
@@ -298,19 +303,33 @@ fn sim_the_skew_bound_is_pinned_into_every_decisions_validity() -> Outcome {
 type BadCase = (&'static str, fn(&mut RuntimeSettings));
 
 /// Every setting whose value its meaning refuses is refused by name, before a
-/// runtime exists to enforce it: zero capacities, a question bound above its
-/// declared ceiling (larry#295), a grant bound above the declared work bound, a
-/// payload ceiling above the hashed-field bound, a skew or lease past its
-/// maximum, and a protocol range that is not a range.
+/// runtime exists to enforce it: zero capacities, a journal or run ceiling past
+/// its stated maximum (larry#333), a tenant count outside its range, a question
+/// bound above its declared ceiling (larry#295), a grant bound above the
+/// declared work bound, a payload ceiling above the hashed-field bound, a skew
+/// or lease past its maximum, and a protocol range that is not a range.
 #[test]
 fn sim_every_bad_setting_value_is_refused_by_name() -> Outcome {
     let good = settings(&[Scope::FileRead], &[Scope::FileRead], 100)?;
     let mut at_ceiling = good.clone();
     at_ceiling.max_pending_questions = DECLARED_MAX_QUESTIONS;
+    at_ceiling.journal_capacity = DECLARED_MAX_JOURNAL_CAPACITY;
+    at_ceiling.run_capacity = DECLARED_MAX_RUN_CAPACITY;
+    at_ceiling.max_tenants = DECLARED_MAX_TENANTS;
     Runtime::<FoldProjection, ScriptedOwner>::new(at_ceiling, ScriptedOwner::new(), clock()?)?;
-    let cases: [BadCase; 14] = [
+    let cases: [BadCase; 18] = [
         ("journal_capacity", |settings| settings.journal_capacity = 0),
+        ("journal_capacity", |settings| {
+            settings.journal_capacity = DECLARED_MAX_JOURNAL_CAPACITY + 1;
+        }),
         ("run_capacity", |settings| settings.run_capacity = 0),
+        ("run_capacity", |settings| {
+            settings.run_capacity = DECLARED_MAX_RUN_CAPACITY + 1;
+        }),
+        ("max_tenants", |settings| settings.max_tenants = 0),
+        ("max_tenants", |settings| {
+            settings.max_tenants = DECLARED_MAX_TENANTS + 1;
+        }),
         ("max_pending_questions", |settings| {
             settings.max_pending_questions = 0;
         }),

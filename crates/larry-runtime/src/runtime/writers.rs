@@ -25,13 +25,29 @@ where
     P: ProjectionBackend + Default,
     O: EffectOwner,
 {
-    /// Establishes run ownership without exceeding the run-table bound.
+    /// Establishes run ownership without exceeding the tenant's share of the
+    /// run table.
+    ///
+    /// Each tenant holds at most `run_capacity / max_tenants` tracked runs, at
+    /// least one, so one tenant cannot fill the table every tenant shares
+    /// (larry#333). A terminal run whose receipt is sealed has left the table:
+    /// it can record no further event, so its row is a slot the next run of its
+    /// tenant takes. The projection's own `run_capacity` still bounds the whole
+    /// table, because every tracked run has a view there.
     pub(super) fn track_run(&mut self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {
         self.ensure_run_tenant(run, tenant)?;
-        if !self.runs.contains_key(&run) && self.runs.len() >= self.settings.run_capacity {
-            return Err(RuntimeError::RunLimitReached {
-                capacity: self.settings.run_capacity,
-            });
+        if !self.runs.contains_key(&run) {
+            // A sealed terminal run is already known to the projection: it was
+            // evicted from the table, and re-tracking it would spend a slot for
+            // a run no work may enter.
+            if self
+                .projection
+                .run_state(run)
+                .is_some_and(RunState::is_terminal)
+            {
+                return Ok(());
+            }
+            self.free_run_slots(tenant)?;
         }
         self.runs.entry(run).or_insert(RunLive { tenant });
         // One budget per tenant (larry#208): a tenant enters the budget map
@@ -42,6 +58,47 @@ where
             .entry(tenant)
             .or_insert(self.settings.initial_budget);
         Ok(())
+    }
+
+    /// Frees this tenant's slots past its share that a sealed terminal run can
+    /// give back.
+    ///
+    /// The oldest row in identity order goes first, so the same journal frees
+    /// the same rows on every replay. The table's global ceiling needs no
+    /// branch here: every tracked run has a view in the projection, whose own
+    /// capacity is `run_capacity`, so the table cannot outgrow the view.
+    fn free_run_slots(&mut self, tenant: TenantId) -> Result<(), RuntimeError> {
+        let share = self.settings.tenant_share(self.settings.run_capacity);
+        loop {
+            let held = self
+                .runs
+                .values()
+                .filter(|live| live.tenant == tenant)
+                .count();
+            if held < share {
+                return Ok(());
+            }
+            let victim = self.runs.iter().find_map(|(run, live)| {
+                (live.tenant == tenant && self.sealed_terminal(*run)).then_some(*run)
+            });
+            let Some(victim) = victim else {
+                return Err(RuntimeError::RunLimitReached { capacity: share });
+            };
+            self.runs.remove(&victim);
+        }
+    }
+
+    /// Whether `run` is terminal and its receipt is sealed, so the table may
+    /// let it go.
+    fn sealed_terminal(&self, run: RunId) -> bool {
+        self.projection
+            .run_state(run)
+            .is_some_and(RunState::is_terminal)
+            && self
+                .projection
+                .receipts()
+                .iter()
+                .any(|receipt| receipt.run() == run)
     }
 
     /// Refuses an envelope whose tenant differs from an established run owner.

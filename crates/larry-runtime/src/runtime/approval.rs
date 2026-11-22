@@ -390,14 +390,18 @@ where
             || self.cancel_pending(run)
     }
 
-    /// How many questions are pending at `at`.
-    fn pending_questions(&self, at: SystemTime) -> usize {
+    /// How many of `tenant`'s questions are pending at `at`.
+    ///
+    /// The bound is per tenant: one tenant's unanswered questions never refuse
+    /// another tenant's ask (larry#333).
+    fn pending_questions(&self, tenant: TenantId, at: SystemTime) -> usize {
         self.questions
             .asked
             .values()
             .filter(|asked| {
-                asked.status(at, self.run_closed(asked.question.subject.run))
-                    == QuestionStatus::Pending
+                asked.tenant == tenant
+                    && asked.status(at, self.run_closed(asked.question.subject.run))
+                        == QuestionStatus::Pending
             })
             .count()
     }
@@ -455,8 +459,10 @@ where
             }
             .into());
         }
-        let capacity = self.settings.max_pending_questions;
-        if self.pending_questions(at) >= capacity {
+        let capacity = self
+            .settings
+            .tenant_share(self.settings.max_pending_questions);
+        if self.pending_questions(tenant, at) >= capacity {
             return Err(QuestionError::PendingFull { capacity }.into());
         }
         Ok(())
