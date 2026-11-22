@@ -14,7 +14,7 @@ use std::time::Duration;
 use lgwks_std::seeded::Seeded;
 
 use super::{
-    Confine, ConfineError, MAX_READ_ROOTS, PROC_READS, Platform, SANDBOX_EXEC, SETPRIV,
+    Confine, ConfineError, MAX_READ_ROOTS, PROC_READS, Platform, SANDBOX_EXEC, SETPRIV, SETSID,
     read_roots_below, supported, supported_with, text,
 };
 use crate::executor::Ledger;
@@ -169,11 +169,7 @@ fn sim_confine_argv_per_platform_is_exact() -> TestResult {
 make-reg,make-sock,make-fifo,make-block,make-sym,refer,truncate";
     let linux = confined(Platform::Linux, &state, &tree, &tmp)?;
     let argv = linux.wrap(&command);
-    let head = [
-        String::from(SETPRIV),
-        String::from("--landlock-access"),
-        String::from("fs"),
-    ];
+    let head = [SETSID, SETPRIV, "--landlock-access", "fs"].map(String::from);
     assert_eq!(argv.get(..head.len()), Some(head.as_slice()));
     let mut rest = argv.get(head.len()..).ok_or("the argv")?.iter();
     let mut rules: Vec<&str> = Vec::new();
@@ -292,7 +288,7 @@ fn sim_confine_each_refusal_gets_its_exact_variant() -> TestResult {
         Err(ConfineError::MissingWrapper { tool: SANDBOX_EXEC })
     ));
     assert!(matches!(
-        supported_with(Platform::Linux, &|_| false),
+        supported_with(Platform::Linux, &|tool| tool != SETPRIV),
         Err(ConfineError::MissingWrapper { tool: SETPRIV })
     ));
     assert!(supported_with(Platform::Linux, &|_| true).is_ok());
@@ -761,3 +757,7 @@ fn bench_confine_overhead_is_measured_against_the_unconfined_spawn() -> TestResu
 #[cfg(target_os = "macos")]
 #[path = "sim_confine_macos.rs"]
 mod macos;
+
+/// The Linux session: no host without `setsid` confines a command (larry#386).
+#[path = "sim_confine_session.rs"]
+mod session;

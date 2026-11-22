@@ -19,7 +19,7 @@ use lgwks_std::process::{
 };
 
 use super::ExecError;
-use super::confine::Confine;
+use super::confine::{Confine, SETSID};
 use super::ledger::Ledger;
 
 // A command's own process group is what a timeout or a cancel kills; a target without
@@ -346,7 +346,7 @@ pub(crate) fn run_command(
 /// own (a session too where the host has `setsid`) with the environment cleared to PATH, HOME
 /// (the workspace) and LANG=C. A confined command is the platform's wrapper plus the model's argv,
 /// so the kernel confines it and everything it forks; the result still names the model's argv.
-fn command_for(
+pub(super) fn command_for(
     argv: &[String],
     place: Place<'_>,
     path_env: &str,
@@ -363,18 +363,16 @@ fn command_for(
             Some(confine.wrap(argv)),
         ),
     };
-    let mut launch: Vec<String> = match wrapped {
+    // util-linux `setsid` gives the command a session of its own, with no controlling terminal.
+    // A confined command takes it from its wrapper, which on Linux always starts with it
+    // (larry#386); macOS has none and its profile refuses `/dev/tty` (larry#323). Exactly one:
+    // a second would find a session leader, fork, and leave the executor waiting on its parent.
+    let launch: Vec<String> = match wrapped {
         Some(prefixed) => prefixed,
+        None if Path::new(SETSID).is_file() => [&[String::from(SETSID)], argv].concat(),
         None => argv.to_vec(),
     };
-    // util-linux `setsid` starts the command in a session of its own, with no controlling
-    // terminal; macOS ships none, and there the confinement refuses `/dev/tty` (larry#323).
-    let session = Path::new("/usr/bin/setsid")
-        .is_file()
-        .then_some("/usr/bin/setsid");
-    if let Some(tool) = session {
-        launch.insert(0, String::from(tool));
-    }
+    let session = launch.first().is_some_and(|word| word == SETSID);
     let Some((program, arguments)) = launch.split_first() else {
         return Err(empty());
     };
@@ -390,7 +388,7 @@ fn command_for(
     if let Some(directory) = scratch {
         command.env("TMPDIR", directory);
     }
-    if session.is_none() {
+    if !session {
         #[cfg(unix)]
         command.process_group(0);
     }
