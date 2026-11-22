@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 mod check;
+mod confine;
 
 use self::check::{check_acceptance, check_repo_and_base, owned_argvs};
 use super::author::Brief;
@@ -64,6 +65,8 @@ pub struct Task {
     /// The id of the route the model step uses, when the document names one
     /// (larry#201); otherwise the tenant's default, else the environment's.
     route: Option<String>,
+    /// Acceptance commands run confined even without a brief (larry#324).
+    confine_acceptance: bool,
     /// The document bytes it was parsed from, kept to name the run.
     bytes: Vec<u8>,
 }
@@ -176,6 +179,7 @@ impl Task {
             brief,
             idempotency_key,
             route,
+            confine_acceptance: false,
             bytes: bytes.to_vec(),
         })
     }

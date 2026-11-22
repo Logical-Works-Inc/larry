@@ -18,10 +18,18 @@
 //! The busy-ledger sim proves the ledger reader's retry on its own, once, in
 //! this binary (larry#309).
 
+#[path = "executor_journey/confine.rs"]
+mod confine;
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
 #[path = "support/held_group.rs"]
 mod held_group;
+#[path = "support/http_wire.rs"]
+mod http_wire;
+#[path = "support/mock_model.rs"]
+mod mock_model;
+#[path = "support/tree_digest.rs"]
+mod tree_digest;
 
 use std::error::Error;
 use std::ffi::OsStr;
@@ -42,6 +50,7 @@ use held_group::{ledger_rows, spawn_held_command};
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
+use tree_digest::tree_digest;
 
 /// Runs the latency case samples.
 const SAMPLES: usize = 32;
@@ -126,42 +135,6 @@ fn sim_live_group_pid_answers_after_two_busy_reads() -> TestResult {
         );
     }
     Ok(())
-}
-
-/// Collects every file and symlink under `dir` as (path relative to `root`, bytes).
-fn collect(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, Vec<u8>)>,
-) -> Result<(), Box<dyn Error>> {
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        let relative = path.strip_prefix(root)?.to_string_lossy().into_owned();
-        let kind = fs::symlink_metadata(&path)?.file_type();
-        if kind.is_symlink() {
-            let target = fs::read_link(&path)?;
-            out.push((relative, format!("link:{}", target.display()).into_bytes()));
-        } else if kind.is_dir() {
-            collect(root, &path, out)?;
-        } else {
-            out.push((relative, fs::read(&path)?));
-        }
-    }
-    Ok(())
-}
-
-/// BLAKE3 over every path and byte under `dir`, in sorted path order.
-fn tree_digest(dir: &Path) -> Result<String, Box<dyn Error>> {
-    let mut entries = Vec::new();
-    collect(dir, dir, &mut entries)?;
-    entries.sort();
-    let mut hasher = lgwks_std::hash::Hasher::new();
-    for entry in &entries {
-        hasher.update(entry.0.as_bytes());
-        hasher.update(&[0u8]);
-        hasher.update(&entry.1);
-    }
-    Ok(hasher.finalize().to_hex())
 }
 
 /// Whether any member of process group `pgid` is still alive.
