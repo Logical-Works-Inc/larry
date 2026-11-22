@@ -82,10 +82,12 @@ pub(crate) fn receipt_from(body: &Value, accepted: bool, bytes: &[u8]) -> Receip
         else {
             return 0;
         };
-        let Ok(number) = usize::try_from(reported) else {
-            return 0;
-        };
-        number
+        // A count past `usize` saturates at its ceiling; reporting 0 would read as no
+        // commands at all (larry#343).
+        match usize::try_from(reported) {
+            Ok(number) => number,
+            Err(_) => usize::MAX,
+        }
     };
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
@@ -458,6 +460,16 @@ mod tests {
             let read = receipt_from(&body, true, b"x");
             assert_eq!((read.commands, read.handoff.as_str()), (0, "none"));
         }
+    }
+
+    /// A count past `usize` saturates at its ceiling; it never reads as zero, which would
+    /// say no command ran (larry#343).
+    #[test]
+    fn a_count_past_usize_saturates() {
+        let body = json!({"session": {"commands": u64::MAX, "declined": 2}});
+        let receipt = receipt_from(&body, true, b"");
+        assert_eq!(receipt.commands, usize::MAX, "the count saturates");
+        assert_eq!(receipt.declined, 2, "a count within usize is its own");
     }
 
     /// Both artifacts cross the observer contract whole: the diff the island offers arrives as

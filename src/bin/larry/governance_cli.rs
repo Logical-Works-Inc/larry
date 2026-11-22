@@ -50,7 +50,17 @@ impl fmt::Display for GovernanceRun {
     }
 }
 
-impl std::error::Error for GovernanceRun {}
+impl std::error::Error for GovernanceRun {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::NoDirectory(ref cause) | Self::Stdout(ref cause) | Self::Stderr(ref cause) => {
+                Some(cause)
+            }
+            Self::Tracker(ref cause) => Some(cause),
+            Self::Usage(_) | Self::Stale => None,
+        }
+    }
+}
 
 /// The root and flag `larry governance` and `larry tracker` take: `[FLAG] [--root DIR]`, in any
 /// order, the root defaulting to the working directory.
@@ -135,5 +145,29 @@ pub(super) fn tracker_once(rest: &[OsString]) -> Result<ExitCode, GovernanceRun>
         Ok(bytes) => print_lines(&[&format!("wrote tools/tracker/index.html ({bytes} bytes)")])
             .map(|()| ExitCode::SUCCESS),
         Err(error) => Err(GovernanceRun::Tracker(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GovernanceRun;
+
+    /// Every refusal that has a cause keeps it as a source, never an empty `Error` impl
+    /// (larry#343).
+    #[test]
+    fn every_governance_refusal_keeps_its_source() {
+        use std::error::Error as _;
+
+        let missing =
+            GovernanceRun::NoDirectory(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(missing.source().is_some(), "no working directory");
+        let stdout = GovernanceRun::Stdout(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(stdout.source().is_some(), "stdout");
+        let stderr = GovernanceRun::Stderr(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(stderr.source().is_some(), "stderr");
+        assert!(
+            GovernanceRun::Stale.source().is_none(),
+            "a stale page has no cause"
+        );
     }
 }

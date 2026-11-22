@@ -195,3 +195,54 @@ fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult
     }
     Ok(())
 }
+
+/// A cleanup that fails after an earlier refusal keeps that refusal as its source, so the
+/// operator sees both causes and neither is flattened into a string (larry#343).
+#[test]
+fn a_cleanup_refusal_keeps_the_earlier_error_as_its_source() -> TestResult {
+    use crate::executor::ExecError;
+
+    let earlier = ExecError::Workspace(io::Error::other("the pipe was not opened"));
+    let cleanup = ExecError::cleanup(
+        earlier,
+        "the child could not be killed",
+        ExecError::Reap(io::Error::from(io::ErrorKind::PermissionDenied)),
+    );
+    let source = std::error::Error::source(&cleanup).ok_or("the earlier refusal is the source")?;
+    assert_eq!(
+        source.to_string(),
+        "exec workspace: the pipe was not opened",
+        "the typed cause survives"
+    );
+    assert!(
+        cleanup
+            .to_string()
+            .contains("the child could not be killed"),
+        "the cleanup step is named too: {cleanup}"
+    );
+    Ok(())
+}
+
+/// A reader thread that panics prints the text it carries, never `Any { .. }` (larry#343).
+#[test]
+fn a_panicking_reader_reports_its_message() {
+    let message = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| -> io::Result<super::Drained> {
+            let explode = std::hint::black_box(true);
+            assert!(!explode, "the reader exploded");
+            Err(io::Error::other("unreachable"))
+        });
+        match super::join_reader(reader, "cat") {
+            Ok(_drained) => String::from("a panicking reader returned a value"),
+            Err(cause) => cause.to_string(),
+        }
+    });
+    assert!(
+        message.contains("the reader exploded"),
+        "the payload text is printed: {message}"
+    );
+    assert!(
+        !message.contains("Any { .. }"),
+        "the payload is never debug-printed: {message}"
+    );
+}

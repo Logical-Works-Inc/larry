@@ -13,7 +13,8 @@ use super::super::ExecError;
 #[cfg(unix)]
 use super::mode::reset_with;
 use super::{
-    hold_origin, origin_lock_path, remove_workspace, strands, sweep, sweep_dir, sweep_origins,
+    hold_origin, origin_lock_path, remove_workspace, stranded_event, strands, sweep, sweep_dir,
+    sweep_origins,
 };
 
 /// What every simulation here returns.
@@ -306,6 +307,39 @@ fn sim_every_unreadable_origin_lock_is_kept_and_every_unheld_one_removed() -> Te
             "lock {index}: an unreadable lock is kept and an unheld one is removed"
         );
     }
+    Ok(())
+}
+
+/// A stranded workspace is one typed JSON event naming the tree, why it was kept, and how
+/// many this process has stranded, so the counter is read (larry#343).
+#[test]
+fn a_stranded_workspace_is_one_typed_event() -> TestResult {
+    let root = std::path::Path::new("/state/ws/run-0");
+    let cause = ExecError::Workspace(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    let event = stranded_event(root, &cause.to_string(), 3);
+    assert_eq!(
+        event.get("sweep").and_then(|value| value.as_str()),
+        Some("stranded"),
+        "the event names itself"
+    );
+    assert_eq!(
+        event.get("entry").and_then(|value| value.as_str()),
+        Some("/state/ws/run-0"),
+        "the kept tree is named"
+    );
+    assert_eq!(
+        event.get("stranded").and_then(|value| value.as_u64()),
+        Some(3),
+        "the counter is read"
+    );
+    let refused = event
+        .get("refused")
+        .and_then(|value| value.as_str())
+        .ok_or("the refusal is named")?;
+    assert!(
+        refused.to_ascii_lowercase().contains("permission denied"),
+        "the cause is named: {refused}"
+    );
     Ok(())
 }
 
