@@ -128,21 +128,14 @@ fn is_valid_id(value: &Value) -> bool {
     value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
 }
 
-/// A notification frame: `method` with `params`, no id.
+/// A notification frame: `method` with `params`, no id. Each member is inserted into a map,
+/// so no member can silently drop on a shape that is not an object (larry#343).
 pub(crate) fn notification(method: &str, params: Value) -> Value {
-    with_member(
-        json!({ "jsonrpc": "2.0", "method": method }),
-        "params",
-        params,
-    )
-}
-
-/// `frame` with the member `name` set to `member`, which moves in.
-fn with_member(mut frame: Value, name: &str, member: Value) -> Value {
-    if let Some(map) = frame.as_object_mut() {
-        map.insert(String::from(name), member);
-    }
-    frame
+    let mut frame = Map::new();
+    frame.insert(String::from("jsonrpc"), json!("2.0"));
+    frame.insert(String::from("method"), json!(method));
+    frame.insert(String::from("params"), params);
+    Value::Object(frame)
 }
 
 /// The JSON-RPC 2.0 internal error (-32603) reply, sent only when a value cannot be
@@ -220,7 +213,10 @@ fn finish(mut line: Vec<u8>) -> Vec<u8> {
 
 /// A success reply for request `id`.
 pub(crate) fn result(id: &Value, result: Value) -> Value {
-    with_member(json!({ "jsonrpc": "2.0", "id": id }), "result", result)
+    let mut frame = Map::new();
+    frame.insert(String::from("jsonrpc"), json!("2.0"));
+    frame.insert(String::from("result"), result);
+    with_id(id, Value::Object(frame))
 }
 
 /// An error reply. `id` is `Value::Null` when the request id is unknown, and
@@ -236,8 +232,14 @@ pub(crate) fn error(id: &Value, code: i64, message: &str) -> Value {
 
 /// An error reply carrying a `data` member, as `UnsupportedProtocolVersionError` does.
 pub(super) fn error_with_data(id: &Value, code: i64, message: &str, data: Value) -> Value {
-    let body = with_member(json!({ "code": code, "message": message }), "data", data);
-    with_id(id, with_member(json!({ "jsonrpc": "2.0" }), "error", body))
+    let mut error = Map::new();
+    error.insert(String::from("code"), json!(code));
+    error.insert(String::from("message"), json!(message));
+    error.insert(String::from("data"), data);
+    let mut frame = Map::new();
+    frame.insert(String::from("jsonrpc"), json!("2.0"));
+    frame.insert(String::from("error"), Value::Object(error));
+    with_id(id, Value::Object(frame))
 }
 
 /// `frame` with `id` set, unless the id is unknown (`Value::Null`).
@@ -264,9 +266,9 @@ pub(crate) fn encode(value: &Value) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, encode, error, read_frame};
+    use super::{Frame, encode, error, error_with_data, notification, read_frame, result};
     use crate::json_at::At;
-    use lgwks_std::json::Value;
+    use lgwks_std::json::{Value, json};
     use std::io::{BufReader, Cursor};
 
     /// A two-byte buffer forces the reader across many `fill_buf` chunks.
@@ -333,6 +335,33 @@ mod tests {
             known.member("/id"),
             Some(&Value::from(7)),
             "the request id comes back"
+        );
+    }
+
+    /// Every reply builder sets its member in the frame it returns; no member is lost on
+    /// a frame that is not an object (larry#343).
+    #[test]
+    fn every_reply_builder_sets_its_member() {
+        let note = notification("session/update", json!({ "a": 1 }));
+        assert_eq!(
+            note.get("params").and_then(|params| params.get("a")),
+            Some(&json!(1)),
+            "the notification carries its params"
+        );
+        let answered = result(&Value::from(1), json!({ "ok": true }));
+        assert_eq!(
+            answered.get("result").and_then(|body| body.get("ok")),
+            Some(&Value::Bool(true)),
+            "the result carries its body"
+        );
+        let failed = error_with_data(&Value::from(2), -32022, "no", json!({ "v": [1] }));
+        assert_eq!(
+            failed
+                .get("error")
+                .and_then(|body| body.get("data"))
+                .and_then(|data| data.get("v")),
+            Some(&json!([1])),
+            "the error carries its data"
         );
     }
 

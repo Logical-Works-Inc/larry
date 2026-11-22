@@ -2,12 +2,9 @@
 //! session, under a timeout (larry#85, larry#323).
 
 use std::io::{self, Read};
-#[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
-use std::os::unix::net::UnixStream;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::unix::{net::UnixStream, process::CommandExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -46,23 +43,20 @@ const ESRCH: i32 = 3;
 /// The kernel's error number for "operation not permitted", the same on Linux and Darwin.
 const EPERM: i32 = 1;
 
-/// Time a process group is given before it counts as surviving (larry#214, larry#268).
-/// Killed members are briefly zombies, so the probes yield between checks, and both group
-/// waits end on this one bound read from the clock their caller injected: a count of yields
-/// measured the scheduler, so a loaded host ended it early and an idle one late.
+/// Time a process group is given before it counts as surviving (larry#214, larry#268): killed
+/// members are briefly zombies, and a count of yields measured the scheduler rather than time,
+/// so both group waits end on this one bound read from the clock their caller injected.
 pub(super) const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Longest one slice of the command wait sleeps before it checks the person's
-/// cancel again (larry#242): it bounds Esc-to-kill latency for a running
-/// command. `tui_journey_esc_kills_running_command` prints the whole path
-/// (`esc_to_interrupted_ms`) against this 25 ms slice; the figure is
-/// MEASURED, never a pass condition, because a loaded host moves it (larry#268).
+/// Longest one slice of the command wait sleeps before it checks the person's cancel again
+/// (larry#242): it bounds Esc-to-kill latency. `tui_journey_esc_kills_running_command` prints
+/// the whole path (`esc_to_interrupted_ms`) against this 25 ms slice; the figure is MEASURED,
+/// never a pass condition, because a loaded host moves it (larry#268).
 const CANCEL_POLL: Duration = Duration::from_millis(25);
 
-/// How long a reader may keep draining once the command's group is settled: past it, a stream
-/// still receiving bytes belongs to a child that left the group, and the run ends with a typed
-/// refusal instead of a join with no deadline (larry#334). A stream that has nothing buffered
-/// and is still held open is reported at once, without waiting this long.
+/// How long a reader may keep draining once the group is settled: past it, a stream still
+/// receiving bytes belongs to a child that left the group, and the run ends typed rather than
+/// joining with no deadline (larry#334). A stream with nothing buffered is reported at once.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// One captured stream: its first bytes, its last bytes, and how many bytes fell between them.
@@ -487,9 +481,8 @@ pub(crate) fn clip(text: &mut String, bytes: usize) -> bool {
 }
 
 /// Keeps the first `HEAD_BYTES` and the last `TAIL_BYTES` of a stream, and counts the bytes
-/// between them. The stream is read to its end in pieces, so memory is bounded by the two
-/// bounds. The shipped drain is [`capture_bounded`]; this arm is the seeded sim's reference
-/// and takes any `Read`, so a generated stream drives it.
+/// between them, reading to the end in pieces so memory is bounded. The shipped drain is
+/// [`capture_bounded`]; this arm is the seeded sim's reference and takes any `Read`.
 #[cfg(test)]
 fn capture(mut pipe: impl Read) -> io::Result<Captured> {
     let mut captured = Captured::default();
@@ -632,10 +625,13 @@ fn join_reader(
     match reader.join() {
         Ok(Ok(drained)) => Ok(drained),
         Ok(Err(source)) => Err(spawn_failure(argv0, source)),
-        Err(panic) => Err(spawn_failure(
-            argv0,
-            io::Error::other(format!("output reader panicked: {panic:?}")),
-        )),
+        Err(payload) => {
+            let text = format!(
+                "output reader panicked: {}",
+                crate::panic_text(payload.as_ref())
+            );
+            Err(spawn_failure(argv0, io::Error::other(text)))
+        }
     }
 }
 
@@ -660,15 +656,15 @@ fn spawn_failure(argv0: &str, source: io::Error) -> ExecError {
 fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
     let settled = settle_group(clock, pgid);
     let waited = child.wait();
-    if let Err(cause) = settled {
-        return ExecError::Reap(io::Error::other(format!(
-            "{error}; the group could not be settled: {cause}"
-        )));
+    if let Err(fault) = settled {
+        return ExecError::cleanup(error, "the group could not be settled", fault);
     }
-    if let Err(cause) = waited {
-        return ExecError::Reap(io::Error::other(format!(
-            "{error}; the leader could not be reaped: {cause}"
-        )));
+    if let Err(fault) = waited {
+        return ExecError::cleanup(
+            error,
+            "the leader could not be reaped",
+            ExecError::Reap(fault),
+        );
     }
     error
 }
@@ -676,15 +672,19 @@ fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> Exe
 /// Kills and reaps a child whose group id is unknown, then returns the error, or the reap
 /// failure that names it when the child could not be ended.
 fn discard(child: &mut Child, error: ExecError) -> ExecError {
-    if let Err(cause) = child.kill() {
-        return ExecError::Reap(io::Error::other(format!(
-            "{error}; the child could not be killed: {cause}"
-        )));
+    if let Err(fault) = child.kill() {
+        return ExecError::cleanup(
+            error,
+            "the child could not be killed",
+            ExecError::Reap(fault),
+        );
     }
-    if let Err(cause) = child.wait() {
-        return ExecError::Reap(io::Error::other(format!(
-            "{error}; the child could not be reaped: {cause}"
-        )));
+    if let Err(fault) = child.wait() {
+        return ExecError::cleanup(
+            error,
+            "the child could not be reaped",
+            ExecError::Reap(fault),
+        );
     }
     error
 }

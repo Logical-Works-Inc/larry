@@ -64,7 +64,19 @@ pub(crate) fn sweep<Out: Send>(
     sweep_on(lanes(), count, work)
 }
 
-/// `work(lane, seed)` for every seed in `0..count` on at most `lanes` scoped threads (never more
+/// The text a panic carried, or a fixed line when it carried none. This file is included by
+/// path into integration test binaries too, so it cannot call the library's one reader.
+fn message_of(cause: &(dyn Any + Send)) -> String {
+    if let Some(text) = cause.downcast_ref::<String>() {
+        return text.clone();
+    }
+    if let Some(text) = cause.downcast_ref::<&str>() {
+        return String::from(*text);
+    }
+    String::from("a lane panicked without a message")
+}
+
+/// Runs `count` seeds over at most `lanes` scoped threads (never more
 /// than [`MAX_LANES`]): lane `n` runs one contiguous chunk, in order, so the lane of a seed is
 /// fixed by `lanes` and `count` alone. The outputs are in seed order. When a lane panics the
 /// others still finish and are joined, and the first panicked lane is named. A sweep that keeps
@@ -122,15 +134,4 @@ pub(crate) fn sweep_on<Out: Send>(
         Some(error) => Err(error),
         None => Ok(merged),
     }
-}
-
-/// The text a panic carried, or a fixed line when it carried none.
-fn message_of(cause: &(dyn Any + Send)) -> String {
-    if let Some(text) = cause.downcast_ref::<String>() {
-        return text.clone();
-    }
-    if let Some(text) = cause.downcast_ref::<&str>() {
-        return String::from(*text);
-    }
-    String::from("a lane panicked without a message")
 }

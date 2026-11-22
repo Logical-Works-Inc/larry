@@ -440,3 +440,31 @@ fn sim_client_fits_exactly_at_its_byte_and_message_bounds() -> TestResult {
     );
     Ok(())
 }
+
+/// A context code is a member of the refusal's code, never a prefix of the whole reason:
+/// a namespaced code is an overflow and a longer member that merely contains the stem is
+/// not (larry#343).
+#[test]
+fn a_namespaced_context_code_is_an_overflow() {
+    let namespaced = ModelError::Client {
+        status: 400,
+        detail: String::from("invalid_request_error.context_length_exceeded: too long"),
+    };
+    assert!(
+        namespaced.is_context_overflow(),
+        "a namespaced code names the context window"
+    );
+    let unrelated = ModelError::Client {
+        status: 400,
+        detail: String::from("max_context_length: not a context overflow"),
+    };
+    assert!(
+        !unrelated.is_context_overflow(),
+        "a longer member is not the code itself"
+    );
+    let bare = ModelError::Client {
+        status: 400,
+        detail: String::from("context_length_exceeded: too long"),
+    };
+    assert!(bare.is_context_overflow(), "a plain code still reads");
+}

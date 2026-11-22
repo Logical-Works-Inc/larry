@@ -123,6 +123,17 @@ pub enum ExecError {
     },
     /// The workspace directory could not be created, read or removed.
     Workspace(std::io::Error),
+    /// A child or group could not be ended after an earlier refusal. The earlier refusal
+    /// stays the source, so the operator sees both causes and neither is flattened into a
+    /// string (larry#343).
+    Cleanup {
+        /// The refusal the cleanup ran after.
+        cause: Box<ExecError>,
+        /// The cleanup step that failed, as the operator reads it.
+        step: &'static str,
+        /// Why that step failed.
+        fault: Box<ExecError>,
+    },
     /// The store holding the receipt key could not be created or made owner-only.
     KeyStore(std::io::Error),
     /// The OS refused entropy for a new receipt key; there is no weaker fallback.
@@ -179,6 +190,17 @@ pub enum ExecError {
         /// The bound it passed.
         limit: u64,
     },
+}
+
+impl ExecError {
+    /// A cleanup that failed after `cause`, which stays the source (larry#343).
+    pub(crate) fn cleanup(cause: Self, step: &'static str, fault: Self) -> Self {
+        Self::Cleanup {
+            cause: Box::new(cause),
+            step,
+            fault: Box::new(fault),
+        }
+    }
 }
 
 /// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
@@ -248,6 +270,11 @@ impl fmt::Display for ExecError {
                 write!(out, "exec process group {pgid} survived its kill")
             }
             Self::Workspace(ref cause) => write!(out, "exec workspace: {cause}"),
+            Self::Cleanup {
+                ref cause,
+                step,
+                ref fault,
+            } => write!(out, "{cause}; {step}: {fault}"),
             Self::KeyStore(ref cause) => write!(out, "exec receipt key store: {cause}"),
             Self::Entropy(ref cause) => write!(out, "exec receipt key entropy: {cause}"),
             Self::Id(ref cause) => write!(out, "exec run id: {cause}"),
@@ -294,6 +321,7 @@ impl std::error::Error for ExecError {
             Self::Reap(ref cause) => Some(cause),
             Self::Spawn { ref source, .. } => Some(source),
             Self::Workspace(ref cause) => Some(cause),
+            Self::Cleanup { ref cause, .. } => Some(&**cause),
             Self::KeyStore(ref cause) => Some(cause),
             Self::Entropy(ref cause) => Some(cause),
             Self::Id(ref cause) => Some(cause),

@@ -107,7 +107,7 @@ where
     let (sender, inbox) = sync_channel::<io::Result<Frame>>(INBOX);
     std::thread::scope(|scope| {
         let book_ref = &book;
-        scope.spawn(move || read_loop(reader, max, book_ref, &sender, log));
+        let reader_thread = scope.spawn(move || read_loop(reader, max, book_ref, &sender, log));
         let mut agent = Agent {
             settings,
             book: &book,
@@ -147,6 +147,25 @@ where
                 abandon_all(&book);
             }
         }
+        // The reader's own fault is joined here: a log write that never landed or an inbox
+        // that closed is reported, never dropped by the scoped spawn (larry#343).
+        let read_fault = match reader_thread.join() {
+            Ok(Ok(())) => None,
+            Ok(Err(ReadFault::Log(cause))) => Some(cause),
+            Ok(Err(fault @ ReadFault::Inbox(_))) => {
+                Some(io::Error::new(io::ErrorKind::BrokenPipe, fault))
+            }
+            Err(payload) => {
+                let text = format!(
+                    "the ACP reader panicked: {}",
+                    crate::panic_text(payload.as_ref())
+                );
+                Some(io::Error::other(text))
+            }
+        };
+        if let Some(cause) = read_fault {
+            return Err(cause);
+        }
         if let Some(cause) = failed {
             return Err(cause);
         }
@@ -154,37 +173,71 @@ where
     })
 }
 
+/// Why the reader stopped serving: the inbox closed under it, or a cancel's
+/// acknowledgement could not be written (larry#343).
+#[derive(Debug)]
+enum ReadFault {
+    /// The agent's receiver was dropped before the reader finished.
+    Inbox(SendError<io::Result<Frame>>),
+    /// The cancel acknowledgement line could not be logged.
+    Log(io::Error),
+}
+
+impl fmt::Display for ReadFault {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Inbox(ref cause) => write!(out, "the ACP inbox closed: {cause}"),
+            Self::Log(ref cause) => write!(out, "the ACP log line could not be written: {cause}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Inbox(ref cause) => Some(cause),
+            Self::Log(ref cause) => Some(cause),
+        }
+    }
+}
+
 /// Reads frames into the inbox until end of input, numbering each prompt and
 /// binding each cancel on the way so it lands while a prompt runs.
 ///
 /// # Errors
 ///
-/// The agent hung up: the inbox is closed and no frame can be delivered.
+/// The inbox closed before the reader finished, or a cancel's acknowledgement could not
+/// be logged: the first such fault is returned when the stream ends, and the reader keeps
+/// serving every frame before it (larry#343).
 fn read_loop<R: BufRead, L: Write>(
     mut reader: R,
     max: usize,
     book: &Book,
     inbox: &SyncSender<io::Result<Frame>>,
     mut log: L,
-) -> Result<(), SendError<io::Result<Frame>>> {
+) -> Result<(), ReadFault> {
+    let mut unlogged: Option<io::Error> = None;
     loop {
         let frame = wire::read_frame(&mut reader, max);
         let end = !matches!(frame, Ok(Frame::Line(_) | Frame::Oversized));
-        let logged = match frame {
-            Ok(Frame::Line(ref bytes)) => mark(bytes, book, &mut log),
-            _ => Ok(()),
-        };
-        inbox.send(frame)?;
-        if let Err(cause) = logged {
-            // A cancel whose acknowledgement could not be logged ends the stream
-            // with that fault, which the agent returns to its caller.
-            return inbox.send(Err(cause));
+        if let Ok(Frame::Line(ref bytes)) = frame
+            && let Err(cause) = mark(bytes, book, &mut log)
+        {
+            // The cancel flag is kept; only the observable acknowledgement is missing, and
+            // the stream is not ended for it (larry#343).
+            unlogged.get_or_insert(cause);
+        }
+        if let Err(cause) = inbox.send(frame) {
+            return Err(ReadFault::Inbox(cause));
         }
         if end {
             // End of input, or a read fault, is a client that is gone: every live
             // session stops instead of running on to its bound (larry#338).
             abandon_all(book);
-            return Ok(());
+            return match unlogged {
+                Some(cause) => Err(ReadFault::Log(cause)),
+                None => Ok(()),
+            };
         }
     }
 }
