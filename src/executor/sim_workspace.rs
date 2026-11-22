@@ -372,7 +372,7 @@ const SENTINEL_MODE: u32 = 0o640;
 /// A directory judged a directory is swapped for a link to a file outside the tree before its
 /// mode is reset, and that file's mode stays byte-identical. Source: CWE-367 (TOCTOU) and CWE-59
 /// (link following); the child that left the command's process group is still alive while the
-/// workspace drops, so the swap window is real (larry#334, larry#366, ADR 0081).
+/// workspace drops, so the swap window is real (larry#334, larry#366, ADR 0082).
 #[cfg(unix)]
 #[test]
 fn sim_a_link_swapped_in_between_the_check_and_the_reset_keeps_the_sentinels_mode() -> TestResult {
@@ -525,48 +525,60 @@ fn sim_a_kept_link_is_one_json_event() -> TestResult {
 
 /// The Linux reset opens a directory only, never a link, and resets a mode-000 directory through
 /// the descriptor it opened (larry#366, CWE-367, CWE-59). Linux has no no-follow `fchmodat`, so
-/// this is the arm CI compiles and the only test that drives its open flags.
-#[cfg(target_os = "linux")]
+/// this is the arm CI compiles and the only test that drives its open flags; on any other host the
+/// Linux arm does not exist and the body answers without a case.
 #[test]
 fn sim_a_linux_mode_reset_opens_only_a_directory_and_never_a_link() -> TestResult {
-    use std::os::unix::fs::PermissionsExt;
-    let state = scratch_directory()?;
-    assert_eq!(
-        super::mode::OPEN_FLAGS,
-        rustix::fs::OFlags::PATH
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::CLOEXEC,
-        "the open carries every flag the no-follow reset needs"
-    );
-    let parent = &*state;
-    let sealed = parent.join("sealed");
-    std::fs::create_dir(&sealed)?;
-    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000))?;
-    let sentinel = parent.join("sentinel");
-    std::fs::write(&sentinel, b"outside the tree")?;
-    std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(SENTINEL_MODE))?;
-    std::os::unix::fs::symlink(&sentinel, parent.join("link"))?;
-    std::fs::write(parent.join("plain"), b"x")?;
-    let held = lgwks_std::fs::capability::Dir::open(parent)?;
-    super::mode::reset_mode(&held, "sealed")?;
-    assert_eq!(
-        std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
-        0o700,
-        "a mode-000 directory is opened and reset through its descriptor"
-    );
-    assert!(
-        super::mode::reset_mode(&held, "link").is_err(),
-        "a link is refused by the open, never followed"
-    );
-    assert_eq!(
-        std::fs::metadata(&sentinel)?.permissions().mode() & 0o777,
-        SENTINEL_MODE,
-        "the link's target keeps its mode"
-    );
-    assert!(
-        super::mode::reset_mode(&held, "plain").is_err(),
-        "a regular file is refused by the open"
-    );
+    // A scratch directory is made on every host, so the answer is a result even where the Linux
+    // arm does not exist.
+    let _state = scratch_directory()?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            super::mode::OPEN_FLAGS,
+            rustix::fs::OFlags::PATH
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            "the open carries every flag the no-follow reset needs"
+        );
+        let parent = &*_state;
+        let sealed = parent.join("sealed");
+        std::fs::create_dir(&sealed)?;
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000))?;
+        let sentinel = parent.join("sentinel");
+        std::fs::write(&sentinel, b"outside the tree")?;
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(SENTINEL_MODE))?;
+        std::os::unix::fs::symlink(&sentinel, parent.join("link"))?;
+        std::fs::write(parent.join("plain"), b"x")?;
+        let held = lgwks_std::fs::capability::Dir::open(parent)?;
+        let entry = super::mode::open_mode_entry(&held, "sealed")?;
+        super::mode::set_owner_rwx(&entry)?;
+        assert_eq!(
+            std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
+            0o700,
+            "a mode-000 directory is opened and reset through its descriptor"
+        );
+        assert!(
+            super::mode::open_mode_entry(&held, "link").is_err(),
+            "a link is refused by the open, never followed"
+        );
+        assert_eq!(
+            std::fs::metadata(&sentinel)?.permissions().mode() & 0o777,
+            SENTINEL_MODE,
+            "the link's target keeps its mode"
+        );
+        assert!(
+            super::mode::open_mode_entry(&held, "plain").is_err(),
+            "a regular file is refused by the open"
+        );
+        super::mode::reset_mode(&held, "sealed")?;
+        assert_eq!(
+            std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
+            0o700,
+            "the reset composes the open and the descriptor reset"
+        );
+    }
     Ok(())
 }

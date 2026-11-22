@@ -10,7 +10,7 @@
 use std::ffi::OsStr;
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use lgwks_std::fs::capability::{Dir, FileKind};
 
 /// The mode every directory is reset to: owner rwx, in the type `Permissions::from_mode` takes.
 #[cfg(target_os = "linux")]
-const OWNER_RWX: u32 = 0o700;
+const OWNER_MODE: u32 = 0o700;
 
 /// The mode every directory is reset to: owner rwx, in the type `Mode::from_raw_mode` takes.
 #[cfg(not(target_os = "linux"))]
@@ -187,39 +187,64 @@ fn link_or_error(
     }
 }
 
-/// The flags Linux's no-follow reset opens with: the path itself, refused if it is a link, refused
-/// unless it is a directory, and not inherited by a child (CWE-367, CWE-59).
+/// The flags the reset opens a directory with. Linux opens the path itself, refused if it is a
+/// link or not a directory, and the descriptor is not inherited by a child (CWE-367, CWE-59); the
+/// other platforms never open a directory to reset it and keep `fchmodat` with no-follow instead.
 #[cfg(target_os = "linux")]
 pub(super) const OPEN_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::PATH
     .union(rustix::fs::OFlags::NOFOLLOW)
     .union(rustix::fs::OFlags::DIRECTORY)
     .union(rustix::fs::OFlags::CLOEXEC);
 
-/// Resets the mode of `name` under the held `parent` to owner rwx, never following a final link.
-/// Linux's `fchmodat` implements no no-follow flag, so the entry is opened
-/// `O_PATH | O_NOFOLLOW | O_DIRECTORY` and the reset goes through that descriptor's own
-/// `/proc/self/fd` name, which pins the object that was opened; a link or a file swapped in is
-/// refused by the open itself (CWE-367, CWE-59).
+/// Opens the entry `name` under the held `parent` for a mode reset: a directory only, never a
+/// link, and never a path a writer can swap after the open (CWE-367, CWE-59).
+///
+/// # Errors
+///
+/// The operating system's refusal: a link, a regular file or a vanished name.
 #[cfg(target_os = "linux")]
-pub(super) fn reset_mode(parent: &Dir, name: &str) -> io::Result<()> {
-    let entry = rustix::fs::openat(parent.as_fd(), name, OPEN_FLAGS, rustix::fs::Mode::empty())
-        .map_err(io::Error::from)?;
+pub(super) fn open_mode_entry(parent: &Dir, name: &str) -> io::Result<OwnedFd> {
+    rustix::fs::openat(parent.as_fd(), name, OPEN_FLAGS, rustix::fs::Mode::empty())
+        .map_err(io::Error::from)
+}
+
+/// Resets the opened entry's mode to owner rwx through its own descriptor name, which pins the
+/// object the open admitted (CWE-367, CWE-59).
+///
+/// # Errors
+///
+/// The operating system's refusal: the descriptor name is not a resettable object on this host.
+#[cfg(target_os = "linux")]
+pub(super) fn set_owner_rwx(entry: &OwnedFd) -> io::Result<()> {
     std::fs::set_permissions(
         format!("/proc/self/fd/{}", entry.as_raw_fd()),
-        std::fs::Permissions::from_mode(OWNER_RWX),
+        std::fs::Permissions::from_mode(OWNER_MODE),
     )
 }
 
-/// Resets the mode of `name` under the held `parent` to owner rwx, never following a final link:
-/// `fchmodat` with `AT_SYMLINK_NOFOLLOW` changes a link's own mode instead of its target, as
-/// Darwin and the BSDs implement it (CWE-367, CWE-59).
-#[cfg(not(target_os = "linux"))]
-fn reset_mode(parent: &Dir, name: &str) -> io::Result<()> {
-    rustix::fs::chmodat(
-        parent.as_fd(),
-        name,
-        rustix::fs::Mode::from_raw_mode(OWNER_RWX),
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-    )
-    .map_err(io::Error::from)
+/// Resets the mode of `name` under the held `parent` to owner rwx, never following a final link.
+/// Linux's `fchmodat` implements no no-follow flag, so the entry is opened
+/// `O_PATH | O_NOFOLLOW | O_DIRECTORY` and the reset goes through that descriptor's own
+/// `/proc/self/fd` name. Darwin and the BSDs implement `fchmodat` with `AT_SYMLINK_NOFOLLOW`,
+/// which changes a link's own mode instead of its target; a link or a file swapped in is refused
+/// either way (CWE-367, CWE-59).
+///
+/// # Errors
+///
+/// The operating system's refusal of the open or the reset.
+pub(super) fn reset_mode(parent: &Dir, name: &str) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        set_owner_rwx(&open_mode_entry(parent, name)?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        rustix::fs::chmodat(
+            parent.as_fd(),
+            name,
+            rustix::fs::Mode::from_raw_mode(OWNER_RWX),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(io::Error::from)
+    }
 }
