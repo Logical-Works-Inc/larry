@@ -188,6 +188,14 @@ where
         }
         if self.journal.command(command.id()).is_none() {
             self.ensure_admitted_tenant(run, command.tenant())?;
+            // The pending set is bounded twice: the whole set by
+            // `MAX_READY_WORK`, and one tenant by its share of that bound, so a
+            // tenant past its share is refused while another still admits
+            // (larry#333).
+            let share = self.settings.tenant_share(MAX_READY_WORK);
+            if self.tenant_pending(command.tenant()) >= share {
+                return Err(RuntimeError::ReadyWorkFull { capacity: share });
+            }
             if self.admitted.len() >= MAX_READY_WORK {
                 return Err(RuntimeError::ReadyWorkFull {
                     capacity: MAX_READY_WORK,
@@ -247,6 +255,14 @@ where
             });
         }
         Ok(())
+    }
+
+    /// How many pending commands one tenant holds in the pending set.
+    fn tenant_pending(&self, tenant: TenantId) -> usize {
+        self.admitted
+            .iter()
+            .filter(|admitted| admitted.command.tenant() == tenant)
+            .count()
     }
 
     /// Whether every effect of `run` has a definite disposition, so a
@@ -409,7 +425,19 @@ where
             display,
         } = held;
         let (id, tenant, kind) = (command.id(), command.tenant(), command.content().kind());
-        if let Err(error) = self.record_command_accepted(id, tenant, kind, run) {
+        // A command that would open a run takes its table and view room before
+        // its acceptance is journalled: an accepted fact the table or the fold
+        // cannot take leaves a journal no restore can reopen (larry#333).
+        let room = if matches!(
+            kind,
+            CommandKind::Submit | CommandKind::Ask | CommandKind::Cancel
+        ) {
+            self.ensure_run_capacity(run, tenant)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = room.and_then(|()| self.record_command_accepted(id, tenant, kind, run))
+        {
             let place = place.min(self.admitted.len());
             self.admitted.insert(
                 place,
@@ -446,10 +474,27 @@ where
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
         let budget = self.promote_admitted(self.settings.max_runs_per_tick, at, report)?;
-        for _ in 0..budget {
+        let share = self.settings.tenant_share(MAX_READY_WORK);
+        let mut attempts = 0_usize;
+        let mut passed_over = 0_usize;
+        while attempts < budget {
+            // Every command ahead was passed over once in this pass, so no
+            // tenant with room is waiting behind a full one.
+            if passed_over >= self.ready.len() {
+                break;
+            }
             let Some(queued) = self.ready.pop_front() else {
-                return Ok(());
+                break;
             };
+            if self.tenant_pending(queued.command.tenant()) >= share {
+                // A tenant at its pending share waits behind the others instead
+                // of holding the head of the queue (larry#333).
+                self.ready.push_back(queued);
+                passed_over = passed_over.saturating_add(1);
+                continue;
+            }
+            passed_over = 0;
+            attempts = attempts.saturating_add(1);
             let id = queued.command.id();
             match self.admit_ready(queued, at, report) {
                 Ok(true) => {}

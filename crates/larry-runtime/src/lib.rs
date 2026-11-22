@@ -108,6 +108,19 @@ pub const MAX_JOURNAL_ENTRIES: usize = 65_536;
 /// Maximum runs the projection tracks.
 pub const MAX_TRACKED_RUNS: usize = 1_024;
 
+/// The largest journal entry ceiling a host may set: `RuntimeSettings::validate`
+/// refuses more with `BadSetting`, in `Runtime::new` and in `restore`, so no
+/// setting can name a bound the runtime cannot hold (larry#333).
+pub(crate) const MAX_JOURNAL_CAPACITY: usize = 1_048_576;
+
+/// The largest run-table ceiling a host may set, refused past it the same way
+/// [`MAX_JOURNAL_CAPACITY`] is (larry#333).
+pub(crate) const MAX_RUN_CAPACITY: usize = 65_536;
+
+/// The largest tenant count a host may declare (larry#333): every shared cap is
+/// divided by it, so one tenant always keeps at least one slot of each.
+pub(crate) const MAX_TENANTS: usize = 65_536;
+
 /// The default ceiling on pending questions (Cell 05 bounds), and the largest
 /// value a host may configure: `RuntimeSettings::validate` refuses more with
 /// `BadSetting`, in `Runtime::new` and in `restore` (larry#295).

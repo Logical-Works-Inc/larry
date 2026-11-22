@@ -390,7 +390,10 @@ where
             || self.cancel_pending(run)
     }
 
-    /// How many questions are pending at `at`.
+    /// How many questions are pending at `at`, every tenant together.
+    ///
+    /// This is the `max_pending_questions` bound: the share below is a second
+    /// bound beside it, never a replacement (larry#295, larry#333).
     fn pending_questions(&self, at: SystemTime) -> usize {
         self.questions
             .asked
@@ -398,6 +401,22 @@ where
             .filter(|asked| {
                 asked.status(at, self.run_closed(asked.question.subject.run))
                     == QuestionStatus::Pending
+            })
+            .count()
+    }
+
+    /// How many of `tenant`'s questions are pending at `at`.
+    ///
+    /// The share is per tenant: one tenant's unanswered questions never refuse
+    /// another tenant's ask (larry#333).
+    fn tenant_pending_questions(&self, tenant: TenantId, at: SystemTime) -> usize {
+        self.questions
+            .asked
+            .values()
+            .filter(|asked| {
+                asked.tenant == tenant
+                    && asked.status(at, self.run_closed(asked.question.subject.run))
+                        == QuestionStatus::Pending
             })
             .count()
     }
@@ -455,9 +474,14 @@ where
             }
             .into());
         }
+        // The global bound holds first, then the tenant's share beside it.
         let capacity = self.settings.max_pending_questions;
         if self.pending_questions(at) >= capacity {
             return Err(QuestionError::PendingFull { capacity }.into());
+        }
+        let share = self.settings.tenant_share(capacity);
+        if self.tenant_pending_questions(tenant, at) >= share {
+            return Err(QuestionError::PendingFull { capacity: share }.into());
         }
         Ok(())
     }
