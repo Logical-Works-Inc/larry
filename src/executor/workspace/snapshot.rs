@@ -166,15 +166,19 @@ fn too_many(what: &'static str, limit: usize) -> ExecError {
 /// Kills and reaps a child whose output is no longer wanted, then returns `error`, or the
 /// failure that names both when the child could not be ended.
 fn abandon(child: &mut std::process::Child, error: ExecError) -> ExecError {
-    if let Err(cause) = child.kill() {
-        return ExecError::Workspace(io::Error::other(format!(
-            "{error}; the listing child could not be killed: {cause}"
-        )));
+    if let Err(fault) = child.kill() {
+        return ExecError::cleanup(
+            error,
+            "the listing child could not be killed",
+            ExecError::Reap(fault),
+        );
     }
-    if let Err(cause) = child.wait() {
-        return ExecError::Workspace(io::Error::other(format!(
-            "{error}; the listing child could not be reaped: {cause}"
-        )));
+    if let Err(fault) = child.wait() {
+        return ExecError::cleanup(
+            error,
+            "the listing child could not be reaped",
+            ExecError::Reap(fault),
+        );
     }
     error
 }
@@ -305,7 +309,9 @@ fn walk(origin: &Path, limits: Limits) -> Result<Vec<PathBuf>, ExecError> {
 }
 
 /// Whether an entry of this kind is copied: a regular file or a symlink. A directory is
-/// walked, not copied, and a fifo, a socket or a device has no bytes to copy.
+/// walked, not copied, and a fifo, a socket or a device has no bytes to copy. The unix file
+/// types are read only where the platform has them (larry#343).
+#[cfg(unix)]
 fn copies_as_entry(kind: std::fs::FileType) -> bool {
     use std::os::unix::fs::FileTypeExt as _;
     kind.is_symlink()
@@ -314,6 +320,13 @@ fn copies_as_entry(kind: std::fs::FileType) -> bool {
             || kind.is_socket()
             || kind.is_block_device()
             || kind.is_char_device())
+}
+
+/// Whether an entry of this kind is copied: a regular file or a symlink; every other kind
+/// has no bytes to copy.
+#[cfg(not(unix))]
+fn copies_as_entry(kind: std::fs::FileType) -> bool {
+    kind.is_file() || kind.is_symlink()
 }
 
 /// Whether `relative` stays beneath the folder it is joined to: only named components,

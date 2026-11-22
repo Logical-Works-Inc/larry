@@ -13,7 +13,7 @@ mod set;
 
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write as _};
 use std::num::TryFromIntError;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -104,6 +104,8 @@ struct Origin {
     lock: PathBuf,
     /// The held lock; the kernel releases it when this process dies.
     _held: File,
+    /// Whether `remove` ran, so `Drop` does not attempt the cleanup twice.
+    cleaned: bool,
 }
 
 impl Origin {
@@ -131,6 +133,7 @@ impl Origin {
             lock: origin_lock_path(&eval, &name),
             dir,
             _held: held,
+            cleaned: false,
         };
         for file in &task.files {
             let target = origin.dir.join(&file.0);
@@ -158,12 +161,46 @@ impl Origin {
     ///
     /// The directory or the lock file could not be removed for a reason other
     /// than already being gone.
-    fn remove(self) -> io::Result<()> {
+    fn remove(mut self) -> io::Result<()> {
+        self.cleaned = true;
+        self.cleanup()
+    }
+
+    /// Removes the directory and then its lock file; a name already gone has done its job.
+    fn cleanup(&self) -> io::Result<()> {
         let directory = absent_is_removed(fs::remove_dir_all(&self.dir));
         let lock = absent_is_removed(fs::remove_file(&self.lock));
         directory?;
         lock
     }
+}
+
+impl Drop for Origin {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+        // A partial origin from a refused write or seed is removed here; anything this
+        // cannot remove is unlocked, so the next run's sweep owns it and reports it
+        // (larry#343).
+        if let Err(cause) = self.cleanup() {
+            report_origin_kept(&self.dir, &cause);
+        }
+    }
+}
+
+/// Reports an origin left for the next sweep as one typed JSON line on standard error, the
+/// operator's channel (larry#343).
+fn report_origin_kept(entry: &std::path::Path, cause: &io::Error) {
+    let event = lgwks_std::json::json!({
+        "sweep": "origin-kept",
+        "entry": format!("{}", entry.display()),
+        "refused": cause.to_string(),
+    });
+    let mut err = io::stderr().lock();
+    let written = writeln!(err, "{event}");
+    drop(written);
 }
 
 /// A removal of something that is already gone has done its job; any other fault stands.
@@ -210,13 +247,17 @@ fn tokens(report: &Report) -> Option<Spent> {
 fn run_one(settings: &Settings, index: usize, task: &EvalTask) -> Result<Outcome, EvalError> {
     let origin = Origin::create(settings, index, task)?;
     let ran = run_in(&origin, settings, task);
-    let removed = origin.remove().map_err(|cause| EvalError::Origin {
-        id: task.id.clone(),
-        cause,
-    });
-    let outcome = ran?;
-    removed?;
-    Ok(outcome)
+    finish_origin(origin, ran)
+}
+
+/// Removes the origin, reporting a fault the next sweep owns, and returns the run's own
+/// result: a cleanup failure never aborts the arm (larry#343).
+fn finish_origin(origin: Origin, ran: Result<Outcome, EvalError>) -> Result<Outcome, EvalError> {
+    let entry = origin.dir.clone();
+    if let Err(cause) = origin.remove() {
+        report_origin_kept(&entry, &cause);
+    }
+    ran
 }
 
 /// Runs `task` in its written `origin` and records how it ended.

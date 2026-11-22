@@ -62,7 +62,8 @@ pub fn serve<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<()> {
     // then runs with no executor and says why, never on a default it fell back to.
     let executor = match crate::executor::process_env() {
         Ok(read) => tools::Executor::from_env(read),
-        Err(error) => tools::Executor::Absent(error.to_string()),
+        // The typed refusal names the variable; every tool call answers it (larry#343).
+        Err(error) => tools::Executor::Absent(error),
     };
     serve_bounded(reader, writer, wire::MAX_FRAME_BYTES, &executor)
 }
@@ -202,7 +203,7 @@ mod tests {
     /// Serves `input` with no executor behind it and returns every reply line parsed.
     fn replies(input: &str, max: usize) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         let mut out = Vec::new();
-        let executor = Executor::Absent(String::from("no executor in a unit test"));
+        let executor = Executor::Absent(crate::executor::ExecError::StateDirUnset);
         serve_bounded(
             Cursor::new(input.as_bytes().to_vec()),
             &mut out,

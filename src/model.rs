@@ -174,6 +174,18 @@ impl fmt::Display for ModelError {
     }
 }
 
+/// Whether a member of a refusal's code names the context window: the stem itself, or the
+/// stem followed by an underscore, so `context_length_exceeded` reads and
+/// `max_context_length` does not (larry#295, larry#343).
+fn names_context_code(member: &str) -> bool {
+    CONTEXT_CODES.iter().any(|stem| {
+        member == *stem
+            || member
+                .strip_prefix(*stem)
+                .is_some_and(|rest| rest.starts_with('_'))
+    })
+}
+
 impl ModelError {
     /// Whether the gateway refused the request as too large for the model: a 413,
     /// or a 400 whose `error.code` or reason names the context window (larry#235,
@@ -188,9 +200,18 @@ impl ModelError {
             400 => {
                 // The wire puts `error.code` first (`refusal_detail`), so a code is
                 // read only there: a message that merely mentions a parameter such
-                // as `max_context_length` is no overflow (larry#295).
+                // as `max_context_length` is no overflow, and a namespaced code is read
+                // as one of its members, not as a prefix of the whole reason (larry#295,
+                // larry#343).
                 let reason = detail.to_ascii_lowercase();
-                CONTEXT_CODES.iter().any(|code| reason.starts_with(code))
+                let mut code = reason.as_str();
+                if let Some((head, _)) = reason.split_once(':') {
+                    code = head;
+                }
+                code.split(|character: char| {
+                    !(character.is_ascii_alphanumeric() || character == '_')
+                })
+                .any(names_context_code)
                     || CONTEXT_OVERFLOW
                         .iter()
                         .any(|phrase| reason.contains(phrase))

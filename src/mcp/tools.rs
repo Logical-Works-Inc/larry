@@ -40,8 +40,8 @@ pub(super) enum Executor {
     /// `LARRY_STATE_DIR` and the model settings were read. Boxed so the
     /// settings (which now carry the policy set too) stay off the enum's size.
     Connected(Box<Settings>),
-    /// The settings could not be read; the reason names the variable.
-    Absent(String),
+    /// The settings could not be read; the typed reason names the variable (larry#343).
+    Absent(ExecError),
 }
 
 impl Executor {
@@ -51,7 +51,7 @@ impl Executor {
     ) -> Executor {
         match Settings::from_env(read) {
             Ok(settings) => Executor::Connected(Box::new(settings)),
-            Err(error) => Executor::Absent(error.to_string()),
+            Err(error) => Executor::Absent(error),
         }
     }
 }
@@ -125,7 +125,7 @@ fn submit_task(arguments: &Map, executor: &Executor) -> Value {
         Err(error) => return tool_error("invalid_arguments", &error.to_string()),
     };
     let settings = match *executor {
-        Executor::Absent(ref reason) => return tool_error(NOT_CONNECTED, reason),
+        Executor::Absent(ref reason) => return tool_error(NOT_CONNECTED, &reason.to_string()),
         Executor::Connected(ref settings) => settings,
     };
     let task: Task = match Task::shell_via(
@@ -366,12 +366,42 @@ fn is_repo_relative(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Executor, call, list, sorted_by_name};
+    use crate::executor::ExecError;
     use crate::json_at::At;
     use lgwks_std::json::{Value, json};
 
     /// A process with no executor behind it.
     fn absent() -> Executor {
-        Executor::Absent(String::from("exec LARRY_STATE_DIR is unset or empty"))
+        Executor::Absent(ExecError::StateDirUnset)
+    }
+
+    /// A non-UTF-8 variable Larry reads is a typed refusal that names the variable in the
+    /// tool result, so an operator knows what to fix (larry#343).
+    #[test]
+    fn a_non_utf8_variable_names_itself_in_the_tool_result()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let executor = Executor::Absent(ExecError::NotUnicode {
+            name: String::from("LARRY_MODEL_KEY"),
+        });
+        let task = json!({"goal": "g", "repo": "r", "files": ["f"], "acceptance": ["c"]});
+        let arguments = task.as_object().ok_or("the task is an object")?;
+        let reply = call("larry_submit_task", arguments, &executor).ok_or("the tool is listed")?;
+        assert_eq!(
+            reply.get("isError").and_then(Value::as_bool),
+            Some(true),
+            "a refusal is never success"
+        );
+        let message = reply
+            .get("structuredContent")
+            .and_then(|content| content.get("error"))
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .ok_or("the refusal carries its message")?;
+        assert!(
+            message.contains("LARRY_MODEL_KEY") && message.contains("not UTF-8"),
+            "the refusal names the variable: {message}"
+        );
+        Ok(())
     }
 
     /// Source: MCP 2026-07-28 Tools, "Servers SHOULD return tools in a

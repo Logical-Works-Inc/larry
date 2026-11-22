@@ -14,6 +14,7 @@ use lgwks_std::seeded::{DrawError, Seeded};
 use super::score::{
     Ending, Outcome, PriceFault, Prices, Scorecard, Spent, card, parse_price, percentile, usd,
 };
+use super::{EvalTask, Origin, finish_origin};
 use crate::sim_error::SimError;
 
 /// What every test returns.
@@ -480,6 +481,79 @@ fn check_rows(seed: u64, scored: &Scorecard, outcomes: &[Outcome]) -> Result<(),
             "seed {seed}: each result names its written tokens"
         );
     }
+    Ok(())
+}
+
+/// Settings over `state` with the test process's PATH.
+fn settings_for(state: &std::path::Path) -> Result<crate::executor::Settings, SimError> {
+    let state = state.to_string_lossy().into_owned();
+    let path = std::env::var("PATH")?;
+    let settings = crate::executor::Settings::from_env(move |name| match name {
+        "LARRY_STATE_DIR" => Some(state.clone()),
+        "PATH" => Some(path.clone()),
+        _ => None,
+    })?;
+    Ok(settings)
+}
+
+/// A write that fails inside a new origin takes its partial tree and lock with it, so
+/// nothing waits for the next sweep (larry#343).
+#[test]
+fn a_partial_origin_removes_itself_when_creation_fails() -> TestResult {
+    let state = crate::executor::sim_tree::scratch("larry-eval-partial")?;
+    let settings = settings_for(&state)?;
+    let task = EvalTask {
+        id: String::from("partial"),
+        files: vec![
+            (String::from("a"), String::from("x")),
+            (String::from("a/b"), String::from("y")),
+        ],
+        goal: String::from("g"),
+        write: Vec::new(),
+        acceptance: Vec::new(),
+    };
+    let refused = Origin::create(&settings, 0, &task);
+    assert!(refused.is_err(), "a file cannot be written under a file");
+    let eval = state.join("eval");
+    assert!(
+        std::fs::read_dir(&eval)?.next().is_none(),
+        "the partial origin and its lock are gone"
+    );
+    Ok(())
+}
+
+/// A cleanup that cannot remove its origin never fails the arm: the entry is left for the
+/// next run's sweep and the task's outcome stands (larry#343).
+#[test]
+fn a_refused_origin_cleanup_keeps_the_arms_outcome() -> TestResult {
+    let state = crate::executor::sim_tree::scratch("larry-eval-kept")?;
+    let eval = state.join("eval");
+    std::fs::create_dir_all(&eval)?;
+    let dir = eval.join("origin-test-0");
+    std::fs::write(&dir, b"not a directory")?;
+    let lock = eval.join("origin-test-0.lock");
+    let held = std::fs::File::create(&lock)?;
+    let origin = Origin {
+        dir: dir.clone(),
+        lock,
+        _held: held,
+        cleaned: false,
+    };
+    let outcome = Outcome {
+        id: String::from("kept"),
+        ending: Ending::Accepted,
+        micros: 7,
+        tokens: None,
+    };
+    let finished = finish_origin(origin, Ok(outcome.clone()));
+    assert!(
+        matches!(finished, Ok(ref kept) if *kept == outcome),
+        "the arm's outcome stands"
+    );
+    assert!(
+        dir.exists(),
+        "the tree the cleanup could not remove is left for the sweep"
+    );
     Ok(())
 }
 

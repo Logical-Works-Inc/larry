@@ -224,10 +224,12 @@ impl Workspace {
         let detail = match errors {
             Ok(Ok(kept)) => String::from_utf8_lossy(&kept).trim().to_owned(),
             Ok(Err(source)) => return Err(ExecError::Workspace(source)),
-            Err(panic) => {
-                return Err(ExecError::Workspace(io::Error::other(format!(
-                    "the diff stderr reader panicked: {panic:?}"
-                ))));
+            Err(payload) => {
+                let text = format!(
+                    "the diff stderr reader panicked: {}",
+                    crate::panic_text(payload.as_ref())
+                );
+                return Err(ExecError::Workspace(io::Error::other(text)));
             }
         };
         let status = child.wait().map_err(spawn_error)?;
@@ -267,27 +269,42 @@ static STRANDED: AtomicU64 = AtomicU64::new(0);
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        if strands(&remove_workspace(&self.root)) {
-            STRANDED.fetch_add(1, Ordering::Relaxed);
+        if let Some(refused) = stranded_cause(&remove_workspace(&self.root)) {
+            let stranded = STRANDED.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            let event = stranded_event(&self.root, &refused, stranded);
+            let mut err = io::stderr().lock();
+            let written = writeln!(err, "{event}");
+            drop(written);
         }
     }
 }
 
-/// Whether a removal left a workspace behind: a tree already gone is not stranded, and every
-/// other refusal is, so the next start's sweep collects it (larry#334).
-fn strands(removed: &Result<(), ExecError>) -> bool {
+/// One stranded workspace as the operator's channel reads it: the tree kept, why, and how
+/// many this process has stranded (larry#343).
+fn stranded_event(root: &Path, refused: &str, stranded: u64) -> lgwks_std::json::Value {
+    lgwks_std::json::json!({
+        "sweep": "stranded",
+        "entry": format!("{}", root.display()),
+        "refused": refused,
+        "stranded": stranded,
+    })
+}
+
+/// Why a removal left a workspace behind, or `None` when nothing was: a tree already gone is
+/// not stranded, and every other refusal is, so the next start's sweep collects it
+/// (larry#334, larry#343).
+fn stranded_cause(removed: &Result<(), ExecError>) -> Option<String> {
     match *removed {
-        Ok(()) => false,
-        Err(ExecError::Workspace(ref error)) => error.kind() != io::ErrorKind::NotFound,
-        Err(ref other) => {
-            // A refusal that is not the file system's own is still a stranded tree; it is
-            // named on the operator's channel, because a destructor cannot return it.
-            let mut err = io::stderr().lock();
-            let written = writeln!(err, "larry exec: workspace not removed: {other}");
-            drop(written);
-            true
-        }
+        Ok(()) => None,
+        Err(ExecError::Workspace(ref error)) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(ref cause) => Some(cause.to_string()),
     }
+}
+
+/// Whether a removal left a workspace behind (larry#334).
+#[cfg(test)]
+fn strands(removed: &Result<(), ExecError>) -> bool {
+    stranded_cause(removed).is_some()
 }
 
 /// Resets `root` and every directory beneath it to owner rwx before the tree is removed

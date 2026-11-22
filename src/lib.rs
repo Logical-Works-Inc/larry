@@ -76,6 +76,18 @@ pub fn diagnose(program: &str, message: &str) -> std::io::Result<()> {
     stderr.write_all(b"\n")
 }
 
+/// The text a panic payload carries: its `&str` or `String`, else a fixed line saying it
+/// carried none. The one reader of panic payloads this repository has (larry#343).
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return String::from(*text);
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.clone();
+    }
+    String::from("non-string panic payload")
+}
+
 /// Maximum command bytes, excluding the line terminator.
 pub const MAX_INPUT: usize = 4096;
 /// Maximum anchored notes retained by one disposable session.

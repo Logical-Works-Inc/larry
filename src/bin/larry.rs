@@ -265,7 +265,16 @@ impl fmt::Display for ModelCheck {
     }
 }
 
-impl std::error::Error for ModelCheck {}
+impl std::error::Error for ModelCheck {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Prompt(ref cause) | Self::Reply(ref cause) => Some(cause),
+            Self::Env(ref cause) => Some(cause),
+            Self::Config(ref cause) | Self::Exchange(ref cause) => Some(cause),
+            Self::EmptyPrompt => None,
+        }
+    }
+}
 
 /// `larry model`: send standard input as one user turn to the gateway that
 /// `LARRY_MODEL_*` names and print the reply. The operator's check that a key
@@ -373,7 +382,14 @@ impl<E: fmt::Display> fmt::Display for Failed<E> {
     }
 }
 
-impl<E: fmt::Debug + fmt::Display> std::error::Error for Failed<E> {}
+impl<E: fmt::Debug + fmt::Display + std::error::Error + 'static> std::error::Error for Failed<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Env(ref cause) => Some(cause),
+            Self::Run(ref cause) => Some(cause),
+        }
+    }
+}
 
 /// `larry key`: print the state directory's receipt public key as 64 hex characters,
 /// the value an offline verifier sets as `LARRY_RECEIPT_KEY`.
@@ -403,7 +419,15 @@ impl fmt::Display for EvalRun {
     }
 }
 
-impl std::error::Error for EvalRun {}
+impl std::error::Error for EvalRun {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match *self {
+            Self::Exec(ref cause) => Some(cause),
+            Self::Price(ref cause) => Some(cause),
+            Self::Eval(ref cause) => Some(cause),
+        }
+    }
+}
 
 /// `larry eval`: run every task of the matched set on standard input as one arm (the
 /// model `LARRY_MODEL_*` pins, priced by `LARRY_EVAL_PRICE_IN`/`_OUT`) and print its
@@ -613,7 +637,42 @@ fn main() -> ExitCode {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{COMMANDS, MAX_ARGUMENTS, Refusal, bounded, find, help_text};
+    use super::{
+        COMMANDS, EvalRun, Failed, MAX_ARGUMENTS, ModelCheck, Refusal, bounded, find, help_text,
+    };
+
+    /// Every subcommand refusal keeps its cause as a source, never an empty `Error` impl
+    /// (larry#343).
+    #[test]
+    fn every_command_refusal_keeps_its_source() {
+        use std::error::Error as _;
+
+        use larry_demo::eval::{EvalError, PriceError};
+        use larry_demo::executor::ExecError;
+        use larry_demo::model::ModelError;
+
+        let model = ModelCheck::Prompt(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        assert!(model.source().is_some(), "model prompt");
+        let model = ModelCheck::Config(ModelError::MissingKey);
+        assert!(model.source().is_some(), "model config");
+        let model = ModelCheck::Env(ExecError::StateDirUnset);
+        assert!(model.source().is_some(), "model env");
+        assert!(
+            ModelCheck::EmptyPrompt.source().is_none(),
+            "a refusal with no cause has no source"
+        );
+        let failed: Failed<std::io::Error> = Failed::Env(ExecError::StateDirUnset);
+        assert!(failed.source().is_some(), "a failed environment read");
+        let failed: Failed<std::io::Error> =
+            Failed::Run(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(failed.source().is_some(), "a failed subcommand");
+        let eval = EvalRun::Exec(ExecError::StateDirUnset);
+        assert!(eval.source().is_some(), "eval exec");
+        let eval = EvalRun::Price(PriceError::Missing { variable: "P" });
+        assert!(eval.source().is_some(), "eval price");
+        let eval = EvalRun::Eval(EvalError::ModelUnconfigured);
+        assert!(eval.source().is_some(), "eval task");
+    }
 
     /// Every row is found by its own name and by no other, and help prints it
     /// once with its variables: the table is the dispatcher, so there is no
