@@ -1,0 +1,25 @@
+# The advisory gate (larry#339): `.github/workflows/ci.yml` runs
+# `cargo deny check advisories` over the lockfile on every pull request.
+# A vulnerability or an unsound API in any locked crate is an error; a yanked
+# crate is a stale lock; an unmaintained crate is judged wherever it sits in
+# the graph. An accepted advisory is one `ignore` row naming its id and why
+# this tree cannot fix it, and the row goes when its owner ships a fix.
+
+# The whole lockfile is judged, optional edges included: a crate reached only
+# by `--features rerank` is still a crate this tree compiles on request.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = [
+    # paste 1.0.15 is unmaintained and has no later release. It is a proc
+    # macro under candle and tokenizers, reached only through the optional
+    # `rerank` feature (lgwks_deps `ml-candle`/`ml-tokenizers`), and it runs
+    # no product code. Retire this row when the estate's ML storefront drops
+    # it or ships a maintained replacement.
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is unmaintained with no fixed release; it is reached only by the optional rerank feature through candle and tokenizers" },
+]
