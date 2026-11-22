@@ -659,6 +659,15 @@ fn run_task(
     ledger: &Ledger,
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Report, ExecError> {
+    // A brief lets the model write the tree, so the command that runs next is model-chosen
+    // code; it runs confined to the workspace. `larry_submit_task` confines too, because a
+    // remote peer drives the run and no person watches a command (larry#324, ADR 0088).
+    let confined = task.confines_acceptance();
+    // A host that cannot confine refuses the task here, before the route, the clone or a
+    // command, with the typed refusal a terminal session already uses (larry#243).
+    if confined {
+        confine::supported(confine::Platform::host()).map_err(ExecError::Confine)?;
+    }
     let step = model_step(task, settings, ledger)?;
     let workspace = Workspace::create(
         &settings.state_dir,
@@ -686,13 +695,34 @@ fn run_task(
             Some(records)
         }
     };
+    let confine = if confined {
+        // The scratch directory sits beside the tree and outside it, so a command's scratch
+        // files never enter the diff (larry#243).
+        std::fs::create_dir_all(workspace.scratch()).map_err(ExecError::Workspace)?;
+        let confine = confine::Confine::new(
+            confine::Platform::host(),
+            &settings.state_dir,
+            workspace.path(),
+            &workspace.scratch(),
+        )
+        .map_err(ExecError::Confine)?;
+        // The host proves it enforces the confinement before a command runs (larry#243).
+        confine.probe(&settings.path).map_err(ExecError::Confine)?;
+        Some(confine)
+    } else {
+        None
+    };
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
         // An acceptance command has no person watching it who could cancel it,
         // so only the timeout ends it (larry#242).
+        let place = match confine {
+            Some(ref confine) => Place::Confined(confine),
+            None => Place::Open(workspace.path()),
+        };
         let result = run_command(
             argv,
-            Place::Open(workspace.path()),
+            place,
             &settings.path,
             settings.timeout,
             ledger,
