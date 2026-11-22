@@ -180,10 +180,20 @@ fn link_or_error(
             Ok(None)
         }
         Ok(_) => Err(cause),
-        Err(stat) if stat.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(stat) => Err(stat),
+        Err(stat) => match stat.kind() {
+            io::ErrorKind::NotFound => Ok(None),
+            _ => Err(stat),
+        },
     }
 }
+
+/// The flags Linux's no-follow reset opens with: the path itself, refused if it is a link, refused
+/// unless it is a directory, and not inherited by a child (CWE-367, CWE-59).
+#[cfg(target_os = "linux")]
+pub(super) const OPEN_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::PATH
+    .union(rustix::fs::OFlags::NOFOLLOW)
+    .union(rustix::fs::OFlags::DIRECTORY)
+    .union(rustix::fs::OFlags::CLOEXEC);
 
 /// Resets the mode of `name` under the held `parent` to owner rwx, never following a final link.
 /// Linux's `fchmodat` implements no no-follow flag, so the entry is opened
@@ -192,16 +202,8 @@ fn link_or_error(
 /// refused by the open itself (CWE-367, CWE-59).
 #[cfg(target_os = "linux")]
 pub(super) fn reset_mode(parent: &Dir, name: &str) -> io::Result<()> {
-    let entry = rustix::fs::openat(
-        parent.as_fd(),
-        name,
-        rustix::fs::OFlags::PATH
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
+    let entry = rustix::fs::openat(parent.as_fd(), name, OPEN_FLAGS, rustix::fs::Mode::empty())
+        .map_err(io::Error::from)?;
     std::fs::set_permissions(
         format!("/proc/self/fd/{}", entry.as_raw_fd()),
         std::fs::Permissions::from_mode(OWNER_RWX),

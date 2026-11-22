@@ -531,6 +531,14 @@ fn sim_a_kept_link_is_one_json_event() -> TestResult {
 fn sim_a_linux_mode_reset_opens_only_a_directory_and_never_a_link() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let state = scratch_directory()?;
+    assert_eq!(
+        super::mode::OPEN_FLAGS,
+        rustix::fs::OFlags::PATH
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC,
+        "the open carries every flag the no-follow reset needs"
+    );
     let parent = &*state;
     let sealed = parent.join("sealed");
     std::fs::create_dir(&sealed)?;
