@@ -273,7 +273,8 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
 }
 
 /// The card's cost per accepted task: `unknown` when a cost is missing, else the floor
-/// share of the known sum, and absent only for a complete card with no accepted task.
+/// share of the known sum, and absent only for a complete card with no accepted task. The
+/// dollar field says the same thing as the picodollar field in every case (larry#340).
 fn check_share(
     seed: u64,
     sheet: &Value,
@@ -281,14 +282,27 @@ fn check_share(
     known: u128,
     complete: bool,
 ) -> TestResult {
+    let dollars = &sheet["cost_per_accepted_task_usd"];
     match sheet["cost_per_accepted_task_picousd"].as_str() {
-        Some("unknown") => assert!(
-            !complete,
-            "seed {seed}: unknown only when a cost is missing"
-        ),
+        Some("unknown") => {
+            assert!(
+                !complete,
+                "seed {seed}: unknown only when a cost is missing"
+            );
+            assert_eq!(
+                dollars.as_str(),
+                Some("unknown"),
+                "seed {seed}: the dollar share is unknown with the picodollar share"
+            );
+        }
         Some(text) => {
             assert!(complete, "seed {seed}: a number only over a complete sum");
             let share = wide_digits(text).ok_or("share digits")?;
+            assert_eq!(
+                dollars.as_str().and_then(read_usd),
+                Some(share),
+                "seed {seed}: the dollar share is the picodollar share"
+            );
             let floor = share.checked_mul(accepted).ok_or("overflow")?;
             let ceiling = share.saturating_add(1).saturating_mul(accepted);
             assert!(
@@ -296,10 +310,16 @@ fn check_share(
                 "seed {seed}: floor share"
             );
         }
-        None => assert!(
-            complete && accepted == 0,
-            "seed {seed}: no share only for a complete card without an accepted task"
-        ),
+        None => {
+            assert!(
+                complete && accepted == 0,
+                "seed {seed}: no share only for a complete card without an accepted task"
+            );
+            assert!(
+                dollars.is_null(),
+                "seed {seed}: no dollar share where there is no picodollar share"
+            );
+        }
     }
     Ok(())
 }
