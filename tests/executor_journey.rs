@@ -279,6 +279,12 @@ fn a_fixture_origin_starts_no_background_maintenance() -> TestResult {
             "-qm",
             "probe",
         ])
+        // The probe commit belongs to the fixture origin. A hook that exports GIT_DIR, GIT_WORK_TREE,
+        // GIT_INDEX_FILE or GIT_COMMON_DIR would send it into the repository under test (larry#366).
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .env("GIT_TRACE", "1")
         .output()?;
     let trace = String::from_utf8_lossy(&output.stderr);

@@ -86,6 +86,21 @@ approved_by = "srinji-kaggss (Director)"
 approved_on = "2026-11-16"
 review = "https://github.com/Logical-Works-Inc/larry/issues/239"
 
+[[approved]]
+crate = "rustix"
+tier = "boundary"
+version = "=1.1.6"
+license = "Apache-2.0 OR MIT"
+owner = "larry-demo"
+capability = "handle-relative-fs"
+source = "registry"
+allowed_consumers = "larry-demo"
+allowed_kinds = "normal"
+reason = "`openat` and `chmodat` reset a workspace directory's mode from its held descriptor; `lgwks_std::fs::capability::Dir` has no mode-reset call, and `std::fs::set_permissions` follows a link swapped in after its check (CWE-367, CWE-59; larry#366). rustix is already in the lock through `lgwks_std` `fs-raw`, so this edge adds no crate. Estate gap: Logical-Works-Inc/logicalworks-crates#1113; retire this row when it closes."
+approved_by = "rust-guard GAP law (Director 2026-11-03): any reproducible, advisory-free OSS crate cited to an open gap issue"
+approved_on = "2026-11-21"
+review = "https://github.com/Logical-Works-Inc/logicalworks-crates/issues/1113"
+
 # ── bevy_ecs: SUPERSEDED, NOT AN EDGE ────────────────────────────────────────
 #
 # The Director's 2026-09-20 direction ("work on the lowest invariant, the

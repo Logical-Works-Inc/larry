@@ -10,6 +10,8 @@
 use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
+#[cfg(unix)]
+use super::mode::reset_with;
 use super::{
     hold_origin, origin_lock_path, remove_workspace, strands, sweep, sweep_dir, sweep_origins,
 };
@@ -360,5 +362,223 @@ fn sim_a_probe_error_keeps_its_workspace_and_the_sweep_goes_on() -> TestResult {
         !ws.join("dead").exists(),
         "a workspace the probe says is dead is still removed"
     );
+    Ok(())
+}
+
+/// The mode a sentinel outside the tree carries: owner read and write, group read.
+#[cfg(unix)]
+const SENTINEL_MODE: u32 = 0o640;
+
+/// A directory judged a directory is swapped for a link to a file outside the tree before its
+/// mode is reset, and that file's mode stays byte-identical. Source: CWE-367 (TOCTOU) and CWE-59
+/// (link following); the child that left the command's process group is still alive while the
+/// workspace drops, so the swap window is real (larry#334, larry#366, ADR 0082).
+#[cfg(unix)]
+#[test]
+fn sim_a_link_swapped_in_between_the_check_and_the_reset_keeps_the_sentinels_mode() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let state = scratch_directory()?;
+    let workspace = state.join("ws").join("run");
+    let sealed = workspace.join("tree").join("sealed");
+    std::fs::create_dir_all(&sealed)?;
+    std::fs::write(sealed.join("file"), b"x")?;
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000))?;
+    let sentinel = state.join("sentinel");
+    std::fs::write(&sentinel, b"outside the tree")?;
+    std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(SENTINEL_MODE))?;
+    let moved = workspace.join("tree").join("sealed-before");
+    let links = reset_with(&workspace, &mut |at| {
+        if at == sealed.as_path() {
+            std::fs::rename(&sealed, &moved)?;
+            std::os::unix::fs::symlink(&sentinel, &sealed)?;
+        }
+        Ok(())
+    })?;
+    assert_eq!(
+        std::fs::metadata(&sentinel)?.permissions().mode() & 0o777,
+        SENTINEL_MODE,
+        "the file a swapped-in link points at keeps its mode"
+    );
+    assert_eq!(links.len(), 1, "the swapped-in link is one typed event");
+    assert_eq!(
+        links.first().map(|kept| kept.entry()),
+        Some(sealed.as_path()),
+        "the reported entry is the swapped name"
+    );
+    Ok(())
+}
+
+/// A link found where a directory was is kept as it is and reported once, and the walk goes on: a
+/// mode-000 directory beneath a mode-500 one is still reset and the sentinel is never followed.
+/// Source: POSIX file modes and CWE-59 (larry#366).
+#[cfg(unix)]
+#[test]
+fn sim_a_link_found_where_a_directory_was_is_one_typed_event_and_the_walk_goes_on() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let state = scratch_directory()?;
+    let workspace = state.join("ws").join("run");
+    let sealed = workspace.join("sealed");
+    let nested = sealed.join("nested");
+    std::fs::create_dir_all(&nested)?;
+    std::fs::write(nested.join("file"), b"x")?;
+    std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000))?;
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500))?;
+    let sentinel = state.join("sentinel");
+    std::fs::write(&sentinel, b"outside the tree")?;
+    std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(SENTINEL_MODE))?;
+    let link = workspace.join("link");
+    std::os::unix::fs::symlink(&sentinel, &link)?;
+    let links = reset_with(&workspace, &mut |_| Ok(()))?;
+    assert_eq!(
+        std::fs::metadata(&sentinel)?.permissions().mode() & 0o777,
+        SENTINEL_MODE,
+        "a link to a file outside the tree is never followed"
+    );
+    assert_eq!(links.len(), 1, "the link is one typed event");
+    assert_eq!(
+        links.first().map(|kept| kept.entry()),
+        Some(link.as_path()),
+        "the reported entry is the link"
+    );
+    assert_eq!(
+        std::fs::metadata(&nested)?.permissions().mode() & 0o777,
+        0o700,
+        "a mode-000 directory is reset through its held parent"
+    );
+    assert_eq!(
+        std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
+        0o700,
+        "a mode-500 directory is reset before its entries"
+    );
+    Ok(())
+}
+
+/// A name that vanishes before it is judged is skipped, a plain file is skipped, and the walk goes
+/// on: the sibling directory is still reset and nothing outside the tree is touched. Source: the
+/// POSIX `*at` family (a name can go away between a listing and a stat) and CWE-367 (larry#366).
+#[cfg(unix)]
+#[test]
+fn sim_an_entry_that_vanishes_as_the_walk_reaches_it_is_skipped() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    let state = scratch_directory()?;
+    let workspace = state.join("ws").join("run");
+    let keep = workspace.join("keep");
+    let gone = workspace.join("gone");
+    std::fs::create_dir_all(&keep)?;
+    std::fs::create_dir_all(&gone)?;
+    std::fs::write(workspace.join("plain"), b"x")?;
+    std::fs::set_permissions(&keep, std::fs::Permissions::from_mode(0o500))?;
+    let links = reset_with(&workspace, &mut |at| {
+        if at == gone.as_path() {
+            std::fs::remove_dir(&gone)?;
+        }
+        Ok(())
+    })?;
+    assert!(links.is_empty(), "a vanished name and a file are no events");
+    assert!(
+        !gone.exists(),
+        "the name the seam removed is skipped, never opened"
+    );
+    assert_eq!(
+        std::fs::metadata(&keep)?.permissions().mode() & 0o777,
+        0o700,
+        "the walk goes on to the entries after a vanished one"
+    );
+    assert!(
+        workspace.join("plain").is_file(),
+        "a plain file is left where it is"
+    );
+    Ok(())
+}
+
+/// A kept link is one typed JSON event on the operator's channel, naming the entry, once
+/// (larry#366). Source: the operator's one line per kept link in ADR 0081.
+#[cfg(unix)]
+#[test]
+fn sim_a_kept_link_is_one_json_event() -> TestResult {
+    let state = scratch_directory()?;
+    let workspace = state.join("ws").join("run");
+    let link = workspace.join("link");
+    std::fs::create_dir_all(&workspace)?;
+    let target = state.join("sentinel");
+    std::fs::write(&target, b"outside the tree")?;
+    std::os::unix::fs::symlink(&target, &link)?;
+    let links = reset_with(&workspace, &mut |_| Ok(()))?;
+    let mut out = Vec::new();
+    super::mode::report_all(&links, &mut out)?;
+    let line = std::str::from_utf8(&out)?;
+    assert!(
+        line.starts_with('{') && line.ends_with("}\n"),
+        "the event is one JSON line: {line:?}"
+    );
+    assert!(
+        line.contains("\"workspace\":\"link\""),
+        "the event names the kept link: {line:?}"
+    );
+    assert!(
+        line.contains(&format!("\"{}\"", link.display())),
+        "the event names the entry: {line:?}"
+    );
+    assert_eq!(line.matches('\n').count(), 1, "one event, one line");
+    Ok(())
+}
+
+/// The Linux reset opens a directory only, never a link, and resets a mode-000 directory through
+/// the descriptor it opened (larry#366, CWE-367, CWE-59). Linux has no no-follow `fchmodat`, so
+/// this is the arm CI compiles and the only test that drives its open flags; on any other host the
+/// Linux arm does not exist and the body answers without a case.
+#[test]
+fn sim_a_linux_mode_reset_opens_only_a_directory_and_never_a_link() -> TestResult {
+    // A scratch directory is made on every host, so the answer is a result even where the Linux
+    // arm does not exist.
+    let _state = scratch_directory()?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            super::mode::OPEN_FLAGS,
+            rustix::fs::OFlags::PATH
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            "the open carries every flag the no-follow reset needs"
+        );
+        let parent = &*_state;
+        let sealed = parent.join("sealed");
+        std::fs::create_dir(&sealed)?;
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000))?;
+        let sentinel = parent.join("sentinel");
+        std::fs::write(&sentinel, b"outside the tree")?;
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(SENTINEL_MODE))?;
+        std::os::unix::fs::symlink(&sentinel, parent.join("link"))?;
+        std::fs::write(parent.join("plain"), b"x")?;
+        let held = lgwks_std::fs::capability::Dir::open(parent)?;
+        let entry = super::mode::open_mode_entry(&held, "sealed")?;
+        super::mode::set_owner_rwx(&entry)?;
+        assert_eq!(
+            std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
+            0o700,
+            "a mode-000 directory is opened and reset through its descriptor"
+        );
+        assert!(
+            super::mode::open_mode_entry(&held, "link").is_err(),
+            "a link is refused by the open, never followed"
+        );
+        assert_eq!(
+            std::fs::metadata(&sentinel)?.permissions().mode() & 0o777,
+            SENTINEL_MODE,
+            "the link's target keeps its mode"
+        );
+        assert!(
+            super::mode::open_mode_entry(&held, "plain").is_err(),
+            "a regular file is refused by the open"
+        );
+        super::mode::reset_mode(&held, "sealed")?;
+        assert_eq!(
+            std::fs::metadata(&sealed)?.permissions().mode() & 0o777,
+            0o700,
+            "the reset composes the open and the descriptor reset"
+        );
+    }
     Ok(())
 }
