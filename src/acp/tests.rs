@@ -239,6 +239,81 @@ fn a_prompt_without_settings_is_a_refusal_and_a_cancel_is_logged()
     Ok(())
 }
 
+/// A log whose every write fails: the reader's acknowledgement cannot land.
+struct BrokenLog;
+
+impl std::io::Write for BrokenLog {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the log pipe closed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serves `lines` with refused settings and a log that always fails; every reply line is
+/// parsed, and the reader's fault is returned as `serve_bounded` returns it.
+fn replies_with_a_broken_log(lines: &[&str]) -> (Result<(), std::io::Error>, Vec<Value>) {
+    let mut input = lines.join("\n");
+    input.push('\n');
+    let mut out: Vec<u8> = Vec::new();
+    let settings = Err(ExecError::StateDirUnset);
+    let served = serve_bounded(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        1_048_576,
+        &settings,
+        BrokenLog,
+    );
+    let mut parsed = Vec::new();
+    if let Ok(text) = String::from_utf8(out) {
+        for line in text.lines() {
+            if let Ok(value) = json::from_str(line) {
+                parsed.push(value);
+            }
+        }
+    }
+    (served, parsed)
+}
+
+/// A cancel whose acknowledgement cannot be written keeps the cancel flag and keeps the
+/// agent serving the frames behind it (larry#343).
+#[test]
+fn a_failed_log_write_keeps_the_cancel_and_the_agent_serving() {
+    let cancel = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s"}}"#;
+    let (served, got) = replies_with_a_broken_log(&[cancel, INIT]);
+    assert_eq!(
+        got.len(),
+        1,
+        "the initialize behind the failed log is answered"
+    );
+    assert_eq!(
+        got.first()
+            .and_then(|reply| reply.get("result"))
+            .and_then(|result| result.get("protocolVersion")),
+        Some(&json::json!(1)),
+        "the agent still answers version 1"
+    );
+    assert!(served.is_err(), "the reader's fault is not dropped");
+}
+
+/// The reader thread's own fault is joined and returned, never dropped by the scoped
+/// spawn (larry#343).
+#[test]
+fn the_read_loops_fault_is_joined_not_dropped() {
+    let cancel = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s"}}"#;
+    let (served, _) = replies_with_a_broken_log(&[cancel]);
+    let message = match served {
+        Ok(()) => String::from("the read loop reported no fault"),
+        Err(cause) => cause.to_string(),
+    };
+    assert!(
+        message.contains("the log pipe closed"),
+        "the joined fault is returned: {message}"
+    );
+}
+
 /// The seventeenth session is refused; the sixteen before it are not.
 #[test]
 fn a_process_holds_at_most_sixteen_sessions() -> Result<(), Box<dyn std::error::Error>> {

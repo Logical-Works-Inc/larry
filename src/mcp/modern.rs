@@ -250,7 +250,7 @@ mod tests {
             json!({"_meta": {"io.modelcontextprotocol/protocolVersion": version,
                 "io.modelcontextprotocol/clientCapabilities": {}}})
         };
-        let absent = Executor::Absent(String::from("no executor in a unit test"));
+        let absent = Executor::Absent(crate::executor::ExecError::StateDirUnset);
         let old = request(&id, "ping", params(&at("2025-11-25")), &absent);
         assert_eq!(
             old.member("/error/code"),

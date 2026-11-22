@@ -12,7 +12,6 @@
 
 mod error;
 
-use std::any::Any;
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -334,17 +333,6 @@ fn report_reload_fault(cause: &io::Error) {
     drop(written);
 }
 
-/// The text of a panic payload, when it carries one.
-fn panic_text(payload: &(dyn Any + Send)) -> String {
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        return String::from(*text);
-    }
-    if let Some(text) = payload.downcast_ref::<String>() {
-        return text.clone();
-    }
-    String::from("a panic without text")
-}
-
 /// The signals `larry serve` watches, registered before the serving line is
 /// written, so a stop sent as soon as it is read is never the default action.
 /// SIGHUP re-reads the key store.
@@ -451,7 +439,7 @@ pub fn run(
         let served = app.serve(listener, &stop).map_err(ServeError::Host);
         done.cancel();
         watcher.join().map_err(|panic| ServeError::Watcher {
-            cause: panic_text(&*panic),
+            cause: crate::panic_text(&*panic),
         })?;
         served
     })
