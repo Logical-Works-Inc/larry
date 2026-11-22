@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0086: the contract errors hand-write their Display and Error impls"
+title: "ADR 0087: the contract errors hand-write their Display and Error impls"
 description: Why Larry's eight contract error enums leave thiserror and the estate derive behind for hand-written Display, source and From impls.
-resource: /docs/adr/0086-hand-written-contract-errors.md
+resource: /docs/adr/0087-hand-written-contract-errors.md
 tags: [larry, adr, dependencies, errors, thiserror]
 generated: {by: claude-code, at: 2026-11-22}
 verified: {by: claude-code, method: cargo nextest run --locked -p larry-contracts; cargo clippy --workspace --all-targets --locked; cargo deny check advisories}
@@ -11,7 +11,7 @@ stale_after: 2027-02-22
 sources: [larry#339, Logical-Works-Inc/logicalworks-crates#842, https://doc.rust-lang.org/std/error/trait.Error.html]
 ---
 
-# 0086: the contract errors hand-write their Display and Error impls
+# 0087: the contract errors hand-write their Display and Error impls
 
 Status: accepted, 2026-11-22 (larry#339)
 
@@ -58,10 +58,9 @@ derive that drops a `#[from]` cause changes behaviour a caller reads.
 - The advisory gate ignores `RUSTSEC-2024-0436` (`paste`, unmaintained, reached
   only by the optional `rerank` feature), and `heapless` moved to 0.9.4, which
   resolves its nine unsound advisories.
-- Test: `cargo nextest run --locked -p larry-contracts` (76 tests) and
-  `cargo clippy --workspace --all-targets --locked` pass. NOT RUN: a
-  distinguishability test per message; the existing tests assert behaviour,
-  not every string.
+- Test: `cargo nextest run --locked -p larry-contracts` (78 tests) and
+  `cargo clippy --workspace --all-targets --locked` pass. The messages and
+  `IdError`'s cause are asserted in `crates/larry-contracts/tests/errors.rs`.
 
 ## Rejected
 
