@@ -25,6 +25,8 @@ pub(crate) use config::env_route;
 #[cfg(test)]
 pub(crate) use config::sim_config;
 pub use route::RouteError;
+#[cfg(test)]
+pub(crate) use route::tenant_namespace;
 pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve};
 
 /// Most messages one completion request carries.

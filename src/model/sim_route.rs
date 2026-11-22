@@ -1,6 +1,6 @@
 //! A built route's parts and the resolver's order (larry#201).
 
-use super::tests::{accepted, built};
+use super::tests::{TENANT, accepted, built};
 use super::{DEFAULT_REQUEST_BYTES, Draft, ENV_ROUTE, Kind, Route, RouteError, Table, resolve};
 
 /// A built route keeps its parts: the URL loses its trailing slash, the host
@@ -31,7 +31,7 @@ fn a_built_route_keeps_its_parts_and_seals_no_key() -> Result<(), RouteError> {
         "residency sealed: {sealed}"
     );
     assert!(
-        !sealed.contains("LARRY_KEY_ALPHA"),
+        !sealed.contains("LARRY_KEY_0123456789ABCDEF_ALPHA"),
         "the key variable stays out: {sealed}"
     );
     assert!(!sealed.contains("/v1"), "the URL path stays out: {sealed}");
@@ -60,29 +60,29 @@ fn the_resolver_order_holds() -> Result<(), RouteError> {
         Some(String::from("beta")),
     );
     assert_eq!(
-        resolve(&table, Some("alpha"), None)?,
+        resolve(TENANT, &table, Some("alpha"), None)?,
         alpha,
         "named beats default"
     );
     assert_eq!(
-        resolve(&table, None, Some(environment.clone()))?,
+        resolve(TENANT, &table, None, Some(environment.clone()))?,
         beta,
         "default beats env"
     );
     assert_eq!(
-        resolve(&table, Some("env"), Some(environment.clone()))?,
+        resolve(TENANT, &table, Some("env"), Some(environment.clone()))?,
         environment,
         "env can be named"
     );
     assert_eq!(
-        resolve(&table, Some("gamma"), Some(environment.clone())),
+        resolve(TENANT, &table, Some("gamma"), Some(environment.clone())),
         Err(RouteError::NoSuchId {
             id: String::from("gamma")
         }),
         "an unknown name never falls through"
     );
     assert_eq!(
-        resolve(&table, Some("env"), None),
+        resolve(TENANT, &table, Some("env"), None),
         Err(RouteError::NoSuchId {
             id: String::from("env")
         }),
@@ -90,12 +90,12 @@ fn the_resolver_order_holds() -> Result<(), RouteError> {
     );
     let bare = Table::new(Vec::new(), None);
     assert_eq!(
-        resolve(&bare, None, Some(environment.clone()))?,
+        resolve(TENANT, &bare, None, Some(environment.clone()))?,
         environment,
         "env alone"
     );
     assert_eq!(
-        resolve(&bare, None, None),
+        resolve(TENANT, &bare, None, None),
         Err(RouteError::NoRoute),
         "nothing"
     );

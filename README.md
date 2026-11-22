@@ -44,7 +44,8 @@ expiry is never consent.
   - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
   - `larry model`: sends one completion through the configured gateway.
   - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
-    calls go, which `LARRY_KEY_*` variable holds the key, and the country where the provider processes the data (ADR 0039).
+    calls go, which `LARRY_KEY_<TAG>_*` variable holds the key, and the country where the provider processes the
+    data (ADR 0039, ADR 0085).
   - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
     Set `LARRY_EVAL_PRICE_IN` and `_OUT`, and `_CACHED` and `_CACHE_WRITE` for cache rates (ADR 0043).
   - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`) over `LARRY_STATE_DIR`;
@@ -60,14 +61,20 @@ expiry is never consent.
 ```sh
 cargo install --git https://github.com/Logical-Works-Inc/larry --tag v0.1.0 --locked
 ```
-`larry mcp` reads `LARRY_STATE_DIR` and a route: add one per tenant, for example a local 9router gateway:
+`larry mcp` reads `LARRY_STATE_DIR` and a route: add one per tenant, for example a local 9router gateway.
+A route names the variable that holds its key: `LARRY_KEY_<TAG>_<NAME>`, where `<TAG>` is your state
+directory's own tenant tag. The add prints the exact variable to export, and an add naming any other
+tenant's variable is refused and names the prefix to use:
 
 ```sh
 larry route add local --url http://127.0.0.1:20128/v1 --model my-model --key-env LARRY_KEY_ROUTER --residency CA --default
+route key-env LARRY_KEY_ROUTER is not this tenant's: it must start with LARRY_KEY_1A2B3C4D5E6F7A8B_
+larry route add local --url http://127.0.0.1:20128/v1 --model my-model --key-env LARRY_KEY_1A2B3C4D5E6F7A8B_ROUTER --residency CA --default
+{"route":"local","saved":true,"made_default":true,"key_env":"LARRY_KEY_1A2B3C4D5E6F7A8B_ROUTER"}
+export LARRY_KEY_1A2B3C4D5E6F7A8B_ROUTER=<your key>
 ```
-A route names its key's variable, which must start with `LARRY_KEY_`; export the key there and it is never stored.
-Or export `LARRY_MODEL_URL`, `LARRY_MODEL` and `LARRY_MODEL_KEY` together as the route `env`. With neither, a task
-with a goal is refused as `executor_not_connected`.
+The key is never stored. Or export `LARRY_MODEL_URL`, `LARRY_MODEL` and `LARRY_MODEL_KEY` together as the
+route `env`. With neither, a task with a goal is refused as `executor_not_connected`.
 
 Start with the [product plan](/docs/product/README.md), the [specification index](index.md), the
 [visual specification](specification.md) and the [source review](research-ledger.md). Working rules are in

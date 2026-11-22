@@ -1,16 +1,16 @@
 //! Routes (larry#201): where a tenant's model calls go, as data the tenant owns
-//! instead of a gateway and a model compiled into the binary. A route names one
-//! provider kind, a base URL, the NAME of the variable that holds its key, the
-//! model id, an optional temperature, a request byte bound, the country where
-//! the provider processes the data, and a short capability description. The
-//! key itself is never part of a route.
+//! instead of a gateway compiled into the binary. A route names one provider
+//! kind, a base URL, the NAME of the variable that holds its key, the model id,
+//! an optional temperature, a request byte bound, the country where the
+//! provider processes the data, and a short capability description. The key
+//! itself is never part of a route, and only that tenant may name its variable
+//! (`LARRY_KEY_<TAG>_*`, larry#328).
 //!
-//! Validation is one function per field and one typed refusal per function, so
-//! a hostile value is refused by name before it reaches the store or the wire.
-//! The resolver is pure: the named route, else the tenant default, else the
-//! operator's environment route, else `NoRoute`. Semantic choice (#202),
-//! residency enforcement (#203), budgets (#204) and provider kinds (#205) plug
-//! in at [`resolve`], [`Route::residency`], [`Route::request_bytes`] and [`Kind`].
+//! Every field is checked by one function with one typed refusal. The resolver
+//! is pure: the named route, else the tenant default, else the operator's
+//! environment route, else `NoRoute`. Semantic choice (#202), residency
+//! enforcement (#203), budgets (#204) and provider kinds (#205) plug in at
+//! [`resolve`], [`Route::residency`], [`Route::request_bytes`] and [`Kind`].
 
 use std::fmt;
 
@@ -33,6 +33,10 @@ const MAX_KEY_ENV_BYTES: usize = 64;
 /// data, so it may only name a variable the operator set aside for routes; the
 /// process's other secrets (`GH_TOKEN`, cloud keys, `LARRY_MODEL_KEY`) are out.
 const KEY_ENV_PREFIX: &str = "LARRY_KEY_";
+/// Characters of the tenant text that make the tenant's own tag: 64 bits of the
+/// tenant digest, so two tenants on one host share a namespace with probability
+/// below 2^-33 at the 65,536-tenant bound (larry#328).
+const TENANT_TAG_CHARS: usize = 16;
 /// Longest capability description, in bytes.
 const MAX_DESCRIBE_BYTES: usize = 1024;
 /// The request body bound a route gets when it names none: 1 MiB.
@@ -63,6 +67,14 @@ pub enum RouteError {
     /// The key variable is not `LARRY_KEY_` followed by at least one more byte, so
     /// it could name a secret the operator never set aside for routes.
     KeyEnvOutsideNamespace,
+    /// The key variable is `LARRY_KEY_*` but not in this tenant's namespace, so
+    /// its value could be another tenant's key sent to this route's host.
+    KeyEnvNotThisTenants {
+        /// The variable the route names.
+        variable: String,
+        /// The prefix this tenant's routes may name.
+        prefix: String,
+    },
     /// The temperature is not a number from 0 to 2.
     BadTemperature,
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
@@ -113,6 +125,13 @@ impl fmt::Display for RouteError {
                 out,
                 "route key-env must start with {KEY_ENV_PREFIX} and name at least one more byte"
             ),
+            Self::KeyEnvNotThisTenants {
+                ref variable,
+                ref prefix,
+            } => write!(
+                out,
+                "route key-env {variable} is not this tenant's: it must start with {prefix}"
+            ),
             Self::BadTemperature => out.write_str("route temperature must be a number from 0 to 2"),
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
@@ -150,6 +169,7 @@ impl std::error::Error for RouteError {
             | Self::BadModel
             | Self::BadKeyEnv
             | Self::KeyEnvOutsideNamespace
+            | Self::KeyEnvNotThisTenants { .. }
             | Self::BadTemperature
             | Self::BadResidency
             | Self::BadRequestBytes
@@ -267,6 +287,14 @@ pub(crate) fn is_route_id(text: &str) -> bool {
             .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
 }
 
+/// The namespace one tenant's route key variables live in: `LARRY_KEY_<TAG>_`,
+/// where `<TAG>` is the first 16 characters of the tenant text in upper case.
+/// The tag is a namespace, never a secret: `larry route add` prints it.
+pub(crate) fn tenant_namespace(tenant: &str) -> String {
+    let tag: String = tenant.chars().take(TENANT_TAG_CHARS).collect();
+    format!("{KEY_ENV_PREFIX}{}_", tag.to_ascii_uppercase())
+}
+
 /// Whether `text` names an environment variable: `[A-Z_][A-Z0-9_]{0,63}`.
 fn is_key_env(text: &str) -> bool {
     let mut bytes = text.bytes();
@@ -302,6 +330,8 @@ impl Route {
     /// A route a tenant stores. Every field is checked, `env` is refused, and
     /// the key variable must be `LARRY_KEY_` and at least one more byte, so a
     /// stored route never names a secret the operator did not set aside for it.
+    /// Which tenant may name it is checked at `larry route add` and again in
+    /// [`resolve`], never as a field check (larry#328).
     ///
     /// # Errors
     ///
@@ -405,6 +435,26 @@ impl Route {
         &self.key_env
     }
 
+    /// The binding refusal of this route's key variable under `tenant`, `None`
+    /// when the variable is one only that tenant may name: `LARRY_KEY_<TAG>_`
+    /// for this tenant's tag, then at least one byte. A row stored before the
+    /// binding, or edited in the store, fails here, so its value is never read
+    /// (larry#328, CWE-200).
+    pub(crate) fn key_env_refusal(&self, tenant: &str) -> Option<RouteError> {
+        let prefix = tenant_namespace(tenant);
+        if self
+            .key_env
+            .strip_prefix(&prefix)
+            .is_some_and(|rest| !rest.is_empty())
+        {
+            return None;
+        }
+        Some(RouteError::KeyEnvNotThisTenants {
+            variable: self.key_env.clone(),
+            prefix,
+        })
+    }
+
     /// The model id.
     pub(crate) fn model(&self) -> &str {
         &self.model
@@ -478,19 +528,27 @@ impl Table {
 /// The route a task uses: the one it names, else the tenant default, else the
 /// operator's environment route, else a refusal. A name no stored route has is
 /// refused before anything else is tried, so a typo never falls through to a
-/// default and sends a prompt somewhere the tenant did not choose.
+/// default and sends a prompt somewhere the tenant did not choose. A stored
+/// route whose key variable is not `tenant`'s own is refused before its value
+/// is ever read, and never falls through to the environment route either: the
+/// tenant asked for a route it may not use (larry#328).
 ///
 /// # Errors
 ///
-/// [`RouteError::NoSuchId`] for a name nothing has and [`RouteError::NoRoute`]
-/// when no name, default or environment route exists.
+/// [`RouteError::KeyEnvNotThisTenants`] for a stored route outside `tenant`'s
+/// namespace, [`RouteError::NoSuchId`] for a name nothing has and
+/// [`RouteError::NoRoute`] when no name, default or environment route exists.
 pub(crate) fn resolve(
+    tenant: &str,
     table: &Table,
     named: Option<&str>,
     environment: Option<Route>,
 ) -> Result<Route, RouteError> {
     if let Some(route) = table.lookup(named) {
-        return Ok(route.clone());
+        return match route.key_env_refusal(tenant) {
+            None => Ok(route.clone()),
+            Some(refusal) => Err(refusal),
+        };
     }
     match (named, environment) {
         (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
@@ -503,16 +561,21 @@ pub(crate) fn resolve(
 /// Unit tests of the field checks at their boundaries and of the resolver order.
 #[cfg(test)]
 mod tests {
-    use super::{Draft, ENV_ROUTE, Kind, Route, RouteError};
+    use super::{Draft, ENV_ROUTE, Kind, Route, RouteError, tenant_namespace};
 
-    /// A draft every check accepts.
+    /// The tenant text the unit tests build routes under: a 64-hex digest, as
+    /// `executor::routes` keys its rows by, whose tag is its first 16 characters.
+    pub(super) const TENANT: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A draft every check accepts, its key variable under [`TENANT`]'s tag.
     pub(super) fn accepted() -> Draft<'static> {
         Draft {
             id: "alpha",
             kind: Kind::OpenAiChat,
             base_url: "https://gateway.example:8443/v1/",
             model: "model-1",
-            key_env: "LARRY_KEY_ALPHA",
+            key_env: "LARRY_KEY_0123456789ABCDEF_ALPHA",
             temperature: Some(0.5),
             request_bytes: Some(2048),
             residency: Some("CA"),
@@ -655,6 +718,27 @@ mod tests {
             key_env: "LARRY_MODEL_KEY",
             ..accepted()
         })?;
+        Ok(())
+    }
+
+    /// The tenant binding: the tag is the tenant text's first 16 characters in upper case, and another tenant's tag is refused by name (larry#328).
+    #[test]
+    fn a_key_variable_is_bound_to_its_tenants_tag() -> Result<(), RouteError> {
+        let prefix = tenant_namespace(TENANT);
+        assert_eq!(prefix, "LARRY_KEY_0123456789ABCDEF_");
+        let own = Route::new(&accepted())?;
+        assert_eq!(own.key_env_refusal(TENANT), None, "its own tag");
+        let longer = built(|fields| fields.key_env = "LARRY_KEY_0123456789ABCDEF_X")?;
+        assert_eq!(longer.key_env_refusal(TENANT), None, "one more byte");
+        let theirs = built(|fields| fields.key_env = "LARRY_KEY_0123456789ABCDEE_ALPHA")?;
+        let refusal = RouteError::KeyEnvNotThisTenants {
+            variable: String::from("LARRY_KEY_0123456789ABCDEE_ALPHA"),
+            prefix,
+        };
+        assert_eq!(theirs.key_env_refusal(TENANT), Some(refusal));
+        let bare = built(|fields| fields.key_env = "LARRY_KEY_0123456789ABCDEF_")?;
+        let refused = bare.key_env_refusal(TENANT);
+        assert!(refused.is_some(), "the bare namespace names nothing");
         Ok(())
     }
 }
