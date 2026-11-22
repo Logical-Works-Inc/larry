@@ -91,8 +91,8 @@ fn reference_profile(state: &Path, copy: &Path, tree: &Path, tmp: &Path) -> Stri
     format!(
         "(version 1)(allow default)(deny file-read* (require-all (subpath \"{}\") (require-not \
          (require-any (subpath \"{}\") (subpath \"{}\") (subpath \"{}\")))))(deny file-write* \
-         (require-not (require-any (subpath \"{}\") (subpath \"{}\") (literal \"/dev/null\") \
-         (literal \"/dev/tty\"))))(deny sysctl-read (sysctl-name \"kern.procargs2\"))",
+         (require-not (require-any (subpath \"{}\") (subpath \"{}\") (literal \"/dev/null\"))))\
+         (deny file-read* (literal \"/dev/tty\"))(deny sysctl-read (sysctl-name \"kern.procargs2\"))",
         state.display(),
         copy.display(),
         tree.display(),
