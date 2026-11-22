@@ -186,7 +186,21 @@ jobs:
           git show "origin/${BASE_REF}:.github/workflows/mutants.yml" > base-mutants.yml
           # The base ref publishes each setting once, as `NAME: <number>`.
           setting() { sed -n "s/^ *$1: *\([0-9][0-9]*\)$/\1/p" base-mutants.yml; }
-          for name in MUTANTS_FLOOR MUTANTS_MAX_SHARDS MUTANTS_SHARD_CAPACITY; do
+          # The base copy from before this change names the floor `FLOOR`;
+          # once merged it publishes `MUTANTS_FLOOR`. Either way the number is
+          # the base ref's, never the pull request's.
+          floor="$(setting MUTANTS_FLOOR)"
+          if [ -z "$floor" ]; then
+            floor="$(setting FLOOR)"
+          fi
+          case "$floor" in
+            '' | *[!0-9]*)
+              echo "::error::the base ref's floor is not one number: there is no verdict (fail closed)"
+              exit 1
+              ;;
+          esac
+          echo "MUTANTS_FLOOR=$floor" >> "$GITHUB_OUTPUT"
+          for name in MUTANTS_MAX_SHARDS MUTANTS_SHARD_CAPACITY; do
             value="$(setting "$name")"
             case "$value" in
               '' | *[!0-9]*)

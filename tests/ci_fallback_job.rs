@@ -417,6 +417,10 @@ fn the_mutants_verdict_reads_the_floor_and_the_caps_from_the_base_ref() -> Check
         "the floor and the caps come from the base ref, never the pull request's copy"
     );
     assert!(
+        verdict.contains("floor=\"$(setting FLOOR)\""),
+        "the base copy before this change still names the floor, and it is read from the base ref"
+    );
+    assert!(
         verdict.contains("if [ \"$COUNT\" -gt \"$capacity\" ]"),
         "the verdict holds the plan to the base ref's capacity"
     );
