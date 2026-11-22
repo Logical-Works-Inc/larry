@@ -1,13 +1,9 @@
-//! Seeded adversarial simulations of storing routes (larry#201), driven through
-//! `larry route`'s own entry point, the code the shipped binary calls.
-//!
-//! Source: the route table design of larry#201, SQLite upsert and
-//! single-statement atomicity for the 256-route cap, and ISO 3166-1 alpha-2 for
-//! the residency shape. Requirement proved: a hostile route field is refused by
-//! its own variant and stores nothing, the cap holds under concurrent adds and
-//! recovers after a remove, a replayed add is one row, and one seed gives one
-//! trace hash. Every actor is a fool: a double-clicker, a fat-finger and a
-//! saboteur who writes escape bytes.
+//! Seeded adversarial simulations of storing routes (larry#201), through
+//! `larry route`'s own entry point, the code the shipped binary calls. Source:
+//! the route table design, SQLite upsert atomicity for the 256-route cap and
+//! ISO 3166-1 alpha-2. Requirement proved: a hostile field is refused by its own
+//! variant and stores nothing, the cap holds under concurrent adds, a replayed
+//! add is one row, and one seed gives one trace hash.
 
 #[path = "support/json_at.rs"]
 mod json_at;
@@ -15,6 +11,8 @@ use json_at::At;
 
 #[path = "support/route_cli.rs"]
 mod route_cli;
+
+use route_cli::route_key::key_env;
 
 use std::error::Error;
 use std::path::Path;
@@ -136,8 +134,8 @@ fn garbage(rng: &mut Seeded) -> Result<String, Box<dyn Error>> {
 }
 
 /// The reason an independent reading of the written rules refuses `text` as the
-/// value of `field`, if any.
-fn reference(field: &str, text: &str) -> Option<RouteError> {
+/// value of `field` for a tenant whose key namespace is `namespace`, if any.
+fn reference(namespace: &str, field: &str, text: &str) -> Option<RouteError> {
     let mut chars = text.chars();
     let (fine, refusal) = match field {
         "id" => (
@@ -161,14 +159,19 @@ fn reference(field: &str, text: &str) -> Option<RouteError> {
             let namespaced = text
                 .strip_prefix("LARRY_KEY_")
                 .is_some_and(|rest| !rest.is_empty());
-            (
-                shaped && namespaced,
-                if shaped {
-                    RouteError::KeyEnvOutsideNamespace
-                } else {
-                    RouteError::BadKeyEnv
-                },
-            )
+            let bound = text
+                .strip_prefix(namespace)
+                .is_some_and(|rest| !rest.is_empty());
+            let refusal = match (shaped, namespaced) {
+                (false, _) => Some(RouteError::BadKeyEnv),
+                (true, false) => Some(RouteError::KeyEnvOutsideNamespace),
+                (true, true) if !bound => Some(RouteError::KeyEnvNotThisTenants {
+                    variable: text.to_owned(),
+                    prefix: namespace.to_owned(),
+                }),
+                (true, true) => None,
+            };
+            return refusal;
         }
         "--residency" => (
             text.chars().count() == 2 && text.chars().all(|ch| ch.is_ascii_uppercase()),
@@ -342,6 +345,7 @@ fn refused_flags_name_themselves_and_store_nothing(state: &Path) -> TestResult {
 /// 256 seeded garbage values for the id, model, key variable, residency and description
 /// are stored or refused exactly as an independent reading of the rules says.
 fn garbage_agrees_with_the_written_rules(state: &Path) -> TestResult {
+    let namespace = key_env(state, "")?;
     let mut rng = Seeded::from_seed(0xFA7F1);
     let fields = ["id", "--model", "--key-env", "--residency", "--describe"];
     for case in 0..256_usize {
@@ -358,7 +362,7 @@ fn garbage_agrees_with_the_written_rules(state: &Path) -> TestResult {
         } else {
             add(state, "fuzzed", &[(flag, value.as_str())], &[])
         };
-        match (outcome, reference(flag, &value)) {
+        match (outcome, reference(&namespace, flag, &value)) {
             (Ok(_), None) => {}
             (Err(RouteCliError::Route(ref got)), Some(ref want)) if got == want => {}
             (other, want) => {
@@ -427,9 +431,11 @@ fn sim_route_add_replayed_is_one_row() -> TestResult {
 }
 
 /// One seeded script of route operations against a fresh state directory, and
-/// the BLAKE3 digest of every output, every refusal and every listing, in order.
+/// the BLAKE3 digest of every output, every refusal and every listing, in order,
+/// with each tenant's own key namespace folded to one word.
 fn trace_of(seed: u64) -> Result<String, Box<dyn Error>> {
     let state = TempDir::new()?;
+    let namespace = key_env(state.path(), "")?;
     let mut rng = Seeded::from_seed(seed);
     let mut hasher = Hasher::new();
     for step in 0..48_u32 {
@@ -451,8 +457,9 @@ fn trace_of(seed: u64) -> Result<String, Box<dyn Error>> {
             Ok(text) => text,
             Err(error) => error.to_string(),
         };
-        hasher.write_framed(line.as_bytes());
-        hasher.write_framed(route_run(state.path(), &[], &["list", "--json"])?.as_bytes());
+        hasher.write_framed(line.replace(&namespace, "LARRY_KEY_TENANT_").as_bytes());
+        let listing = route_run(state.path(), &[], &["list", "--json"])?;
+        hasher.write_framed(listing.replace(&namespace, "LARRY_KEY_TENANT_").as_bytes());
     }
     Ok(hasher.finalize().to_hex())
 }
@@ -474,21 +481,32 @@ fn sim_same_seed_same_route_trace_hash() -> TestResult {
     Ok(())
 }
 
-/// Giant and empty: a key variable of every length from 0 to 72 bytes, cut from
-/// the prefix and then padded with `A`. The written bounds are three ranges: a
-/// name shorter than `LARRY_KEY_` plus one byte is empty (not a name) or outside
-/// the namespace, 11 to 64 bytes is stored, and 65 or more is not a name. Bug
-/// caught: a bound off by one on either side of the prefix or of the 64-byte cap.
+/// Giant and empty: a key variable that is the tenant's own namespace followed
+/// by `A`, of every length from 0 to the namespace plus 72 bytes. The written
+/// bounds: a name shorter than `LARRY_KEY_` plus one byte is no name or outside
+/// the namespace, a name short of the tenant's namespace, or the bare namespace
+/// itself, is another tenant's, 28 to 64 bytes is stored, and 65 or more is no
+/// name. Bug caught: a bound off by one on either side of a prefix or of the cap.
 #[test]
 fn sim_key_variable_length_walk_matches_the_written_bounds() -> TestResult {
     let state = TempDir::new()?;
-    let ladder = format!("LARRY_KEY_{}", "A".repeat(72));
-    for length in 0..=72_usize {
+    let namespace = key_env(state.path(), "")?;
+    let ladder = format!("{namespace}{}", "A".repeat(72));
+    for length in 0..=ladder.len() {
         let name: String = ladder.chars().take(length).collect();
-        let wanted = match length {
-            0 | 65.. => Some(RouteError::BadKeyEnv),
-            1..=10 => Some(RouteError::KeyEnvOutsideNamespace),
-            11..=64 => None,
+        let wanted = if matches!(length, 0) {
+            Some(RouteError::BadKeyEnv)
+        } else if length <= 10 {
+            Some(RouteError::KeyEnvOutsideNamespace)
+        } else if length <= namespace.len() {
+            Some(RouteError::KeyEnvNotThisTenants {
+                variable: name.clone(),
+                prefix: namespace.clone(),
+            })
+        } else if length <= 64 {
+            None
+        } else {
+            Some(RouteError::BadKeyEnv)
         };
         match (
             add(state.path(), "walk", &[("--key-env", name.as_str())], &[]),
@@ -507,21 +525,22 @@ fn sim_key_variable_length_walk_matches_the_written_bounds() -> TestResult {
 }
 
 /// The monkey: 512 seeded one-to-three-key edits (delete, overwrite, insert) of
-/// a valid `LARRY_KEY_ROUTER` with letters, a digit, a hyphen, a non-ASCII
+/// a valid tenant-bound `..._ROUTER` with letters, a digit, a hyphen, a non-ASCII
 /// letter and a space. Each result agrees with the reference reading of the
 /// rules by exact variant, and the one row holds the last accepted name. Bug
-/// caught: a check that reads only the prefix, or only the shape, so a mutant
-/// slips through one of them.
+/// caught: a check that reads only the prefix, only the shape or only the
+/// namespace, so a mutant slips through one of them.
 #[test]
 fn sim_monkey_edits_of_a_valid_key_variable_agree_with_the_reference() -> TestResult {
     /// What the monkey types.
     const KEYS: [char; 8] = ['L', 'Y', '_', 'a', '7', '-', '\u{c9}', ' '];
     let state = TempDir::new()?;
+    let namespace = key_env(state.path(), "")?;
     let mut rng = Seeded::from_seed(0x0DDB_1750);
     let (mut accepted, mut refused) = (0_u32, 0_u32);
     let mut last_good: Option<String> = None;
     for case in 0..512_u32 {
-        let mut chars: Vec<char> = "LARRY_KEY_ROUTER".chars().collect();
+        let mut chars: Vec<char> = format!("{namespace}ROUTER").chars().collect();
         for _ in 0..=rng.below(3)? {
             let at = usize::try_from(rng.below(u64::try_from(chars.len().saturating_add(1))?)?)?;
             let key = *KEYS.get(usize::try_from(rng.below(8)?)?).ok_or("a key")?;
@@ -545,7 +564,7 @@ fn sim_monkey_edits_of_a_valid_key_variable_agree_with_the_reference() -> TestRe
         let name: String = chars.into_iter().collect();
         match (
             add(state.path(), "mutant", &[("--key-env", name.as_str())], &[]),
-            reference("--key-env", &name),
+            reference(&namespace, "--key-env", &name),
         ) {
             (Ok(_), None) => {
                 accepted = accepted.saturating_add(1);
@@ -618,13 +637,33 @@ fn sim_a_row_edited_outside_the_namespace_fails_its_own_tenant_alone() -> TestRe
             route_run(bystander.path(), &[], args)?;
         }
     }
-    set_key_env(victim.path(), "LARRY_KEY_BACK")?;
+    let good = key_env(victim.path(), "BACK")?;
+    set_key_env(victim.path(), &good)?;
     let value = parse(&route_run(victim.path(), &[], &["list", "--json"])?)?;
     assert_eq!(
         value.at("/routes/0/key_env")?.as_str(),
-        Some("LARRY_KEY_BACK"),
+        Some(good.as_str()),
         "a good name back and the victim reads again"
     );
+    Ok(())
+}
+
+/// A row stored before the tenant binding names no tenant's variable: `resolve` refuses it (larry#328).
+#[test]
+fn sim_a_row_stored_before_the_binding_is_refused_at_resolve() -> TestResult {
+    let state = TempDir::new()?;
+    add(state.path(), "main", &[], &["--default"])?;
+    set_key_env(state.path(), "LARRY_KEY_LEGACY")?;
+    assert_eq!(listed(state.path())?.0, ["main"], "the row still lists");
+    let refusal = route_run(state.path(), &[], &["resolve"]);
+    let bound = matches!(
+        refusal,
+        Err(RouteCliError::Route(RouteError::KeyEnvNotThisTenants { ref variable, .. }))
+            if variable == "LARRY_KEY_LEGACY"
+    );
+    assert!(bound, "resolve refuses the binding typed: {refusal:?}");
+    set_key_env(state.path(), &key_env(state.path(), "MAIN")?)?;
+    route_run(state.path(), &[], &["resolve"])?;
     Ok(())
 }
 
@@ -646,13 +685,14 @@ fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> Test
         "HOME",
     ];
     let state = TempDir::new()?;
+    let namespace = key_env(state.path(), "")?;
     let mut rng = Seeded::from_seed(0x5AB0_7E42);
     let mut plans: Vec<Vec<(String, String)>> = Vec::new();
     for thread in 0..8_u32 {
         let mut plan = Vec::new();
         for step in 0..16_u32 {
             let key = if rng.below(2)? == 0 {
-                format!("LARRY_KEY_T{thread}")
+                format!("{namespace}T{thread}")
             } else {
                 String::from(
                     *HOSTILE
@@ -668,14 +708,14 @@ fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> Test
     std::thread::scope(|scope| -> TestResult {
         let mut handles = Vec::new();
         for plan in &plans {
-            let (barrier, path) = (&barrier, state.path());
+            let (barrier, path, namespace) = (&barrier, state.path(), &namespace);
             handles.push(scope.spawn(move || -> Result<(), String> {
                 barrier.wait();
                 for entry in plan {
                     let (id, key) = (&entry.0, &entry.1);
                     match (
                         add(path, id, &[("--key-env", key.as_str())], &[]),
-                        reference("--key-env", key),
+                        reference(namespace, "--key-env", key),
                     ) {
                         (Ok(_), None) => {}
                         (Err(RouteCliError::Route(ref got)), Some(ref want)) if got == want => {}
@@ -695,7 +735,7 @@ fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> Test
     let mut honest: Vec<&str> = plans
         .iter()
         .flatten()
-        .filter(|entry| reference("--key-env", &entry.1).is_none())
+        .filter(|entry| reference(&namespace, "--key-env", &entry.1).is_none())
         .map(|entry| entry.0.as_str())
         .collect();
     honest.sort_unstable();
@@ -704,7 +744,7 @@ fn sim_hostile_and_honest_adders_at_once_leave_exactly_the_honest_rows() -> Test
     let value = parse(&route_run(state.path(), &[], &["list", "--json"])?)?;
     for route in value.at("/routes")?.as_array().ok_or("a routes array")? {
         let key = route["key_env"].as_str().ok_or("a key variable")?;
-        assert!(key.starts_with("LARRY_KEY_T"), "{key} is an honest name");
+        assert!(key.starts_with(&namespace), "{key} is an honest name");
     }
     Ok(())
 }

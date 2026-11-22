@@ -2,8 +2,9 @@
 //! tenant owns in the state directory's store: `larry route add` stores one,
 //! `list` shows them, `remove` and `default` change the table, and `resolve`
 //! shows which route a task naming an id (or none) would use. The key is never
-//! an argument and never stored: a route names the `LARRY_KEY_*` variable that
-//! holds it, and the variable is read only when a task reaches the model.
+//! an argument and never stored: a route names the `LARRY_KEY_<TAG>_*` variable
+//! that holds it, under the tag its own tenant's digest names, and the variable
+//! is read only when a task reaches the model (larry#328).
 
 use std::fmt;
 use std::io::{self, Write};
@@ -64,6 +65,7 @@ impl fmt::Display for RouteCliError {
                 | RouteError::BadModel
                 | RouteError::BadKeyEnv
                 | RouteError::KeyEnvOutsideNamespace
+                | RouteError::KeyEnvNotThisTenants { .. }
                 | RouteError::BadTemperature
                 | RouteError::BadResidency
                 | RouteError::BadRequestBytes
@@ -115,13 +117,14 @@ pub(super) fn resolve_for(
     named: Option<&str>,
     read: &impl Fn(&str) -> Option<String>,
 ) -> Result<Route, ExecError> {
-    let table = ledger.routes(&tenant_text(state))?;
+    let tenant = tenant_text(state);
+    let table = ledger.routes(&tenant)?;
     let environment = if table.lookup(named).is_some() {
         None
     } else {
         env_route(read).map_err(ExecError::ModelConfig)?
     };
-    resolve(&table, named, environment).map_err(ExecError::Route)
+    resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
 }
 
 /// The flags of `route add`, each still text.
@@ -227,7 +230,9 @@ fn open(read: &impl Fn(&str) -> Option<String>) -> Result<(Ledger, String), Rout
     Ok((ledger, tenant_text(&state)))
 }
 
-/// `larry route add <id> ...`: checks every field, then stores the route.
+/// `larry route add <id> ...`: checks every field, refuses a key variable that
+/// is not this tenant's own, then stores the route and prints the exact variable
+/// name the child must export for it.
 fn add(
     read: &impl Fn(&str) -> Option<String>,
     id: &str,
@@ -252,13 +257,25 @@ fn add(
         describe,
     })
     .map_err(RouteCliError::Route)?;
-    let (ledger, tenant) = open(read)?;
+    // The binding is checked before the store opens, so a refused add writes
+    // nothing (larry#328).
+    let state = state_dir(read).map_err(from_exec)?;
+    let tenant = tenant_text(&state);
+    if let Some(refusal) = route.key_env_refusal(&tenant) {
+        return Err(RouteCliError::Route(refusal));
+    }
+    let ledger = Ledger::open(&state).map_err(from_exec)?;
     ledger
         .put_route(&tenant, &route, parsed.make_default)
         .map_err(from_exec)?;
     say(
         out,
-        &json!({ "route": route.id(), "saved": true, "made_default": parsed.make_default }),
+        &json!({
+            "route": route.id(),
+            "saved": true,
+            "made_default": parsed.make_default,
+            "key_env": route.key_env(),
+        }),
     )
 }
 
@@ -407,6 +424,16 @@ mod tests {
         let outside = said(&RouteCliError::Route(RouteError::KeyEnvOutsideNamespace));
         assert!(outside.starts_with("route key-env must start"), "{outside}");
         assert_eq!(outside.matches("route").count(), 1, "{outside}");
+        // larry#328: another tenant's variable is a field refusal too.
+        let bound = said(&RouteCliError::Route(RouteError::KeyEnvNotThisTenants {
+            variable: String::from("LARRY_KEY_THEIRS"),
+            prefix: String::from("LARRY_KEY_1A2B3C4D5E6F7A8B_"),
+        }));
+        assert!(
+            bound.starts_with("route key-env LARRY_KEY_THEIRS is not this tenant's"),
+            "{bound}"
+        );
+        assert_eq!(bound.matches("route").count(), 1, "{bound}");
         let numbered = said(&RouteCliError::Route(RouteError::BadTemperature));
         assert!(numbered.starts_with("route temperature must"), "{numbered}");
         assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
@@ -427,5 +454,27 @@ mod tests {
             assert!(text.starts_with("route: "), "{text}");
             assert!(!text.starts_with("route: route"), "{text}");
         }
+    }
+
+    /// A successful add prints the route id, that it was saved, whether it is the
+    /// default, and the exact key variable to export (larry#328).
+    #[test]
+    fn a_saved_route_prints_its_key_variable() -> Result<(), Box<dyn std::error::Error>> {
+        let state = crate::executor::sim_tree::scratch("larry-route-add")?;
+        let dir = state.to_string_lossy().into_owned();
+        let key_env = format!(
+            "{}MAIN",
+            crate::model::tenant_namespace(&super::tenant_text(&state))
+        );
+        let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
+        let mut args = vec!["add", "main", "--url", "http://gateway.test:1/v1"];
+        args.extend(["--model", "m", "--key-env", key_env.as_str()]);
+        args.extend(["--residency", "CA"]);
+        let mut out = Vec::new();
+        super::run(read, &args, &mut out)?;
+        let text = String::from_utf8(out)?;
+        assert!(text.contains("\"saved\":true"), "{text}");
+        assert!(text.contains(&key_env), "the exact variable: {text}");
+        Ok(())
     }
 }

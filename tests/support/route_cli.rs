@@ -11,6 +11,9 @@ use std::thread::ScopedJoinHandle;
 use larry_demo::executor::routes::{self, RouteCliError};
 use lgwks_std::json::{self, Value};
 
+#[path = "route_key.rs"]
+pub(crate) mod route_key;
+
 #[path = "temp_dir.rs"]
 mod temp_dir;
 pub(crate) use temp_dir::TempDir;
@@ -53,11 +56,11 @@ pub(crate) fn route_run(
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// The flags of a valid `route add`, each with the value a case may replace.
-const DEFAULTS: [(&str, &str); 7] = [
+/// The flags of a valid `route add`, each with the value a case may replace. The
+/// key variable is the tenant's own, so `add` fills it from the state directory.
+const DEFAULTS: [(&str, &str); 6] = [
     ("--url", GATEWAY),
     ("--model", "model-1"),
-    ("--key-env", "LARRY_KEY_SIM"),
     ("--residency", "CA"),
     ("--temperature", "0.5"),
     ("--request-bytes", "4096"),
@@ -72,6 +75,10 @@ pub(crate) fn add(
     overrides: &[(&str, &str)],
     extra: &[&str],
 ) -> Result<String, RouteCliError> {
+    let key = match overrides.iter().find(|pair| pair.0 == "--key-env") {
+        Some(pair) => pair.1.to_owned(),
+        None => route_key::key_env(state, "SIM").map_err(RouteCliError::Usage)?,
+    };
     let mut args = vec!["add", id];
     for (flag, value) in DEFAULTS {
         args.push(flag);
@@ -81,6 +88,8 @@ pub(crate) fn add(
             None => value,
         });
     }
+    args.push("--key-env");
+    args.push(&key);
     args.extend_from_slice(extra);
     route_run(state, &[], &args)
 }

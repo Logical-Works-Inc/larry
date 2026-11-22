@@ -25,6 +25,8 @@ mod larry_cli;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "support/route_key.rs"]
+mod route_key;
 #[path = "support/sealed_report.rs"]
 mod sealed_report;
 
@@ -36,6 +38,7 @@ use std::process::{Child, Command, Output};
 
 use json_at::At;
 use larry_cli::{spawn_larry_args, stderr_of};
+use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::json::{self, Value, json};
 use mock_model::{Config, Fault, Handle};
 use origin::{TempDir, commit_all, fixture};
@@ -80,14 +83,14 @@ struct Tenant<'tenant> {
     model: &'static str,
     /// The residency its route declares.
     residency: &'static str,
-    /// The variable its route reads the key from.
-    key_var: &'static str,
+    /// The suffix of the key variable its route names, under its own tenant tag.
+    suffix: &'static str,
     /// The key itself, which only the exec child's environment holds.
     key: &'static str,
 }
 
 impl<'tenant> Tenant<'tenant> {
-    /// A Canadian tenant on `model-a` with the key `secret-a` in `LARRY_KEY_A`.
+    /// A Canadian tenant on `model-a` with the key `secret-a` in its `_A` variable.
     fn standard(state: &'tenant TempDir, origin: &'tenant TempDir, mock: &'tenant Handle) -> Self {
         Tenant {
             state,
@@ -95,7 +98,7 @@ impl<'tenant> Tenant<'tenant> {
             mock,
             model: "model-a",
             residency: "CA",
-            key_var: "LARRY_KEY_A",
+            suffix: "A",
             key: "secret-a",
         }
     }
@@ -103,6 +106,7 @@ impl<'tenant> Tenant<'tenant> {
     /// Stores the route `id` pointing at this tenant's gateway, as the default.
     fn add_route(&self, id: &str) -> TestResult {
         let url = format!("http://{}/v1", host_of(self.mock));
+        let key_env = route_key::key_env(self.state.path(), self.suffix)?;
         let output = larry_route(
             self.state.path(),
             &[],
@@ -114,7 +118,7 @@ impl<'tenant> Tenant<'tenant> {
                 "--model",
                 self.model,
                 "--key-env",
-                self.key_var,
+                &key_env,
                 "--residency",
                 self.residency,
                 "--default",
@@ -136,10 +140,11 @@ impl<'tenant> Tenant<'tenant> {
 
     /// Starts `larry exec` on `task` with the extra variables `extra` as well, unwaited.
     fn start(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Child, Box<dyn Error>> {
+        let variable = route_key::key_env(self.state.path(), self.suffix)?;
         let mut env: Vec<(&str, &OsStr)> = vec![
             ("LARRY_STATE_DIR", self.state.path().as_os_str()),
             ("LARRY_POLICY", OsStr::new(POLICY)),
-            (self.key_var, OsStr::new(self.key)),
+            (variable.as_str(), OsStr::new(self.key)),
         ];
         env.extend_from_slice(extra);
         spawn_larry_args(&["exec"], &env, task.as_bytes())
@@ -208,7 +213,8 @@ impl<'tenant> Tenant<'tenant> {
             "the receipt names this tenant's route, host and residency"
         );
         let printed = String::from_utf8_lossy(&output.stdout);
-        for secret in [self.key, self.key_var] {
+        let variable = route_key::key_env(self.state.path(), self.suffix)?;
+        for secret in [self.key, variable.as_str()] {
             assert!(
                 !printed.contains(secret),
                 "{secret} must not appear in a report"
@@ -232,7 +238,7 @@ fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult
             let two = Tenant {
                 model: "model-b",
                 residency: "DE",
-                key_var: "LARRY_KEY_B",
+                suffix: "B",
                 key: "secret-b",
                 ..Tenant::standard(&state_b, &origin_b, mock_b)
             };
@@ -336,9 +342,10 @@ fn holds(haystack: &[u8], needle: &[u8]) -> bool {
 fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
     let state = TempDir::new()?;
     let secret = OsStr::new("topsecret-key-bytes");
+    let key_env = route_key::key_env(state.path(), "ROUTE")?;
     let added = larry_route(
         state.path(),
-        &[("LARRY_KEY_ROUTE", secret)],
+        &[(&key_env, secret)],
         &[
             "add",
             "main",
@@ -347,7 +354,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
             "--model",
             "model-a",
             "--key-env",
-            "LARRY_KEY_ROUTE",
+            &key_env,
             "--residency",
             "CA",
             "--describe",
@@ -356,6 +363,13 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
         ],
     )?;
     assert!(added.status.success(), "route add: {}", stderr_of(&added));
+    let saved: Value = json::from_slice(&added.stdout)?;
+    assert_eq!(
+        saved.at("/key_env")?.as_str(),
+        Some(key_env.as_str()),
+        "route add prints the exact variable name to export"
+    );
+    assert_eq!(saved.at("/saved")?, &json!(true), "the add reports saved");
     let listed = larry_route(state.path(), &[], &["list", "--json"])?;
     let value: Value = json::from_slice(&listed.stdout)?;
     assert_eq!(
@@ -370,7 +384,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
     );
     assert_eq!(
         value.at("/routes/0/key_env")?.as_str(),
-        Some("LARRY_KEY_ROUTE"),
+        Some(key_env.as_str()),
         "the listing names the key's variable, not its value"
     );
     let text = larry_route(state.path(), &[], &["list"])?;
@@ -475,7 +489,7 @@ fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
     let (state, origin) = fixture()?;
     mock_model::run(Config::seeded(7), |mock| -> TestResult {
         let tenant = Tenant {
-            key_var: "LARRY_KEY_UNSET",
+            suffix: "UNSET",
             key: "",
             ..Tenant::standard(&state, &origin, mock)
         };
@@ -486,7 +500,7 @@ fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
             "an unset key variable fails the task"
         );
         assert!(
-            stderr_of(&output).contains("LARRY_KEY_UNSET"),
+            stderr_of(&output).contains(&route_key::key_env(state.path(), "UNSET")?),
             "the refusal names the variable: {}",
             stderr_of(&output)
         );
@@ -566,6 +580,74 @@ fn a_stored_route_cannot_name_a_variable_outside_its_namespace() -> TestResult {
             mock.authorizations().is_empty(),
             "no bearer header left the host"
         );
+        Ok(())
+    })
+}
+
+/// A tenant's route may name only its own `LARRY_KEY_<TAG>_*` variable: A's add
+/// naming B's variable is refused typed and stores nothing, and a task naming it
+/// sends nothing even with B's key in the child's environment (CWE-200, larry#328).
+#[test]
+fn a_route_cannot_name_another_tenants_key_variable() -> TestResult {
+    let (state_a, origin_a) = fixture()?;
+    let state_b = TempDir::new()?;
+    mock_model::run(Config::seeded(10), |mock| -> TestResult {
+        let tenant = Tenant::standard(&state_a, &origin_a, mock);
+        let theirs = route_key::key_env(state_b.path(), "A")?;
+        let url = format!("http://{}/v1", host_of(mock));
+        let mut args = vec!["add", "steal", "--url", url.as_str()];
+        args.extend(["--model", "model-a", "--key-env", theirs.as_str()]);
+        args.extend(["--residency", "CA", "--default"]);
+        let refused = larry_route(state_a.path(), &[], &args)?;
+        let named = stderr_of(&refused);
+        assert_eq!(refused.status.code(), Some(1), "refused: {named}");
+        assert!(named.contains(&theirs), "the refusal names it: {named}");
+        assert!(named.contains("must start with LARRY_KEY_"), "{named}");
+        let stored = larry_route(state_a.path(), &[], &["list"])?;
+        assert!(stored.stdout.is_empty(), "nothing was stored");
+        let secret = OsStr::new("tenant-bs-secret-bytes");
+        let task = tenant.briefed(Some("steal"), None)?;
+        let output = tenant.exec_with(&task, &[(theirs.as_str(), secret)])?;
+        assert!(!output.status.success(), "a route nobody stored fails");
+        assert_eq!(mock.served(), 0, "nothing reached the gateway");
+        assert!(mock.authorizations().is_empty(), "no header left the host");
+        let shown = stderr_of(&output);
+        assert!(!holds(shown.as_bytes(), secret.as_encoded_bytes()));
+        Ok(())
+    })
+}
+
+/// Rewrites every route row's key variable in `state`'s store, the way a row
+/// stored before the tenant binding, or a saboteur with the file, leaves it.
+fn set_key_env(state: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+    Connection::open(state.join("executor.db"))?
+        .execute("UPDATE routes SET key_env = ?1", [name])?;
+    Ok(())
+}
+
+/// A route stored before the tenant binding names a variable no tenant tag
+/// bounds: `larry route resolve` refuses it typed before the variable is read,
+/// and a task that would use it sends nothing (larry#328).
+#[test]
+fn a_route_stored_before_the_binding_is_refused_at_resolve() -> TestResult {
+    let (state, origin) = fixture()?;
+    mock_model::run(Config::seeded(11), |mock| -> TestResult {
+        let tenant = Tenant::standard(&state, &origin, mock);
+        tenant.add_route("main")?;
+        set_key_env(state.path(), "LARRY_KEY_LEGACY")?;
+        let secret = OsStr::new("legacy-secret-bytes");
+        let resolved = larry_route(state.path(), &[("LARRY_KEY_LEGACY", secret)], &["resolve"])?;
+        let named = stderr_of(&resolved);
+        assert_eq!(resolved.status.code(), Some(1), "refused: {named}");
+        assert!(named.contains("LARRY_KEY_LEGACY"), "{named}");
+        let task = tenant.briefed(None, None)?;
+        let output = tenant.exec_with(&task, &[("LARRY_KEY_LEGACY", secret)])?;
+        assert!(!output.status.success(), "a task over it fails");
+        for shown in [&named, &stderr_of(&output)] {
+            assert!(!holds(shown.as_bytes(), secret.as_encoded_bytes()));
+        }
+        assert_eq!(mock.served(), 0, "nothing reached the gateway");
+        assert!(mock.authorizations().is_empty(), "no header left the host");
         Ok(())
     })
 }
