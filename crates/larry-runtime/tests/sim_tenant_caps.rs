@@ -22,10 +22,10 @@ use larry_contracts::state::RunState;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::WorkProposal;
-use larry_runtime::projection::ProjectionBackend;
+use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer, ProtocolVersionRange};
 use larry_runtime::runtime::{
-    Question, QuestionError, Runtime, RuntimeSettings, Subject, TickItem,
+    Question, QuestionError, Runtime, RuntimeSettings, Subject, TickItem, restore,
 };
 
 use sim_kit::{Sim, replay};
@@ -320,8 +320,9 @@ fn sim_a_tenant_at_its_share_refuses_and_another_tenant_still_admits_runs_and_as
         fill_run_share(&mut runtime, first)?;
         let refused = refuse_fifth_run(&mut runtime, first, second)?;
         fill_question_share(&mut runtime, first, second)?;
-        // The two questions above are already pending for tenant 1.
-        fill_ready_share(&mut runtime, first, second, 2)?;
+        // Tenant 1's refused fifth run is held for its retry (no acceptance
+        // was recorded for it), and its two questions are pending too.
+        fill_ready_share(&mut runtime, first, second, 3)?;
         Ok((refused, runtime.journal().len()))
     })
 }
@@ -488,5 +489,163 @@ fn sim_a_terminal_run_without_a_receipt_keeps_its_slot() -> Sim<()> {
             "the slot is not freed without a receipt: {second_tick:?}"
         );
         Ok(second_tick.refused().len())
+    })
+}
+
+/// Three tenants at one declared tenant still hold the global question
+/// ceiling: the share is a second bound beside `max_pending_questions`, never
+/// a replacement for it (larry#295, larry#333).
+#[test]
+fn sim_three_tenants_at_one_share_hold_the_global_question_bound() -> Sim<()> {
+    replay(32_u64..40, |_| -> Sim<usize> {
+        let alice = tenant(1);
+        let bob = tenant(2);
+        let carol = tenant(3);
+        let mut settings = settings(&[Scope::FileRead], &[Scope::FileRead], 100_000)?;
+        settings.max_tenants = 1;
+        settings.max_pending_questions = 4;
+        let mut runtime: TestRuntime = Runtime::new(settings, ScriptedOwner::new(), clock()?)?;
+        // One tenant fills the global ceiling of four questions.
+        for index in 11_u8..=14 {
+            let item = ask(
+                CommandId::from_bytes(wide(u32::from(index), 0x61)),
+                alice,
+                run(index),
+                operation(index),
+                worker(1),
+                worker(2),
+            )?;
+            runtime.submit_protocol(&human(alice, worker(2)), item, None)?;
+        }
+        // Its own share is whole, but the global ceiling holds for the others.
+        for (tag, asked, principal) in [(0x62_u8, bob, worker(4)), (0x63, carol, worker(6))] {
+            let item = ask(
+                CommandId::from_bytes(wide(0, tag)),
+                asked,
+                run(15),
+                operation(15),
+                worker(3),
+                principal,
+            )?;
+            match runtime.submit_protocol(&human(asked, principal), item, None) {
+                Err(RuntimeError::Question(QuestionError::PendingFull { capacity })) => {
+                    assert_eq!(capacity, 4, "the refusal names the global ceiling");
+                }
+                other => {
+                    return Err(format!(
+                        "another tenant's ask past the global ceiling must be refused: {other:?}"
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(runtime.journal().len())
+    })
+}
+
+/// Three tenants at one declared tenant still hold the global run-table
+/// ceiling: a new run past `run_capacity` is refused there, before any
+/// eviction, and the journal it leaves is one a restore can reopen.
+#[test]
+fn sim_three_tenants_at_one_share_hold_the_global_run_bound() -> Sim<()> {
+    replay(40_u64..48, |_| -> Sim<usize> {
+        let alice = tenant(1);
+        let bob = tenant(2);
+        let carol = tenant(3);
+        let mut settings = settings(&[Scope::FileRead], &[Scope::FileRead], 100_000)?;
+        settings.run_capacity = 4;
+        settings.max_tenants = 1;
+        let owner = ScriptedOwner::scripted([
+            unknown(operation(1)),
+            unknown(operation(2)),
+            unknown(operation(3)),
+            unknown(operation(4)),
+        ]);
+        let mut runtime: TestRuntime = Runtime::new(settings.clone(), owner, clock()?)?;
+        // Two live runs each from two tenants fill the table at its ceiling.
+        for index in 1_u8..=4 {
+            let holder = if index <= 2 { alice } else { bob };
+            let body = read(holder, run(index), operation(index));
+            runtime.submit(submit(command_id(index), &body)?)?;
+        }
+        runtime.tick()?;
+        for index in 1_u8..=4 {
+            assert_eq!(
+                runtime.projection().run_state(run(index)),
+                Some(RunState::Reconciling),
+                "run {index} is live and holds its slot"
+            );
+        }
+        // The third tenant's new run is refused at the table's ceiling.
+        let body = read(carol, run(5), operation(5));
+        runtime.submit(submit(command_id(5), &body)?)?;
+        let tick = runtime.tick()?;
+        assert!(
+            tick.refused().iter().any(|entry| {
+                entry.0 == TickItem::Command(command_id(5))
+                    && matches!(&entry.1, RuntimeError::RunLimitReached { capacity }
+                        if *capacity == 4)
+            }),
+            "the table refuses at its ceiling: {tick:?}"
+        );
+        // A refused acceptance the fold could not take would leave a journal
+        // no restore can reopen, so the restore is the proof nothing was taken.
+        let journal = runtime.into_journal();
+        restore::<FoldProjection, ScriptedOwner>(
+            settings,
+            ScriptedOwner::new(),
+            clock()?,
+            journal,
+        )?;
+        Ok(tick.refused().len())
+    })
+}
+
+/// An evicted sealed run keeps its owner: another tenant's command on it is
+/// refused `RunTenantMismatch` before anything is written, never answered as a
+/// closed run.
+#[test]
+fn sim_an_evicted_runs_owner_still_refuses_a_foreign_tenant() -> Sim<()> {
+    replay(48_u64..56, |_| -> Sim<usize> {
+        let alice = tenant(1);
+        let bob = tenant(2);
+        let mut settings = settings(&[Scope::FileRead], &[Scope::FileRead], 100_000)?;
+        settings.run_capacity = 4;
+        settings.max_tenants = 2;
+        let owner = ScriptedOwner::scripted([
+            succeeded(operation(21)),
+            succeeded(operation(22)),
+            succeeded(operation(23)),
+        ]);
+        let mut runtime: TestRuntime = Runtime::new(settings, owner, clock()?)?;
+        for index in 1_u8..=2 {
+            let body = read(alice, run(index), operation(index.saturating_add(20)));
+            runtime.submit(submit(command_id(index), &body)?)?;
+            runtime.tick()?;
+        }
+        // Alice's third run evicts the sealed first, whose view keeps its owner.
+        let body = read(alice, run(3), operation(23));
+        runtime.submit(submit(command_id(3), &body)?)?;
+        runtime.tick()?;
+        assert_eq!(
+            runtime.projection().run_state(run(1)),
+            Some(RunState::Completed),
+            "the evicted run keeps its recorded state"
+        );
+        let foreign = command_id(4);
+        runtime.submit(submit(foreign, &read(bob, run(1), operation(24)))?)?;
+        let tick = runtime.tick()?;
+        assert!(
+            tick.refused()
+                .iter()
+                .any(|entry| entry.0 == TickItem::Command(foreign)
+                    && matches!(&entry.1, RuntimeError::RunTenantMismatch { .. })),
+            "a foreign tenant is refused as trespass: {tick:?}"
+        );
+        assert!(
+            runtime.journal().command(foreign).is_none(),
+            "a trespassing command is never journaled"
+        );
+        Ok(tick.refused().len())
     })
 }

@@ -25,29 +25,25 @@ where
     P: ProjectionBackend + Default,
     O: EffectOwner,
 {
-    /// Establishes run ownership without exceeding the tenant's share of the
-    /// run table.
+    /// Establishes run ownership without exceeding the table's ceiling or the
+    /// tenant's share of it.
     ///
     /// Each tenant holds at most `run_capacity / max_tenants` tracked runs, at
     /// least one, so one tenant cannot fill the table every tenant shares
     /// (larry#333). A terminal run whose receipt is sealed has left the table:
     /// it can record no further event, so its row is a slot the next run of its
-    /// tenant takes. The projection's own `run_capacity` still bounds the whole
-    /// table, because every tracked run has a view there.
+    /// tenant takes.
     pub(super) fn track_run(&mut self, run: RunId, tenant: TenantId) -> Result<(), RuntimeError> {
-        self.ensure_run_tenant(run, tenant)?;
-        if !self.runs.contains_key(&run) {
+        if self.runs.contains_key(&run) {
+            self.ensure_run_tenant(run, tenant)?;
+        } else {
+            self.ensure_run_capacity(run, tenant)?;
             // A sealed terminal run is already known to the projection: it was
             // evicted from the table, and re-tracking it would spend a slot for
             // a run no work may enter.
-            if self
-                .projection
-                .run_state(run)
-                .is_some_and(RunState::is_terminal)
-            {
+            if self.terminal_in_view(run) {
                 return Ok(());
             }
-            self.free_run_slots(tenant)?;
         }
         self.runs.entry(run).or_insert(RunLive { tenant });
         // One budget per tenant (larry#208): a tenant enters the budget map
@@ -60,13 +56,53 @@ where
         Ok(())
     }
 
+    /// Decides whether `run` may enter the table, and adds nothing.
+    ///
+    /// The check runs before a command's acceptance is recorded, so a journal
+    /// never holds an accepted fact the table or the fold cannot take. A run
+    /// the projection already records as terminal left the table and takes no
+    /// row; a run it has not seen needs a view. The global ceiling refuses
+    /// typed before any eviction, so the table never passes `run_capacity`,
+    /// and this tenant's share may free only its own sealed terminal rows.
+    pub(super) fn ensure_run_capacity(
+        &mut self,
+        run: RunId,
+        tenant: TenantId,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_run_tenant(run, tenant)?;
+        if self.runs.contains_key(&run) || self.terminal_in_view(run) {
+            return Ok(());
+        }
+        if self.runs.len() >= self.settings.run_capacity {
+            return Err(RuntimeError::RunLimitReached {
+                capacity: self.settings.run_capacity,
+            });
+        }
+        // The fold takes this run's view at its acceptance record, so a new
+        // view must have room too.
+        if self.projection.run_state(run).is_none()
+            && self.projection.run_count() >= self.settings.run_capacity
+        {
+            return Err(RuntimeError::RunLimitReached {
+                capacity: self.settings.run_capacity,
+            });
+        }
+        self.free_run_slots(tenant)
+    }
+
+    /// Whether the projection already records `run` as terminal.
+    fn terminal_in_view(&self, run: RunId) -> bool {
+        self.projection
+            .run_state(run)
+            .is_some_and(RunState::is_terminal)
+    }
+
     /// Frees this tenant's slots past its share that a sealed terminal run can
     /// give back.
     ///
     /// The oldest row in identity order goes first, so the same journal frees
-    /// the same rows on every replay. The table's global ceiling needs no
-    /// branch here: every tracked run has a view in the projection, whose own
-    /// capacity is `run_capacity`, so the table cannot outgrow the view.
+    /// the same rows on every replay. The global ceiling is refused by
+    /// [`Self::ensure_run_capacity`] before this runs.
     fn free_run_slots(&mut self, tenant: TenantId) -> Result<(), RuntimeError> {
         let share = self.settings.tenant_share(self.settings.run_capacity);
         loop {
@@ -107,12 +143,20 @@ where
         run: RunId,
         tenant: TenantId,
     ) -> Result<(), RuntimeError> {
-        if let Some(live) = self.runs.get(&run)
-            && live.tenant != tenant
+        // An evicted sealed run keeps its owner in the projection, so another
+        // tenant's command on it is still refused as trespass rather than
+        // answered as a closed run (larry#333).
+        let owner = self
+            .runs
+            .get(&run)
+            .map(|live| live.tenant)
+            .or_else(|| self.projection.run_tenant(run));
+        if let Some(expected) = owner
+            && expected != tenant
         {
             return Err(RuntimeError::RunTenantMismatch {
                 run,
-                expected: live.tenant,
+                expected,
                 got: tenant,
             });
         }
@@ -308,6 +352,7 @@ where
         self.runs
             .get(&run)
             .map(|live| live.tenant)
+            .or_else(|| self.projection.run_tenant(run))
             .ok_or(RuntimeError::RunNotTracked { run })
     }
 }

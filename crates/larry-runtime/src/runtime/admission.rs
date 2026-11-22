@@ -425,7 +425,19 @@ where
             display,
         } = held;
         let (id, tenant, kind) = (command.id(), command.tenant(), command.content().kind());
-        if let Err(error) = self.record_command_accepted(id, tenant, kind, run) {
+        // A command that would open a run takes its table and view room before
+        // its acceptance is journalled: an accepted fact the table or the fold
+        // cannot take leaves a journal no restore can reopen (larry#333).
+        let room = if matches!(
+            kind,
+            CommandKind::Submit | CommandKind::Ask | CommandKind::Cancel
+        ) {
+            self.ensure_run_capacity(run, tenant)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = room.and_then(|()| self.record_command_accepted(id, tenant, kind, run))
+        {
             let place = place.min(self.admitted.len());
             self.admitted.insert(
                 place,
