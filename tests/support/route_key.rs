@@ -9,7 +9,7 @@ use std::path::Path;
 
 use lgwks_std::hash::Hasher;
 
-/// Characters of the tenant text that make the tag (ADR 0084).
+/// Characters of the tenant text that make the tag (ADR 0085).
 const TENANT_TAG_CHARS: usize = 16;
 
 /// The domain tag the executor's tenant identity hashes first.

@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0084: a route's key variable is bound to its tenant"
+title: "ADR 0085: a route's key variable is bound to its tenant"
 description: Why a stored route may name only LARRY_KEY_<TAG>_* under its own tenant's digest tag, checked at add and again at resolve.
-resource: /docs/adr/0084-a-route-key-variable-is-bound-to-its-tenant.md
+resource: /docs/adr/0085-a-route-key-variable-is-bound-to-its-tenant.md
 tags: [larry, adr, model, routing, multitenant, security]
 generated: {by: claude-code, at: 2026-11-21}
 verified: {by: claude-code, method: tests/route_cli_journey.rs's a_route_cannot_name_another_tenants_key_variable and a_route_stored_before_the_binding_is_refused_at_resolve red before the change (exit 0 where 1 was required) and green after, with sim_route_table's sim_a_row_stored_before_the_binding_is_refused_at_resolve and model::route::tests::a_key_variable_is_bound_to_its_tenants_tag, 2026-11-21}
@@ -11,7 +11,7 @@ stale_after: 2027-02-21
 sources: [larry#328, larry#201, ADR 0039, CWE-200, /INVARIANTS.md]
 ---
 
-# 0084: a route's key variable is bound to its tenant
+# 0085: a route's key variable is bound to its tenant
 
 Status: accepted, 2026-11-21 (larry#328, found by the 2026-11-19 review).
 

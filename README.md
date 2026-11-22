@@ -45,7 +45,7 @@ expiry is never consent.
   - `larry model`: sends one completion through the configured gateway.
   - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
     calls go, which `LARRY_KEY_<TAG>_*` variable holds the key, and the country where the provider processes the
-    data (ADR 0039, ADR 0084).
+    data (ADR 0039, ADR 0085).
   - `larry eval`: scores one model arm over a matched task set, such as `eval/matched-v1.json` (ADR 0009).
     Set `LARRY_EVAL_PRICE_IN` and `_OUT`, and `_CACHED` and `_CACHE_WRITE` for cache rates (ADR 0043).
   - `larry serve`: the HTTP host on `LARRY_SERVE_ADDR` (default `127.0.0.1:8787`) over `LARRY_STATE_DIR`;
