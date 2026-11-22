@@ -1,6 +1,8 @@
-//! `larry-rerank`: ranks already-scoped JSONL candidates against one query with the pinned local
-//! Qwen3 reranker and writes one create-exclusive receipt under `tools/receipts/` (larry#150,
-//! ADR 0013). It ports `tools/rerank_local.py` with the same bounds and the same messages. The
+//! `larry-rerank`: ranks already-scoped JSONL candidates against one query with the local Qwen3
+//! reranker at the snapshot `model.pin` names, and writes one create-exclusive receipt under
+//! `tools/receipts/`, whole by link (larry#150, ADR 0013). The revision a receipt records is that
+//! snapshot label, not a digest of the weights, so the receipt is not evidence of their bytes.
+//! It ports `tools/rerank_local.py` with the same bounds and the same messages. The
 //! request, bounds, ranking and receipt live here and build in every configuration; the model
 //! engine is `qwen`, behind the `rerank` cargo feature, and [`rank`] is the one entry point.
 //! Source: the Qwen3-Reranker model card (the yes/no judgment prompt), RFC 8259 (JSON text), the
@@ -13,6 +15,7 @@ use std::io::{self, Read, Write};
 use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use lgwks_std::hash;
@@ -23,8 +26,9 @@ mod qwen;
 #[cfg(test)]
 mod sim;
 
-/// The pinned reranker every receipt names, as data: the model id on the first line and its
-/// 40-hex revision on the second, so a re-pin edits no code (ADR 0013). [`model_pin`] reads it.
+/// The reranker identity every receipt names, as data: the model id on the first line and the
+/// snapshot revision on the second, so a re-pin edits no code (ADR 0013). The revision names the
+/// snapshot directory the engine reads; it is not a digest of the weights. [`model_pin`] reads it.
 const MODEL_PIN: &str = include_str!("rerank/model.pin");
 /// The length of a git revision in hex, the form a pinned model revision takes.
 const REVISION_HEX: usize = 40;
@@ -527,7 +531,8 @@ impl Scorer for Unbuilt {
 
 /// Runs one request end to end: validates the query, reads the candidates from the request's file
 /// or `input`, checks the bounds and receipt path against `root`, scores with `scorer`, refuses a
-/// run past its time limit, writes the receipt create-exclusive and returns its JSON line.
+/// run past its time limit, writes the receipt whole and create-exclusive, and returns its JSON
+/// line.
 pub(crate) fn run<S: Scorer, R: Read>(
     request: &Request,
     input: R,
@@ -579,8 +584,33 @@ pub(crate) fn run<S: Scorer, R: Read>(
     Ok(line)
 }
 
-/// Writes `line` and a newline to a file that must not exist yet, owner read-write only.
+/// Writes `line` and a newline to a path that must not exist yet, as one whole file: a fresh
+/// temporary sibling holds the bytes, `link(2)` puts it in place and refuses an existing name,
+/// and the temporary is removed, so a kill leaves the previous state or the whole receipt, never
+/// a torn one. Rejected: `rename(2)` over the target, which would overwrite a receipt the
+/// create-exclusive rule refuses. Owner read-write only.
 fn write_exclusive(path: &Path, line: &str) -> Result<(), RerankError> {
+    let directory = path.parent().ok_or(RerankError::ReceiptPath(None))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(RerankError::ReceiptPath(None))?;
+    let sequence = crate::REPLACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = directory.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
+    let written = match write_new(&temporary, line.as_bytes()) {
+        Ok(()) => {
+            let linked = fs::hard_link(&temporary, path);
+            let removed = fs::remove_file(&temporary);
+            linked.and(removed)
+        }
+        Err(cause) => Err(cause),
+    };
+    written.map_err(RerankError::Io)
+}
+
+/// Creates `path`, refusing one that already exists, and writes `line` and a newline into it,
+/// owner read-write only, then syncs it.
+fn write_new(path: &Path, line: &[u8]) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -588,8 +618,8 @@ fn write_exclusive(path: &Path, line: &str) -> Result<(), RerankError> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(RerankError::Io)?;
-    file.write_all(line.as_bytes()).map_err(RerankError::Io)?;
-    file.write_all(b"\n").map_err(RerankError::Io)?;
-    file.sync_all().map_err(RerankError::Io)
+    let mut file = options.open(path)?;
+    file.write_all(line)?;
+    file.write_all(b"\n")?;
+    file.sync_all()
 }

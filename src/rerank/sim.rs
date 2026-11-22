@@ -348,6 +348,14 @@ fn sim_ranking_and_receipt_match_the_reference_for_every_seed() -> Check {
             "seed {seed}: the first receipt is intact"
         );
         mode_is_private(&root.path().join("tools/receipts").join(name), seed)?;
+        let mut leftovers = Vec::new();
+        for entry in fs::read_dir(root.path().join("tools/receipts"))? {
+            leftovers.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        assert!(
+            !leftovers.iter().any(|left| left.ends_with(".tmp")),
+            "seed {seed}: no temporary receipt survives: {leftovers:?}"
+        );
     }
     Ok(())
 }

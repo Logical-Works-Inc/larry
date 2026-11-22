@@ -8,7 +8,7 @@
 
 use std::error::Error;
 
-use lgwks_std::json::json;
+use lgwks_std::json::{Value, json};
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::score::{
@@ -245,22 +245,8 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
             "seed {seed}: total is the known sum"
         );
         let accepted = u128::from(field("accepted").ok_or("accepted")?);
-        match sheet["cost_per_accepted_task_picousd"].as_str() {
-            Some(text) => {
-                let share = wide_digits(text).ok_or("share digits")?;
-                let floor = share.checked_mul(accepted).ok_or("overflow")?;
-                let ceiling = share.saturating_add(1).saturating_mul(accepted);
-                assert!(
-                    floor <= known && known < ceiling,
-                    "seed {seed}: floor share"
-                );
-            }
-            None => assert_eq!(
-                accepted, 0,
-                "seed {seed}: no share only without an accepted task"
-            ),
-        }
         let complete = outcomes.iter().all(|done| done.tokens.is_some());
+        check_share(seed, sheet, accepted, known, complete)?;
         assert_eq!(
             sheet["cost_complete"],
             json!(complete),
@@ -280,6 +266,58 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
                 refused,
                 result["reason"].is_string(),
                 "seed {seed}: a refusal says why"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The card's cost per accepted task: `unknown` when a cost is missing, else the floor
+/// share of the known sum, and absent only for a complete card with no accepted task. The
+/// dollar field says the same thing as the picodollar field in every case (larry#340).
+fn check_share(
+    seed: u64,
+    sheet: &Value,
+    accepted: u128,
+    known: u128,
+    complete: bool,
+) -> TestResult {
+    let dollars = &sheet["cost_per_accepted_task_usd"];
+    match sheet["cost_per_accepted_task_picousd"].as_str() {
+        Some("unknown") => {
+            assert!(
+                !complete,
+                "seed {seed}: unknown only when a cost is missing"
+            );
+            assert_eq!(
+                dollars.as_str(),
+                Some("unknown"),
+                "seed {seed}: the dollar share is unknown with the picodollar share"
+            );
+        }
+        Some(text) => {
+            assert!(complete, "seed {seed}: a number only over a complete sum");
+            let share = wide_digits(text).ok_or("share digits")?;
+            assert_eq!(
+                dollars.as_str().and_then(read_usd),
+                Some(share),
+                "seed {seed}: the dollar share is the picodollar share"
+            );
+            let floor = share.checked_mul(accepted).ok_or("overflow")?;
+            let ceiling = share.saturating_add(1).saturating_mul(accepted);
+            assert!(
+                floor <= known && known < ceiling,
+                "seed {seed}: floor share"
+            );
+        }
+        None => {
+            assert!(
+                complete && accepted == 0,
+                "seed {seed}: no share only for a complete card without an accepted task"
+            );
+            assert!(
+                dollars.is_null(),
+                "seed {seed}: no dollar share where there is no picodollar share"
             );
         }
     }
