@@ -570,7 +570,8 @@ fn drive<O: EffectOwner>(
     // The ingress negotiates before the command is queued (E47): the
     // executor offers the runtime's own configured version range and the
     // SubmitCommand capability only, and it is headless — a task's question can
-    // wait for no human here.
+    // wait for no human here. It binds the worker it holds as the offer's
+    // principal, the same host-authenticated identity the display carries.
     let offered = BTreeSet::from([ProtocolCapability::SubmitCommand]);
     let offer = ProtocolOffer::new(
         tenant,
@@ -578,7 +579,8 @@ fn drive<O: EffectOwner>(
         offered,
         true,
         false,
-    );
+    )
+    .authenticated(holder);
     let submitted = runtime.submit_protocol(&offer, command, Some(shown));
     let acceptance = match submitted {
         Ok((acceptance, _version)) => acceptance,

@@ -143,7 +143,7 @@ trait Ack {
 
 impl Ack for Rt {
     fn ack(&mut self, command: Command) -> Result<CommandAcceptance, RuntimeError> {
-        self.admit(command, None)
+        self.admit(command, None, None)
     }
 }
 

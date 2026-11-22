@@ -70,8 +70,10 @@ where
         }
         // The command is acknowledged only once it is durable (E28): the version
         // returned is the acknowledgement, and the acceptance says whether this
-        // request was already recorded (larry#182 defect 3).
-        let acceptance = self.admit(command, display)?;
+        // request was already recorded (larry#182 defect 3). An answer carries
+        // the offer's host-authenticated principal, never a client's claim
+        // (E30, larry#331).
+        let acceptance = self.admit(command, display, offer.principal())?;
         Ok((acceptance, negotiated.version))
     }
 }
