@@ -9,7 +9,8 @@
 //! scratch directory and the one device a shell writes; a launch service, a signal
 //! outside the command's own process group and the `open`, `launchctl` and `osascript`
 //! launchers are denied, larry#326),
-//! and `/usr/bin/setpriv` with a Landlock allowlist on Linux (reads beneath every
+//! and `/usr/bin/setsid` then `/usr/bin/setpriv` with a Landlock allowlist on Linux (a
+//! session of its own with no controlling terminal, larry#386; reads beneath every
 //! path but the state directory and `/proc`, read and write beneath the tree and
 //! scratch directory). Every descendant of the command inherits it. Source:
 //! Apple's Seatbelt profile language (`sandbox-exec`), the Linux Landlock
@@ -51,6 +52,16 @@ const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The util-linux wrapper that applies Landlock rules, then execs the command.
 const SETPRIV: &str = "/usr/bin/setpriv";
+
+/// The util-linux tool that starts the command in a session of its own, so it has no
+/// controlling terminal and `/dev/tty`, readable under Landlock's `/dev`, opens nothing
+/// (larry#386, ADR 0091). The executor launches through it whenever it is the wrapper's first
+/// word, and never adds a second one.
+pub(super) const SETSID: &str = "/usr/bin/setsid";
+
+/// The tools a Linux confinement runs, in launch order: no host confines a command without
+/// both, because `setpriv` alone leaves the person's terminal open (larry#386).
+const LINUX_TOOLS: [&str; 2] = [SETSID, SETPRIV];
 
 /// The one device a shell writes, which the profile leaves open: the person's terminal is not one
 /// (larry#323).
@@ -121,11 +132,11 @@ impl Platform {
         }
     }
 
-    /// The platform's wrapper program, when it has one.
-    const fn wrapper(self) -> Option<&'static str> {
+    /// The platform's wrapper programs, every one needed, or `None` when it has none.
+    const fn wrappers(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Macos => Some(SANDBOX_EXEC),
-            Self::Linux => Some(SETPRIV),
+            Self::Macos => Some(&[SANDBOX_EXEC]),
+            Self::Linux => Some(&LINUX_TOOLS),
             Self::Other => None,
         }
     }
@@ -238,18 +249,21 @@ impl std::error::Error for ConfineError {
     }
 }
 
-/// Whether `platform` can confine a command, `present` saying whether a tool is installed.
+/// Whether `platform` can confine a command, `present` saying whether a tool is installed: the
+/// first wrapper program missing is the refusal.
 fn supported_with(platform: Platform, present: &dyn Fn(&str) -> bool) -> Result<(), ConfineError> {
-    match platform.wrapper() {
-        None => Err(ConfineError::Unsupported {
+    let Some(tools) = platform.wrappers() else {
+        return Err(ConfineError::Unsupported {
             platform: platform.name(),
-        }),
-        Some(tool) if present(tool) => Ok(()),
+        });
+    };
+    match tools.iter().copied().find(|tool| !present(tool)) {
         Some(tool) => Err(ConfineError::MissingWrapper { tool }),
+        None => Ok(()),
     }
 }
 
-/// Whether `platform` can confine a command on this host: it has a wrapper and the wrapper is installed.
+/// Whether `platform` can confine a command on this host: it has a wrapper and every program of it is installed.
 pub(crate) fn supported(platform: Platform) -> Result<(), ConfineError> {
     supported_with(platform, &|tool| Path::new(tool).is_file())
 }
@@ -490,7 +504,10 @@ fn landlock(
     rules.allow(tree, PathAccess::ReadWrite);
     rules.allow(scratch, PathAccess::ReadWrite);
     rules.validate().map_err(ConfineError::Invalid)?;
+    // The session first: setsid execs setpriv, which confines itself and execs the command,
+    // so the command and every descendant have no controlling terminal (larry#386).
     let mut prefix = vec![
+        String::from(SETSID),
         String::from(SETPRIV),
         String::from("--landlock-access"),
         String::from("fs"),
