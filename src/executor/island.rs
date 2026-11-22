@@ -142,8 +142,13 @@ impl Island {
     ) -> Result<Island, ExecError> {
         let (workspace, copied) =
             Workspace::snapshot(&settings.state_dir, origin, task_id, &settings.path)?;
-        let confine = Confine::new(platform, workspace.path(), &workspace.scratch())
-            .map_err(ExecError::Confine)?;
+        let confine = Confine::new(
+            platform,
+            &settings.state_dir,
+            workspace.path(),
+            &workspace.scratch(),
+        )
+        .map_err(ExecError::Confine)?;
         confine.probe(&settings.path).map_err(ExecError::Confine)?;
         let base = workspace.head()?;
         Ok(Island {

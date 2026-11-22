@@ -79,6 +79,20 @@ fn adrs(root: &Path) -> Result<Vec<(String, String)>, Box<dyn Error>> {
     Ok(out)
 }
 
+/// The four-digit numbers `text` cites after `ADR `.
+fn citations(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some((_, after)) = rest.split_once("ADR ") {
+        let number: String = after.chars().take(4).collect();
+        if number.len() == 4 && number.bytes().all(|byte| byte.is_ascii_digit()) {
+            out.push(number);
+        }
+        rest = after;
+    }
+    out
+}
+
 #[test]
 fn every_adr_number_names_one_document() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -99,6 +113,25 @@ fn every_adr_number_names_one_document() -> TestResult {
     assert!(
         drift.is_empty(),
         "these ADRs name another path as their resource: {drift:?}"
+    );
+    // A renumbered ADR must not leave a governed document citing its old number at a
+    // different decision (larry#322's move to 0081 followed main's 0080).
+    let held: Vec<String> = adrs
+        .iter()
+        .filter_map(|adr| adr_number(&adr.0).map(str::to_owned))
+        .collect();
+    let mut missing = Vec::new();
+    for document in ["INVARIANTS.md", "CODEBOOK.md"] {
+        let text = fs::read_to_string(root.join(document))?;
+        for number in citations(&text) {
+            if !held.contains(&number) {
+                missing.push(format!("{document} cites ADR {number}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "documents cite numbers no ADR holds: {missing:?}"
     );
     Ok(())
 }
