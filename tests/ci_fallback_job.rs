@@ -225,8 +225,8 @@ fn the_mutants_verdict_fails_closed_on_a_lost_shard() -> Check {
     let verdict = job(&text, "verdict")?;
     assert!(
         verdict.contains("needs: [plan, shard]")
-            && verdict.contains("if: ${{ always() && !github.event.repository.private }}"),
-        "the verdict runs after any outcome of the plan and the shards"
+            && verdict.contains("if: ${{ always() && !github.event.repository.private && github.event_name == 'pull_request' }}"),
+        "the verdict runs after any outcome of the plan and the shards, on every pull request"
     );
     for refusal in [
         "if [ \"$PLAN\" != success ] || [ -z \"$SHARDS\" ]; then",
@@ -290,13 +290,18 @@ fn the_mutants_lane_never_writes_the_cache_main_restores() -> Check {
     let text = workflow("mutants.yml")?;
     assert_eq!(
         text.matches("uses: Swatinem/rust-cache@").count(),
-        1,
-        "only the shard builds, so only the shard restores a cache"
+        2,
+        "the shard restores a cache and the aarch64 warm job saves the one it restores"
+    );
+    assert_eq!(
+        text.matches("save-if: ${{ github.ref == 'refs/heads/main' }}")
+            .count(),
+        2,
+        "both cache steps save only from main, so a pull request never writes what main restores"
     );
     assert!(
-        text.contains("shared-key: test-hosted")
-            && text.contains("save-if: ${{ github.ref == 'refs/heads/main' }}"),
-        "the lane restores the test lane's key and saves only from main, which it never runs on"
+        text.contains("'test-hosted'") && text.contains("shared-key: mutants-aarch64"),
+        "x86_64 restores the test lane's key; aarch64 restores the key only main writes (ADR 0095)"
     );
     assert!(
         text.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
@@ -353,25 +358,37 @@ fn the_mutants_lane_pins_every_action_and_shares_one_diff() -> Check {
 }
 
 #[test]
-fn the_mutants_lane_runs_hosted_only_on_pull_requests() -> Check {
+fn the_mutants_lane_runs_hosted_and_judges_only_pull_requests() -> Check {
     let text = workflow("mutants.yml")?;
     assert!(
-        text.contains("\non:\n  pull_request:\n\npermissions:") && !text.contains("push:"),
-        "the lane runs on pull requests and on nothing else"
+        text.contains("\non:\n  pull_request:\n  push:\n    branches: [main]\n\npermissions:"),
+        "the lane judges pull requests, and a push to main only warms the aarch64 cache"
     );
     assert_eq!(
-        text.matches("runs-on: ubuntu-latest").count(),
-        3,
-        "plan, shard and verdict all run hosted"
+        text.matches("runs-on: ubuntu-24.04\n").count(),
+        2,
+        "plan and verdict run on the pinned hosted x86_64 image"
+    );
+    assert_eq!(
+        text.matches("runs-on: ubuntu-24.04-arm\n").count(),
+        1,
+        "the warm job runs on the hosted ARM64 image"
+    );
+    assert_eq!(
+        text.matches("runs-on: ${{").count(),
+        1,
+        "only the shard picks its runner, from the matrix's two hosted images"
     );
     assert!(
-        !text.contains("runs-on: ${{"),
-        "no job picks the self-hosted Mac by a runner expression"
+        !text.contains("ubuntu-latest") && !text.contains("\"self-hosted\",\"macOS\""),
+        "every job names its image, and none runs on the self-hosted Mac"
     );
     let plan = job(&text, "plan")?;
     assert!(
-        plan.contains("if: ${{ !github.event.repository.private }}"),
-        "a private repository runs no job of the lane"
+        plan.contains(
+            "if: ${{ !github.event.repository.private && github.event_name == 'pull_request' }}"
+        ),
+        "a private repository runs no job of the lane, and a push to main plans nothing"
     );
     Ok(())
 }
@@ -381,8 +398,8 @@ fn the_mutants_verdict_names_each_missed_mutant_and_the_denominator() -> Check {
     let text = workflow("mutants.yml")?;
     let verdict = job(&text, "verdict")?;
     assert!(
-        verdict.contains("\"missed \\(.file):\\(.line): \\(.replacement)"),
-        "each missed mutant prints as file:line: replacement"
+        verdict.contains("\"\\($arch) missed \\(.file):\\(.line): \\(.replacement)"),
+        "each missed mutant prints as arch missed file:line: replacement"
     );
     assert!(
         verdict.contains("left out of the denominator: unviable $unviable, timeout $timeouts"),
@@ -442,6 +459,80 @@ fn the_mutants_verdict_reads_the_floor_and_the_caps_from_the_base_ref() -> Check
     assert!(
         !text.contains("pull_request_target"),
         "the lane never runs with the target repository's token"
+    );
+    Ok(())
+}
+
+/// Source: the Director's order of 2026-11-23 ("add x86 as well in the testing portfolio"),
+/// GitHub's hosted runner images (`ubuntu-24.04` is x86_64, `ubuntu-24.04-arm` is ARM64) and
+/// cargo-mutants 27.1.0's release assets (x86_64 Linux only). Requirement: every mutant is judged
+/// on both architectures, each shard proves which one it ran on, each architecture meets the
+/// floor alone, and a mutant the two judge apart fails the verdict (larry#404, ADR 0095).
+#[test]
+fn the_mutants_lane_judges_every_mutant_on_both_linux_architectures() -> Check {
+    let text = workflow("mutants.yml")?;
+    let plan = job(&text, "plan")?;
+    for leg in [
+        r#"{arch: "x86_64", runner: "ubuntu-24.04", host: "x86_64-unknown-linux-gnu"}"#,
+        r#"{arch: "aarch64", runner: "ubuntu-24.04-arm", host: "aarch64-unknown-linux-gnu"}"#,
+    ] {
+        assert!(plan.contains(leg), "the shard matrix holds the leg {leg}");
+    }
+    assert!(
+        plan.contains("| . as $a | range(0; $n) | $a + {k: ., n: $n}]}"),
+        "every shard of the plan runs on each architecture"
+    );
+    let shard = job(&text, "shard")?;
+    assert!(
+        shard.contains("runs-on: ${{ matrix.runner }}")
+            && shard.contains("name: shard ${{ matrix.arch }} ${{ matrix.k }}/${{ matrix.n }}"),
+        "a shard runs on its leg's hosted image and names its architecture"
+    );
+    assert!(
+        shard.contains("host=\"$(rustc -vV | sed -n 's/^host: //p')\"")
+            && shard.contains("if [ \"$host\" != \"$WANT\" ]; then")
+            && shard.contains("it judges the wrong architecture (fail closed)"),
+        "a runner that served the other architecture fails its shard"
+    );
+    assert!(
+        shard.contains("name: mutants-outcomes-${{ matrix.arch }}-${{ matrix.k }}"),
+        "each architecture uploads its own outcomes"
+    );
+    assert!(
+        shard.contains(
+            "shared-key: ${{ matrix.arch == 'x86_64' && 'test-hosted' || 'mutants-aarch64' }}"
+        ),
+        "x86_64 restores the test lane's cache and aarch64 the warm job's"
+    );
+    assert!(
+        shard.contains("if: ${{ matrix.arch == 'aarch64' }}\n        timeout-minutes: 8\n        run: cargo install cargo-mutants --locked --version 27.1.0"),
+        "cargo-mutants ships no aarch64 Linux binary, so that leg builds the pinned release, bounded"
+    );
+    let warm = job(&text, "warm-aarch64")?;
+    assert!(
+        warm.contains("if: ${{ !github.event.repository.private && github.event_name == 'push' }}")
+            && warm.contains("runs-on: ubuntu-24.04-arm")
+            && warm.contains("shared-key: mutants-aarch64")
+            && warm.contains("cargo install cargo-mutants --locked --version 27.1.0")
+            && warm.contains("cargo nextest run --workspace --locked --no-run"),
+        "a push to main warms the aarch64 shards' cache, cargo-mutants included, and judges nothing"
+    );
+    let verdict = job(&text, "verdict")?;
+    assert!(
+        verdict.contains("for arch in x86_64 aarch64; do")
+            && verdict.contains("outcomes/mutants-outcomes-\"$arch\"-*/outcomes.json")
+            && verdict.contains("::error::$arch: mutation score under the ${FLOOR}% floor"),
+        "each architecture is held to the base ref's floor on its own"
+    );
+    assert!(
+        verdict.contains("group_by([.file, .line, .replacement, .name])")
+            && verdict.contains("select(.arches != 2 or (.summaries | length) > 1)")
+            && verdict.contains("judged apart by x86_64 and aarch64"),
+        "a mutant the architectures judge apart, or that one alone judged, fails the verdict"
+    );
+    assert!(
+        !text.contains("runs-on: [self-hosted") && !text.contains("lgwks-linux"),
+        "the x64 org runners never serve this public repository (larry#116)"
     );
     Ok(())
 }
