@@ -53,6 +53,50 @@ fn workflow(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     Ok(std::fs::read_to_string(path)?)
 }
 
+/// The compiler every box and every job builds larry with (Director 2026-11-23: "rust 1.100
+/// upgrade mandated for all repos", larry#406).
+const RUST: &str = "1.100.0";
+
+/// Requirement: one baseline compiler (NIST SP 800-53 rev. 5 CM-2). `rust-toolchain.toml`
+/// pins 1.100.0, the workspace `rust-version` is 1.100, and every toolchain step of the four
+/// workflows installs 1.100.0, so the Mac, Oracle (default 1.98.0), the x86_64 box (only
+/// 1.100.0) and the hosted runners compile one way. Catches a lane left on `stable`, a step
+/// that names another release, and a manifest or toolchain file that drifts.
+#[test]
+fn the_toolchain_is_the_mandated_rust() -> Check {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml"))?;
+    assert!(
+        toolchain
+            .lines()
+            .any(|line| line.trim() == format!("channel = \"{RUST}\"")),
+        "rust-toolchain.toml pins {RUST}: {toolchain}"
+    );
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
+    assert!(
+        manifest
+            .lines()
+            .any(|line| line.trim() == "rust-version = \"1.100\""),
+        "the workspace rust-version is 1.100"
+    );
+    for name in ["ci.yml", "governance.yml", "mutants.yml", "sim.yml"] {
+        let text = workflow(name)?;
+        let steps = text.matches("uses: dtolnay/rust-toolchain@").count();
+        let pinned = text.matches(&format!("toolchain: {RUST}\n")).count();
+        assert!(steps > 0, "{name} installs a toolchain");
+        assert_eq!(
+            pinned, steps,
+            "{name}: every toolchain step installs {RUST}"
+        );
+        assert_eq!(
+            text.matches("toolchain: ").count(),
+            steps,
+            "{name}: no other toolchain is named"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn every_hosted_lane_runs_its_tests_even_when_the_nextest_install_hangs() -> Check {
     let sim = workflow("sim.yml")?;
