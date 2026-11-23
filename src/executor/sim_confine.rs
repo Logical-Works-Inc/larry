@@ -645,57 +645,6 @@ fn sim_confine_a_state_at_the_walk_root_is_refused() {
     ));
 }
 
-/// The read-root count stays under its named bound with many siblings, and past it the
-/// confinement is refused typed rather than built unbounded (larry#322).
-#[test]
-fn sim_confine_read_roots_stay_under_their_bound() -> TestResult {
-    let root = scratch("many")?;
-    let state = root.join("state");
-    std::fs::create_dir_all(&state)?;
-    for n in 0..15 {
-        std::fs::create_dir_all(root.join(format!("sib-{n}")))?;
-    }
-    let mut errors = std::io::stderr().lock();
-    match read_roots_below(&root, &state) {
-        Ok(roots) => {
-            writeln!(
-                errors,
-                "{{\"metric\":\"read_roots\",\"siblings\":15,\"rules\":{}}}",
-                roots.len()
-            )?;
-            assert!(
-                roots.iter().any(|granted| granted == &root.join("sib-0")),
-                "a sibling of the state directory is a read root: {roots:?}"
-            );
-        }
-        // A host whose path to the state directory already holds more entries than the
-        // allowlist leaves is refused typed with both counts, never built past the bound.
-        Err(ConfineError::TooManyRoots { roots, bound }) => {
-            writeln!(
-                errors,
-                "{{\"metric\":\"read_roots_refused\",\"rules\":{roots},\"bound\":{bound}}}"
-            )?;
-        }
-        Err(other) => {
-            return Err(format!("the roots were refused for another reason: {other}").into());
-        }
-    }
-    let crowded = scratch("crowded")?;
-    let crowded_state = crowded.join("state");
-    std::fs::create_dir_all(&crowded_state)?;
-    for n in 0..=MAX_READ_ROOTS {
-        std::fs::create_dir_all(crowded.join(format!("sib-{n}")))?;
-    }
-    assert!(
-        matches!(
-            read_roots_below(&crowded, &crowded_state),
-            Err(ConfineError::TooManyRoots { .. })
-        ),
-        "past the bound the confinement is refused typed"
-    );
-    Ok(())
-}
-
 /// The p50, p95 and p99 of `samples`, by nearest rank.
 fn percentiles(samples: &mut [u64]) -> Option<[u64; 3]> {
     samples.sort_unstable();
@@ -761,3 +710,7 @@ mod macos;
 /// The Linux session: no host without `setsid` confines a command (larry#386).
 #[path = "sim_confine_session.rs"]
 mod session;
+
+/// The read walk and its bound, on a crowded home folder too (larry#322, larry#382).
+#[path = "sim_confine_walk.rs"]
+mod walk;
