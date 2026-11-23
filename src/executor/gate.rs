@@ -401,16 +401,12 @@ pub(super) fn admit_and_run(
     key: &lgwks_std::sign::SecretKey,
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
-    if recovered_evidence(&settings.state_dir, task_id)? {
+    if let Some(line) = recovered_evidence(&settings.state_dir, task_id)? {
         // This request was already dispatched once and its executor died inside
-        // it. The journal it left is the evidence; the retry answers from it and
-        // nothing here reaches the world again (larry#182 defect 3).
-        return Ok(denied_report(
-            task_id,
-            task_digest,
-            "gate: the run was recovered from its journal as unknown",
-            key,
-        ));
+        // it. The journal it left is the evidence, recovered or refused; the retry
+        // answers from it and nothing here reaches the world again (larry#182
+        // defect 3, larry#394).
+        return Ok(denied_report(task_id, task_digest, line, key));
     }
     let policy = &settings.policy;
     let required = subject.required;
@@ -469,6 +465,9 @@ pub(super) fn admit_and_run(
     };
     std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
     let path = journal_path(&settings.state_dir, task_id);
+    // A journal already here is a dead run's the recovery kept for a passing fault
+    // (larry#394): this retry's failure must never remove that evidence.
+    let leftover = path.try_exists().map_err(ExecError::Journals)?;
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     let opened = Journal::open(&path, run_settings.journal_capacity)
         .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
@@ -489,7 +488,7 @@ pub(super) fn admit_and_run(
         }
         Err(error) => Err(ExecError::Gate(error)),
     };
-    finish(&path, outcome)
+    finish(&path, outcome, leftover)
 }
 
 /// What one task presents to its runtime once the journal is open.
@@ -517,17 +516,24 @@ struct Admission<'a> {
 /// Removes a returned task's journal: its record is now the sealed report the
 /// caller holds. A journal the store itself refused is kept, because what it
 /// holds is the only evidence of how far the task got, and the next start
-/// recovers it. A removal fault never hides the task's own failure.
-fn finish(path: &Path, outcome: Result<Report, ExecError>) -> Result<Report, ExecError> {
-    let kept = matches!(
-        outcome,
-        Err(ExecError::Gate(
-            RuntimeError::Durable(_)
-                | RuntimeError::DurableRepeat { .. }
-                | RuntimeError::DurabilityShort { .. }
-                | RuntimeError::Codec(_)
-        )) | Err(ExecError::Unsealed(_))
-    );
+/// recovers it. A journal that was `leftover` before this run opened it is a dead run's
+/// evidence, and a failed retry keeps it whatever the failure (larry#394). A removal
+/// fault never hides the task's own failure.
+pub(super) fn finish(
+    path: &Path,
+    outcome: Result<Report, ExecError>,
+    leftover: bool,
+) -> Result<Report, ExecError> {
+    let kept = (leftover && outcome.is_err())
+        || matches!(
+            outcome,
+            Err(ExecError::Gate(
+                RuntimeError::Durable(_)
+                    | RuntimeError::DurableRepeat { .. }
+                    | RuntimeError::DurabilityShort { .. }
+                    | RuntimeError::Codec(_)
+            )) | Err(ExecError::Unsealed(_))
+        );
     if kept {
         return outcome;
     }
