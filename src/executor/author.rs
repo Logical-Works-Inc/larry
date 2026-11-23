@@ -106,6 +106,9 @@ pub enum AuthorFault {
     Io(io::Error),
     /// The model gateway refused or failed.
     Model(ModelError),
+    /// The model's reply holds nothing but whitespace once its fence is removed, so it is
+    /// never written as the file (larry#396).
+    EmptyReply,
 }
 
 impl fmt::Display for AuthorFault {
@@ -120,6 +123,9 @@ impl fmt::Display for AuthorFault {
             Self::NotText(ref cause) => write!(out, "the file is not UTF-8 text: {cause}"),
             Self::Io(ref cause) => write!(out, "{cause}"),
             Self::Model(ref cause) => write!(out, "{cause}"),
+            Self::EmptyReply => {
+                out.write_str("the model's reply is empty, so the file is not written")
+            }
         }
     }
 }
@@ -130,7 +136,7 @@ impl std::error::Error for AuthorFault {
             Self::Io(ref cause) => Some(cause),
             Self::Model(ref cause) => Some(cause),
             Self::NotText(ref cause) => Some(cause),
-            Self::Symlink | Self::NotAFile | Self::TooLarge { .. } => None,
+            Self::Symlink | Self::NotAFile | Self::TooLarge { .. } | Self::EmptyReply => None,
         }
     }
 }
@@ -208,7 +214,7 @@ pub(crate) fn author(
         let completion: Completion = client
             .complete(&messages)
             .map_err(|cause| refused(path, AuthorFault::Model(cause)))?;
-        let content = file_text(completion.content());
+        let content = reply_file(completion.content()).map_err(|fault| refused(path, fault))?;
         if let Some(parent) = source.target.parent() {
             fs::create_dir_all(parent).map_err(|cause| refused(path, AuthorFault::Io(cause)))?;
         }
@@ -366,6 +372,16 @@ fn file_text(reply: &str) -> String {
         text.push('\n');
     }
     text
+}
+
+/// The file text a reply writes, refused when nothing but whitespace is left once the fence is
+/// removed: an empty reply is a cut or a refusal, never a file (larry#396).
+fn reply_file(reply: &str) -> Result<String, AuthorFault> {
+    let text = file_text(reply);
+    if text.trim().is_empty() {
+        return Err(AuthorFault::EmptyReply);
+    }
+    Ok(text)
 }
 
 /// The reply without one surrounding ```` ``` ```` fence; the reply itself when it has none.

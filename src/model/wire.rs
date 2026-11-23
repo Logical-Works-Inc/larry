@@ -25,12 +25,22 @@ pub(super) fn request_body(model: &str, temperature: f64, messages: &[Message]) 
     body.to_string().into_bytes()
 }
 
+/// `finish_reason` values that say the model ended its reply itself, compared ignoring ASCII
+/// case: OpenAI and vLLM `stop`, Anthropic's `end_turn` and `stop_sequence` as a gateway passes
+/// them through, and Gemini's `STOP`. Every other reason (`length`, `content_filter`,
+/// `max_tokens`, `MAX_TOKENS`, `SAFETY`, `tool_calls`, one no gateway documents) is a reply the
+/// model did not finish, so the list is closed and anything past it is refused (larry#396).
+const FINISHED: [&str; 3] = ["stop", "end_turn", "stop_sequence"];
+
 /// Read one successful reply body into its completion. The body may be a bare
 /// JSON document, a document followed by `data: [DONE]`, or an SSE chunk stream;
-/// all three reduce to the same document (see [`leading_document`]).
+/// all three reduce to the same document (see [`leading_document`]). A reply the
+/// model did not finish is refused before its content is read, so a filtered reply
+/// with no content is named by its reason (larry#396).
 pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
     let text = std::str::from_utf8(body).map_err(ModelError::NotUtf8)?;
     let document = leading_document(text)?;
+    finished(&document)?;
     let content = document
         .get("choices")
         .and_then(|choices| choices.get(0_usize))
@@ -41,6 +51,31 @@ pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
     Ok(Completion {
         content: content.to_owned(),
         usage: usage_of(&document),
+    })
+}
+
+/// Refuses a reply whose first choice says the model did not finish it. A missing or `null`
+/// reason reads as finished, because many gateways send none; a reason that is not text is
+/// malformed (larry#396).
+fn finished(document: &Value) -> Result<(), ModelError> {
+    let reason = match document
+        .get("choices")
+        .and_then(|choices| choices.get(0_usize))
+        .and_then(|choice| choice.get("finish_reason"))
+    {
+        None | Some(&Value::Null) => return Ok(()),
+        Some(reason) => reason.as_str().ok_or(ModelError::Malformed(
+            "the reply's finish_reason is not text",
+        ))?,
+    };
+    if FINISHED
+        .iter()
+        .any(|done| reason.eq_ignore_ascii_case(done))
+    {
+        return Ok(());
+    }
+    Err(ModelError::Unfinished {
+        reason: bounded(reason, MAX_CODE_CHARS),
     })
 }
 
@@ -96,6 +131,8 @@ fn first_count(candidates: &[&Value]) -> Option<u64> {
 /// others reassemble from their `data:` payloads, so the framing never reaches
 /// the caller. A stream reports its token counts as the `usage` object of its
 /// last chunk that carries one; that object is kept (larry#230), a `null` is not.
+/// Its finish reason is the last one a chunk names, and a `data:` payload that is
+/// not JSON refuses the reply, because the content it carried is lost (larry#396).
 fn leading_document(text: &str) -> Result<Value, ModelError> {
     if let Ok(document) = json::from_str::<Value>(without_done_marker(text)) {
         return Ok(document);
@@ -103,7 +140,8 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
     let mut assembled = String::new();
     let mut chunks = 0_usize;
     let mut usage = Value::Null;
-    for line in text.lines() {
+    let mut finish = Value::Null;
+    for (number, line) in text.lines().enumerate() {
         let Some(payload) = line.trim_start().strip_prefix("data:") else {
             continue;
         };
@@ -111,17 +149,24 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
         if payload.is_empty() || payload == "[DONE]" {
             continue;
         }
-        let Ok(chunk) = json::from_str::<Value>(payload) else {
-            continue;
-        };
+        let chunk = json::from_str::<Value>(payload).map_err(|cause| ModelError::StreamChunk {
+            line: number.saturating_add(1),
+            column: cause.column(),
+        })?;
         if let Some(reported) = chunk.get("usage")
             && reported.as_object().is_some()
         {
             usage = reported.clone();
         }
-        if let Some(delta) = chunk
+        let choice = chunk
             .get("choices")
-            .and_then(|choices| choices.get(0_usize))
+            .and_then(|choices| choices.get(0_usize));
+        if let Some(reason) = choice.and_then(|choice| choice.get("finish_reason"))
+            && !reason.is_null()
+        {
+            finish = reason.clone();
+        }
+        if let Some(delta) = choice
             .and_then(|choice| choice.get("delta"))
             .and_then(|delta| delta.get("content"))
             .and_then(Value::as_str)
@@ -135,7 +180,10 @@ fn leading_document(text: &str) -> Result<Value, ModelError> {
             "the reply is not a completion document",
         ));
     }
-    Ok(json!({ "choices": [{ "message": { "content": assembled } }], "usage": usage }))
+    Ok(json!({
+        "choices": [{ "message": { "content": assembled }, "finish_reason": finish }],
+        "usage": usage,
+    }))
 }
 
 /// The text without surrounding whitespace and without one trailing

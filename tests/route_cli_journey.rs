@@ -697,6 +697,21 @@ fn a_route_keeps_the_model_settings_and_refuses_each_gateway_fault_once() -> Tes
         "a padded reply is read: {}",
         stderr_of(&padded)
     );
+    // larry#396: a reply cut at the token limit, or one with no content, refuses the task
+    // naming why, and is never resent.
+    for (fault, why) in [
+        (Fault::Finish { reason: "length" }, "finish_reason length"),
+        (Fault::EmptyContent, "reply is empty"),
+    ] {
+        let (cut, served) = under_fault(fault, &[])?;
+        assert!(!cut.status.success(), "{fault:?} fails the task");
+        assert!(
+            stderr_of(&cut).contains(why),
+            "{fault:?}: {}",
+            stderr_of(&cut)
+        );
+        assert_eq!(served, 1, "{fault:?} is never resent");
+    }
     Ok(())
 }
 

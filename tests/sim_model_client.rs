@@ -371,29 +371,33 @@ fn a_hostile_refusal_message_is_bounded_and_cannot_drive_a_terminal() -> TestRes
     Ok(())
 }
 
+/// A 200 that is not JSON is malformed, a body cut against its declared length is a transport
+/// failure, a reply cut by `length` is `Unfinished` (larry#396), and none is retried: the next
+/// reply is clean, so a retry would succeed. A finished reply with no content is kept as sent.
 #[test]
 fn a_malformed_200_body_is_a_malformed_error_and_is_not_retried() -> TestResult {
+    let cut = Fault::Finish { reason: "length" };
+    let faults = [
+        Fault::MalformedJson,
+        Fault::TruncatedBody,
+        cut,
+        Fault::EmptyContent,
+    ];
     for seed in 0..SEEDS {
-        let config = scripted(seed, vec![Some(Fault::MalformedJson)]);
-        let (outcome, _) = run_once(config, &[], &[user("bad body")])?;
-        assert!(
-            matches!(outcome, Err(ModelError::Malformed(_))),
-            "seed {seed}: a reply that is not JSON is malformed, got {outcome:?}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn a_truncated_body_is_a_transport_failure_never_a_short_reply() -> TestResult {
-    for seed in 0..SEEDS {
-        let config = scripted(seed, vec![Some(Fault::TruncatedBody)]);
-        let (outcome, _) = run_once(config, &[], &[user("cut")])?;
-        assert_eq!(
-            outcome,
-            Err(ModelError::Transport),
-            "seed {seed}: a body cut short against its declared length is a transport failure"
-        );
+        for fault in faults {
+            let (outcome, _) = run_once(scripted(seed, vec![Some(fault)]), &[], &[user("bad")])?;
+            let right = match fault {
+                Fault::MalformedJson => matches!(outcome, Err(ModelError::Malformed(_))),
+                Fault::TruncatedBody => matches!(outcome, Err(ModelError::Transport)),
+                Fault::EmptyContent => {
+                    matches!(outcome, Ok(ref reply) if reply.content().is_empty())
+                }
+                _ => {
+                    matches!(outcome, Err(ModelError::Unfinished { ref reason }) if reason == "length")
+                }
+            };
+            assert!(right, "seed {seed}: {fault:?} gave {outcome:?}");
+        }
     }
     Ok(())
 }

@@ -441,6 +441,130 @@ fn sim_client_fits_exactly_at_its_byte_and_message_bounds() -> TestResult {
     Ok(())
 }
 
+/// Each `finish_reason` a gateway sends, as JSON text (empty: no member), and whether a reader
+/// reads the reply as finished. Source: the OpenAI chat completion object (`stop`, `length`,
+/// `content_filter`, `tool_calls`), Anthropic's stop reasons (`end_turn`, `stop_sequence`,
+/// `max_tokens`, `refusal`) and Gemini's finish reasons (`STOP`, `MAX_TOKENS`, `SAFETY`).
+const REASONS: [(&str, bool); 14] = [
+    ("", true),
+    ("null", true),
+    ("\"stop\"", true),
+    ("\"STOP\"", true),
+    ("\"end_turn\"", true),
+    ("\"stop_sequence\"", true),
+    ("\"length\"", false),
+    ("\"content_filter\"", false),
+    ("\"max_tokens\"", false),
+    ("\"MAX_TOKENS\"", false),
+    ("\"SAFETY\"", false),
+    ("\"tool_calls\"", false),
+    ("\"refusal\"", false),
+    ("\"\\u001b[31mlength\"", false),
+];
+
+/// The reply body for `reason` in `framing`: a bare document, the document with a done
+/// marker, or an SSE stream whose last chunk carries only the reason.
+fn finish_body(reason: &str, framing: u64, content: &str) -> String {
+    let member = if reason.is_empty() {
+        String::new()
+    } else {
+        format!(",\"finish_reason\":{reason}")
+    };
+    let content = json!(content).to_string();
+    let document = format!(r#"{{"choices":[{{"message":{{"content":{content}}}{member}}}]}}"#);
+    match framing {
+        0 => document,
+        1 => format!("{document}\n\ndata: [DONE]\n\n"),
+        _ => format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":{content}}},\"finish_reason\":null}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{{}}{member}}}]}}\n\ndata: [DONE]\n\n"
+        ),
+    }
+}
+
+/// weird-bytes and liar-upstream (larry#396): for 256 seeds a gateway sends a seeded finish
+/// reason in a seeded framing, and the reader passes exactly the finished ones with their content
+/// and refuses every other as `Unfinished`, naming the reason with no control character. Catches
+/// a reader that ignores the reason, knows only OpenAI's words, compares case, or loses a
+/// stream's last reason.
+#[test]
+fn sim_every_finish_reason_in_every_framing_gets_the_reference_verdict() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let index = usize::try_from(rng.below(u64::try_from(REASONS.len())?)?)?;
+        let (reason, done) = *REASONS.get(index).ok_or("a drawn reason")?;
+        let framing = rng.below(3)?;
+        let text = finish_body(reason, framing, "fn main() {}\n");
+        match (parse_completion(text.as_bytes()), done) {
+            (Ok(completion), true) => assert_eq!(
+                completion.content(),
+                "fn main() {}\n",
+                "seed {seed}: {reason} in framing {framing} keeps its content"
+            ),
+            (Err(ModelError::Unfinished { reason: named }), false) => assert!(
+                named.contains("length")
+                    || named.contains("filter")
+                    || named.contains("tokens")
+                    || named.contains("TOKENS")
+                    || named.contains("SAFETY")
+                    || named.contains("calls")
+                    || named.contains("refusal"),
+                "seed {seed}: the refusal names {reason}: {named:?}"
+            ),
+            (outcome, _) => {
+                return Err(
+                    format!("seed {seed}: {reason} in framing {framing} gave {outcome:?}").into(),
+                );
+            }
+        }
+    }
+    for (reason, done) in REASONS {
+        for framing in 0..3 {
+            let outcome = parse_completion(finish_body(reason, framing, "x").as_bytes());
+            assert_eq!(outcome.is_ok(), done, "{reason} in framing {framing}");
+            if let Err(ModelError::Unfinished { reason: named }) = outcome {
+                assert!(
+                    !named.chars().any(char::is_control),
+                    "{reason}: no control character reaches an operator: {named:?}"
+                );
+            }
+        }
+    }
+    let filtered = r#"{"choices":[{"message":{"content":null},"finish_reason":"content_filter"}]}"#;
+    assert_eq!(
+        parse_completion(filtered.as_bytes()),
+        Err(ModelError::Unfinished {
+            reason: String::from("content_filter")
+        }),
+        "a filtered reply with no content is named by its reason"
+    );
+    let numbered = r#"{"choices":[{"message":{"content":"x"},"finish_reason":7}]}"#;
+    assert_eq!(
+        parse_completion(numbered.as_bytes()),
+        Err(ModelError::Malformed(
+            "the reply's finish_reason is not text"
+        ))
+    );
+    Ok(())
+}
+
+/// larry#396: a stream chunk that is not JSON refuses the reply by its line, where the reader
+/// once skipped it and wrote what was left. Catches a reader that drops a torn chunk.
+#[test]
+fn a_torn_stream_chunk_refuses_the_reply_by_its_line() {
+    let torn = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"fn main\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"() {\n\n",
+        "data: [DONE]\n\n",
+    );
+    assert!(
+        matches!(
+            parse_completion(torn.as_bytes()),
+            Err(ModelError::StreamChunk { line: 3, .. })
+        ),
+        "the torn chunk on line 3 refuses the reply"
+    );
+}
+
 /// A context code is a member of the refusal's code, never a prefix of the whole reason:
 /// a namespaced code is an overflow and a longer member that merely contains the stem is
 /// not (larry#343).

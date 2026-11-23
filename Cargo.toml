@@ -54,7 +54,7 @@ lgwks_std = { version = "=5.0.0", default-features = false }
 # is the newest release; 10.0.0 raised the Landlock allowlist to 4,096 rules (crates#1114), and
 # 8.3.0 (larry#187) added `RecordJournal::admits` and `RecordProjection::admit` (crates#898, #905,
 # #906), which larry#90 builds on.
-lgwks_bot = { version = "=10.0.1", default-features = false }
+lgwks_bot = { version = "=10.0.2", default-features = false }
 # The dependency-admission storefront. The larry package opts into `sqlite`; the
 # published storefront owns that dependency and its transitive admission. 8.0.0 is the newest
 # release and re-exports rusqlite 0.43; 7.2.0 (larry#189) set the ledger's `sqlite::open` and

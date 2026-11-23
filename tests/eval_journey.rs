@@ -530,7 +530,7 @@ fn a_fat_fingered_price_or_set_spends_nothing() -> TestResult {
 }
 
 /// The gateway's lie for each task in order, and the ending it must score.
-const LIES: [(Option<Fault>, &str); 8] = [
+const LIES: [(Option<Fault>, &str); 11] = [
     (Some(Fault::Delay), "accepted"),
     (
         Some(Fault::RateLimit {
@@ -543,6 +543,15 @@ const LIES: [(Option<Fault>, &str); 8] = [
     (Some(Fault::ServerError { status: 503 }), "refused"),
     (Some(Fault::PaddedDone), "accepted"),
     (Some(Fault::HostileRefusal { status: 401 }), "refused"),
+    // larry#396: a reply cut at the token limit, stopped by a filter or empty.
+    (Some(Fault::Finish { reason: "length" }), "refused"),
+    (
+        Some(Fault::Finish {
+            reason: "content_filter",
+        }),
+        "refused",
+    ),
+    (Some(Fault::EmptyContent), "refused"),
     (None, "accepted"),
 ];
 
@@ -577,7 +586,7 @@ fn check_lies(ran: &Ran) -> TestResult {
         }
     }
     let counts = (number(card, "accepted")?, number(card, "refused")?);
-    assert_eq!(counts, (3, 5), "every lie counted");
+    assert_eq!(counts, (3, 8), "every lie counted");
     assert_eq!(
         card["cost_complete"], false,
         "a refusal leaves its cost unknown, and says so"
@@ -586,7 +595,8 @@ fn check_lies(ran: &Ran) -> TestResult {
 }
 
 /// liar-upstream: a slow reply, a 429, a non-JSON 200, a truncated body, a 503, a
-/// padded `[DONE]` stream and a hostile 401 are each scored as that task's ending,
+/// padded `[DONE]` stream, a hostile 401, and a reply cut by `length`, stopped by
+/// `content_filter` or empty (larry#396) are each scored as that task's ending,
 /// the arm runs on to the last task, the card says its cost is incomplete, no
 /// refusal reason carries the gateway's escape bytes, and the same lies replay to
 /// the same trace and card. Catches an eval that aborts the arm on one bad reply,
@@ -611,7 +621,11 @@ fn a_lying_gateway_is_scored_as_refusals_and_the_arm_keeps_going() -> TestResult
                 &operator(&state, handle.addr(), &FLASH, "1"),
                 set.as_bytes(),
             )?;
-            assert_eq!(handle.served(), 8, "one request per task at one attempt");
+            assert_eq!(
+                handle.served(),
+                u64::try_from(LIES.len())?,
+                "one request per task at one attempt"
+            );
             Ok::<_, Box<dyn std::error::Error>>((ran, handle.trace_hash()))
         })?;
         check_lies(&ran)?;

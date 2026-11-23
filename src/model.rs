@@ -94,6 +94,21 @@ pub enum ModelError {
     },
     /// The reply is not a completion document. The reason names what is missing.
     Malformed(&'static str),
+    /// A `data:` chunk of a streamed reply is not JSON, so the content it carried is lost and
+    /// the assembled reply is not the model's (larry#396).
+    StreamChunk {
+        /// The reply line the chunk is on, from 1.
+        line: usize,
+        /// The column of the chunk's payload where the JSON reader refused it.
+        column: usize,
+    },
+    /// The model did not finish its reply: the gateway's `finish_reason` names a cut
+    /// (`length`, `max_tokens`), a filter (`content_filter`, `SAFETY`) or another reason the
+    /// client does not read as finished, so the content is never used (larry#396).
+    Unfinished {
+        /// The gateway's reason, at most 64 characters, control characters replaced.
+        reason: String,
+    },
     /// The reply body is not UTF-8.
     NotUtf8(Utf8Error),
     /// The connection failed or the reply could not be read to its end.
@@ -152,6 +167,14 @@ impl fmt::Display for ModelError {
                 with_detail(out, detail)
             }
             Self::Malformed(reason) => write!(out, "malformed model reply: {reason}"),
+            Self::StreamChunk { line, column } => write!(
+                out,
+                "malformed model reply: the stream chunk on line {line} is not JSON (column {column})"
+            ),
+            Self::Unfinished { ref reason } => write!(
+                out,
+                "the model did not finish its reply (finish_reason {reason})"
+            ),
             Self::NotUtf8(ref cause) => write!(out, "the model reply is not UTF-8: {cause}"),
             Self::Transport => out.write_str("the model gateway could not be reached"),
             Self::MissingKey => out.write_str("no model API key is configured (LARRY_MODEL_KEY)"),

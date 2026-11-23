@@ -13,7 +13,7 @@ use lgwks_std::seeded::Seeded;
 
 use super::{
     AuthorFault, Brief, MAX_CONTEXT_BYTES, MAX_FILES, MAX_GOAL_BYTES, SYSTEM, checked_target,
-    file_text, fitting_context, prefix_label, shared_context, system_line, user_turn,
+    file_text, fitting_context, prefix_label, reply_file, shared_context, system_line, user_turn,
 };
 use crate::executor::{ExecError, TaskError};
 use crate::model::{Message, ModelClient, ModelError, Role, sim_config};
@@ -603,6 +603,29 @@ fn sim_a_context_past_the_request_bound_falls_back_to_one_file() -> TestResult {
         );
         assert_eq!(prefix_label(Some(context.as_str())), "shared");
         assert_eq!(prefix_label(None), "own");
+    }
+    Ok(())
+}
+
+/// giant-and-empty (larry#396): for 64 seeds an empty reply, one of only whitespace and an
+/// empty fence is refused `EmptyReply`, and a reply with one visible character keeps it with
+/// a final newline. Catches a step that writes a cut reply as an empty file.
+#[test]
+fn sim_an_empty_reply_is_never_written_as_the_file() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let pad = " \t\n".repeat(usize::try_from(rng.below(4)?)?);
+        for empty in [String::new(), pad.clone(), format!("```\n{pad}```")] {
+            assert!(
+                matches!(reply_file(&empty), Err(AuthorFault::EmptyReply)),
+                "seed {seed}: {empty:?} is refused"
+            );
+        }
+        assert_eq!(
+            reply_file(&format!("{pad}x"))?,
+            format!("{pad}x\n"),
+            "seed {seed}: one visible character is a file"
+        );
     }
     Ok(())
 }
