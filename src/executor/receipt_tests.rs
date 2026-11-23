@@ -460,7 +460,7 @@ fn diffed_body(size: usize, letter: u8) -> Result<(Value, bool), Box<dyn std::er
     let mut body = json::json!({
         "task_id": "t",
         "task_digest": "d",
-        "results": [],
+        "results": [passing()],
         "denied": [],
     });
     for (name, member) in report_members(Some(diff)) {
@@ -594,7 +594,7 @@ fn a_legacy_receipt_without_the_new_fields_keeps_its_verdict() -> TestResult {
             "task_id": "t",
             "task_digest": "d",
             "diff": diff,
-            "results": [],
+            "results": [passing()],
             "denied": [],
         })
     };
@@ -636,6 +636,58 @@ fn a_signed_accepted_claim_over_a_truncated_diff_is_refused() -> TestResult {
         ),
         "a signed accepted claim over a cut diff is refused"
     );
+    Ok(())
+}
+
+/// One command result that exited 0 inside its timeout: a report needs at least one to be
+/// accepted (larry#395).
+fn passing() -> Value {
+    json::json!({ "argv": ["true"], "exit_code": 0, "timed_out": false })
+}
+
+/// A report that ran no command is never accepted: the seal derives false, verify agrees, and a
+/// signer that claims accepted over zero results is refused as inconsistent. The same body with
+/// one passing command is accepted exactly when the reference rule says so (larry#395).
+#[test]
+fn sim_a_report_with_no_command_is_never_accepted_and_verify_agrees() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut stream = Seeded::from_seed(seed);
+        let mut original = body(&mut stream)?;
+        set(&mut original, "diff", json::json!(format!("d-{seed}")))?;
+        set(&mut original, "results", json::json!([]))?;
+        let signer = key(&mut stream);
+        let trusted = signer.public_key();
+        let (sealed, accepted) = seal(original.clone(), &signer);
+        assert!(
+            !accepted,
+            "seed {seed}: a report with no command is never accepted"
+        );
+        assert!(
+            !verify_value(&sealed, &trusted)?.accepted(),
+            "seed {seed}: verify agrees with the seal"
+        );
+        let mut ran = original.clone();
+        set(&mut ran, "results", json::json!([passing()]))?;
+        let reference = ran
+            .get("denied")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        assert_eq!(
+            seal(ran, &signer).1,
+            reference,
+            "seed {seed}: one passing command is accepted unless a denial refuses it"
+        );
+        let mut claimed = original;
+        set(&mut claimed, ACCEPTED, Value::Bool(true))?;
+        let forged = sign_claim(&signer, claimed)?;
+        assert!(
+            matches!(
+                verify_value(&forged, &trusted),
+                Err(ReceiptError::Inconsistent)
+            ),
+            "seed {seed}: a signed accepted claim over zero commands is refused"
+        );
+    }
     Ok(())
 }
 

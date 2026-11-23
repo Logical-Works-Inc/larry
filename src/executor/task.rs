@@ -292,8 +292,8 @@ pub enum TaskError {
     BadRepo,
     /// The base was empty, oversize, option-like, or held a control character or whitespace.
     BadBase,
-    /// The document held too many acceptance commands.
-    TooManyCommands {
+    /// The document named no acceptance command, or more than 16 (larry#395).
+    CommandCount {
         /// Number of acceptance commands.
         count: usize,
     },
@@ -356,9 +356,10 @@ impl fmt::Display for TaskError {
             ),
             Self::BadRepo => out.write_str("task document repository path is invalid"),
             Self::BadBase => out.write_str("task document base is invalid"),
-            Self::TooManyCommands { count } => {
-                write!(out, "task document has too many commands ({count})")
-            }
+            Self::CommandCount { count } => write!(
+                out,
+                "task document names {count} acceptance commands; 1 to {MAX_COMMANDS} are allowed"
+            ),
             Self::EmptyArgv { index } => write!(out, "task document command {index} is empty"),
             Self::ArgvTooLong { index, len } => {
                 write!(
@@ -496,7 +497,8 @@ mod tests {
     fn valid_task(generator: &mut SplitMix64) -> Result<ValidTask, Box<dyn std::error::Error>> {
         let repo = generator.next_text(8)?;
         let base = generator.next_word(8)?;
-        let command_count = usize::try_from(generator.next_bound(17)?)?;
+        // A valid task names 1 to 16 commands (larry#395).
+        let command_count = usize::try_from(generator.next_bound(16)?.saturating_add(1))?;
         let mut acceptance: Vec<Vec<String>> = Vec::with_capacity(command_count);
         let mut command_index = 0_usize;
         while command_index < command_count {
@@ -705,8 +707,15 @@ mod tests {
             let many_commands = lgwks_std::json::Value::Array(many_commands);
             assert!(matches!(
                 Task::parse(&rendered(&repo, &base, many_commands)),
-                Err(TaskError::TooManyCommands { count: 17 })
+                Err(TaskError::CommandCount { count: 17 })
             ));
+            // larry#395: none is refused like too many, and the bound itself is taken.
+            assert!(matches!(
+                Task::parse(&rendered(&repo, &base, lgwks_std::json::json!([]))),
+                Err(TaskError::CommandCount { count: 0 })
+            ));
+            let sixteen = lgwks_std::json::Value::Array(vec![lgwks_std::json::json!(["run"]); 16]);
+            assert!(Task::parse(&rendered(&repo, &base, sixteen)).is_ok());
             assert!(matches!(
                 Task::parse(&rendered(&repo, &base, lgwks_std::json::json!([[]]))),
                 Err(TaskError::EmptyArgv { index: 0 })

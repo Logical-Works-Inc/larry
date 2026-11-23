@@ -313,6 +313,20 @@ fn a_denied_run_never_reports_success() -> TestResult {
 }
 
 #[test]
+fn exec_refuses_a_task_with_no_acceptance_command_and_seals_nothing() -> TestResult {
+    // larry#395: a task that runs no command checks nothing, so it is refused at the door with
+    // one line naming the bound, and no report claims it was accepted.
+    let (state, origin) = fixture()?;
+    let output = run_exec(state.path(), &task_json(origin.path(), "HEAD", "[]"), None)?;
+    assert_refused(&output, "1 to 16");
+    assert!(
+        output.stdout.is_empty(),
+        "a refused task prints no sealed report"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_receipt_from_another_state_dir_is_untrusted() -> TestResult {
     // Two tenants run at once on one origin; each trusts only its own receipts.
     let (first_state, origin) = fixture()?;

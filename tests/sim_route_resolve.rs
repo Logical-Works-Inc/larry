@@ -276,7 +276,7 @@ fn sim_two_tenants_resolve_only_their_own_routes() -> TestResult {
 
 /// A task document naming a route.
 fn document(route: &Value) -> String {
-    json!({"repo": "r", "base": "HEAD", "acceptance": [], "route": route}).to_string()
+    json!({"repo": "r", "base": "HEAD", "acceptance": [["true"]], "route": route}).to_string()
 }
 
 /// Secure, the saboteur: a route name in a task document is a route id or a

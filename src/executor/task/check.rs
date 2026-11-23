@@ -38,10 +38,12 @@ pub(super) fn check_repo_and_base(repo_text: &str, base_text: &str) -> Result<()
     Ok(())
 }
 
-/// Refuses acceptance commands past the command, argv and argument bounds.
+/// Refuses acceptance commands outside the command, argv and argument bounds. A task names 1
+/// to [`MAX_COMMANDS`] commands: one that names none checks nothing, and its report would be
+/// sealed accepted over whatever the model wrote (larry#395).
 pub(super) fn check_acceptance(acceptance: &[Vec<String>]) -> Result<(), TaskError> {
-    if acceptance.len() > MAX_COMMANDS {
-        return Err(TaskError::TooManyCommands {
+    if acceptance.is_empty() || acceptance.len() > MAX_COMMANDS {
+        return Err(TaskError::CommandCount {
             count: acceptance.len(),
         });
     }

@@ -160,8 +160,9 @@ impl Verdict {
     }
 }
 
-/// Whether a report body is an accepted run: no denial, a diff that is the whole change, and every
-/// command exited 0 inside its timeout. Anything missing or mistyped is not.
+/// Whether a report body is an accepted run: no denial, a diff that is the whole change, at least
+/// one command, and every command exited 0 inside its timeout. Anything missing or mistyped is
+/// not, and a report that ran no command checked nothing (larry#395).
 #[must_use]
 fn acceptance(body: &Value) -> bool {
     let none_denied = body
@@ -173,7 +174,7 @@ fn acceptance(body: &Value) -> bool {
     let all_passed = body
         .get("results")
         .and_then(Value::as_array)
-        .is_some_and(|results| results.iter().all(passed));
+        .is_some_and(|results| !results.is_empty() && results.iter().all(passed));
     none_denied && has_diff && whole_diff && all_passed
 }
 
