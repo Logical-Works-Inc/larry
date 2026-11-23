@@ -43,6 +43,10 @@ fn task_json(repo: &Path, base: &str, acceptance: &str) -> String {
     )
 }
 
+/// The acceptance of a task that only needs the next start to run: one command that passes,
+/// because a task names 1 to 16 (larry#395).
+const QUICK: &str = r#"[["true"]]"#;
+
 /// Creates a named pipe at `path`.
 fn make_fifo(path: &Path) -> Result<(), Box<dyn Error>> {
     let status = Command::new("mkfifo").arg(path).status()?;
@@ -157,7 +161,7 @@ fn a_command_that_leaves_a_directory_read_only_never_stops_the_next_start() -> T
     )?);
     expect_report(&run_exec(
         state.path(),
-        &task_json(origin.path(), "HEAD", "[]"),
+        &task_json(origin.path(), "HEAD", QUICK),
     )?);
     Ok(())
 }
@@ -174,7 +178,7 @@ fn a_stranded_workspace_that_lost_its_permissions_is_swept() -> TestResult {
     fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000))?;
     expect_report(&run_exec(
         state.path(),
-        &task_json(origin.path(), "HEAD", "[]"),
+        &task_json(origin.path(), "HEAD", QUICK),
     )?);
     assert!(
         !stranded.exists(),
@@ -198,7 +202,7 @@ fn a_journal_lock_probe_that_errors_keeps_the_runs_workspace() -> TestResult {
     fs::set_permissions(&journal, fs::Permissions::from_mode(0o000))?;
     expect_report(&run_exec(
         state.path(),
-        &task_json(origin.path(), "HEAD", "[]"),
+        &task_json(origin.path(), "HEAD", QUICK),
     )?);
     assert!(
         workspace.is_dir(),

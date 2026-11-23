@@ -75,7 +75,7 @@ fn a_kill_after_the_recorded_group_leaves_no_group_after_restart() -> TestResult
     let (mut child, pid, _hold) = spawn_held_command(state.path(), origin.path(), scratch.path())?;
     child.kill()?;
     child.wait()?;
-    let next = task_json(origin.path(), "HEAD", "[]");
+    let next = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
     report_of(&run_exec(state.path(), &next, None)?)?;
     await_group_exit(pid)?;
     let rows = ledger_rows(&state.path().join("executor.db"))?;
@@ -351,7 +351,7 @@ fn a_kill_9_of_the_executor_is_reaped_by_the_next_start() -> TestResult {
         "the killed executor's group {pid} must still be alive before the next start"
     );
 
-    let next = task_json(origin.path(), "HEAD", "[]");
+    let next = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
     report_of(&run_exec(state.path(), &next, None)?)?;
     await_group_exit(pid)?;
     let rows = ledger_rows(&state.path().join("executor.db"))?;
@@ -423,7 +423,7 @@ fn a_kill_9_mid_task_leaves_a_journal_the_next_start_restores_without_rerunning(
         .open(journal)?
         .write_all(torn)?;
 
-    let next = task_json(origin.path(), "HEAD", "[]");
+    let next = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
     report_of(&run_exec(state.path(), &next, None)?)?;
     assert_eq!(
         journals(state.path(), "journal")?,
@@ -464,17 +464,18 @@ fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
     // A model-command task is a denial, sealed and never accepted: tests/receipt_journey.rs.
     let (state, origin) = fixture()?;
     let empty = TempDir::new()?;
-    let valid = task_json(origin.path(), "HEAD", "[]");
+    let quick = r#"[["true"]]"#;
+    let valid = task_json(origin.path(), "HEAD", quick);
 
     let output = spawn_exec(None, None, &valid)?.wait_with_output()?;
     assert_refused(&output, "LARRY_STATE_DIR");
 
-    let output = run_exec(state.path(), &task_json(empty.path(), "HEAD", "[]"), None)?;
+    let output = run_exec(state.path(), &task_json(empty.path(), "HEAD", quick), None)?;
     assert_refused(&output, "could not clone");
 
     let output = run_exec(
         state.path(),
-        &task_json(origin.path(), "no-such-ref", "[]"),
+        &task_json(origin.path(), "no-such-ref", quick),
         None,
     )?;
     assert_refused(&output, "could not check out base no-such-ref");
