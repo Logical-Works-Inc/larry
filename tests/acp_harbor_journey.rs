@@ -517,32 +517,45 @@ fn a_padded_reply_runs_and_the_same_seed_replays_the_same_trace() -> TestResult 
     Ok(())
 }
 
-/// A gateway refusal carrying escape sequences ends the session as a refusal whose
-/// message carries none of them, and nothing runs.
+/// A gateway refusal carrying escape sequences, a reply cut at the token limit and a reply
+/// with no content (larry#396) each end the session as a refusal whose message carries no
+/// escape sequence, and nothing runs.
 #[test]
 fn a_hostile_gateway_refusal_ends_the_session_with_a_clean_message() -> TestResult {
-    let (state, work) = fixture()?;
-    let config = Config {
-        script: vec![Some(Fault::HostileRefusal { status: 401 })],
-        ..scripted(37, &[r#"{"command":"touch ran.txt"}"#])
-    };
-    mock_model::run(config, |mock| -> TestResult {
-        let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
-        let session = acp.open(work.path())?;
-        let (notes, reply) = acp.call(&prompt(2, &session, "go"))?;
-        assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
-        let message = said(&notes).ok_or("the refusal is said")?;
-        assert!(
-            message.starts_with("model: "),
-            "the gateway's refusal: {message}"
-        );
-        assert!(
-            !message.contains('\u{1b}') && !message.contains('\u{7}'),
-            "no escape sequence reaches the client"
-        );
-        assert!(!work.path().join("ran.txt").exists(), "nothing ran");
-        Ok(())
-    })
+    let faults = [
+        Fault::HostileRefusal { status: 401 },
+        Fault::Finish { reason: "length" },
+        Fault::EmptyContent,
+    ];
+    for fault in faults {
+        let (state, work) = fixture()?;
+        let config = Config {
+            script: vec![Some(fault)],
+            ..scripted(37, &[r#"{"command":"touch ran.txt"}"#])
+        };
+        mock_model::run(config, |mock| -> TestResult {
+            let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
+            let session = acp.open(work.path())?;
+            let (notes, reply) = acp.call(&prompt(2, &session, "go"))?;
+            assert_eq!(
+                *reply.at("/result/stopReason")?,
+                "refusal",
+                "{fault:?}: {reply}"
+            );
+            let message = said(&notes).ok_or("the refusal is said")?;
+            assert!(message.starts_with("model: "), "{fault:?}: {message}");
+            assert!(
+                !message.contains('\u{1b}') && !message.contains('\u{7}'),
+                "{fault:?}: no escape sequence reaches the client"
+            );
+            assert!(
+                !work.path().join("ran.txt").exists(),
+                "{fault:?}: nothing ran"
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 /// A cancel sent while the model is still answering ends the prompt `cancelled`

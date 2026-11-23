@@ -286,11 +286,11 @@ fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outco
             };
             (ending, tokens(&report))
         }
-        // Only the gateway's refusal is the arm's; a symlink or a write failure is the set's
-        // or the machine's, and stops the run below.
+        // Only the gateway's refusal or the model's own empty reply is the arm's; a symlink or
+        // a write failure is the set's or the machine's, and stops the run below (larry#396).
         Err(
             error @ ExecError::Author {
-                fault: AuthorFault::Model(_),
+                fault: AuthorFault::Model(_) | AuthorFault::EmptyReply,
                 ..
             },
         ) => (Ending::Refused(error.to_string()), None),

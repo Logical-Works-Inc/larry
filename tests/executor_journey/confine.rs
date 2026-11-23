@@ -23,7 +23,7 @@ use crate::tree_digest::tree_digest;
 
 /// Every fault the seeded endpoint can answer with. Naming them keeps the whole shared enum
 /// live in this binary, and the confinement journey schedules none of them (larry#324).
-const EVERY_FAULT: [Option<Fault>; 7] = [
+const EVERY_FAULT: [Option<Fault>; 9] = [
     Some(Fault::Delay),
     Some(Fault::RateLimit {
         retry_after_secs: 1,
@@ -33,12 +33,14 @@ const EVERY_FAULT: [Option<Fault>; 7] = [
     Some(Fault::ServerError { status: 500 }),
     Some(Fault::PaddedDone),
     Some(Fault::HostileRefusal { status: 401 }),
+    Some(Fault::Finish { reason: "length" }),
+    Some(Fault::EmptyContent),
 ];
 
 /// The shared endpoint's whole fault set stays named, so including it never narrows it.
 #[test]
 fn the_endpoint_can_answer_with_every_fault() {
-    assert_eq!(EVERY_FAULT.len(), 7, "every fault is named");
+    assert_eq!(EVERY_FAULT.len(), 9, "every fault is named");
 }
 
 /// The environment that points `larry exec` at the seeded endpoint.

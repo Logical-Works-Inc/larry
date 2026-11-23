@@ -574,8 +574,9 @@ fn refused_with(
     Ok(outcome)
 }
 
-/// A gateway that answers 502, rate-limits, refuses with 401 or never answers refuses `task`
-/// with the planner told why, no terminal control in the reason, and one attempt made.
+/// A gateway that answers 502, rate-limits, refuses with 401, never answers, or sends a reply
+/// that is cut, filtered or empty refuses `task` with the planner told why, no terminal control
+/// in the reason, nothing sealed, and one attempt made.
 fn every_model_fault_refuses_the_task(task: &Value) -> TestResult<()> {
     let once = [("LARRY_MODEL_ATTEMPTS", "1")];
     let faults = [
@@ -587,6 +588,15 @@ fn every_model_fault_refuses_the_task(task: &Value) -> TestResult<()> {
             "retry after 30s",
         ),
         (Fault::HostileRefusal { status: 401 }, "status 401"),
+        // larry#396: a reply cut at the token limit, stopped by a filter or empty.
+        (Fault::Finish { reason: "length" }, "length"),
+        (
+            Fault::Finish {
+                reason: "content_filter",
+            },
+            "content_filter",
+        ),
+        (Fault::EmptyContent, "empty"),
     ];
     for (fault, needle) in faults {
         let (code, message, served) = refused_with(task, vec![Some(fault)], &once)?;
