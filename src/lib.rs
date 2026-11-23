@@ -20,6 +20,7 @@ pub(crate) mod json_at;
 pub mod mascot;
 pub mod mcp;
 pub mod model;
+pub mod mutants;
 pub mod rerank;
 pub mod serve;
 #[cfg(test)]

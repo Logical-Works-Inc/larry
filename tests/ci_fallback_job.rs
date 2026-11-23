@@ -255,40 +255,8 @@ fn the_mutants_lane_passes_a_diff_with_no_rust_lines() -> Check {
         text.contains("(.[0] // []) | length"),
         "an empty diff prints nothing, not an array, and counts as zero mutants"
     );
-    let verdict = job(&text, "verdict")?;
-    assert!(
-        verdict.contains("if [ \"$SHARDS\" = 0 ]; then\n            echo \"no mutants:"),
-        "zero shards is a pass that says no mutants"
-    );
-    Ok(())
-}
-
-#[test]
-fn the_mutants_verdict_fails_closed_on_a_lost_shard() -> Check {
-    let text = workflow("mutants.yml")?;
-    let verdict = job(&text, "verdict")?;
-    assert!(
-        verdict.contains("needs: [plan, shard]")
-            && verdict.contains("if: ${{ always() && !github.event.repository.private && github.event_name == 'pull_request' }}"),
-        "the verdict runs after any outcome of the plan and the shards, on every pull request"
-    );
-    for refusal in [
-        "if [ \"$PLAN\" != success ] || [ -z \"$SHARDS\" ]; then",
-        "if [ \"$SHARD\" != success ]; then",
-        "outcomes files for $SHARDS shards (fail closed)",
-        "mutants have an outcome but the plan listed $COUNT (fail closed)",
-        "mutants have an outcome this verdict does not know (fail closed)",
-    ] {
-        assert!(
-            verdict.contains(refusal),
-            "the verdict keeps its refusal: {refusal}"
-        );
-    }
-    let shard = job(&text, "shard")?;
-    assert!(
-        shard.contains("0 | 2 | 3) echo") && shard.contains("exit \"$rc\""),
-        "a shard treats exit 0, 2 and 3 as outcomes and every other code as a shard that did not run"
-    );
+    // The verdict on zero mutants is `larry mutants verdict`'s (larry#387):
+    // tests/mutants_verdict_journey.rs holds it.
     Ok(())
 }
 
@@ -325,6 +293,14 @@ fn the_mutants_lane_caps_its_shards_and_bounds_each_one() -> Check {
     assert!(
         shard.contains("--timeout 300"),
         "a mutant that loops is a timeout outcome, not a held job"
+    );
+    assert!(
+        shard.contains("0 | 2 | 3) echo") && shard.contains("exit \"$rc\""),
+        "a shard treats exit 0, 2 and 3 as outcomes and every other code as a shard that did not run"
+    );
+    assert!(
+        plan.contains("MUTANTS_FLOOR: 60") && plan.contains("MUTANTS_PER_SHARD: 2"),
+        "the lane publishes the floor and the shard size the verdict reads from main"
     );
     Ok(())
 }
@@ -410,8 +386,8 @@ fn the_mutants_lane_runs_hosted_and_judges_only_pull_requests() -> Check {
     );
     assert_eq!(
         text.matches("runs-on: ubuntu-24.04\n").count(),
-        2,
-        "plan and verdict run on the pinned hosted x86_64 image"
+        1,
+        "the plan runs on the pinned hosted x86_64 image; the verdict is mutants-verdict.yml's"
     );
     assert_eq!(
         text.matches("runs-on: ubuntu-24.04-arm\n").count(),
@@ -433,76 +409,6 @@ fn the_mutants_lane_runs_hosted_and_judges_only_pull_requests() -> Check {
             "if: ${{ !github.event.repository.private && github.event_name == 'pull_request' }}"
         ),
         "a private repository runs no job of the lane, and a push to main plans nothing"
-    );
-    Ok(())
-}
-
-#[test]
-fn the_mutants_verdict_names_each_missed_mutant_and_the_denominator() -> Check {
-    let text = workflow("mutants.yml")?;
-    let verdict = job(&text, "verdict")?;
-    assert!(
-        verdict.contains("\"\\($arch) missed \\(.file):\\(.line): \\(.replacement)"),
-        "each missed mutant prints as arch missed file:line: replacement"
-    );
-    assert!(
-        verdict.contains("left out of the denominator: unviable $unviable, timeout $timeouts"),
-        "the mutants left out of the score are printed beside it"
-    );
-    assert!(
-        verdict.contains("FLOOR: ${{ steps.settings.outputs.MUTANTS_FLOOR }}")
-            && verdict.contains("[ $(( caught * 100 )) -lt $(( FLOOR * viable )) ]"),
-        "caught over caught plus missed is held to the base ref's floor in whole numbers"
-    );
-    Ok(())
-}
-
-#[test]
-fn the_mutants_verdict_reads_the_floor_and_the_caps_from_the_base_ref() -> Check {
-    let text = workflow("mutants.yml")?;
-    let verdict = job(&text, "verdict")?;
-    assert!(
-        verdict.contains(
-            "git show \"origin/${BASE_REF}:.github/workflows/mutants.yml\" > base-mutants.yml"
-        ),
-        "the verdict reads the published settings from the base ref's copy of the workflow"
-    );
-    assert!(
-        verdict.contains("refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"),
-        "the base branch is fetched before it is read"
-    );
-    assert!(
-        verdict.contains("steps.settings.outputs.MUTANTS_FLOOR")
-            && verdict.contains("steps.settings.outputs.MUTANTS_MAX_SHARDS")
-            && verdict.contains("steps.settings.outputs.MUTANTS_SHARD_CAPACITY"),
-        "the floor and the caps come from the base ref, never the pull request's copy"
-    );
-    assert!(
-        verdict.contains("floor=\"$(setting FLOOR)\""),
-        "the base copy before this change still names the floor, and it is read from the base ref"
-    );
-    assert!(
-        verdict.contains("if [ \"$COUNT\" -gt \"$capacity\" ]"),
-        "the verdict holds the plan to the base ref's capacity"
-    );
-    assert!(
-        !verdict.contains("FLOOR: 60"),
-        "no floor is taken from the pull request's own checkout"
-    );
-    let plan = job(&text, "plan")?;
-    for published in [
-        "MUTANTS_FLOOR: 60",
-        "MUTANTS_MAX_SHARDS: 96",
-        "MUTANTS_SHARD_CAPACITY: 3",
-    ] {
-        assert!(
-            plan.contains(published),
-            "the base ref publishes {published}"
-        );
-    }
-    assert!(
-        !text.contains("pull_request_target"),
-        "the lane never runs with the target repository's token"
     );
     Ok(())
 }
@@ -561,19 +467,8 @@ fn the_mutants_lane_judges_every_mutant_on_both_linux_architectures() -> Check {
             && warm.contains("cargo nextest run --workspace --locked --no-run"),
         "a push to main warms the aarch64 shards' cache, cargo-mutants included, and judges nothing"
     );
-    let verdict = job(&text, "verdict")?;
-    assert!(
-        verdict.contains("for arch in x86_64 aarch64; do")
-            && verdict.contains("outcomes/mutants-outcomes-\"$arch\"-*/outcomes.json")
-            && verdict.contains("::error::$arch: mutation score under the ${FLOOR}% floor"),
-        "each architecture is held to the base ref's floor on its own"
-    );
-    assert!(
-        verdict.contains("group_by([.file, .line, .replacement, .name])")
-            && verdict.contains("select(.arches != 2 or (.summaries | length) > 1)")
-            && verdict.contains("judged apart by x86_64 and aarch64"),
-        "a mutant the architectures judge apart, or that one alone judged, fails the verdict"
-    );
+    // Each architecture held to the floor alone, and a mutant judged apart, is
+    // `larry mutants verdict`'s rule now (larry#387): tests/mutants_verdict_journey.rs.
     assert!(
         !text.contains("runs-on: [self-hosted") && !text.contains("lgwks-linux"),
         "the x64 org runners never serve this public repository (larry#116)"

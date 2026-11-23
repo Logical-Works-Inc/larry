@@ -7,6 +7,7 @@
 //! `larry eval`, one priced arm over the matched task set (larry#87), and
 //! `larry governance` and `larry tracker`, the document gate (larry#53, ADR 0010), and
 //! `larry mascot`, the pixel raccoon's SVG, preview and pet package (larry#152, ADR 0014), and
+//! `larry mutants verdict`, the mutation lane's verdict from main's build (larry#387, ADR 0098), and
 //! `larry serve`, the HTTP host on lgwks_bot's app edge (larry#88, ADR 0021), and
 //! `larry help`, `--help` and `-h`, the one table every subcommand and the
 //! `LARRY_*` variables it reads are printed from (larry#228, ADR 0054).
@@ -106,7 +107,7 @@ const NO_ENV: &str = "none";
 
 /// Every subcommand the dispatcher handles, in help order. A `static`, so a
 /// lookup hands out a `'static` row.
-static COMMANDS: [Subcommand; 13] = [
+static COMMANDS: [Subcommand; 14] = [
     Subcommand {
         name: "help",
         summary: "print this help and exit",
@@ -190,6 +191,16 @@ static COMMANDS: [Subcommand; 13] = [
         summary: "draw the pixel mascot's SVG, preview and pet package",
         env: NO_ENV,
         run: |rest| ran("", larry_demo::mascot::run(rest, &mut io::stdout().lock())),
+    },
+    Subcommand {
+        name: "mutants",
+        summary: "`mutants verdict <settings> <artifacts> <jobs.json>` judges one mutation run from its data",
+        env: NO_ENV,
+        run: |rest| {
+            larry_demo::mutants::run(rest, &mut io::stdout().lock())
+                .map(verdict_status)
+                .map_err(failed(""))
+        },
     },
     Subcommand {
         name: "serve",

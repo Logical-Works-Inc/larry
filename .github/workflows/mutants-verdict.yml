@@ -1,0 +1,103 @@
+name: mutants verdict
+# The mutation lane's one verdict (larry#387, ADR 0098). GitHub runs a
+# `workflow_run` workflow from the default branch's copy of this file, so the
+# checkout below is main, the `larry` it builds is main's, and the floor and caps
+# it reads are main's mutants.yml. A pull request that edits mutants.yml, its
+# jobs or its floor is still judged by main. Nothing of the pull request is
+# checked out, built or run here: its run's artifacts and job list are data that
+# `larry mutants verdict` reads with fixed bounds and fails closed on. The one
+# write is a commit status on the judged head commit. It never takes the trigger
+# that hands a pull request the base repository's token.
+on:
+  workflow_run:
+    workflows: [mutants]
+    types: [requested, completed]
+
+permissions:
+  actions: read
+  contents: read
+  statuses: write
+
+# One verdict job at a time per judged run, never cancelled, so the pending
+# status of `requested` never lands after the verdict of `completed`.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  verdict:
+    if: ${{ !github.event.repository.private && github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      TARGET: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Mark the verdict pending
+        if: ${{ github.event.action == 'requested' }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" -f state=pending -f context="mutants / verdict" \
+            -f description="the mutation lane is running" -f target_url="$TARGET" > /dev/null
+      - if: ${{ github.event.action == 'completed' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - if: ${{ github.event.action == 'completed' }}
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.100.0
+      # main's code only: this cache is written from the default branch's checkout.
+      - if: ${{ github.event.action == 'completed' }}
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: mutants-verdict
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: ${{ github.event.action == 'completed' }}
+        run: cargo build --locked --bin larry
+      # A missing artifact is judged by the verdict, so a download that finds
+      # nothing is not allowed to stop the job before it posts a status.
+      - if: ${{ github.event.action == 'completed' }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mutants-*
+          path: artifacts
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Judge the run and post the verdict
+        if: ${{ github.event.action == 'completed' }}
+        run: |
+          set -uo pipefail
+          rc=0
+          gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | {name, conclusion}' > jobs.lines || rc=1
+          if [ "$rc" -eq 0 ]; then
+            jq -s . jobs.lines > jobs.json || rc=1
+          fi
+          if [ "$rc" -eq 0 ]; then
+            target/debug/larry mutants verdict .github/workflows/mutants.yml artifacts jobs.json > verdict.log 2>&1 || rc=$?
+          else
+            echo "the judged run's jobs could not be listed (fail closed)" > verdict.log
+          fi
+          cat verdict.log
+          cat verdict.log >> "$GITHUB_STEP_SUMMARY"
+          state=success
+          if [ "$rc" -ne 0 ]; then
+            state=failure
+          fi
+          description="$(tail -n 1 verdict.log | cut -c 1-140)"
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" -f state="$state" -f context="mutants / verdict" \
+            -f description="$description" -f target_url="$TARGET" > /dev/null
+          exit "$rc"
+      # A checkout, toolchain or build that failed posts no verdict of its own:
+      # the pending status turns red here, never green.
+      - name: Mark the verdict failed when it could not run
+        if: ${{ failure() && github.event.action == 'completed' }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" -f state=failure -f context="mutants / verdict" \
+            -f description="the verdict could not run (fail closed)" -f target_url="$TARGET" > /dev/null

@@ -95,8 +95,8 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::inventory` | The R, D, E, C and axis inventories, traceability, cells, log drift, crash cases |
 | `governance::error` | Every refusal that stops a check, printed in the Python checker's wording |
 | `governance::receipts` | The reranker receipts' shape, SHA-256 (retained) or BLAKE3 (ADR 0013) |
-| `mascot` | `larry mascot`: the one pixel grid, its SVG, preview and pet package (ADR 0014) |
-| `mascot::webp`, `mascot::sim` | The lossless VP8L encoder of the pet spritesheet (RFC 9649), seeded round trips, the SVG check |
+| `mascot`, `mascot::webp`, `mascot::sim` | `larry mascot`: the one pixel grid, its SVG, preview and pet package (ADR 0014); the lossless VP8L encoder of the pet spritesheet (RFC 9649), seeded round trips, the SVG check |
+| `mutants`, `mutants::read` | `larry mutants verdict`: the mutation lane's one verdict, run by `mutants-verdict.yml` on `workflow_run` from main's build; main's floor and caps, the floor per architecture, parity and its typed fail-closed refusals; `mutants::read` the plan, outcomes, jobs and artifact directories, each file through `governance::read` (larry#387, ADR 0098) |
 | `rerank` | `larry-rerank`: the request, its bounds, the ranking and the create-exclusive receipt, whole by link; its revision is the snapshot label, not a weights digest (larry#340, ADR 0013) |
 | `rerank::qwen`, `rerank::sim` | The pinned Qwen3 reranker on Candle and its tokenizer, feature `rerank` only; the seeded ports |
 | `governance::tracker` | `larry tracker`: the tracker page rendered from `tools/tracker/tracker.json` |
@@ -104,7 +104,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::patterns` | Every checker regex, compiled once, searched as Python's `\w`, `\s` and `\b` read |
 | `governance::sim_*`, `governance::tests`, `governance::fixture` | Seeded ports of the Python controls, parser references, bounds and two-root checks; the controls over a governed fixture tree the tests write for themselves, also included by path into `tests/governance_journey.rs`; `sim_governance` mutates documents in memory only (larry#270) |
 | `src/main.rs` | The demo binary entry |
-| `src/bin/larry.rs`, `src/bin/larry/governance_cli.rs` | The `larry` launcher: the one `COMMANDS` table each word dispatches from (ADR 0065), the split terminal, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `mascot`, `serve`; `governance_cli` the `governance` and `tracker` runs and their typed refusal |
+| `src/bin/larry.rs`, `src/bin/larry/governance_cli.rs` | The `larry` launcher: the one `COMMANDS` table each word dispatches from (ADR 0065), the split terminal, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `eval`, `mascot`, `mutants`, `serve`; `governance_cli` the `governance` and `tracker` runs and their typed refusal |
 | `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json`, `eval/errands-v1.json` | The shipped matched task set, 12 POSIX sh tasks; 12 Rust errands with hidden tests, the cache benchmark's set (larry#230) |

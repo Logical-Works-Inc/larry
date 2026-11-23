@@ -11,7 +11,7 @@ mod markdown;
 mod patterns;
 mod pyjson;
 mod pystr;
-mod read;
+pub(crate) mod read;
 pub(crate) mod receipts;
 mod temp_paths;
 
