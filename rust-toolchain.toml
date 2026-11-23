@@ -1,0 +1,6 @@
+# One compiler on every box and every job (Director 2026-11-23, larry#406, ADR 0097).
+# tests/ci_fallback_job.rs (`the_toolchain_is_the_mandated_rust`) refuses a drift.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

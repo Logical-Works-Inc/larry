@@ -33,12 +33,10 @@ edition = "2024"
 # Not an SPDX-listed license, hence the LicenseRef; publish = false everywhere.
 license = "LicenseRef-Larry-HL3-FULL"
 repository = "https://github.com/Logical-Works-Inc/larry"
-# The real floor, and it is the library's: lgwks_std 3.2.2 declares
-# `rust-version = "1.98"` and edition 2024. The larry-contracts manifest
-# formerly declared 1.85, which was never satisfiable against that
-# dependency — the merge corrected a false claim rather than raising a real
-# requirement.
-rust-version = "1.98"
+# The mandated compiler (Director 2026-11-23, larry#406, ADR 0097): every box
+# and every job builds with 1.100.0 (`rust-toolchain.toml`), so the floor is
+# 1.100 too; `the_toolchain_is_the_mandated_rust` refuses a drift.
+rust-version = "1.100"
 
 [workspace.dependencies]
 # Estate foundation (crates.io releases; exact pins = controlled deps).
@@ -50,11 +48,11 @@ rust-version = "1.98"
 lgwks_std = { version = "=5.0.0", default-features = false }
 # The runtime's owner (larry#68). Defaults off; each member names its features. larry-runtime
 # takes `wire`. The larry package takes `edge` (the `lgwks_bot::app` HTTP edge of `larry serve`,
-# ADR 0021), which pulls `script` and with it the ECS world, and `signal` for its drain. 10.0.1
-# is the newest release; 10.0.0 raised the Landlock allowlist to 4,096 rules (crates#1114), and
+# ADR 0021), which pulls `script` and with it the ECS world, and `signal` for its drain. 10.0.2
+# is the newest release (one Darwin temp scan per machine, crates#1130); 10.0.0 raised the Landlock allowlist to 4,096 rules (crates#1114), and
 # 8.3.0 (larry#187) added `RecordJournal::admits` and `RecordProjection::admit` (crates#898, #905,
 # #906), which larry#90 builds on.
-lgwks_bot = { version = "=10.0.1", default-features = false }
+lgwks_bot = { version = "=10.0.2", default-features = false }
 # The dependency-admission storefront. The larry package opts into `sqlite`; the
 # published storefront owns that dependency and its transitive admission. 8.0.0 is the newest
 # release and re-exports rusqlite 0.43; 7.2.0 (larry#189) set the ledger's `sqlite::open` and

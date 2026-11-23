@@ -53,7 +53,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       # Bounded and not allowed to fail: with no cargo-mutants there is no plan,
       # and no plan is no verdict (fail closed).
       - timeout-minutes: 3
@@ -125,7 +125,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       # A runner label that served the other architecture would judge nothing
       # this leg claims: the host triple decides, fail closed.
       - name: Check the architecture
@@ -209,7 +209,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           shared-key: mutants-aarch64

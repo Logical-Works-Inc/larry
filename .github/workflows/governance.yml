@@ -53,7 +53,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       # Its own key, saved only from main (larry#307): this is the one
       # governance build per run, and a PR never writes the cache main uses.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
