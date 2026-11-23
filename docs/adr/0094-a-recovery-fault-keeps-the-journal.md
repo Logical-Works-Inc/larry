@@ -44,4 +44,5 @@ and the host.
   reported each time until an operator clears the fault.
 - Falsifiers: `tests/executor_idempotency_journey.rs`
   (`a_keyed_retry_after_a_recovery_fault_runs_nothing_and_keeps_the_journal`) and
-  `executor::recovery::sim::sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal`.
+  `executor::recovery::sim::sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal` and
+  `executor::recovery::sim::the_gate_keeps_a_leftover_journal_on_any_failed_retry`.

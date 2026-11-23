@@ -519,7 +519,7 @@ struct Admission<'a> {
 /// recovers it. A journal that was `leftover` before this run opened it is a dead run's
 /// evidence, and a failed retry keeps it whatever the failure (larry#394). A removal
 /// fault never hides the task's own failure.
-fn finish(
+pub(super) fn finish(
     path: &Path,
     outcome: Result<Report, ExecError>,
     leftover: bool,

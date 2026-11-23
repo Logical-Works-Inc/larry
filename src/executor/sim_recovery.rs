@@ -15,7 +15,7 @@ use larry_runtime::journal::Journal;
 use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
-use super::super::gate::{policy, task_settings};
+use super::super::gate::{finish, policy, task_settings};
 use super::{JOURNALS_DIR, journal_live, journal_path, recover, recovered_evidence};
 
 /// What every simulation here returns.
@@ -289,6 +289,26 @@ fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult
         );
         drop(held);
     }
+    Ok(())
+}
+
+/// larry#394: a journal already there when a retry opened it is a dead run's evidence, so the
+/// gate keeps it on any failure of that retry; a run's own journal goes with a failure the store
+/// did not cause. The injected failure is one the store-refusal list does not name.
+#[test]
+fn the_gate_keeps_a_leftover_journal_on_any_failed_retry() -> TestResult {
+    let state = scratch_directory()?;
+    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+    let path = journal_path(&state, "018f0000-0000-7000-8000-000000000394");
+    let injected = || ExecError::Journals(std::io::Error::other("injected"));
+    std::fs::write(&path, b"evidence")?;
+    assert!(finish(&path, Err(injected()), true).is_err());
+    assert!(path.exists(), "a failed retry keeps the leftover journal");
+    assert!(finish(&path, Err(injected()), false).is_err());
+    assert!(
+        !path.exists(),
+        "a run's own journal goes with a failure the store did not cause"
+    );
     Ok(())
 }
 
