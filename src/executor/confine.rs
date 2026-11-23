@@ -11,8 +11,8 @@
 //! launchers are denied, larry#326),
 //! and `/usr/bin/setsid` then `/usr/bin/setpriv` with a Landlock allowlist on Linux (a
 //! session of its own with no controlling terminal, larry#386; reads beneath every
-//! path but the state directory and `/proc`, read and write beneath the tree and
-//! scratch directory). Every descendant of the command inherits it. Source:
+//! path but the state directory and `/proc`, files beside the walk included, larry#382;
+//! read and write beneath the tree and scratch directory). Every descendant of the command inherits it. Source:
 //! Apple's Seatbelt profile language (`sandbox-exec`), the Linux Landlock
 //! documentation, and `lgwks_bot::rt::process`, whose `SandboxProfile::validate`
 //! and `LandlockRules::validate` refuse what could not confine anything before a
@@ -73,13 +73,21 @@ const DEVICES: [&str; 1] = ["/dev/null"];
 /// only directory rules, so a single summary file cannot be a rule of its own.
 const PROC_READS: [&str; 2] = ["/proc/self", "/proc/sys"];
 
-/// The most read roots the allowlist carries: the estate's `LandlockRules` holds 64
-/// rules, and the tree, the scratch directory, the device and the two `/proc` entries
-/// take five, so the roots get the rest (larry#322, ADR 0081).
-const MAX_READ_ROOTS: usize = 64 - 5;
+/// The rules `LandlockRules` carries beside the walk's roots: the session's copy, the tree,
+/// the scratch directory and the two `/proc` entries.
+const FIXED_RULES: usize = 5;
 
-/// `setpriv`'s access list for read and execute.
+/// The most read roots the allowlist carries: the estate's bound, 4,096 since lgwks_bot 10.0.0
+/// (logicalworks-crates#1114), less the fixed rules, so a home folder of hundreds of entries
+/// confines (larry#322, larry#382, ADR 0081, ADR 0092). Larry keeps no bound of its own.
+const MAX_READ_ROOTS: usize = LandlockRules::MAX_RULES.saturating_sub(FIXED_RULES);
+
+/// `setpriv`'s access list for read and execute beneath a directory.
 const READ_LIST: &str = "execute,read-file,read-dir";
+
+/// `setpriv`'s access list for a regular file: landlock(7) refuses a directory right on a
+/// file, so a file beside the walk takes the file rights alone (larry#382).
+const FILE_READ_LIST: &str = "execute,read-file";
 
 /// `setpriv`'s access list for read, execute, create, change and remove.
 const WRITE_LIST: &str = "execute,write-file,read-file,read-dir,remove-dir,remove-file,\
@@ -392,6 +400,16 @@ fn read_roots_at(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineError
 /// simulations drive on a fake root, so the walk's shape never depends on the host's
 /// own directories (larry#322).
 fn read_roots_below(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineError> {
+    read_roots_bounded(root, state, MAX_READ_ROOTS)
+}
+
+/// [`read_roots_below`] refused past `bound` roots: the simulations drive the refusal at a
+/// small bound, so proving it never costs thousands of directories (larry#382).
+fn read_roots_bounded(
+    root: &Path,
+    state: &Path,
+    bound: usize,
+) -> Result<Vec<PathBuf>, ConfineError> {
     let state = resolved(state)?;
     let below = state.strip_prefix(root).map_err(|source| {
         ConfineError::Invalid(io::Error::new(io::ErrorKind::InvalidInput, source))
@@ -419,10 +437,10 @@ fn read_roots_below(root: &Path, state: &Path) -> Result<Vec<PathBuf>, ConfineEr
                 }
             }
         }
-        if roots.len() > MAX_READ_ROOTS {
+        if roots.len() > bound {
             return Err(ConfineError::TooManyRoots {
                 roots: roots.len(),
-                bound: MAX_READ_ROOTS,
+                bound,
             });
         }
         level = skip;
@@ -475,11 +493,13 @@ fn children(level: &Path) -> Result<Vec<PathBuf>, ConfineError> {
 }
 
 /// A path as one read root, or `None` when it cannot be one: `/proc`, which is granted
-/// entry by entry; a file, a device or a dangling link, which a rule on a file cannot
-/// name; and the state directory, anything beneath it or any ancestor of it, so a
-/// sibling link that resolves into the state directory grants nothing (larry#322).
+/// entry by entry; a device, FIFO, socket or dangling link, which no read rule serves; and
+/// the state directory, anything beneath it or any ancestor of it, so a sibling link that
+/// resolves into the state directory grants nothing (larry#322). A directory and a regular
+/// file, such as `~/.gitconfig` beside a state directory under the home folder, are roots
+/// (larry#382).
 fn grantable(path: &Path, state: &Path) -> Result<Option<PathBuf>, ConfineError> {
-    if path == Path::new("/proc") || !path.is_dir() {
+    if path == Path::new("/proc") || !(path.is_dir() || path.is_file()) {
         return Ok(None);
     }
     let resolved = resolved(path)?;
@@ -514,6 +534,9 @@ fn landlock(
     ];
     for (path, access) in rules.rules() {
         let list = match access {
+            // A root is a directory or a regular file, as the walk resolved it; a file swapped
+            // for a directory since only refuses the spawn, never widens it.
+            PathAccess::Read if path.is_file() => FILE_READ_LIST,
             PathAccess::Read => READ_LIST,
             PathAccess::ReadWrite => WRITE_LIST,
             _ => {
