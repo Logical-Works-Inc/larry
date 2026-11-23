@@ -90,7 +90,7 @@ fn sim_recover_skips_a_held_journal_and_sets_every_other_aside() -> TestResult {
     std::fs::write(&broken, b"not a journal")?;
 
     assert_eq!(
-        recover(&state, &scopes)?,
+        recover(&state, &scopes)?.set_aside,
         2,
         "the dead journal and the damaged one are set aside, the held one is not"
     );
@@ -145,7 +145,7 @@ fn sim_a_dead_journal_directory_is_set_aside_exactly_for_every_seed() -> TestRes
             expected.push((id, valid));
         }
         assert_eq!(
-            recover(&state, &scopes)?,
+            recover(&state, &scopes)?.set_aside,
             count,
             "seed {seed}: every journal is set aside, the note is not"
         );
@@ -193,7 +193,7 @@ fn sim_two_state_directories_never_set_aside_each_others_journals() -> TestResul
             right_ids.push(id);
         }
         assert_eq!(
-            recover(&left, &scopes)?,
+            recover(&left, &scopes)?.set_aside,
             left_count,
             "seed {seed}: the left directory sets aside only its own journals"
         );
@@ -204,10 +204,90 @@ fn sim_two_state_directories_never_set_aside_each_others_journals() -> TestResul
             );
         }
         assert_eq!(
-            recover(&right, &scopes)?,
+            recover(&right, &scopes)?.set_aside,
             right_count,
             "seed {seed}: the right directory sets aside its own journals afterwards"
         );
+    }
+    Ok(())
+}
+
+/// The saboteur at every fault class, for every seed (larry#394): a journal the device refuses
+/// to open stays a journal and is reported kept with its typed cause, and the next start
+/// recovers it once the fault clears; a journal whose bytes are refused is set aside as refused
+/// and is evidence a keyed retry answers from; a held journal is skipped; a sound one is
+/// recovered. The oracle is the fault each file was given, never the code's own answer.
+#[cfg(unix)]
+#[test]
+fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (scopes, capacity) = settings()?;
+    for seed in SEEDS {
+        let state = scratch_directory()?;
+        std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+        let mut seeded = Seeded::from_seed(seed);
+        let sound = format!("sound-{seed}");
+        let damaged = format!("damaged-{seed}");
+        let faulted = format!("faulted-{seed}");
+        let held_id = format!("held-{seed}");
+        drop(Journal::open(&journal_path(&state, &sound), capacity)?);
+        let noise = format!("garbage-{}", seeded.index(100_000)?);
+        std::fs::write(journal_path(&state, &damaged), noise.as_bytes())?;
+        drop(Journal::open(&journal_path(&state, &faulted), capacity)?);
+        let faulted_path = journal_path(&state, &faulted);
+        std::fs::set_permissions(&faulted_path, std::fs::Permissions::from_mode(0o000))?;
+        let held = Journal::open(&journal_path(&state, &held_id), capacity)?;
+
+        let first = recover(&state, &scopes)?;
+        std::fs::set_permissions(&faulted_path, std::fs::Permissions::from_mode(0o600))?;
+        assert_eq!(first.set_aside, 2, "seed {seed}: the sound and the damaged");
+        assert_eq!(
+            first
+                .kept
+                .iter()
+                .map(|kept| kept.path.clone())
+                .collect::<Vec<_>>(),
+            vec![faulted_path.clone()],
+            "seed {seed}: only the faulted journal is kept"
+        );
+        assert!(
+            first
+                .kept
+                .iter()
+                .all(|kept| !kept.cause.refuses_the_record()),
+            "seed {seed}: a kept journal's cause never refuses its bytes"
+        );
+        assert!(faulted_path.exists(), "seed {seed}: it stays a journal");
+        assert!(
+            recovered_evidence(&state, &damaged)?.is_some_and(|line| line.contains("refused")),
+            "seed {seed}: a refused journal is evidence"
+        );
+        assert!(
+            recovered_evidence(&state, &sound)?.is_some_and(|line| line.contains("recovered")),
+            "seed {seed}: a recovered journal is evidence"
+        );
+        assert_eq!(
+            recovered_evidence(&state, &faulted)?,
+            None,
+            "seed {seed}: a kept journal is no set-aside evidence yet"
+        );
+
+        let second = recover(&state, &scopes)?;
+        assert_eq!(
+            second.set_aside, 1,
+            "seed {seed}: the cleared fault recovers"
+        );
+        assert!(second.kept.is_empty(), "seed {seed}: nothing is kept twice");
+        assert!(
+            recovered_evidence(&state, &faulted)?.is_some(),
+            "seed {seed}: the cleared journal is recovered evidence"
+        );
+        assert!(
+            journal_path(&state, &held_id).exists(),
+            "seed {seed}: a held journal is never touched"
+        );
+        drop(held);
     }
     Ok(())
 }
@@ -245,7 +325,9 @@ fn sim_a_probe_error_is_typed_and_never_dead_or_absent() -> TestResult {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     match hidden {
         Err(ExecError::Journals(_)) => {}
-        Ok(found) => return Err(format!("a stat error answered absent={}", !found).into()),
+        Ok(found) => {
+            return Err(format!("a stat error answered absent={}", found.is_none()).into());
+        }
         Err(other) => {
             return Err(format!("the stat error is not typed as a journals error: {other}").into());
         }

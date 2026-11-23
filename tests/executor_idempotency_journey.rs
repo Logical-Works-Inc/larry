@@ -226,22 +226,22 @@ fn a_key_that_names_nothing_is_refused_typed() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_killed_run_with_a_key_answers_from_its_recovered_journal_and_runs_nothing() -> TestResult {
-    // Source: the Idempotent Receiver pattern and INVARIANTS' journals line (a
-    // dead task's journal is recovered, never re-run). The first run is killed
-    // inside its command, after the ledger recorded that command's group; the
-    // keyed retry must not run that command again and must keep the dead run's
-    // journal as evidence (larry#182 defect 3).
-    let (state, origin) = fixture()?;
-    let scratch = TempDir::new()?;
-    let hold = scratch.path().join("hold");
-    let count = scratch.path().join("runs");
+/// Starts a keyed task under `state` whose command marks `count` and then blocks, and kills
+/// the executor with SIGKILL inside that command, after the ledger recorded its group. Returns
+/// the document a retry resubmits.
+fn killed_keyed_run(
+    state: &Path,
+    origin: &Path,
+    key: &str,
+    scratch: &Path,
+    count: &Path,
+) -> Result<String, Box<dyn Error>> {
+    let hold = scratch.join(format!("hold-{key}"));
     make_fifo(&hold)?;
     let document = lgwks_std::json::json!({
-        "repo": origin.path().to_string_lossy(),
+        "repo": origin.to_string_lossy(),
         "base": "HEAD",
-        "idempotency_key": "killed-1",
+        "idempotency_key": key,
         "acceptance": [["sh", "-c", format!(
             "echo ran >> {}; cat < {}",
             count.display(),
@@ -249,21 +249,160 @@ fn a_killed_run_with_a_key_answers_from_its_recovered_journal_and_runs_nothing()
         )]],
     })
     .to_string();
-    let mut child = spawn_exec(Some(state.path()), None, &document)?;
+    let mut child = spawn_exec(Some(state), None, &document)?;
     // The command writes its marker before it opens the fifo's read end, and the write end
     // opens only once that read end is open: the marker is on disk when this returns, and a
     // document the parser refuses fails this wait inside one deadline (larry#268).
     let _hold = await_fifo_writer(&hold)?;
     // The ledger names the group the command runs in, so the kill -9 has one to reap.
-    let pgid = live_group_pid(&state.path().join("executor.db"))?;
+    let pgid = live_group_pid(&state.join("executor.db"))?;
     assert!(pgid > 0, "the running command holds a recorded group");
     child.kill()?;
     child.wait()?;
     assert_eq!(
-        fs::read_to_string(&count)?,
+        fs::read_to_string(count)?,
         "ran\n",
         "the killed run's command ran once"
     );
+    Ok(document)
+}
+
+/// A fresh state directory and origin whose keyed run under `key` was killed inside its
+/// command: what a retry journey starts from.
+struct Killed {
+    /// The state directory the killed run left its journal in.
+    state: TempDir,
+    /// The origin repository.
+    origin: TempDir,
+    /// Scratch space holding the run's fifo and marker.
+    scratch: TempDir,
+    /// The marker each run of the command appends one line to.
+    count: std::path::PathBuf,
+    /// The task document a retry resubmits.
+    document: String,
+}
+
+/// Builds a fixture and kills a keyed run in it (larry#394).
+fn killed_in_a_fixture(key: &str) -> Result<Killed, Box<dyn Error>> {
+    let (state, origin) = fixture()?;
+    let scratch = TempDir::new()?;
+    let count = scratch.path().join("runs");
+    let document = killed_keyed_run(state.path(), origin.path(), key, scratch.path(), &count)?;
+    Ok(Killed {
+        state,
+        origin,
+        scratch,
+        count,
+        document,
+    })
+}
+
+/// The one file `<state>/journals` holds.
+fn only_journal(state: &Path) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(state.join("journals"))? {
+        found.push(entry?.path());
+    }
+    if found.len() != 1 {
+        return Err(format!("one journal is left, found {found:?}").into());
+    }
+    found.pop().ok_or_else(|| "one journal is left".into())
+}
+
+#[test]
+fn a_keyed_retry_after_a_recovery_fault_runs_nothing_and_keeps_the_journal() -> TestResult {
+    // larry#394. A fault that is not a refusal of the journal's bytes (here the device refuses
+    // the open) never sets the dead run's journal aside: it stays a journal, the start reports
+    // it and goes on, the keyed retry runs nothing, and once the fault clears the next start
+    // recovers it. A journal whose bytes are refused is kept as refused, and that is evidence
+    // a keyed retry answers from too. Source: the Idempotent Receiver pattern.
+    use std::os::unix::fs::PermissionsExt;
+
+    let Killed {
+        state,
+        origin,
+        scratch,
+        count,
+        document,
+    } = killed_in_a_fixture("fault-1")?;
+    let journal = only_journal(state.path())?;
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o000))?;
+    let faulted = run_exec(state.path(), &document, None)?;
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o600))?;
+    assert_eq!(
+        fs::read_to_string(&count)?,
+        "ran\n",
+        "a keyed retry during a recovery fault must not run the dead run's command"
+    );
+    assert_eq!(
+        only_journal(state.path())?,
+        journal,
+        "a passing fault keeps the dead run's journal for the next start"
+    );
+    assert_ne!(
+        faulted.status.code(),
+        Some(0),
+        "a retry that cannot read the evidence is never accepted"
+    );
+    let retry = report_of(&run_exec(state.path(), &document, None)?)?;
+    assert_eq!(fs::read_to_string(&count)?, "ran\n", "nor after it clears");
+    assert_eq!(
+        only_journal(state.path())?,
+        journal.with_extension("recovered"),
+        "once the fault clears the journal is recovered"
+    );
+    assert!(
+        !flag_of(&retry, "accepted")?,
+        "a run nobody observed is never accepted"
+    );
+
+    // A journal whose bytes are refused is set aside, and still answers its keyed retry.
+    let damaged_state = TempDir::new()?;
+    let damaged_count = scratch.path().join("damaged-runs");
+    let damaged = killed_keyed_run(
+        damaged_state.path(),
+        origin.path(),
+        "damaged-1",
+        scratch.path(),
+        &damaged_count,
+    )?;
+    let damaged_journal = only_journal(damaged_state.path())?;
+    fs::write(&damaged_journal, b"not a journal")?;
+    let answered = report_of(&run_exec(damaged_state.path(), &damaged, None)?)?;
+    assert_eq!(
+        fs::read_to_string(&damaged_count)?,
+        "ran\n",
+        "a keyed retry of a run whose journal was refused must not run its command"
+    );
+    assert_eq!(
+        only_journal(damaged_state.path())?,
+        damaged_journal.with_extension("refused"),
+        "a journal whose bytes are refused is kept as refused"
+    );
+    assert!(
+        denial_lines(&answered)?
+            .first()
+            .is_some_and(|line| line.contains("refused")),
+        "the retry says the earlier run's journal was refused"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_killed_run_with_a_key_answers_from_its_recovered_journal_and_runs_nothing() -> TestResult {
+    // Source: the Idempotent Receiver pattern and INVARIANTS' journals line (a
+    // dead task's journal is recovered, never re-run). The first run is killed
+    // inside its command, after the ledger recorded that command's group; the
+    // keyed retry must not run that command again and must keep the dead run's
+    // journal as evidence (larry#182 defect 3).
+    // The origin and the scratch stay alive to the end, so a retry that did run would succeed.
+    let Killed {
+        state,
+        origin: _origin,
+        scratch: _scratch,
+        count,
+        document,
+    } = killed_in_a_fixture("killed-1")?;
     assert_eq!(
         journal_entries(state.path())?,
         1,

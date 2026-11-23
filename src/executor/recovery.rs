@@ -15,6 +15,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -86,21 +87,40 @@ pub(super) fn journal_live(
     }
 }
 
-/// Whether `task_id`'s run already has evidence this state directory kept: a
-/// journal a killed executor left, which the recovery set aside as `<task>.recovered`.
-/// A retry that derives this run id is answered from that evidence and never runs
-/// the body again, because the earlier run's outcome is exactly what nobody observed
-/// (larry#182 defect 3).
+/// The denial line a retry is answered with when `task_id`'s run already has evidence this
+/// state directory kept: a journal a killed executor left, which the recovery set aside as
+/// `<task>.recovered`, or as `<task>.refused` when its bytes were refused. A retry that derives
+/// this run id is answered from that evidence and never runs the body again, because the
+/// earlier run's outcome is exactly what nobody observed (larry#182 defect 3, larry#394).
 ///
 /// # Errors
 ///
 /// [`ExecError::Journals`] when the evidence cannot be stat'ed, so an unreadable
 /// directory is never read as absent (larry#334).
-pub(super) fn recovered_evidence(state: &Path, task_id: &str) -> Result<bool, ExecError> {
-    journal_path(state, task_id)
-        .with_extension(RECOVERED_EXT)
-        .try_exists()
-        .map_err(ExecError::Journals)
+pub(super) fn recovered_evidence(
+    state: &Path,
+    task_id: &str,
+) -> Result<Option<&'static str>, ExecError> {
+    let path = journal_path(state, task_id);
+    for (ext, line) in [
+        (
+            RECOVERED_EXT,
+            "gate: the run was recovered from its journal as unknown",
+        ),
+        (
+            REFUSED_EXT,
+            "gate: the run's journal was refused and set aside; its outcome is unknown",
+        ),
+    ] {
+        if path
+            .with_extension(ext)
+            .try_exists()
+            .map_err(ExecError::Journals)?
+        {
+            return Ok(Some(line));
+        }
+    }
+    Ok(None)
 }
 
 /// The owner a recovered run is restored with. The task body died with the
@@ -153,23 +173,61 @@ fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError
     Ok(())
 }
 
+/// One journal the recovery left as `<task>.journal`: recovering it failed for a reason
+/// other than its bytes, so the next start tries again (larry#394).
+#[derive(Debug)]
+pub(super) struct KeptJournal {
+    /// The journal left in place.
+    pub(super) path: PathBuf,
+    /// Why it could not be recovered now.
+    pub(super) cause: RuntimeError,
+}
+
+impl KeptJournal {
+    /// Reports the journal as one typed JSON line on standard error, the operator's channel,
+    /// in the shape the workspace sweep reports a kept entry (larry#334).
+    fn report(&self) {
+        let event = lgwks_std::json::json!({
+            "recovery": "kept",
+            "entry": format!("{}", self.path.display()),
+            "refused": self.cause.to_string(),
+        });
+        let mut err = std::io::stderr().lock();
+        let written = writeln!(err, "{event}");
+        drop(written);
+    }
+}
+
+/// What one recovery sweep did: how many journals it set aside, and the ones it kept.
+#[derive(Debug, Default)]
+pub(super) struct Recovery {
+    /// Journals renamed to `<task>.recovered` or `<task>.refused`.
+    pub(super) set_aside: usize,
+    /// Journals left as `<task>.journal`, each reported once, for the next start.
+    pub(super) kept: Vec<KeptJournal>,
+}
+
 /// Recovers every task journal a killed executor left under `state`, at most
-/// [`MAX_RECOVERED`] in name order, and returns how many were set aside.
+/// [`MAX_RECOVERED`] in name order.
 ///
 /// A journal another executor still holds is skipped: its lock is the proof
 /// it is live. A recovered journal is kept as `<task>.recovered`; one whose
-/// bytes the store or the replay refuses is kept as `<task>.refused`, so a
-/// damaged file is evidence, never a reason every later task fails.
+/// bytes the store or the replay refuses ([`RuntimeError::refuses_the_record`]) is
+/// kept as `<task>.refused`, so a damaged file is evidence, never a reason every
+/// later task fails. Any other fault (the device, a lock probe, the clock, a setting,
+/// a capacity) leaves the file a journal and is returned as one typed fault, so the
+/// next start recovers it and a keyed retry still opens it rather than running the
+/// body again (larry#394).
 ///
 /// # Errors
 ///
 /// [`ExecError::Journals`] when the directory cannot be listed or a journal
-/// cannot be renamed, and [`ExecError::Gate`] when a lease instant cannot be
-/// read.
-pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<usize, ExecError> {
+/// cannot be renamed.
+pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery, ExecError> {
+    let mut recovery = Recovery::default();
     let listing = match std::fs::read_dir(state.join(JOURNALS_DIR)) {
         Ok(listing) => listing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(recovery),
         Err(error) => return Err(ExecError::Journals(error)),
     };
     let mut paths: Vec<PathBuf> = listing
@@ -180,17 +238,22 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<usize, E
     paths.retain(|path| path.extension() == Some(OsStr::new(JOURNAL_EXT)));
     paths.sort();
     paths.truncate(MAX_RECOVERED);
-    let mut set_aside: usize = 0;
     for path in paths {
         let kept_as = match recover_one(&path, policy) {
             Ok(()) => RECOVERED_EXT,
             Err(RuntimeError::Durable(JournalError::Locked { .. })) => continue,
-            Err(_) => REFUSED_EXT,
+            Err(refusal) if refusal.refuses_the_record() => REFUSED_EXT,
+            Err(cause) => {
+                let kept = KeptJournal { path, cause };
+                kept.report();
+                recovery.kept.push(kept);
+                continue;
+            }
         };
         std::fs::rename(&path, path.with_extension(kept_as)).map_err(ExecError::Journals)?;
-        set_aside = set_aside.saturating_add(1);
+        recovery.set_aside = recovery.set_aside.saturating_add(1);
     }
-    Ok(set_aside)
+    Ok(recovery)
 }
 
 /// Seeded adversarial simulations of the recovery (larry#182 defect 3).

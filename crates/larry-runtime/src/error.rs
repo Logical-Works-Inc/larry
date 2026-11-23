@@ -394,6 +394,38 @@ impl RuntimeError {
             | Self::Fence(_) => false,
         }
     }
+
+    /// Whether this refusal is the journal's own bytes refusing to rebuild (`true`), or a
+    /// fault of the host, its settings or its clock that a later start may not meet (`false`).
+    ///
+    /// A journal a killed executor left is set aside as refused only on `true`: committed bytes
+    /// that break the chain or past the file's ceiling, a record that does not decode, and a
+    /// replay the contracts refuse. A device, lock, clock, setting or capacity fault keeps the
+    /// file where it is, so the next start recovers it and a keyed retry still finds the run
+    /// (larry#394). Every unlisted case of the estate's journal error keeps the file: losing the
+    /// evidence is the one outcome a retry cannot undo, so only the listed cases refuse.
+    #[must_use]
+    pub const fn refuses_the_record(&self) -> bool {
+        use lgwks_bot::journal::JournalError as Store;
+        matches!(
+            *self,
+            Self::Durable(Store::Corrupt(_) | Store::CapacityExceeded { .. } | Store::Exhausted)
+                | Self::Codec(_)
+                | Self::Sequence(_)
+                | Self::Ordering(_)
+                | Self::Command(_)
+                | Self::Transition(_)
+                | Self::UnsupportedEvent(_)
+                | Self::UnsupportedCommand(_)
+                | Self::UnsupportedDecision(_)
+                | Self::UnsupportedDisposition(_)
+                | Self::UnsupportedReconciliationAction(_)
+                | Self::FoldDivergence { .. }
+                | Self::DurableRepeat { .. }
+                | Self::RunTenantMismatch { .. }
+                | Self::EffectIdentity { .. }
+        )
+    }
 }
 
 impl std::error::Error for RuntimeError {
