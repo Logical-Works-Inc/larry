@@ -47,21 +47,23 @@ rust-version = "1.98"
 # `default-features` when the workspace declaration omits it, so leaving it
 # out would silently keep defaults on. Select only the capabilities used by
 # each member.
-lgwks_std = { version = "=4.2.1", default-features = false }
+lgwks_std = { version = "=5.0.0", default-features = false }
 # The runtime's owner (larry#68). Defaults off; each member names its features. larry-runtime
 # takes `wire`. The larry package takes `edge` (the `lgwks_bot::app` HTTP edge of `larry serve`,
-# ADR 0021), which pulls `script` and with it the ECS world, and `signal` for its drain. 9.0.0
-# is the newest release; 8.3.0 (larry#187) added `RecordJournal::admits` and
-# `RecordProjection::admit` (crates#898, #905, #906), which larry#90 builds on.
-lgwks_bot = { version = "=9.0.0", default-features = false }
+# ADR 0021), which pulls `script` and with it the ECS world, and `signal` for its drain. 10.0.1
+# is the newest release; 10.0.0 raised the Landlock allowlist to 4,096 rules (crates#1114), and
+# 8.3.0 (larry#187) added `RecordJournal::admits` and `RecordProjection::admit` (crates#898, #905,
+# #906), which larry#90 builds on.
+lgwks_bot = { version = "=10.0.1", default-features = false }
 # The dependency-admission storefront. The larry package opts into `sqlite`; the
-# published storefront owns that dependency and its transitive admission. 7.3.0 is the newest
-# release; 7.2.0 (larry#189) set the ledger's `sqlite::open` and `sqlite::migrate` API.
-lgwks_deps = { version = "=7.3.0", default-features = false }
+# published storefront owns that dependency and its transitive admission. 8.0.0 is the newest
+# release and re-exports rusqlite 0.43; 7.2.0 (larry#189) set the ledger's `sqlite::open` and
+# `sqlite::migrate` API.
+lgwks_deps = { version = "=8.0.0", default-features = false }
 # The estate's one Rust reader (larry#293, ADR 0061). The governance temp-path rule parses
 # test sources with its tree-sitter grammar and takes its byte, node, depth and time bounds;
-# 6.1.0 is the newest release. `lang-rust` selects the Rust grammar and the parser it needs.
-lgwks_ast = { version = "=6.1.0", default-features = false }
+# 6.1.1 is the newest release. `lang-rust` selects the Rust grammar and the parser it needs.
+lgwks_ast = { version = "=6.1.1", default-features = false }
 # Handle-relative mode reset for the workspace sweep (larry#366): `Dir` holds a descriptor but has no
 # call that resets a child's mode from it, so the sweep opens with `openat` and resets through
 # `chmodat`/`O_PATH` itself. Already in the lock through `lgwks_std` `fs-raw`, so this adds no crate.

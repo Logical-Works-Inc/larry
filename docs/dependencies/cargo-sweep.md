@@ -19,7 +19,7 @@ sources:
 # Cargo sweep
 
 Read 2026-11-03. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
-`lgwks_ast`, `lgwks_deps`, all at their newest release: 4.2.1, 9.0.0, 6.1.0, 7.3.0 on 2026-11-19); Loco.rs where the estate
+`lgwks_ast`, `lgwks_deps`, all at their newest release: 5.0.0, 10.0.1, 6.1.1, 8.0.0 on 2026-11-23); Loco.rs where the estate
 owns nothing; any other crate only with a `gap` issue on its manifest line. Labels: MEASURED, READ, DOC.
 
 ## Measured with cargo (MEASURED, stable toolchain, load average 4 to 6)
@@ -32,6 +32,7 @@ owns nothing; any other crate only with a `gap` issue on its manifest line. Labe
 | Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.2.0 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
 | Larry's branch for larry#88 on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | resolves |
 | Larry's branch for larry#293 on `lgwks_ast =6.0.3` (`lang-rust`), `env -u CARGO_BUILD_BUILD_DIR cargo build --bins --locked --target-dir <fresh>`, 2026-11-17; the tree without the edge measured 230.8 s on 214 crates the same day | 228 (214 without) | 406.7 s, load 5.75 to 10.55 on 4 cores (73% CPU) | 598 MB | resolves; `larry governance`'s temp-path rule p50 279.5 ms, p95 282.8 ms, p99 356.1 ms per check over the root's `src` and `tests` (ADR 0061) |
+| larry#393: main on lgwks_std 4.2.1 / lgwks_bot 9.0.0, then the branch on 5.0.0 / 10.0.1, `cargo build --bins --locked`, fresh target, no sccache, Oracle 4 cores, load 2.0 then 3.5, 2026-11-23 | 228 to 213 | 249.2 s to 204.3 s | 1.24 GiB to 1.21 GiB | resolves; tracing-subscriber and 7 crates under it leave |
 
 Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u | wc -l`,
 `/usr/bin/time -l cargo build --locked` into a fresh target directory after one warm-up fetch, sccache on

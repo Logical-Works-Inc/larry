@@ -582,7 +582,8 @@ fn the_cargo_sweep_names_every_locked_estate_release() -> Result<(), Box<dyn std
     else {
         return Err("docs/product/README.md has no `Newest estate pins` ruling".into());
     };
-    for name in ["lgwks_std", "lgwks_bot", "lgwks_deps"] {
+    // larry#393: the ruling names lgwks_ast too, so all four follow the lock.
+    for name in SWEEP_ESTATE {
         for version in locked_versions(&lock, name) {
             let pin = format!("{name} {version}");
             assert!(
@@ -598,7 +599,7 @@ fn the_cargo_sweep_names_every_locked_estate_release() -> Result<(), Box<dyn std
         .lines()
         .filter(|line| line.starts_with("- [x]"))
         .collect();
-    for name in ["lgwks_std", "lgwks_bot", "lgwks_deps"] {
+    for name in SWEEP_ESTATE {
         for version in locked_versions(&lock, name) {
             let pin = format!("{name} {version}");
             assert!(

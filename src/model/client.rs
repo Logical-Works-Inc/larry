@@ -188,14 +188,14 @@ impl ModelClient {
         let url = format!("{}/chat/completions", self.config.base_url());
         let response = http::post_with(&url, "application/json", body, &options)
             .map_err(|failure| map_transport(&failure))?;
-        if !(200..300).contains(&response.status) {
+        if !(200..300).contains(&response.status()) {
             let retry_after = response
                 .headers()
                 .iter()
                 .find(|header| header.0.eq_ignore_ascii_case("retry-after"))
                 .and_then(|header| header.1.trim().parse::<u64>().ok());
             return Err(wire::status_error(
-                response.status,
+                response.status(),
                 retry_after,
                 response.body(),
             ));
