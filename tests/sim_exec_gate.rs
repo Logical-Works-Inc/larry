@@ -60,7 +60,7 @@ const NAMES: [&str; 5] = [
 
 /// Every fault the mock endpoint can answer with, named here so scheduling
 /// one in a gate run is a deliberate act that extends this list first.
-const EVERY_FAULT: [Option<mock_model::Fault>; 7] = [
+const EVERY_FAULT: [Option<mock_model::Fault>; 9] = [
     Some(mock_model::Fault::Delay),
     Some(mock_model::Fault::RateLimit {
         retry_after_secs: 1,
@@ -70,6 +70,8 @@ const EVERY_FAULT: [Option<mock_model::Fault>; 7] = [
     Some(mock_model::Fault::ServerError { status: 500 }),
     Some(mock_model::Fault::PaddedDone),
     Some(mock_model::Fault::HostileRefusal { status: 401 }),
+    Some(mock_model::Fault::Finish { reason: "length" }),
+    Some(mock_model::Fault::EmptyContent),
 ];
 
 /// What every test here returns.
@@ -243,7 +245,7 @@ fn the_gate_simulation_schedules_no_fault() {
     );
     assert_eq!(
         EVERY_FAULT.len(),
-        7,
+        9,
         "every fault the endpoint can answer with is named"
     );
 }

@@ -290,6 +290,36 @@ fn a_refusal_shows_the_gateway_reason_without_terminal_control() -> TestResult {
     })
 }
 
+/// larry#396: a reply cut at the token limit fails `larry model` naming the reason, sent once;
+/// a finished reply with no content is the model's answer and prints nothing.
+#[test]
+fn a_cut_reply_fails_naming_its_reason_and_an_empty_one_prints_nothing() -> TestResult {
+    let config = Config {
+        script: vec![
+            Some(Fault::Finish { reason: "length" }),
+            Some(Fault::EmptyContent),
+        ],
+        ..Config::seeded(18)
+    };
+    mock_model::run(config, |handle| {
+        let cut = larry_model(&operator(handle.addr()), b"long")?;
+        assert!(!cut.status.success(), "a cut reply fails");
+        let shown = stderr_of(&cut);
+        assert!(
+            shown.contains("did not finish its reply (finish_reason length)"),
+            "the operator sees why: {shown:.160}"
+        );
+        assert_eq!(handle.served(), 1, "a cut reply is never retried");
+        let empty = larry_model(&operator(handle.addr()), b"nothing")?;
+        assert!(empty.status.success(), "stderr {}", stderr_of(&empty));
+        assert!(
+            String::from_utf8_lossy(&empty.stdout).trim().is_empty(),
+            "an empty answer prints nothing"
+        );
+        Ok(())
+    })
+}
+
 #[test]
 fn the_same_seed_through_the_binary_replays_one_trace() -> TestResult {
     let trace = |seed: u64| {

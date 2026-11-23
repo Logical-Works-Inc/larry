@@ -210,6 +210,33 @@ fn sim_tui_gateway_refusal_shows_typed_notice() -> Journey {
     Ok(())
 }
 
+/// larry#396: a reply the gateway cut at its token limit ends the session with a notice naming
+/// `finish_reason`; an empty reply is a refused reply the model is told about, and once three in
+/// a row are refused the session ends. Neither runs anything, and the frame stays usable.
+#[test]
+fn sim_tui_cut_or_empty_reply_runs_nothing() -> Journey {
+    for (fault, notice) in [
+        (Fault::Finish { reason: "length" }, "finish_reason"),
+        (Fault::EmptyContent, "refused"),
+    ] {
+        let config = Config {
+            script: vec![Some(fault)],
+            ..scripted(6, &[COMMAND])
+        };
+        let ran = frame(config, |pty, _, _| {
+            working(pty)?;
+            pty.wait_for(notice)
+        })?;
+        assert!(
+            ran.status.success(),
+            "{fault:?}: the frame stays usable: {}",
+            ran.status
+        );
+        assert!(!wrote(&ran), "{fault:?}: an unfinished reply runs nothing");
+    }
+    Ok(())
+}
+
 /// Esc while the model call is held (`Fault::Delay`) stops the session: the reply that then
 /// arrives is never run, the frame says so, and Ctrl+C exits 0 with the worker joined.
 #[test]

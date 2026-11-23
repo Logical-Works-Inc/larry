@@ -78,6 +78,15 @@ pub(crate) enum Fault {
         /// The status code.
         status: u16,
     },
+    /// Answer 200 with the good reply whose `finish_reason` is `reason`: a gateway
+    /// that stopped at its token limit (`length`) or a filter (`content_filter`) and
+    /// sent what it had (larry#396).
+    Finish {
+        /// The `finish_reason` the reply carries.
+        reason: &'static str,
+    },
+    /// Answer 200 with the good reply whose content is empty (larry#396).
+    EmptyContent,
 }
 
 /// The message a [`Fault::HostileRefusal`] carries.
@@ -440,7 +449,32 @@ fn apply(fault: Option<Fault>, good: Vec<u8>) -> Result<Planned, Failure> {
             Vec::new(),
             error_body(&hostile_message(), "authentication_error")?,
         ),
+        Some(Fault::Finish { reason }) => Planned::whole(
+            200,
+            Vec::new(),
+            with_choice(&good, "finish_reason", reason)?,
+        ),
+        Some(Fault::EmptyContent) => Planned::whole(200, Vec::new(), with_choice(&good, "", "")?),
     })
+}
+
+/// `good` with its first choice's `member` set to `value`, or its message content set to
+/// `value` when `member` is empty.
+fn with_choice(good: &[u8], member: &str, value: &str) -> Result<Vec<u8>, Failure> {
+    let mut reply = json::from_slice::<Value>(good)?;
+    let choice = reply
+        .get_mut("choices")
+        .and_then(|choices| choices.get_mut(0_usize))
+        .ok_or(Failure::Table)?;
+    let target = if member.is_empty() {
+        choice
+            .get_mut("message")
+            .and_then(|message| message.get_mut("content"))
+    } else {
+        choice.get_mut(member)
+    };
+    *target.ok_or(Failure::Table)? = json!(value);
+    Ok(json::to_vec(&reply)?)
 }
 
 /// Write a transport-level refusal.

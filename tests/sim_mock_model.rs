@@ -237,13 +237,36 @@ fn sim_scripted_faults_are_visible_to_a_plain_client_and_replay() -> TestResult 
         None,
         Some(Fault::PaddedDone),
         Some(Fault::HostileRefusal { status: 401 }),
+        Some(Fault::Finish { reason: "length" }),
+        Some(Fault::EmptyContent),
     ];
     let config = Config {
         script,
         ..Config::seeded(77)
     };
-    let (replies, trace) = session(config.clone(), 7)?;
-    assert_eq!(replies.len(), 7, "one reply per request");
+    let (replies, trace) = session(config.clone(), 9)?;
+    assert_eq!(replies.len(), 9, "one reply per request");
+    let cut: Value = json::from_slice(&replies.get(7).ok_or("missing cut reply")?.body)?;
+    assert_eq!(
+        cut.at("/choices/0/finish_reason")?.as_str(),
+        Some("length"),
+        "the cut reply names its finish reason (larry#396)"
+    );
+    let had = cut
+        .at("/choices/0/message/content")?
+        .as_str()
+        .ok_or("the cut reply's content")?;
+    assert!(
+        !had.is_empty(),
+        "the cut reply still carries the text it had"
+    );
+    let empty: Value = json::from_slice(&replies.get(8).ok_or("missing empty reply")?.body)?;
+    assert_eq!(
+        empty.at("/choices/0/message/content")?.as_str(),
+        Some(""),
+        "the empty reply has no content and finished"
+    );
+    assert_eq!(empty.at("/choices/0/finish_reason")?.as_str(), Some("stop"));
     let padded = replies.get(5).ok_or("missing padded reply")?;
     let text = std::str::from_utf8(&padded.body)?;
     assert!(
@@ -283,7 +306,7 @@ fn sim_scripted_faults_are_visible_to_a_plain_client_and_replay() -> TestResult 
     assert_eq!(failed.status, 503, "5xx status");
     assert_eq!(clean.status, 200, "the request past the script is clean");
     assert!(!content(clean)?.is_empty(), "the clean reply parses");
-    let (_, again) = session(config, 7)?;
+    let (_, again) = session(config, 9)?;
     assert_eq!(trace, again, "a scripted run replays to one trace hash");
     Ok(())
 }
