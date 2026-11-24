@@ -4,7 +4,8 @@
 //! and printed, so an open line must say what its proof is. larry#372, 2026-11-21: the #321
 //! review line read as of 2026-11-19 after ten of its children had merged.
 //! Requirement: every open line of the "Sweep #200" section names `Proof:` or `Acceptance:`,
-//! and the #321 line names what shipped and what is open, in order.
+//! and the #321 line names what shipped and what is open, in order, and every ADR since 0092
+//! is named on the line of the PR that shipped it (larry#431).
 
 use std::error::Error;
 use std::fs;
@@ -83,6 +84,65 @@ fn the_ship_steps_pick_from_the_work_graph() -> TestResult {
         "step 4 files new work under its epic in #423: {file:?}"
     );
     Ok(())
+}
+
+/// The first ADR whose shipping PR named it on its checklist line (larry#382, PR #401). Before
+/// it, process ADRs shipped with no line of their own.
+const FIRST_TICKED_ADR: u32 = 92;
+/// More entries than this in `docs/adr` is refused before they are judged.
+const MAX_ADRS: usize = 4096;
+
+/// The ADR numbers at or past `FIRST_TICKED_ADR` that `checklist` never names as `ADR NNNN`.
+fn unnamed(checklist: &str, numbers: &[u32]) -> Vec<u32> {
+    numbers
+        .iter()
+        .copied()
+        .filter(|&number| number >= FIRST_TICKED_ADR)
+        .filter(|number| !checklist.contains(&format!("ADR {number:04}")))
+        .collect()
+}
+
+/// A shipped decision ticks its line (step 3, larry#431): on 2026-11-24 ADRs 0099 to 0103 had
+/// merged and the checklist named none of them, so a session read four fixed issues as open.
+#[test]
+fn every_adr_since_the_ticking_rule_is_named_on_its_line() -> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checklist = fs::read_to_string(root.join(SHIP))?;
+    let mut numbers = Vec::new();
+    for entry in fs::read_dir(root.join("docs/adr"))? {
+        assert!(
+            numbers.len() < MAX_ADRS,
+            "docs/adr holds over {MAX_ADRS} entries"
+        );
+        let name = entry?.file_name();
+        let digits = name.to_str().and_then(|name| name.get(..4));
+        if let Some(number) = digits.and_then(|digits| digits.parse::<u32>().ok()) {
+            numbers.push(number);
+        }
+    }
+    numbers.sort_unstable();
+    assert!(
+        numbers.last().is_some_and(|&last| last >= FIRST_TICKED_ADR),
+        "docs/adr holds the ticked ADRs: {numbers:?}"
+    );
+    let missing = unnamed(&checklist, &numbers);
+    assert!(
+        missing.is_empty(),
+        "{SHIP} names no line for ADR {missing:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_adr_past_the_floor_with_no_line_is_named_and_an_older_one_is_not() {
+    let sample = "- [x] #1 a fix (ADR 0092): PR #2. #3 another (ADR 0094).";
+    assert_eq!(unnamed(sample, &[5, 91, 92, 93, 94, 120]), [93, 120]);
+    assert!(unnamed(sample, &[92, 94]).is_empty(), "named ADRs pass");
+    assert_eq!(
+        unnamed("ADR 93 without padding", &[93]),
+        [93],
+        "the number is four digits"
+    );
 }
 
 #[test]
