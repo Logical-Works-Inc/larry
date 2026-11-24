@@ -356,12 +356,13 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
         acp.send(&json!({"jsonrpc":"2.0","method":"session/cancel",
             "params":{"sessionId":session}}))?;
         acp.logged("cancel requested")?;
-        // The writer's open waits for cat's; the write lets cat end.
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&fifo)?
-            .write_all(b"go\n")?;
+        // The write lets cat end. The cancel can kill cat before cat opens the fifo, and a
+        // write-only open then waits for a reader for good (larry#458): opened read-write, the
+        // fifo never waits, on Linux or on macOS, whichever came first.
+        let mut gate = fs::OpenOptions::new().read(true).write(true).open(&fifo)?;
+        gate.write_all(b"go\n")?;
         let (notes, reply) = acp.until(&json!(2))?;
+        drop(gate);
         assert_eq!(*reply.at("/result/stopReason")?, "cancelled", "{reply}");
         assert_eq!(
             kinds(&notes),
