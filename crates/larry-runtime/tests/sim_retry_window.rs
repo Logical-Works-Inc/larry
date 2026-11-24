@@ -10,11 +10,13 @@ mod support;
 
 use std::time::SystemTime;
 
-use larry_contracts::authority::Scope;
+use larry_contracts::authority::{Scope, SecurityEpoch};
 use larry_contracts::binding::{BindingError, ResolvedEffect};
 use larry_contracts::effect::{
     EffectIntent, EffectOutcome, MAX_EFFECT_ATTEMPTS, ReconciliationStrategy,
 };
+use larry_runtime::FenceRefusal;
+use larry_runtime::error::RuntimeError;
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
@@ -22,7 +24,7 @@ use larry_runtime::runtime::Runtime;
 
 use seed::step;
 use sim_kit::read_work;
-use support::{clock, command_id, operation, settings, submit, unknown};
+use support::{clock, command_id, operation, settings, submit, tenant, unknown};
 
 /// Fallible test outcome; setup failures propagate instead of panicking.
 type Outcome<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -83,7 +85,26 @@ fn sim_a_retry_needs_the_owners_window_or_proof_it_never_left() -> Outcome {
             unknown(operation(n)),
             unknown(operation(n)),
         ];
-        let bare = drive(Undeclared(ScriptedOwner::scripted(answers)), n, seed)?;
+        let undeclared = Undeclared(ScriptedOwner::scripted(answers));
+        let intent = read_work(n, 1, ReconciliationStrategy::IdempotentRetrySafe)
+            .intent(tenant(1), SecurityEpoch::INITIAL);
+        assert_eq!(
+            undeclared.deduplication_window(&intent),
+            None,
+            "seed {seed}: an owner that declares nothing has no window, not a zero one"
+        );
+        // A reach the broker then refused to count is a tick refusal that says the owner
+        // was reached, never a fenced reach that says nothing was sent.
+        let unspent = RuntimeError::Unspent {
+            operation: operation(n),
+            refusal: FenceRefusal::Closed,
+        }
+        .to_string();
+        assert!(
+            unspent.contains("reached its owner"),
+            "seed {seed}: {unspent}"
+        );
+        let bare = drive(undeclared, n, seed)?;
         assert_eq!(
             bare.owner().0.dispatched().len(),
             1,

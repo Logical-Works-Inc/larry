@@ -102,8 +102,6 @@ pub struct TickReport {
     receipts: Vec<TerminalReceipt>,
     /// Mutating reaches refused by the freshness fence.
     fenced: Vec<(OperationId, FenceRefusal)>,
-    /// Reaches that happened but that the broker refused to count (larry#197).
-    unspent: Vec<(OperationId, FenceRefusal)>,
     /// One command's, effect's or run's typed refusal. The tick recorded it
     /// and went on; only the journal's and the clock's own refusals end a tick
     /// (larry#329).
@@ -176,14 +174,6 @@ impl TickReport {
     #[must_use]
     pub fn fenced(&self) -> &[(OperationId, FenceRefusal)] {
         &self.fenced
-    }
-
-    /// Reaches the owner received whose offline spend the broker then refused,
-    /// a broker defect (E65). Unlike [`TickReport::fenced`], the effect may
-    /// have happened, and its outcome is recorded (larry#197).
-    #[must_use]
-    pub fn unspent(&self) -> &[(OperationId, FenceRefusal)] {
-        &self.unspent
     }
 
     /// One command's, effect's or run's typed refusal, in the order the tick

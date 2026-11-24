@@ -35,8 +35,9 @@ Status: accepted, 2026-11-24 (larry#197, #182 defects 4 and 6). Amends ADR 0017.
 - `EffectOwner::deduplication_window` (default `None`) is the only source of the contract. An
   effect that may have reached its owner is resent only inside that window. One that no reach
   sent carries `EffectEvidence::NotApplied`.
-- A mutating reach with no live entry is denied `AuthorityExpired`.
-- A `spend` refusal after the owner ran is `TickReport::unspent`.
+- A mutating reach with no live entry is denied `AuthorityExpired`. The retry rule's authority
+  input is the fence's answer; the reach checks the admission proof itself.
+- A `spend` refusal after the owner ran is the tick refusal `RuntimeError::Unspent`.
 
 Rejected: keep minting the contract from the strategy and add an owner opt-out. A new owner
 that forgets the opt-out fails open. A measurement that would reverse this: an owner whose

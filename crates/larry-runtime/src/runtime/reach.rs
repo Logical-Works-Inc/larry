@@ -8,7 +8,7 @@ use larry_contracts::effect::{EffectIntent, EffectOutcome};
 use larry_contracts::ids::RunId;
 use larry_contracts::replay::DenialReason;
 
-use super::{OwnerReach, Runtime, TickReport};
+use super::{OwnerReach, Runtime, TickItem, TickReport};
 use crate::error::RuntimeError;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
@@ -141,7 +141,13 @@ where
                 // happened, and the outcome of the reach that did happen is still
                 // recorded (larry#197).
                 if let Err(refusal) = self.fence.spend(&warrant, &intent) {
-                    report.unspent.push((intent.operation, refusal));
+                    report.refused.push((
+                        TickItem::Effect(intent.operation),
+                        RuntimeError::Unspent {
+                            operation: intent.operation,
+                            refusal,
+                        },
+                    ));
                 }
                 Some(outcome)
             }
