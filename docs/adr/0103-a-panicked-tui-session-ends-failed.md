@@ -44,6 +44,7 @@ Rejected: a second reaper thread per session that joins the session thread and s
 
 - A panic in a session never leaves a spinner. The person sees why the task stopped.
 - Tests: `tui::sim_tui::worker_panics` (`sim_tui_worker_a_panicked_session_ends_failed_with_its_message`,
+  `sim_tui_worker_drop_joins_the_session_before_it_returns`,
   `sim_tui_worker_finish_names_a_panic_and_only_a_panic`). A channel handshake fixes every
   channel state the reads see, so the sims read no clock.
 - Reverse this if `run_session` gains a typed fault for every path that now panics, and the
