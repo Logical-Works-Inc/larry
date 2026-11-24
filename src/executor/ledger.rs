@@ -172,15 +172,27 @@ impl Ledger {
     }
 
     /// Stores `digest` as `tenant`'s one key digest, replacing an earlier one, so
-    /// issuing again rotates the key.
-    pub(crate) fn set_tenant_key(&self, tenant: &str, digest: &str) -> Result<(), ExecError> {
-        self.conn
+    /// issuing again rotates the key. A tenant with no key yet is stored only while
+    /// the store holds fewer than `cap` keys, checked in the same statement, so two
+    /// issuers racing at the cap never both land (larry#397). `false` when nothing
+    /// was written because the store is full.
+    pub(crate) fn set_tenant_key(
+        &self,
+        tenant: &str,
+        digest: &str,
+        cap: u32,
+    ) -> Result<bool, ExecError> {
+        let written = self
+            .conn
             .execute(
-                "INSERT OR REPLACE INTO tenant_keys (tenant, digest) VALUES (?1, ?2)",
-                rusqlite::params![tenant, digest],
+                "INSERT INTO tenant_keys (tenant, digest) SELECT ?1, ?2 \
+                 WHERE EXISTS (SELECT 1 FROM tenant_keys WHERE tenant = ?1) \
+                 OR (SELECT COUNT(*) FROM tenant_keys) < ?3 \
+                 ON CONFLICT (tenant) DO UPDATE SET digest = excluded.digest",
+                rusqlite::params![tenant, digest, i64::from(cap)],
             )
             .map_err(ExecError::Sql)?;
-        Ok(())
+        Ok(written > 0)
     }
 
     /// Every (tenant, digest hex) pair, at most `limit` of them.
@@ -501,10 +513,49 @@ mod tests {
         let clock = larry_runtime::live_clock()?;
         let settled = ledger.reap(&clock);
         let group_up = lgwks_std::process::process_group_exists(pid);
-        drop(survivor.kill());
-        drop(survivor.wait());
+        // The survivor is stopped before any assert, so a failing one leaves no process behind;
+        // a stop that fails is the test's failure too.
+        let killed = survivor.kill();
+        let reaped = survivor.wait();
         assert_eq!(settled?, 0, "a surviving group settles no row");
         assert!(group_up?, "the group is still running after the reap");
+        killed?;
+        reaped?;
+        Ok(())
+    }
+
+    /// At the cap a new tenant's key writes nothing and says so, while a keyed tenant still
+    /// rotates; under the cap a new tenant is stored (larry#397).
+    #[test]
+    fn a_tenant_key_past_the_cap_writes_nothing_and_a_rotation_still_lands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = scratch_directory()?;
+        let ledger = Ledger::open(&directory)?;
+        let digest = |nibble: char| nibble.to_string().repeat(64);
+        assert!(
+            ledger.set_tenant_key("ada", &digest('a'), 2)?,
+            "under the cap"
+        );
+        assert!(
+            ledger.set_tenant_key("bo", &digest('b'), 2)?,
+            "the last slot"
+        );
+        assert!(
+            !ledger.set_tenant_key("cy", &digest('c'), 2)?,
+            "past the cap"
+        );
+        assert!(
+            ledger.set_tenant_key("ada", &digest('d'), 2)?,
+            "a rotation at the cap"
+        );
+        assert_eq!(
+            ledger.tenant_keys(8)?,
+            [
+                (String::from("ada"), digest('d')),
+                (String::from("bo"), digest('b'))
+            ],
+            "the refused tenant wrote no row and the rotation replaced the digest"
+        );
         Ok(())
     }
 
