@@ -61,6 +61,30 @@ fn the_sweep_section_names_each_open_lines_proof() -> TestResult {
     Ok(())
 }
 
+/// One order governs every agent (larry#424): the steps pick the next issue from the work graph
+/// #423 and file new work under its epics, so no second order competes with it.
+#[test]
+fn the_ship_steps_pick_from_the_work_graph() -> TestResult {
+    let checklist = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(SHIP))?;
+    let steps: Vec<&str> = checklist
+        .lines()
+        .skip_while(|line| !line.starts_with("## How a session ships"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .collect();
+    let first = steps.iter().find(|line| line.starts_with("1. "));
+    assert!(
+        first.is_some_and(|line| line.contains("#423") && line.contains("-is:blocked")),
+        "step 1 picks from the #423 ready query: {first:?}"
+    );
+    let file = steps.iter().find(|line| line.starts_with("4. "));
+    assert!(
+        file.is_some_and(|line| line.contains("under its epic in #423")),
+        "step 4 files new work under its epic in #423: {file:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn an_open_line_with_no_proof_is_named_and_a_ticked_one_is_not() {
     let sample = "## 7. Sweep #200\n- [x] #1 done\n- [ ] #2 Proof: a run\n- [ ] #3 bare\n\
