@@ -41,12 +41,14 @@ impl Rect {
     }
 }
 
-/// One cell.
+/// One cell. A grid is built and dropped for every frame, so a cell owns no heap unless a
+/// combining mark joined it (larry#415).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cell {
-    /// What the cell shows: one character and any combining marks after it;
-    /// empty for the right half of a wide character.
-    symbol: String,
+    /// The character the cell shows; `None` for the right half of a wide character.
+    base: Option<char>,
+    /// The combining marks after `base`; `None` for every other cell.
+    marks: Option<Box<str>>,
     /// How it is painted.
     style: Style,
     /// Whether the symbol takes two cells.
@@ -55,17 +57,39 @@ struct Cell {
 
 impl Cell {
     /// A blank cell.
-    fn blank() -> Self {
+    const fn blank() -> Self {
         Self {
-            symbol: String::from(" "),
+            base: Some(' '),
+            marks: None,
             style: Style::PLAIN,
             wide: false,
         }
     }
 
     /// Whether this is the right half of a wide character.
-    fn is_tail(&self) -> bool {
-        self.symbol.is_empty()
+    const fn is_tail(&self) -> bool {
+        self.base.is_none()
+    }
+
+    /// Joins the combining mark `mark` to the character shown.
+    fn join(&mut self, mark: char) {
+        let mut text = match self.marks.take() {
+            Some(marks) => String::from(marks),
+            None => String::new(),
+        };
+        text.push(mark);
+        self.marks = Some(text.into_boxed_str());
+    }
+
+    /// Appends what the cell shows to `out`: the character, then its marks.
+    fn write_to(&self, out: &mut Vec<u8>) {
+        if let Some(base) = self.base {
+            let mut utf8 = [0_u8; 4];
+            out.extend_from_slice(base.encode_utf8(&mut utf8).as_bytes());
+        }
+        if let Some(ref marks) = self.marks {
+            out.extend_from_slice(marks.as_bytes());
+        }
     }
 }
 
@@ -151,7 +175,7 @@ impl Buffer {
             let cells = char_width(character);
             if cells == 0 {
                 if let Some(cell) = last.and_then(|at| self.cells.get_mut(at)) {
-                    cell.symbol.push(character);
+                    cell.join(character);
                 }
                 continue;
             }
@@ -164,7 +188,8 @@ impl Buffer {
             };
             if let Some(cell) = self.cells.get_mut(at) {
                 *cell = Cell {
-                    symbol: character.to_string(),
+                    base: Some(character),
+                    marks: None,
                     style,
                     wide: cells > 1,
                 };
@@ -177,7 +202,8 @@ impl Buffer {
                     .and_then(|next| self.cells.get_mut(next))
                 {
                     *cell = Cell {
-                        symbol: String::new(),
+                        base: None,
+                        marks: None,
                         style,
                         wide: false,
                     };
@@ -197,17 +223,25 @@ impl Buffer {
         })
     }
 
+    /// How many cells own heap text: the ones a combining mark joined.
+    #[cfg(test)]
+    pub(crate) fn heap_cells(&self) -> usize {
+        self.cells
+            .iter()
+            .filter(|cell| cell.marks.is_some())
+            .count()
+    }
+
     /// The text of row `y`, wide characters once; a test reads the frame with it.
     #[cfg(test)]
     pub(crate) fn row_text(&self, y: usize) -> String {
         let start = y.saturating_mul(self.width);
         let end = start.saturating_add(self.width);
-        self.cells
-            .get(start..end)
-            .into_iter()
-            .flatten()
-            .map(|cell| cell.symbol.as_str())
-            .collect()
+        let mut text = Vec::new();
+        for cell in self.cells.get(start..end).into_iter().flatten() {
+            cell.write_to(&mut text);
+        }
+        String::from_utf8_lossy(&text).into_owned()
     }
 }
 
@@ -265,7 +299,7 @@ pub(crate) fn render(previous: Option<&Frame>, next: &Frame, out: &mut Vec<u8>) 
             cell.style.sgr(&mut body);
             style = Some(cell.style);
         }
-        body.extend_from_slice(cell.symbol.as_bytes());
+        cell.write_to(&mut body);
         // After a wide character the next write moves explicitly: terminals
         // disagree on some widths, and a wrong guess would shift the row.
         at = (!cell.wide).then(|| (x.saturating_add(1), y));
