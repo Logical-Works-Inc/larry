@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvError, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,7 @@ const CAPTURE_CHUNK: usize = 8_192;
 #[cfg(test)]
 pub(super) use group::GROUP_PROBE_DEADLINE;
 pub(super) use group::await_gone;
-use group::{await_group_gone, settle_group};
+use group::{await_group_gone, settle_group, status_after_kill};
 
 /// Longest one slice of the command wait sleeps before it checks the person's cancel again
 /// (larry#242): it bounds Esc-to-kill latency. `tui_journey_esc_kills_running_command` prints
@@ -437,14 +437,16 @@ fn wait_for_status(
         let left = deadline.saturating_sub(clock.now());
         if left.is_zero() {
             settle_group(clock, pgid)?;
-            return Ok((flatten(receiver.recv()), true, false));
+            let status = killed_status(clock, receiver, pgid)?;
+            return Ok((status, true, false));
         }
         match receiver.recv_timeout(CANCEL_POLL.min(left)) {
             Ok(status) => return Ok((status, false, false)),
             Err(RecvTimeoutError::Timeout) => {
                 if cancelled() {
                     settle_group(clock, pgid)?;
-                    return Ok((flatten(receiver.recv()), false, true));
+                    let status = killed_status(clock, receiver, pgid)?;
+                    return Ok((status, false, true));
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -626,12 +628,16 @@ fn join_reader(
     }
 }
 
-/// Flattens a received wait status, mapping a closed channel to an I/O error.
-fn flatten(received: Result<io::Result<ExitStatus>, RecvError>) -> io::Result<ExitStatus> {
-    match received {
-        Ok(status) => status,
-        Err(error) => Err(io::Error::other(error)),
-    }
+/// The status of a leader whose group was just signalled, the signal repeated each
+/// [`CANCEL_POLL`] slice until it arrives (larry#442).
+fn killed_status(
+    clock: &Clock,
+    receiver: &mpsc::Receiver<io::Result<ExitStatus>>,
+    pgid: i32,
+) -> Result<io::Result<ExitStatus>, ExecError> {
+    status_after_kill(clock, receiver, pgid, CANCEL_POLL, || {
+        settle_group(clock, pgid)
+    })
 }
 
 /// Builds a spawn failure that names the program.

@@ -10,12 +10,15 @@
 
 use std::fmt;
 use std::io;
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::{Clock, ClockError};
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::{ExecError, GROUP_PROBE_DEADLINE, await_gone, settle_with};
+use super::{ExecError, GROUP_PROBE_DEADLINE, await_gone, settle_with, status_after_kill};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -51,6 +54,12 @@ enum GroupWaitSimError {
     Overflow,
     /// The virtual clock refused the step this simulation asked of it.
     Clock(ClockError),
+    /// The leader's status could not be queued for the wait.
+    Send(mpsc::SendError<io::Result<ExitStatus>>),
+    /// The wait answered with the waiter's own fault where a status was expected.
+    Status(io::Error),
+    /// The wait refused with an error this simulation does not expect.
+    Exec(ExecError),
 }
 
 impl fmt::Display for GroupWaitSimError {
@@ -60,7 +69,16 @@ impl fmt::Display for GroupWaitSimError {
             Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
             Self::Overflow => out.write_str("a drawn duration overflowed"),
             Self::Clock(ref cause) => write!(out, "the virtual clock refused a step: {cause}"),
+            Self::Send(ref cause) => write!(out, "the status could not be queued: {cause}"),
+            Self::Status(ref cause) => write!(out, "the waiter's own fault: {cause}"),
+            Self::Exec(ref cause) => write!(out, "the wait refused: {cause}"),
         }
+    }
+}
+
+impl From<mpsc::SendError<io::Result<ExitStatus>>> for GroupWaitSimError {
+    fn from(cause: mpsc::SendError<io::Result<ExitStatus>>) -> Self {
+        Self::Send(cause)
     }
 }
 
@@ -355,6 +373,116 @@ fn settle_trace(seed: u64) -> Result<String, GroupWaitSimError> {
     Ok(format!(
         "refusals={refusals} calls={first_calls} elapsed_ms={first_ms} outlasted_calls={outlasted_calls} outlasted_ms={outlasted_ms} gone_calls={gone_calls} refused=reap"
     ))
+}
+
+/// The pid the status wait is told its group is: nothing is signalled, so any positive id serves.
+const SIM_PGID: i32 = 4242;
+
+/// The wait status of a leader a SIGKILL ended: a signal, so no exit code.
+const KILLED: i32 = 9;
+
+/// The real time one slice of the status wait sleeps here: tiny, so a seed that re-signals fifty
+/// times costs milliseconds, while the virtual clock alone decides the bound.
+const SLICE: Duration = Duration::from_micros(50);
+
+/// The most re-signals a seed draws before its group exists: past the 26 to 50 a step of 100 to
+/// 199 ms fits in the bound, so some seeds land the kill and some give up.
+const MAX_ABSENT: u64 = 100;
+
+/// One seed's status wait: the group does not exist for `absent` signals (the `setsid` that makes
+/// it has not run), the signal that finds it lands the kill, and the leader's status follows. The
+/// rule is worked out here from the bound alone: the wait signals once per slice and gives up at
+/// the first reading past the bound, so the kill lands when `absent` re-signals fit inside it.
+fn status_trace(seed: u64) -> Result<String, GroupWaitSimError> {
+    let mut seeded = Seeded::from_seed(seed.wrapping_add(4 << 40));
+    let step_ms = seeded.below(100)?.saturating_add(100);
+    let step = Duration::from_millis(step_ms);
+    let absent = seeded.below(MAX_ABSENT)?;
+    let fits = bound_ms()?.div_ceil(step_ms);
+    let lands = absent <= fits;
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let killed = ExitStatus::from_raw(KILLED);
+    if absent == 0 {
+        sender.send(Ok(killed))?;
+    }
+    let mut calls = 0_u64;
+    let outcome = status_after_kill(&clock, &receiver, SIM_PGID, SLICE, || {
+        calls = calls.saturating_add(1);
+        clock
+            .advance(step)
+            .map(drop)
+            .map_err(|cause| ExecError::Reap(io::Error::other(cause)))?;
+        if calls == absent {
+            sender
+                .send(Ok(killed))
+                .map_err(|cause| ExecError::Reap(io::Error::other(cause)))?;
+        }
+        Ok(())
+    });
+    match outcome {
+        Ok(Ok(status)) => {
+            assert!(lands, "seed {seed}: {absent} re-signals are past the bound");
+            assert_eq!(
+                status.signal(),
+                Some(KILLED),
+                "seed {seed}: the kill's status"
+            );
+            assert_eq!(
+                calls, absent,
+                "seed {seed}: one signal per slice until it landed"
+            );
+        }
+        Ok(Err(cause)) => return Err(GroupWaitSimError::Status(cause)),
+        Err(ExecError::GroupSurvived { pgid }) => {
+            assert!(!lands, "seed {seed}: {absent} re-signals fit the bound");
+            assert_eq!(pgid, SIM_PGID, "seed {seed}: the refusal names the group");
+            assert_eq!(
+                calls, fits,
+                "seed {seed}: it gives up at the first reading past the bound"
+            );
+            assert!(
+                clock.now() >= GROUP_PROBE_DEADLINE,
+                "seed {seed}: it gives up only once the bound has passed"
+            );
+        }
+        Err(other) => return Err(GroupWaitSimError::Exec(other)),
+    }
+    Ok(format!(
+        "absent={absent} step_ms={step_ms} calls={calls} lands={lands} elapsed_ms={}",
+        clock.now().as_millis()
+    ))
+}
+
+/// A cancel or a deadline that kills before the command's group exists is not the end of the
+/// run: the Linux `setsid` wrapper makes the group after `spawn` returns, so the first signal can
+/// find nothing (`ESRCH` settles it), and the wait signals again each slice until the leader's
+/// status arrives, or gives up typed at the bound on the injected clock (larry#442). Seeded over
+/// 64 groups that appear after 0 to 99 signals; one seed gives one trace hash.
+#[test]
+fn sim_a_group_not_yet_made_is_signalled_again_until_the_status_arrives() -> TestResult {
+    for seed in 0..SEEDS {
+        let first = trace_hash(&status_trace(seed)?);
+        let second = trace_hash(&status_trace(seed)?);
+        assert_eq!(first, second, "seed {seed}: one seed gives one trace hash");
+    }
+    Ok(())
+}
+
+/// A waiter that ended without a status is its own fault and is never answered with a signal.
+#[test]
+fn sim_a_leader_whose_waiter_ended_reports_the_fault_and_signals_nothing() -> TestResult {
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let (sender, receiver) = mpsc::sync_channel::<io::Result<ExitStatus>>(1);
+    drop(sender);
+    let mut calls = 0_u64;
+    let outcome = status_after_kill(&clock, &receiver, SIM_PGID, SLICE, || {
+        calls = calls.saturating_add(1);
+        Ok(())
+    })?;
+    assert!(outcome.is_err(), "a closed channel is the waiter's fault");
+    assert_eq!(calls, 0, "nothing is signalled for a waiter that is gone");
+    Ok(())
 }
 
 /// The EPERM retry ends on the injected clock, never on a count of yields: for every seed the
