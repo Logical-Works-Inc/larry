@@ -5,8 +5,9 @@
 //! Written from the Agent Client Protocol, protocol version 1: `initialize`
 //! (version negotiation and capabilities), `session/new` (an absolute `cwd`, the
 //! `mcpServers` list, a unique session id), `session/prompt` (content blocks in,
-//! `session/update` notifications out, one `stopReason` back) and the
-//! `session/cancel` notification. A prompt runs one terminal session
+//! `session/update` notifications out, one `stopReason` back), the
+//! `session/cancel` notification and `session/close` (`sessionCapabilities.close`,
+//! stabilized 2026-04-23), which stops the session's prompts and frees its slot. A prompt runs one terminal session
 //! (`executor::run_session`): every command is a `tool_call` of kind `execute`
 //! and its `tool_call_update`, the model's summary is an `agent_message_chunk`,
 //! and the result's `_meta.larry.report` is the sealed report `larry verify` checks.
@@ -20,7 +21,8 @@
 //! ACP leaves to the agent. End of input, or a reply that cannot be written,
 //! abandons every live session so a client that dies stops its runs (larry#338).
 //! The inbox between the two holds at most 64 frames, so a client that floods
-//! while a prompt runs waits on its own pipe; a process holds at most 16 sessions.
+//! while a prompt runs waits on its own pipe; a process holds at most 16 open sessions, and a
+//! closed session holds none (larry#411).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -59,6 +61,20 @@ struct Entry {
     cancelled: BTreeSet<u64>,
     /// The client hung up or a reply could not be written: every prompt stops.
     abandoned: bool,
+    /// The reader read a `session/close` for it: every prompt stops, and the agent's answer
+    /// removes the session from the book (larry#411).
+    closing: bool,
+}
+
+/// What a frame the reader reads does to its session, in stream order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// `session/prompt`: the session's next prompt number.
+    Prompt,
+    /// `session/cancel`: binds to the prompt it follows (larry#338).
+    Cancel,
+    /// `session/close`: stops every prompt of the session (larry#411).
+    Close,
 }
 
 /// The sessions, shared by the reader thread (which flags cancels) and the agent.
@@ -254,34 +270,43 @@ fn mark<L: Write>(bytes: &[u8], book: &Book, log: &mut L) -> io::Result<()> {
     let Ok(frame) = wire::object(bytes) else {
         return Ok(());
     };
-    let (cancel, params) = match wire::envelope(&frame) {
+    let (kind, params) = match wire::envelope(&frame) {
         Ok(Envelope::Notification {
             method: "session/cancel",
             params: Some(params),
-        }) => (true, params),
+        }) => (Mark::Cancel, params),
         Ok(Envelope::Request {
             method: "session/prompt",
             params: Some(params),
             ..
-        }) => (false, params),
+        }) => (Mark::Prompt, params),
+        Ok(Envelope::Request {
+            method: "session/close",
+            params: Some(params),
+            ..
+        }) => (Mark::Close, params),
         _ => return Ok(()),
     };
     let Some(session) = params.get("sessionId").and_then(Value::as_str) else {
         return Ok(());
     };
     if let Some(entry) = locked(book).get_mut(session) {
-        if cancel {
-            entry.cancelled.insert(entry.prompts);
-        } else {
-            entry.prompts = entry.prompts.saturating_add(1);
+        match kind {
+            Mark::Cancel => {
+                entry.cancelled.insert(entry.prompts);
+            }
+            Mark::Prompt => entry.prompts = entry.prompts.saturating_add(1),
+            Mark::Close => entry.closing = true,
         }
     }
-    if cancel {
-        // The cancel is recorded; the log line is the observable acknowledgement
-        // that it was read, and a failed write is reported.
-        writeln!(log, "larry acp: session {session} cancel requested")?;
-    }
-    Ok(())
+    let requested = match kind {
+        Mark::Cancel => "cancel",
+        Mark::Close => "close",
+        Mark::Prompt => return Ok(()),
+    };
+    // The stop is recorded; the log line is the observable acknowledgement that it was
+    // read, and a failed write is reported.
+    writeln!(log, "larry acp: session {session} {requested} requested")
 }
 
 /// Marks every session abandoned, so every prompt running in this process stops:
@@ -361,6 +386,7 @@ impl Agent<'_> {
                 "Larry advertises no authentication method",
             ),
             "session/new" => self.new_session(id, params),
+            "session/close" => self.close_session(id, params),
             "session/prompt" => return self.prompt(id, params, out),
             _ => wire::error(id, wire::METHOD_NOT_FOUND, "method not found"),
         })
@@ -389,6 +415,7 @@ impl Agent<'_> {
                 "protocolVersion": PROTOCOL_VERSION,
                 "agentCapabilities": {
                     "loadSession": false,
+                    "sessionCapabilities": { "close": {} },
                     "promptCapabilities": { "image": false, "audio": false, "embeddedContext": true },
                     "mcpCapabilities": { "http": false, "sse": false }
                 },
@@ -419,6 +446,9 @@ impl Agent<'_> {
         {
             return wire::error(id, wire::INVALID_PARAMS, "mcpServers must be an array");
         }
+        // An abandoned session keeps its slot: the reader abandons every session at end of
+        // input while frames sent before it still wait here, so freeing one would answer them
+        // by thread timing, not stream order (larry#411, ADR 0102).
         let mut book = locked(self.book);
         if book.len() >= MAX_SESSIONS {
             return wire::error(
@@ -437,9 +467,24 @@ impl Agent<'_> {
                 started: 0,
                 cancelled: BTreeSet::new(),
                 abandoned: false,
+                closing: false,
             },
         );
         wire::result(id, json!({ "sessionId": session }))
+    }
+
+    /// `session/close` (ACP v1): the reader stopped the session's prompts as it read the frame,
+    /// so the session leaves the book and frees its slot. An unknown or already closed id gets
+    /// the same empty result, as the protocol asks (larry#411).
+    fn close_session(&self, id: &Value, params: Option<&Map>) -> Value {
+        let Some(session) = params
+            .and_then(|map| map.get("sessionId"))
+            .and_then(Value::as_str)
+        else {
+            return wire::error(id, wire::INVALID_PARAMS, "sessionId must be a string");
+        };
+        locked(self.book).remove(session);
+        wire::result(id, json!({}))
     }
 
     /// `session/prompt`: runs one terminal session and answers with its stop reason.
@@ -666,9 +711,9 @@ impl<W: Write> Observer for Updates<'_, W> {
     }
 
     fn cancelled(&self) -> bool {
-        locked(self.book)
-            .get(self.session)
-            .is_some_and(|entry| entry.abandoned || entry.cancelled.contains(&self.prompt_no))
+        locked(self.book).get(self.session).is_some_and(|entry| {
+            entry.abandoned || entry.closing || entry.cancelled.contains(&self.prompt_no)
+        })
     }
 }
 
