@@ -766,21 +766,21 @@ fn a_bad_model_timeout_does_not_fail_a_task_with_no_brief() -> TestResult {
 #[test]
 fn exec_refuses_an_unset_path_typed() -> TestResult {
     // larry#213: an unset PATH is a typed refusal, never the empty string every command
-    // would then be looked up under. The child gets no PATH at all.
+    // would then be looked up under. The child gets no PATH at all. The task is the child's
+    // stdin as a file, never a pipe: `larry exec` refuses before it reads, and a pipe write
+    // would race that exit into a BrokenPipe (larry#448).
     let (state, origin) = fixture()?;
     let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+    let task_file = state.path().join("task.json");
+    std::fs::write(&task_file, task.as_bytes())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_larry"))
         .arg("exec")
         .env_clear()
         .env("LARRY_STATE_DIR", state.path())
-        .stdin(Stdio::piped())
+        .stdin(std::fs::File::open(&task_file)?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(task.as_bytes())?;
-    }
-    let output = child.wait_with_output()?;
+        .output()?;
     assert_refused(&output, "PATH is unset");
     assert!(output.stdout.is_empty(), "a refused run seals no report");
     Ok(())
