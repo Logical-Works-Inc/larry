@@ -27,7 +27,7 @@ use larry_runtime::journal::Journal;
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::projection::FoldProjection;
 use larry_runtime::runtime::restore;
-use lgwks_bot::journal::JournalError;
+use lgwks_bot::kernel::journal::JournalError;
 
 use super::ExecError;
 use super::gate::{task_settings, with_expiry};
@@ -53,7 +53,7 @@ pub(super) fn journal_path(state: &Path, task_id: &str) -> PathBuf {
 
 /// Whether another executor still holds `task_id`'s journal, so its evidence is
 /// live and must be left alone. The journal file's lock is the estate's own proof
-/// of a live writer (`lgwks_bot::journal::JournalError::Locked`), so liveness needs
+/// of a live writer (`lgwks_bot::kernel::journal::JournalError::Locked`), so liveness needs
 /// no process id at all: the name is one canonical UUID text that a container
 /// cannot reuse (larry#182 defect 3).
 ///

@@ -242,11 +242,15 @@ fn git(args: &[&str], what: &'static str) -> Result<String, LocalCiError> {
     Ok(line.to_owned())
 }
 
-/// Writes the receipt for `root` at `head` beside the guard's state, atomically.
+/// The receipt's file name in the guard's state directory.
+const RECEIPT: &str = "local-ci-receipt.json";
+
+/// Writes the receipt for `root` at `head` beside the guard's state, atomically and durably
+/// through the library's one replace (larry#434).
 fn write_receipt(root: &Path, branch: &str, head: &str) -> Result<PathBuf, LocalCiError> {
     let home = std::env::var_os("HOME").ok_or(LocalCiError::Home)?;
     let dir = PathBuf::from(home).join("wwfd").join("state");
-    let path = dir.join("local-ci-receipt.json");
+    let path = dir.join(RECEIPT);
     let failed = |cause| LocalCiError::Receipt {
         path: path.clone(),
         cause,
@@ -263,9 +267,8 @@ fn write_receipt(root: &Path, branch: &str, head: &str) -> Result<PathBuf, Local
         "ci_script": "cargo local-ci",
     });
     fs::create_dir_all(&dir).map_err(failed)?;
-    let staged = dir.join(format!("local-ci-receipt.json.tmp-{}", std::process::id()));
-    fs::write(&staged, format!("{receipt}\n")).map_err(failed)?;
-    fs::rename(&staged, &path).map_err(failed)?;
+    larry_demo::replace_file(&dir, RECEIPT, format!("{receipt}\n").as_bytes())
+        .map_err(|(path, cause)| LocalCiError::Receipt { path, cause })?;
     Ok(path)
 }
 

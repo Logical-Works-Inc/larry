@@ -1,6 +1,6 @@
 //! The tick's one observed instant, sampled from the estate's declared clock (E30, larry#74).
 //!
-//! Larry keeps no clock: the time source is `lgwks_bot::clock::Clock`. Its readings carry no
+//! Larry keeps no clock: the time source is `lgwks_bot::kernel::clock::Clock`. Its readings carry no
 //! epoch, so the convention is fixed here, once: a reading is elapsed time since
 //! 1970-01-01T00:00Z. A virtual clock placed at a recorded reading therefore replays the same
 //! instants on any host, and a live host builds its clock with [`live_clock`], which places
@@ -15,7 +15,7 @@
 
 use std::time::SystemTime;
 
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 
 use crate::error::RuntimeError;
 
@@ -95,7 +95,8 @@ mod tests {
         );
         let runtime = std::fs::read_to_string(src.join("runtime.rs"))?;
         assert!(
-            runtime.contains("clock: Clock") && runtime.contains("use lgwks_bot::clock::Clock;"),
+            runtime.contains("clock: Clock")
+                && runtime.contains("use lgwks_bot::kernel::clock::Clock;"),
             "the runtime's clock field is lgwks_bot's clock"
         );
         Ok(())

@@ -16,7 +16,7 @@
 //! # One owner: `lgwks_bot::broker` (larry#68 row 3, larry#76)
 //!
 //! The fence holds no rule of its own. Its state is one environment of an
-//! `lgwks_bot::broker::Broker`, and every fact below is that broker's:
+//! `lgwks_bot::kernel::broker::Broker`, and every fact below is that broker's:
 //!
 //! 1. **A security epoch** ([`SecurityEpoch`]), the environment's generation.
 //!    Moving it forward withdraws every authorization admitted below it, at
@@ -50,8 +50,8 @@ use core::num::{NonZeroU64, NonZeroU128};
 use larry_contracts::authority::SecurityEpoch;
 use larry_contracts::effect::{EffectIntent, ReconciliationStrategy};
 use larry_contracts::ids::OperationId;
-use lgwks_bot::broker::{Authority, Broker, BrokerError};
-use lgwks_bot::effect::{
+use lgwks_bot::kernel::broker::{Authority, Broker, BrokerError};
+use lgwks_bot::kernel::effect::{
     ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch, EnvironmentId,
     FlowRevision, Id128, RunId as BotRunId,
 };

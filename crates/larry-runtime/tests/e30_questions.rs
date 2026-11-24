@@ -27,7 +27,7 @@ use larry_runtime::protocol::{
 use larry_runtime::runtime::{
     Answer, Decision, Question, QuestionError, Runtime, Subject, restore,
 };
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 
 use support::temp_dir::TempDir;
 use support::{

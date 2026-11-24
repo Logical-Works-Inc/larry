@@ -55,7 +55,7 @@ fn settings() -> RuntimeSettings {
 /// Fresh runtime or restoration of an authoritative journal in hand.
 fn subject(journal: Option<Journal>) -> TestResult<Subject> {
     let owner = ScriptedOwner::new();
-    let clock = lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO);
+    let clock = lgwks_bot::kernel::clock::Clock::virtual_at(std::time::Duration::ZERO);
     Ok(match journal {
         Some(journal) => restore(settings(), owner, clock, journal)?,
         None => Runtime::new(settings(), owner, clock)?,

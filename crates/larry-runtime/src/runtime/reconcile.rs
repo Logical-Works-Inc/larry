@@ -11,7 +11,7 @@ use super::{LiveEffect, OwnerReach, Runtime, TickItem, TickReport, retry};
 use crate::error::RuntimeError;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
-use lgwks_bot::retry::RetryRefusal;
+use lgwks_bot::kernel::retry::RetryRefusal;
 
 impl<P, O> Runtime<P, O>
 where

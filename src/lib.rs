@@ -34,11 +34,18 @@ pub mod tui;
 /// Distinguishes the temporary files of concurrent replacements inside one process.
 static REPLACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Replaces `directory/name` with `bytes` atomically: a fresh temporary sibling, written and
-/// synced, then a rename over the target, so a killed write leaves the previous whole file. A
-/// failed write removes its temporary file; the error names the target, or the temporary file
-/// when it could not be removed. The tracker page and the mascot files are written this way.
-pub(crate) fn replace_file(
+/// Replaces `directory/name` with `bytes` atomically and durably: a fresh temporary sibling,
+/// written and synced, a rename over the target, then a sync of `directory`, so a killed write
+/// leaves the previous whole file and a power loss after the return keeps the new one (POSIX
+/// `rename(2)` and `fsync(2)`: the rename lives in the directory, larry#434). A failed write
+/// removes its temporary file; the error names the target, or the temporary file when it could
+/// not be removed. The tracker page, the mascot files and the local-ci receipt are written
+/// this way. The estate owner of this primitive is logicalworks-crates#1141.
+///
+/// # Errors
+///
+/// The path and the I/O error of the step that failed.
+pub fn replace_file(
     directory: &Path,
     name: &str,
     bytes: &[u8],
@@ -47,14 +54,21 @@ pub(crate) fn replace_file(
     let sequence = REPLACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
     let written = write_new(&temporary, bytes).and_then(|()| fs::rename(&temporary, &output));
-    written.map_err(|cause| {
-        let path = if fs::remove_file(&temporary).is_ok() {
-            output
-        } else {
-            temporary
+    if let Err(cause) = written {
+        // A temporary never created is clean too; only one left on disk is named.
+        let path = match fs::remove_file(&temporary) {
+            Ok(()) => output,
+            Err(gone) if gone.kind() == io::ErrorKind::NotFound => output,
+            Err(_) => temporary,
         };
-        (path, cause)
-    })
+        return Err((path, cause));
+    }
+    sync_directory(directory).map_err(|cause| (directory.to_path_buf(), cause))
+}
+
+/// Syncs `directory` itself, so the entries a rename changed in it are on the device.
+fn sync_directory(directory: &Path) -> io::Result<()> {
+    fs::File::open(directory)?.sync_all()
 }
 
 /// Creates `path`, refusing one that already exists, and writes and syncs `bytes` into it.
@@ -353,5 +367,36 @@ impl Demo {
             "help": "next | inspect N | feedback TEXT | continue | folders | agents | scenario empty/change | reset | status | quit"
         });
         json::to_string(&value)
+    }
+}
+
+/// `replace_file`, the one durable replace (larry#434). Source: POSIX `rename(2)` and
+/// `fsync(2)`. Requirement: the target holds the last bytes whole, no temporary sibling
+/// survives, and a directory that is not there is refused with the target's path.
+#[cfg(test)]
+mod replace_tests {
+    use std::fs;
+
+    use super::replace_file;
+
+    #[test]
+    fn a_replace_leaves_the_last_bytes_whole_and_no_temporary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let scratch = crate::executor::sim_tree::scratch("replace")?;
+        let directory = scratch.to_path_buf();
+        replace_file(&directory, "receipt.json", b"first\n").map_err(|(_, cause)| cause)?;
+        replace_file(&directory, "receipt.json", b"second\n").map_err(|(_, cause)| cause)?;
+        assert_eq!(fs::read(directory.join("receipt.json"))?, b"second\n");
+        let names: Vec<_> = fs::read_dir(&directory)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(names, ["receipt.json"], "no temporary sibling survives");
+        let missing = directory.join("missing");
+        let refused = replace_file(&missing, "receipt.json", b"third\n");
+        assert!(
+            matches!(refused, Err((ref path, _)) if path == &missing.join("receipt.json")),
+            "a missing directory is refused with the target: {refused:?}"
+        );
+        Ok(())
     }
 }

@@ -111,8 +111,10 @@ pub enum ModelError {
     },
     /// The reply body is not UTF-8.
     NotUtf8(Utf8Error),
-    /// The connection failed or the reply could not be read to its end.
-    Transport,
+    /// The connection failed, or the reply could not be read to its end. The estate client's
+    /// error is kept whole: its stage (resolve, connect, TLS, send, body) and kind tell a bad
+    /// host from a dead network, and its sanitized cause never carries the URL (larry#434).
+    Transport(lgwks_std::http::Error),
     /// No API key is configured, so nothing was sent.
     MissingKey,
     /// The variable a route names for its key is unset or empty, so nothing was
@@ -176,7 +178,9 @@ impl fmt::Display for ModelError {
                 "the model did not finish its reply (finish_reason {reason})"
             ),
             Self::NotUtf8(ref cause) => write!(out, "the model reply is not UTF-8: {cause}"),
-            Self::Transport => out.write_str("the model gateway could not be reached"),
+            Self::Transport(ref cause) => {
+                write!(out, "the model gateway could not be reached: {cause}")
+            }
             Self::MissingKey => out.write_str("no model API key is configured (LARRY_MODEL_KEY)"),
             Self::KeyUnset { ref variable } => {
                 write!(out, "the route's key variable {variable} is unset or empty")
@@ -327,6 +331,7 @@ impl std::error::Error for ModelError {
             Self::BadInteger { ref cause, .. } => Some(cause),
             Self::BadFloat { ref cause, .. } => Some(cause),
             Self::BadRoute(ref cause) => Some(cause),
+            Self::Transport(ref cause) => Some(cause),
             _ => None,
         }
     }

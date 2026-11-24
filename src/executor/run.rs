@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, RecvError, RecvTimeoutError};
 use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::process::{
     ProcessIdentity, identify_process, kill_process_group, process_group_exists,
 };

@@ -388,7 +388,7 @@ fn a_malformed_200_body_is_a_malformed_error_and_is_not_retried() -> TestResult 
             let (outcome, _) = run_once(scripted(seed, vec![Some(fault)]), &[], &[user("bad")])?;
             let right = match fault {
                 Fault::MalformedJson => matches!(outcome, Err(ModelError::Malformed(_))),
-                Fault::TruncatedBody => matches!(outcome, Err(ModelError::Transport)),
+                Fault::TruncatedBody => matches!(outcome, Err(ModelError::Transport(_))),
                 Fault::EmptyContent => {
                     matches!(outcome, Ok(ref reply) if reply.content().is_empty())
                 }
@@ -598,7 +598,7 @@ fn concurrent_tenants_each_send_only_their_own_key() -> TestResult {
                     .into_iter()
                     .map(|worker| match worker.join() {
                         Ok(outcome) => outcome,
-                        Err(_) => Err(ModelError::Transport),
+                        Err(_) => Err(ModelError::Malformed("a request thread panicked")),
                     })
                     .collect()
             });

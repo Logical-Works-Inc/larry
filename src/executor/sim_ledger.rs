@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use lgwks_bot::clock::{Clock, ClockError};
+use lgwks_bot::kernel::clock::{Clock, ClockError};
 use lgwks_std::process::{ProcessIdentity, identify_process, process_group_exists};
 use lgwks_std::seeded::Seeded;
 

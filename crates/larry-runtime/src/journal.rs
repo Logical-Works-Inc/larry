@@ -18,7 +18,7 @@
 //!
 //! A journal opened with [`Journal::open`] is durable (larry#75): each entry
 //! the index takes is staged, and [`Journal::sync`] puts every staged entry in
-//! its `lgwks_bot::journal::RecordJournal` file in one write and one sync. The
+//! its `lgwks_bot::kernel::journal::RecordJournal` file in one write and one sync. The
 //! runtime syncs before every owner reach and before every tick returns, so no
 //! fact an owner or a caller saw is ever missing from the file; the next open
 //! replays it through the same acceptance rules. [`Journal::new`] stays
@@ -171,7 +171,7 @@ impl Journal {
                     self.lose_sync = false;
                     self.refused = true;
                     return Err(RuntimeError::Durable(
-                        lgwks_bot::journal::JournalError::OutcomeUnknown {
+                        lgwks_bot::kernel::journal::JournalError::OutcomeUnknown {
                             cause: std::io::Error::other(
                                 "injected: the append's acknowledgment was lost",
                             ),
@@ -192,12 +192,12 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// [`RuntimeError::Durable`] with [`lgwks_bot::journal::JournalError::OutcomeUnknown`]
+    /// [`RuntimeError::Durable`] with [`lgwks_bot::kernel::journal::JournalError::OutcomeUnknown`]
     /// while the journal is latched.
     fn refuse_if_refused(&self) -> Result<(), RuntimeError> {
         if self.refused {
             return Err(RuntimeError::Durable(
-                lgwks_bot::journal::JournalError::OutcomeUnknown {
+                lgwks_bot::kernel::journal::JournalError::OutcomeUnknown {
                     cause: std::io::Error::other(
                         "an earlier sync was refused; reopen the journal to replay the file",
                     ),

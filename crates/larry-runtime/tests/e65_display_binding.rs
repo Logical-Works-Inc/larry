@@ -27,7 +27,7 @@ use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend, replay_authorizations};
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 
 /// Each simulation family exhausts this deterministic seed interval.
 const SEEDS: u64 = 1_024;

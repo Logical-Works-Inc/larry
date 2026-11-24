@@ -64,7 +64,7 @@ use display::ReadyCommand;
 
 use std::collections::{BTreeMap, VecDeque};
 
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 
 use larry_contracts::command::{Command, CommandKind};
 use larry_contracts::effect::{

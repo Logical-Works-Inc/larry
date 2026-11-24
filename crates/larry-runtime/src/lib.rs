@@ -46,7 +46,7 @@
 //! the opt-in `fixture` feature so no shipped build carries one. Nothing in this crate
 //! contacts Moo, Sentinel, Nova, Logical-DB, Secure-Authority or a network.
 //! The memory hold is intact. A journal from [`journal::Journal::open`] is a
-//! bounded `lgwks_bot::journal::RecordJournal` file that survives a kill -9
+//! bounded `lgwks_bot::kernel::journal::RecordJournal` file that survives a kill -9
 //! (larry#75); [`journal::Journal::new`] stays memory-only. P1–P8 remain
 //! proof obligations.
 //!
@@ -62,7 +62,7 @@
 //!
 //! ## Module map
 //!
-//! - The tick's time source is `lgwks_bot::clock::Clock`, the estate's declared clock, read
+//! - The tick's time source is `lgwks_bot::kernel::clock::Clock`, the estate's declared clock, read
 //!   as elapsed time since the Unix epoch and sampled once per tick (E30, larry#74). A replay
 //!   or a test places a virtual clock (`Clock::virtual_at`); a live host places a wall clock
 //!   (`Clock::wall_at`), which follows monotonic time and so never reads earlier than it did.

@@ -1,7 +1,7 @@
 //! The retry decision for an open effect (larry#68 row 5, larry#78).
 //!
 //! The rule that decides whether an effect may be sent again is lgwks_bot's
-//! RQ-009, `lgwks_bot::retry::retry_admissible`: the budget, live authority,
+//! RQ-009, `lgwks_bot::kernel::retry::retry_admissible`: the budget, live authority,
 //! an unchanged intent, and either proof that the effect did not happen or a
 //! deduplication contract that rules out a second application. Larry keeps
 //! only the strategy-to-action policy in `larry-contracts`. This module
@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use larry_contracts::ids::OperationId;
 use larry_contracts::replay::ReplayRecord;
-use lgwks_bot::retry::{
+use lgwks_bot::kernel::retry::{
     DedupScope, DeduplicationContract, LateArrival, RetryDecision, RetryFacts, retry_admissible,
 };
 use lgwks_std::retry::RetryPolicy;

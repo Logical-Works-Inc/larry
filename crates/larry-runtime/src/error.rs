@@ -179,7 +179,7 @@ pub enum RuntimeError {
     /// The journal's file refused (larry#75): another writer holds it, its
     /// committed bytes break the chain, a ceiling was reached, the device
     /// refused, or an append's outcome is unknown until a reopen.
-    Durable(lgwks_bot::journal::JournalError),
+    Durable(lgwks_bot::kernel::journal::JournalError),
     /// The journal's file holds a command identity twice, which no append
     /// this runtime made can produce (larry#75).
     DurableRepeat {
@@ -190,7 +190,7 @@ pub enum RuntimeError {
     /// surviving a process crash (larry#75).
     DurabilityShort {
         /// What the acknowledgment promised.
-        promised: lgwks_bot::journal::DurabilityPromise,
+        promised: lgwks_bot::kernel::journal::DurabilityPromise,
     },
 }
 
@@ -406,7 +406,7 @@ impl RuntimeError {
     /// evidence is the one outcome a retry cannot undo, so only the listed cases refuse.
     #[must_use]
     pub const fn refuses_the_record(&self) -> bool {
-        use lgwks_bot::journal::JournalError as Store;
+        use lgwks_bot::kernel::journal::JournalError as Store;
         matches!(
             *self,
             Self::Durable(Store::Corrupt(_) | Store::CapacityExceeded { .. } | Store::Exhausted)
@@ -512,8 +512,8 @@ impl From<larry_contracts::binding::BindingError> for RuntimeError {
     }
 }
 
-impl From<lgwks_bot::journal::JournalError> for RuntimeError {
-    fn from(err: lgwks_bot::journal::JournalError) -> Self {
+impl From<lgwks_bot::kernel::journal::JournalError> for RuntimeError {
+    fn from(err: lgwks_bot::kernel::journal::JournalError) -> Self {
         Self::Durable(err)
     }
 }

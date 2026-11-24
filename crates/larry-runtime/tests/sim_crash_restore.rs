@@ -26,7 +26,7 @@ use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::projection::replay_authorizations;
 use larry_runtime::runtime::{TickItem, restore};
-use lgwks_bot::journal::JournalError;
+use lgwks_bot::kernel::journal::JournalError;
 use sim_kit::{
     Offer, Sim, dispatch, fresh_journal, read_work, reader, remove, reopen, replay, trace, work,
 };
@@ -632,4 +632,44 @@ fn sim_a_second_opener_is_refused_while_the_first_holds_the_file() -> Outcome {
         remove(&path)?;
         Ok(held)
     })
+}
+
+/// larry#394: a killed executor's journal is set aside only when its own bytes refuse to
+/// rebuild. A live writer's lock and an unknown append outcome keep the file, so the next start
+/// recovers it and a keyed retry still finds the run; a spent file and a repeated record refuse
+/// it. Source: the write-ahead-log recovery rule (keep the log unless its bytes are invalid).
+#[test]
+fn sim_only_the_journal_bytes_refuse_the_record() -> Outcome {
+    let (_guard, path) = fresh_journal("refuse", 192)?;
+    let held = Journal::open(&path, 4096)?;
+    let locked = match Journal::open(&path, 4096) {
+        Err(refusal) => refusal,
+        Ok(_) => return Err("a second opener must be locked out".into()),
+    };
+    assert!(
+        !locked.refuses_the_record(),
+        "a live writer's lock keeps the file: {locked:?}"
+    );
+    drop(held);
+    let unknown = RuntimeError::Durable(JournalError::OutcomeUnknown {
+        cause: std::io::Error::other("the append's acknowledgment was lost"),
+    });
+    assert!(
+        !unknown.refuses_the_record(),
+        "an unknown outcome keeps the file"
+    );
+    assert!(
+        !RuntimeError::JournalFull { capacity: 1 }.refuses_the_record(),
+        "a full index is capacity, not the file's bytes"
+    );
+    assert!(
+        RuntimeError::Durable(JournalError::Exhausted).refuses_the_record(),
+        "a spent file refuses the record"
+    );
+    assert!(
+        RuntimeError::DurableRepeat { index: 0 }.refuses_the_record(),
+        "a repeated record refuses the record"
+    );
+    remove(&path)?;
+    Ok(())
 }

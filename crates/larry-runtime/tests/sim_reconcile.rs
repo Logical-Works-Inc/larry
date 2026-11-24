@@ -538,7 +538,7 @@ fn sim_reconcile_human_success_authorizes_at_gate() -> Outcome {
 
 /// A `FileRead` runtime over `owner` on `clock`, which the test keeps a handle
 /// to so it can move time past the authority's validity.
-fn timed_reader(owner: ScriptedOwner, clock: lgwks_bot::clock::Clock) -> Sim<TestRuntime> {
+fn timed_reader(owner: ScriptedOwner, clock: lgwks_bot::kernel::clock::Clock) -> Sim<TestRuntime> {
     Ok(larry_runtime::runtime::Runtime::new(
         support::settings(&[Scope::FileRead], &[Scope::FileRead], 100)?,
         owner,
@@ -556,7 +556,7 @@ fn sim_lease_expiry_matches_the_pinned_lease_for_every_seed() -> Outcome {
     use larry_contracts::replay::{
         CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot,
     };
-    use lgwks_bot::clock::Clock;
+    use lgwks_bot::kernel::clock::Clock;
 
     replay(184_u64..192, |seed| -> Sim<(bool, usize)> {
         let at = support::epoch()?;
