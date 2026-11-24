@@ -38,6 +38,38 @@ use lgwks_std::json::{self, Value};
 /// Latency samples the keyed journey prints, as the other journeys print theirs.
 const SAMPLES: usize = 32;
 
+/// Thirty-two executors start at once on one fresh state directory, eight times over: each
+/// start recovers the journals it finds while the others run, and no run's own journal may
+/// be one of them. Found live on toronto: one in 32 failed with "journal storage refused
+/// the append: No such file or directory" (larry#456). Every run exits 0 and leaves no
+/// recovered evidence, because no run died.
+#[test]
+fn many_execs_at_once_on_a_fresh_state_dir_all_finish() -> TestResult {
+    for round in 0..8 {
+        let (state, origin) = fixture()?;
+        let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
+        let children = (0..SAMPLES)
+            .map(|_| spawn_exec(Some(state.path()), None, &task))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (n, child) in children.into_iter().enumerate() {
+            let output = child.wait_with_output()?;
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "round {round} exec {n}: {} {}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        assert_eq!(
+            journal_entries(state.path())?,
+            0,
+            "round {round}: no live run's journal was recovered as evidence"
+        );
+    }
+    Ok(())
+}
+
 /// A task document over `repo` that names `key`, or no key when it is empty, whose
 /// acceptance command appends both a work-tree change and one line to `count`.
 fn keyed_document(repo: &Path, key: &str, count: &Path) -> String {
@@ -55,10 +87,19 @@ fn keyed_document(repo: &Path, key: &str, count: &Path) -> String {
 }
 
 /// How many entries `<state>/journals` holds: one per run whose journal still
-/// exists, whatever extension the recovery left it under.
+/// exists, whatever extension the recovery left it under. A dead run's `.lock` is its
+/// liveness lock, not a journal (larry#456), and is not counted.
 fn journal_entries(state: &Path) -> Result<usize, Box<dyn Error>> {
     match fs::read_dir(state.join("journals")) {
-        Ok(listing) => Ok(listing.count()),
+        Ok(listing) => {
+            let mut journals = 0_usize;
+            for entry in listing {
+                if entry?.path().extension().is_none_or(|ext| ext != "lock") {
+                    journals = journals.saturating_add(1);
+                }
+            }
+            Ok(journals)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error.into()),
     }
@@ -297,11 +338,14 @@ fn killed_in_a_fixture(key: &str) -> Result<Killed, Box<dyn Error>> {
     })
 }
 
-/// The one file `<state>/journals` holds.
+/// The one journal `<state>/journals` holds; a dead run's `.lock` is not one (larry#456).
 fn only_journal(state: &Path) -> Result<std::path::PathBuf, Box<dyn Error>> {
     let mut found = Vec::new();
     for entry in fs::read_dir(state.join("journals"))? {
-        found.push(entry?.path());
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "lock") {
+            found.push(path);
+        }
     }
     if found.len() != 1 {
         return Err(format!("one journal is left, found {found:?}").into());

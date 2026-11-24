@@ -370,8 +370,8 @@ fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), 
     // The one clock the reap's group waits read, built the way the gate builds its own, so a
     // host whose clock reads before the epoch refuses with nothing reaped (larry#268, larry#308).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    ledger.reap(&clock)?;
     let state = settings.state_dir.as_path();
+    ledger.reap(&clock, |task| recovery::run_held(state, task))?;
     let policy = &settings.policy;
     for fault in sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
         recovery::journal_live(state, policy, task)

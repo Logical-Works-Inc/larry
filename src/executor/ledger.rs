@@ -287,8 +287,15 @@ impl Ledger {
     /// builds it with [`larry_runtime::live_clock`], the way the gate builds its own; a
     /// simulation passes a virtual clock so the deadline passes with no real time
     /// (larry#308).
-    pub(crate) fn reap(&self, clock: &Clock) -> Result<usize, ExecError> {
-        self.reap_with(|pgid| {
+    ///
+    /// A row whose task `held` says is still running belongs to a concurrent executor on this
+    /// state directory, and is left alone: reaping it killed that run's command (larry#456).
+    pub(crate) fn reap(
+        &self,
+        clock: &Clock,
+        held: impl Fn(&str) -> Result<bool, ExecError>,
+    ) -> Result<usize, ExecError> {
+        self.reap_with(&held, |pgid| {
             await_gone(clock, || {
                 lgwks_std::process::process_group_exists(pgid).map_err(ExecError::Reap)
             })
@@ -299,7 +306,11 @@ impl Ledger {
     /// outlived the caller's deadline. A row is dropped only once its group is gone, so a
     /// surviving group keeps its row and the next start tries again (INVARIANTS, larry#214).
     /// The probe is the caller's, so the simulation drives the same loop on a clock it moves.
-    fn reap_with<E>(&self, mut group_gone: impl FnMut(i32) -> Result<bool, E>) -> Result<usize, E>
+    fn reap_with<E>(
+        &self,
+        held: &dyn Fn(&str) -> Result<bool, ExecError>,
+        mut group_gone: impl FnMut(i32) -> Result<bool, E>,
+    ) -> Result<usize, E>
     where
         E: From<ExecError>,
     {
@@ -308,7 +319,10 @@ impl Ledger {
             return Ok(0);
         }
         let mut settled = 0_usize;
-        for (pid, started) in rows {
+        for (task_id, pid, started) in rows {
+            if held(&task_id)? {
+                continue;
+            }
             // A row no identity can be rebuilt from was damaged or written by something
             // else: reaping against it would be a guess, so it is dropped unsignalled.
             let identity = match i32::try_from(pid) {
@@ -350,19 +364,23 @@ impl Ledger {
             .map_err(ExecError::Sql)
     }
 
-    /// Every recorded (pid, start time) pair.
-    fn rows(&self) -> Result<Vec<(i64, String)>, ExecError> {
+    /// Every recorded (task, pid, start time) row.
+    fn rows(&self) -> Result<Vec<(String, i64, String)>, ExecError> {
         let mut statement = self
             .conn
-            .prepare("SELECT pid, started FROM live_groups")
+            .prepare("SELECT task_id, pid, started FROM live_groups")
             .map_err(ExecError::Sql)?;
         let mapped = statement
             .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(ExecError::Sql)?;
         mapped
-            .collect::<Result<Vec<(i64, String)>, rusqlite::Error>>()
+            .collect::<Result<Vec<(String, i64, String)>, rusqlite::Error>>()
             .map_err(ExecError::Sql)
     }
 
@@ -442,11 +460,45 @@ mod tests {
         )?;
         let clock = larry_runtime::live_clock()?;
         assert_eq!(
-            ledger.reap(&clock)?,
+            ledger.reap(&clock, |_task| Ok(false))?,
             2,
             "the dead-leader row and the damaged row are both settled"
         );
         assert!(ledger.live_tasks()?.is_empty(), "reap leaves no row behind");
+        Ok(())
+    }
+
+    /// A row whose task a live run still holds is another executor's command on this state
+    /// directory: the start-up reap neither signals its group nor drops its row (larry#456).
+    #[test]
+    fn a_held_task_group_is_never_reaped() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt;
+        let directory = scratch_directory()?;
+        let ledger = Ledger::open(&directory)?;
+        let mut running = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()?;
+        let pid = i32::try_from(running.id())?;
+        let identity = lgwks_std::process::identify_process(pid)?.ok_or("the group vanished")?;
+        ledger.insert("task-held", &identity)?;
+        let clock = larry_runtime::live_clock()?;
+        let settled = ledger.reap(&clock, |task| Ok(task == "task-held"));
+        let group_up = lgwks_std::process::process_group_exists(pid);
+        let killed = running.kill();
+        let reaped = running.wait();
+        assert_eq!(settled?, 0, "a held task's row is not settled");
+        assert!(
+            group_up?,
+            "a held task's group is still running after the reap"
+        );
+        assert_eq!(
+            ledger.live_tasks()?,
+            vec!["task-held".to_owned()],
+            "its row stays"
+        );
+        killed?;
+        reaped?;
         Ok(())
     }
 
@@ -466,7 +518,7 @@ mod tests {
         let stranger = ProcessIdentity::new(pid, PLATFORM_START)?;
         ledger.insert("task-s", &stranger)?;
         let clock = larry_runtime::live_clock()?;
-        let settled = ledger.reap(&clock);
+        let settled = ledger.reap(&clock, |_task| Ok(false));
         let group_up = lgwks_std::process::process_group_exists(pid);
         // The survivor is stopped before any assert, so a failing one leaves no process behind;
         // a stop that fails is the test's failure too.
