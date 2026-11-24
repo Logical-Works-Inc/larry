@@ -16,6 +16,7 @@ use std::io::{self, Write};
 use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 
+use lgwks_macros::Error;
 use lgwks_std::json;
 
 use crate::governance::read::ReadFault;
@@ -300,20 +301,9 @@ impl std::error::Error for Fault {
 }
 
 /// Why `larry mutants` gave no verdict. The lane reads it as a red verdict (fail closed).
-#[derive(Debug)]
-pub struct VerdictError(Fault);
-
-impl fmt::Display for VerdictError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(out, "larry mutants verdict: {} (fail closed)", self.0)
-    }
-}
-
-impl std::error::Error for VerdictError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
-    }
-}
+#[derive(Debug, Error)]
+#[error("larry mutants verdict: {0} (fail closed)")]
+pub struct VerdictError(#[source] Fault);
 
 /// The verdict on one judged run: the report lines, the verdict last, and whether every
 /// architecture met the floor and agreed with the other.

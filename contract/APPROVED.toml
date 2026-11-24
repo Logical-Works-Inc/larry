@@ -30,8 +30,8 @@ accepted_licenses = "MIT, Apache-2.0"
 
 # The boundary edges below are the crates this workspace compiles that the
 # estate does not own. `thiserror` left with larry#339: its cited gap
-# Logical-Works-Inc/logicalworks-crates#842 is closed, and the contract crate's
-# eight error enums now carry hand-written Display, Error and From impls.
+# Logical-Works-Inc/logicalworks-crates#842 is closed, and every error enum takes
+# Display, Error and From from the estate's lgwks_macros::Error derive (larry#435).
 
 # The terminal frontend (larry#239, ADR 0045). crossterm was already in the
 # lock under AppCUI; dropping AppCUI took the larry-demo normal tree from 250 to

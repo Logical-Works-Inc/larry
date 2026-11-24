@@ -2,8 +2,9 @@
 //! `larry_submit_task` builds over MCP: an optional brief (`goal` and `files`)
 //! asks the model to write those files before the acceptance commands run (larry#123).
 
-use std::fmt;
 use std::path::{Path, PathBuf};
+
+use lgwks_macros::Error;
 
 mod check;
 mod confine;
@@ -256,53 +257,71 @@ fn bounded_key(entry: &lgwks_std::json::Value) -> Result<String, TaskError> {
 }
 
 /// Why a task document was refused.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TaskError {
     /// The document exceeded the byte limit.
+    #[error("task document is too large ({len} bytes)")]
     TooLarge {
         /// Document length in bytes.
         len: usize,
     },
     /// The document was not valid UTF-8.
-    NotUtf8(std::str::Utf8Error),
+    #[error("task document is not UTF-8: {0}")]
+    NotUtf8(#[source] std::str::Utf8Error),
     /// The document was not valid JSON.
-    Malformed(lgwks_std::json::Error),
+    #[error("task document is not valid JSON: {0}")]
+    Malformed(#[source] lgwks_std::json::Error),
     /// The document was not a JSON object.
+    #[error("task document is not a JSON object")]
     NotAnObject,
     /// The document held an unrecognised key.
+    #[error("task document has unknown key {key}")]
     UnknownKey {
         /// The unrecognised key.
         key: String,
     },
     /// A required key was absent.
+    #[error("task document is missing key {key}")]
     MissingKey {
         /// The absent key.
         key: &'static str,
     },
     /// A key held the wrong JSON type.
+    #[error("task document key {key} has the wrong type")]
     WrongType {
         /// The key with the wrong type.
         key: &'static str,
     },
     /// `acceptance` was not an array of argv arrays: the form `larry exec`
     /// takes, one string array per command (larry#228).
+    #[error(
+        "task document key acceptance must be an array of argv arrays, one string array per command, such as [[\"true\"]]"
+    )]
     AcceptanceNotArgv,
     /// The repository path was empty, oversize, or held a NUL byte.
+    #[error("task document repository path is invalid")]
     BadRepo,
     /// The base was empty, oversize, option-like, or held a control character or whitespace.
+    #[error("task document base is invalid")]
     BadBase,
     /// The document named no acceptance command, or more than 16 (larry#395).
+    #[error(
+        "task document names {count} acceptance commands; 1 to {} are allowed",
+        MAX_COMMANDS
+    )]
     CommandCount {
         /// Number of acceptance commands.
         count: usize,
     },
     /// An acceptance command held no items.
+    #[error("task document command {index} is empty")]
     EmptyArgv {
         /// Index of the empty command.
         index: usize,
     },
     /// An acceptance command held too many items.
+    #[error("task document command {index} has too many items ({len})")]
     ArgvTooLong {
         /// Index of the command.
         index: usize,
@@ -310,6 +329,7 @@ pub enum TaskError {
         len: usize,
     },
     /// A command item exceeded the byte limit.
+    #[error("task document command {index} has an item that is too large ({len} bytes)")]
     ArgTooLarge {
         /// Index of the command holding the item.
         index: usize,
@@ -317,101 +337,38 @@ pub enum TaskError {
         len: usize,
     },
     /// A command item held a NUL byte.
+    #[error("task document command {index} has an item holding a NUL byte")]
     ArgHasNul {
         /// Index of the command holding the item.
         index: usize,
     },
     /// The document carried `goal` without `files`, or `files` without `goal`.
+    #[error("task document needs both goal and files, or neither")]
     IncompleteBrief,
     /// The goal was blank, oversize, or held a NUL byte.
+    #[error("task document goal is blank, too long or holds NUL")]
     BadGoal,
     /// The brief named no file or too many.
+    #[error("task document names {count} files; 1 to 64 are allowed")]
     FileCount {
         /// Number of files named.
         count: usize,
     },
     /// A file path was empty, oversize, not repo-relative, inside `.git`, or a repeat.
+    #[error("task document file {index} is not a distinct repo-relative path outside .git")]
     BadFile {
         /// Index of the file.
         index: usize,
     },
     /// The idempotency key was empty, oversize, or held a control byte.
+    #[error(
+        "task document idempotency_key is empty, over {} bytes, or holds a control byte",
+        MAX_KEY_BYTES
+    )]
     BadIdempotencyKey,
     /// The route was not 1 to 64 bytes of `a-z`, `0-9`, `_` and `-`.
+    #[error("task document route is not a route id: 1 to 64 bytes of a-z, 0-9, _ and -")]
     BadRoute,
-}
-
-impl fmt::Display for TaskError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TooLarge { len } => write!(out, "task document is too large ({len} bytes)"),
-            Self::NotUtf8(ref cause) => write!(out, "task document is not UTF-8: {cause}"),
-            Self::Malformed(ref cause) => write!(out, "task document is not valid JSON: {cause}"),
-            Self::NotAnObject => out.write_str("task document is not a JSON object"),
-            Self::UnknownKey { ref key } => write!(out, "task document has unknown key {key}"),
-            Self::MissingKey { key } => write!(out, "task document is missing key {key}"),
-            Self::WrongType { key } => write!(out, "task document key {key} has the wrong type"),
-            Self::AcceptanceNotArgv => out.write_str(
-                "task document key acceptance must be an array of argv arrays, one string array per command, such as [[\"true\"]]",
-            ),
-            Self::BadRepo => out.write_str("task document repository path is invalid"),
-            Self::BadBase => out.write_str("task document base is invalid"),
-            Self::CommandCount { count } => write!(
-                out,
-                "task document names {count} acceptance commands; 1 to {MAX_COMMANDS} are allowed"
-            ),
-            Self::EmptyArgv { index } => write!(out, "task document command {index} is empty"),
-            Self::ArgvTooLong { index, len } => {
-                write!(
-                    out,
-                    "task document command {index} has too many items ({len})"
-                )
-            }
-            Self::ArgTooLarge { index, len } => {
-                write!(
-                    out,
-                    "task document command {index} has an item that is too large ({len} bytes)"
-                )
-            }
-            Self::ArgHasNul { index } => {
-                write!(
-                    out,
-                    "task document command {index} has an item holding a NUL byte"
-                )
-            }
-            Self::IncompleteBrief => {
-                out.write_str("task document needs both goal and files, or neither")
-            }
-            Self::BadGoal => out.write_str("task document goal is blank, too long or holds NUL"),
-            Self::FileCount { count } => {
-                write!(
-                    out,
-                    "task document names {count} files; 1 to 64 are allowed"
-                )
-            }
-            Self::BadFile { index } => write!(
-                out,
-                "task document file {index} is not a distinct repo-relative path outside .git"
-            ),
-            Self::BadIdempotencyKey => write!(
-                out,
-                "task document idempotency_key is empty, over {MAX_KEY_BYTES} bytes, or holds a control byte"
-            ),
-            Self::BadRoute => out.write_str(
-                "task document route is not a route id: 1 to 64 bytes of a-z, 0-9, _ and -",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for TaskError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::NotUtf8(ref cause) => Some(cause),
-            Self::Malformed(ref cause) => Some(cause),
-            _ => None,
-        }
-    }
 }
 
 /// Seeded simulation tests for the task parser.

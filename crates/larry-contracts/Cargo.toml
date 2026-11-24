@@ -18,6 +18,8 @@ serde = ["lgwks_std/json"]
 # readings, so this crate still reads no clock.
 lgwks_bot = { workspace = true }
 lgwks_std = { workspace = true, features = ["random", "hash"] }
+# Every error enum derives `Display`, `Error` and `From` from it (larry#435).
+lgwks_macros = { workspace = true }
 
 [lints]
 workspace = true

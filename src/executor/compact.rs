@@ -18,8 +18,8 @@
 //! decision is a byte length, so one seed replays one conversation.
 
 use std::collections::VecDeque;
-use std::fmt;
 
+use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 use super::run::clip;
@@ -78,16 +78,25 @@ fn margin(bytes: usize) -> usize {
 
 /// The bytes `limit` tokens hold at the rate the refused request shows: `len`
 /// bytes carried `counted` tokens, so the model's limit holds `len` times
-/// `limit` over `counted` bytes, less the margin. `None` when a length does not
+/// `limit` over `counted` bytes, less the margin. `fallback` when a length does not
 /// fit, so a hostile number falls back rather than wrapping.
-fn sized(len: usize, counted: u64, limit: u64) -> Option<usize> {
+fn sized(len: usize, counted: u64, limit: u64, fallback: usize) -> usize {
     if counted == 0 {
-        return None;
+        return fallback;
     }
-    let len = u64::try_from(len).ok()?;
-    let bytes = len.checked_mul(limit)?.checked_div(counted)?;
-    let bytes = usize::try_from(bytes).ok()?;
-    Some(margin(bytes))
+    let Ok(wide) = u64::try_from(len) else {
+        return fallback;
+    };
+    let Some(bytes) = wide
+        .checked_mul(limit)
+        .and_then(|product| product.checked_div(counted))
+    else {
+        return fallback;
+    };
+    match usize::try_from(bytes) {
+        Ok(fits) => margin(fits),
+        Err(_too_wide) => fallback,
+    }
 }
 
 /// The window one refusal leaves: the model's own limit when the gateway names
@@ -99,10 +108,7 @@ fn shrunk(len: usize, refused: WindowRefusal) -> usize {
         return quarters(len, 3);
     };
     match refused.counted {
-        Some(counted) if counted > 0 => match sized(len, counted, limit) {
-            Some(bytes) => bytes,
-            None => quarters(len, 3),
-        },
+        Some(counted) if counted > 0 => sized(len, counted, limit, quarters(len, 3)),
         _ => match usize::try_from(limit) {
             Ok(tokens) => margin(tokens),
             Err(_too_wide) => quarters(len, 3),
@@ -215,9 +221,12 @@ pub(super) struct Tally {
 }
 
 /// Why a conversation cannot be sent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(super) enum Overflow {
     /// Compacted as far as it goes, the request is still over the window.
+    #[error(
+        "compacted as far as it goes, the request is {len} bytes, over the model's window of {window}"
+    )]
     Irreducible {
         /// The request's encoded length, in bytes.
         len: usize,
@@ -225,25 +234,9 @@ pub(super) enum Overflow {
         window: usize,
     },
     /// The gateway refused the window [`MAX_SHRINKS`] times.
+    #[error("the gateway refused the model's window {} times", MAX_SHRINKS)]
     Shrinks,
 }
-
-impl fmt::Display for Overflow {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Irreducible { len, window } => write!(
-                out,
-                "compacted as far as it goes, the request is {len} bytes, over the model's window of {window}"
-            ),
-            Self::Shrinks => write!(
-                out,
-                "the gateway refused the model's window {MAX_SHRINKS} times"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for Overflow {}
 
 /// A session's conversation and its auto-compaction.
 #[derive(Debug)]

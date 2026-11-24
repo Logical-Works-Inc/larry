@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SendError, SyncSender, sync_channel};
 use std::sync::{Mutex, MutexGuard};
 
+use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 
 use crate::executor::{Approval, ExecError, Isolation, Observer, Settings, run_session};
@@ -191,30 +192,14 @@ where
 
 /// Why the reader stopped serving: the inbox closed under it, or a cancel's
 /// acknowledgement could not be written (larry#343).
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum ReadFault {
     /// The agent's receiver was dropped before the reader finished.
-    Inbox(SendError<io::Result<Frame>>),
+    #[error("the ACP inbox closed: {0}")]
+    Inbox(#[source] SendError<io::Result<Frame>>),
     /// The cancel acknowledgement line could not be logged.
-    Log(io::Error),
-}
-
-impl fmt::Display for ReadFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Inbox(ref cause) => write!(out, "the ACP inbox closed: {cause}"),
-            Self::Log(ref cause) => write!(out, "the ACP log line could not be written: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for ReadFault {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Inbox(ref cause) => Some(cause),
-            Self::Log(ref cause) => Some(cause),
-        }
-    }
+    #[error("the ACP log line could not be written: {0}")]
+    Log(#[source] io::Error),
 }
 
 /// Reads frames into the inbox until end of input, numbering each prompt and

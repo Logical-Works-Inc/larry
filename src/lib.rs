@@ -7,6 +7,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lgwks_macros::Error;
 use lgwks_std::json::{self, Serialize};
 
 pub mod acp;
@@ -213,38 +214,40 @@ impl Default for Demo {
 }
 
 /// Safe rejection leaves the session unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum Rejected {
     /// The command exceeded [`MAX_INPUT`] bytes.
+    #[error("InputBound; DEMO state unchanged")]
     InputBound,
     /// The command contained a control character.
+    #[error("ControlCharacter; DEMO state unchanged")]
     ControlCharacter,
     /// The command is not in the fixture's grammar.
+    #[error("UnknownCommand; DEMO state unchanged")]
     UnknownCommand,
     /// `inspect N` named an event that is not revealed, or was not a number.
+    #[error("InvalidAnchor; DEMO state unchanged")]
     InvalidAnchor,
     /// `feedback` arrived before anything was selected to attach it to.
+    #[error("NoSelection; DEMO state unchanged")]
     NoSelection,
     /// `continue` arrived with no owner held.
+    #[error("NoHeldWork; DEMO state unchanged")]
     NoHeldWork,
     /// A different owner is held, so this one's work may not advance.
+    #[error("HeldWork; DEMO state unchanged")]
     HeldWork,
     /// The change list is exhausted, or the scenario is empty.
+    #[error("EndOfFixture; DEMO state unchanged")]
     EndOfFixture,
     /// The session already holds [`MAX_NOTES`](crate::MAX_NOTES) notes.
+    #[error("NoteBound; DEMO state unchanged")]
     NoteBound,
     /// `feedback` carried no text.
+    #[error("EmptyFeedback; DEMO state unchanged")]
     EmptyFeedback,
 }
-
-impl std::fmt::Display for Rejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}; DEMO state unchanged")
-    }
-}
-
-impl std::error::Error for Rejected {}
 
 impl Demo {
     /// Apply a command without executing the text as code or accessing a workspace.

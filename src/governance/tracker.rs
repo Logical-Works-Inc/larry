@@ -3,9 +3,9 @@
 //! governance gate runs on it. Writes are atomic, so a killed write leaves the previous whole page.
 
 use std::collections::BTreeSet;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
+use lgwks_macros::Error;
 use lgwks_std::json::{self, Value};
 
 use super::patterns::Patterns;
@@ -26,10 +26,11 @@ const DATA_TOKEN: &str = "__TRACKER_DATA__";
 const MAX_TRACKER_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Every way the tracker render or write can fail. Each variant names what failed.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TrackerError {
     /// A file could not be read.
+    #[error("cannot read {}: {cause}", path.display())]
     Read {
         /// The file that failed.
         path: PathBuf,
@@ -37,6 +38,7 @@ pub enum TrackerError {
         cause: String,
     },
     /// A file exceeds the 4 MiB bound.
+    #[error("{} exceeds {limit} bytes", path.display())]
     TooLarge {
         /// The file that is too large.
         path: PathBuf,
@@ -44,16 +46,19 @@ pub enum TrackerError {
         limit: u64,
     },
     /// A file, or a directory on its path, is a symbolic link (CWE-59, larry#336).
+    #[error("{} is a symbolic link", path.display())]
     Symlink {
         /// The file that is a link.
         path: PathBuf,
     },
     /// A file is not a regular file: a FIFO, device or socket (larry#336).
+    #[error("{} is not a regular file", path.display())]
     NotRegular {
         /// The file that is not regular.
         path: PathBuf,
     },
     /// A file is not valid UTF-8; the text is CPython's codec message.
+    #[error("{cause}")]
     NotUtf8 {
         /// The file that is not UTF-8.
         path: PathBuf,
@@ -61,10 +66,13 @@ pub enum TrackerError {
         cause: String,
     },
     /// The data file is not valid JSON.
+    #[error("{0}")]
     Data(json::Error),
     /// The template lacks the data token.
+    #[error("template is missing the __TRACKER_DATA__ token")]
     MissingToken,
     /// The rendered page could not be written.
+    #[error("cannot write {}: {cause}", path.display())]
     Write {
         /// The file that failed.
         path: PathBuf,
@@ -72,35 +80,6 @@ pub enum TrackerError {
         cause: String,
     },
 }
-
-impl fmt::Display for TrackerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Read {
-                ref path,
-                ref cause,
-            } => write!(f, "cannot read {}: {cause}", path.display()),
-            Self::TooLarge { ref path, limit } => {
-                write!(f, "{} exceeds {limit} bytes", path.display())
-            }
-            Self::Symlink { ref path } => {
-                write!(f, "{} is a symbolic link", path.display())
-            }
-            Self::NotRegular { ref path } => {
-                write!(f, "{} is not a regular file", path.display())
-            }
-            Self::NotUtf8 { ref cause, .. } => f.write_str(cause),
-            Self::Data(ref error) => write!(f, "{error}"),
-            Self::MissingToken => f.write_str("template is missing the __TRACKER_DATA__ token"),
-            Self::Write {
-                ref path,
-                ref cause,
-            } => write!(f, "cannot write {}: {cause}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for TrackerError {}
 
 /// The tracker directory under `root`.
 fn directory(root: &Path) -> PathBuf {

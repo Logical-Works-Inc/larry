@@ -3,10 +3,9 @@
 //! responsibility when a stopped arm's partial card took the path (larry#399); the table row in
 //! that file calls [`eval_once`].
 
-use std::fmt;
-
 use larry_demo::eval::{EvalError, MAX_SET_BYTES, PriceError, Prices};
 use larry_demo::executor::{ExecError, Settings, process_env};
+use lgwks_macros::Error;
 
 use super::{print_line, read_stdin};
 
@@ -21,47 +20,27 @@ const _: () = assert!(
 );
 
 /// Why `larry eval` printed no complete scorecard; each variant keeps its cause.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(super) enum EvalRun {
     /// The executor settings, standard input or standard output failed.
-    Exec(ExecError),
+    #[error("eval: {0}")]
+    Exec(#[source] ExecError),
     /// A price setting is missing or refused.
-    Price(PriceError),
+    #[error("eval price: {0}")]
+    Price(#[source] PriceError),
     /// The set was refused, or a task failed outside the arm's doing.
-    Eval(EvalError),
+    #[error("{0}")]
+    Eval(#[source] EvalError),
     /// The arm stopped partway and standard output refused its partial card too; both
     /// causes are kept, neither flattened.
+    #[error("{stopped}; the card was not printed: {output}")]
     Unprinted {
         /// Why the arm stopped.
+        #[source]
         stopped: Box<EvalError>,
         /// Why the card could not be printed.
         output: Box<ExecError>,
     },
-}
-
-impl fmt::Display for EvalRun {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Exec(ref cause) => write!(out, "eval: {cause}"),
-            Self::Price(ref cause) => write!(out, "eval price: {cause}"),
-            Self::Eval(ref cause) => write!(out, "{cause}"),
-            Self::Unprinted {
-                ref stopped,
-                ref output,
-            } => write!(out, "{stopped}; the card was not printed: {output}"),
-        }
-    }
-}
-
-impl std::error::Error for EvalRun {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Exec(ref cause) => Some(cause),
-            Self::Price(ref cause) => Some(cause),
-            Self::Eval(ref cause) => Some(cause),
-            Self::Unprinted { ref stopped, .. } => Some(&**stopped),
-        }
-    }
 }
 
 /// `larry eval`: run every task of the matched set on standard input as one arm (the

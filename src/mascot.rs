@@ -6,10 +6,11 @@
 //! a bandit mask, large brown eyes with cream catchlights, a dark nose, an open smile with tongue.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write};
 use std::path::{Path, PathBuf};
+
+use lgwks_macros::Error;
 
 #[cfg(test)]
 mod sim;
@@ -74,63 +75,38 @@ const USAGE: &str =
     "usage: larry mascot [--preview] [--pet DIR] [--svg PATH] [--check [--root DIR]]";
 
 /// Why `larry mascot` stopped; each variant keeps its cause.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum MascotError {
     /// The arguments were not ones this command reads.
+    #[error("{} (got {:?})", USAGE, __field_0)]
     Usage(Vec<OsString>),
     /// No root was given and the working directory is unreadable.
-    NoDirectory(io::Error),
+    #[error("mascot: no working directory: {0}")]
+    NoDirectory(#[source] io::Error),
     /// A file could not be read or written.
+    #[error("mascot: {}: {cause}", path.display())]
     File {
         /// The file.
         path: PathBuf,
         /// Why.
+        #[source]
         cause: io::Error,
     },
     /// The committed SVG is past [`MAX_SVG_BYTES`].
+    #[error("mascot: {} exceeds {} bytes", __field_0.display(), MAX_SVG_BYTES)]
     TooLarge(PathBuf),
     /// `--check` found the committed SVG differs from the render.
+    #[error(
+        "FAIL: docs/larry-mascot.svg is stale — run `larry mascot --svg docs/larry-mascot.svg`"
+    )]
     Stale,
     /// The spritesheet could not be encoded; the encoder's error is kept as the cause.
-    Encode(Box<dyn std::error::Error + Send + Sync>),
+    #[error("mascot: spritesheet: {0}")]
+    Encode(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// Standard output could not be written.
-    Output(io::Error),
-}
-
-impl fmt::Display for MascotError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Usage(ref given) => write!(out, "{USAGE} (got {given:?})"),
-            Self::NoDirectory(ref cause) => write!(out, "mascot: no working directory: {cause}"),
-            Self::File {
-                ref path,
-                ref cause,
-            } => write!(out, "mascot: {}: {cause}", path.display()),
-            Self::TooLarge(ref path) => write!(
-                out,
-                "mascot: {} exceeds {MAX_SVG_BYTES} bytes",
-                path.display()
-            ),
-            Self::Stale => out.write_str(
-                "FAIL: docs/larry-mascot.svg is stale — run `larry mascot --svg docs/larry-mascot.svg`",
-            ),
-            Self::Encode(ref cause) => write!(out, "mascot: spritesheet: {cause}"),
-            Self::Output(ref cause) => write!(out, "mascot: stdout unwritable: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for MascotError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::NoDirectory(ref cause)
-            | Self::Output(ref cause)
-            | Self::File { ref cause, .. } => Some(cause),
-            Self::Encode(ref cause) => Some(&**cause),
-            _ => None,
-        }
-    }
+    #[error("mascot: stdout unwritable: {0}")]
+    Output(#[source] io::Error),
 }
 
 /// The parsed command line.

@@ -44,7 +44,6 @@
 //! is the "already-dispatched treatment" D48 asks to be defined, enforced by
 //! shape: the warrant is asked for only on the mutating reach.
 
-use core::fmt;
 use core::num::{NonZeroU64, NonZeroU128};
 
 use larry_contracts::authority::SecurityEpoch;
@@ -55,6 +54,7 @@ use lgwks_bot::kernel::effect::{
     ActionDigest, ActionId, AttemptId, EffectIdentity, EffectKey, EnvironmentEpoch, EnvironmentId,
     FlowRevision, Id128, RunId as BotRunId,
 };
+use lgwks_macros::Error;
 
 use crate::error::RuntimeError;
 
@@ -176,10 +176,11 @@ fn action(operation: OperationId) -> Option<ActionId> {
 /// deciding what to do about a fenced effect needs to know whether it was
 /// withdrawn by name, left behind by a generation change, or held back
 /// because the authority source has gone quiet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum FenceRefusal {
     /// The operation's authority was withdrawn by name.
+    #[error("operation {operation} was revoked by name")]
     Revoked {
         /// The withdrawn operation.
         operation: OperationId,
@@ -187,6 +188,7 @@ pub enum FenceRefusal {
     /// The effect was admitted below the fence's current security epoch, so
     /// its authorization belongs to a generation the authority source has
     /// left behind (E71).
+    #[error("admitted at {admitted} but the fence stands at {current}: stale authority")]
     StaleEpoch {
         /// The generation the reservation was admitted under.
         admitted: SecurityEpoch,
@@ -196,6 +198,7 @@ pub enum FenceRefusal {
     /// The effect names an epoch later than the fence has ever stood at: a
     /// journal restored under an authority older than the one that admitted
     /// it. The opposite investigation to [`Self::StaleEpoch`].
+    #[error("admitted at {admitted}, which the fence never reached; it stands at {current}")]
     NeverIssued {
         /// The generation the reservation claims.
         admitted: SecurityEpoch,
@@ -204,82 +207,45 @@ pub enum FenceRefusal {
     },
     /// The authority source has not been reached for `bound` mutating
     /// reaches. Offline authority is spent and the fence fails closed.
+    #[error("offline authority spent: {bound} reaches without the authority source")]
     OfflineExposureExhausted {
         /// The configured offline exposure ceiling.
         bound: u32,
     },
     /// The fence is closed: the authority source reported an epoch past the
     /// last one it can hold, so no reach is permitted again.
+    #[error("the fence is closed: its epoch space is spent")]
     Closed,
 }
 
-impl fmt::Display for FenceRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Revoked { operation } => {
-                write!(f, "operation {operation} was revoked by name")
-            }
-            Self::StaleEpoch { admitted, current } => write!(
-                f,
-                "admitted at {admitted} but the fence stands at {current}: stale authority"
-            ),
-            Self::NeverIssued { admitted, current } => write!(
-                f,
-                "admitted at {admitted}, which the fence never reached; it stands at {current}"
-            ),
-            Self::OfflineExposureExhausted { bound } => write!(
-                f,
-                "offline authority spent: {bound} reaches without the authority source"
-            ),
-            Self::Closed => write!(f, "the fence is closed: its epoch space is spent"),
-        }
-    }
-}
-
-impl std::error::Error for FenceRefusal {}
-
 /// A refused change to, or read of, the fence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum FenceError {
     /// The epoch cannot advance or be represented. Refused rather than
     /// wrapped: a wrapped epoch would alias a withdrawn generation with a
     /// live one, re-authorizing effects that revocation had withdrawn.
+    #[error("security epoch space is exhausted; it never wraps")]
     EpochExhausted,
     /// The fence already holds as many withdrawals by name as it can; the
     /// operation is not withdrawn, and advancing the epoch still fences it.
+    #[error("the fence already holds {limit} withdrawals; advance the epoch to fence the rest")]
     RevocationsFull {
         /// How many withdrawals it holds.
         limit: usize,
     },
     /// The all-zero operation names no action and cannot be withdrawn.
+    #[error("the all-zero operation cannot be withdrawn")]
     ZeroOperation,
     /// The fence was closed by an epoch past its space and takes no change.
+    #[error("the fence is closed and takes no change")]
     Closed,
     /// The broker does not hold the fence's environment, or refused it in a
     /// way no path here produces (registered twice, or a refusal newer than
     /// this build).
+    #[error("the broker does not hold the fence's environment")]
     Unowned,
 }
-
-impl fmt::Display for FenceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::EpochExhausted => {
-                write!(f, "security epoch space is exhausted; it never wraps")
-            }
-            Self::RevocationsFull { limit } => write!(
-                f,
-                "the fence already holds {limit} withdrawals; advance the epoch to fence the rest"
-            ),
-            Self::ZeroOperation => write!(f, "the all-zero operation cannot be withdrawn"),
-            Self::Closed => write!(f, "the fence is closed and takes no change"),
-            Self::Unowned => write!(f, "the broker does not hold the fence's environment"),
-        }
-    }
-}
-
-impl std::error::Error for FenceError {}
 
 /// The fence change a broker refusal is.
 fn refused(error: &BrokerError) -> FenceError {

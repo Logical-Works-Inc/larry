@@ -1,9 +1,9 @@
 //! Version and capability negotiation at the runtime ingress.
 
 use std::collections::BTreeSet;
-use std::fmt;
 
 use larry_contracts::ids::{TenantId, WorkerId};
+use lgwks_macros::Error;
 
 /// Minimum protocol version accepted by this runtime.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;
@@ -143,10 +143,13 @@ pub(crate) struct NegotiatedProtocol {
 }
 
 /// Typed refusals returned by negotiation and protocol submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ProtocolError {
     /// The offered range is reversed.
+    #[error(
+        "invalid protocol version range {min}..={max}; set the minimum no greater than the maximum"
+    )]
     InvalidVersionRange {
         /// Inclusive lower bound supplied by the client.
         min: u16,
@@ -154,6 +157,9 @@ pub enum ProtocolError {
         max: u16,
     },
     /// No offered version is supported by this runtime.
+    #[error(
+        "unsupported protocol version range {offered_min}..={offered_max}; supported range is {supported_min}..={supported_max}"
+    )]
     UnsupportedVersion {
         /// Lowest version offered by the client.
         offered_min: u16,
@@ -165,16 +171,28 @@ pub enum ProtocolError {
         supported_max: u16,
     },
     /// A required capability is absent.
+    #[error(
+        "required protocol capability {capability:?} is absent; enable it or remove the dependent request"
+    )]
     CapabilityMissing {
         /// Required capability not present in the offer.
         capability: ProtocolCapability,
     },
     /// A human question cannot be handled by a headless client.
+    #[error(
+        "human question cannot be served headlessly; attach an authorized response surface or remove the question requirement"
+    )]
     HeadlessQuestion,
     /// A question or an answer arrived from an offer with no
     /// host-authenticated principal, so no worker's answer could count.
+    #[error(
+        "human question needs the host-authenticated principal; bind one with ProtocolOffer::authenticated"
+    )]
     NoPrincipal,
     /// The offer and command belong to different tenants.
+    #[error(
+        "protocol offer is scoped to tenant {negotiated}, but command belongs to tenant {command}"
+    )]
     TenantMismatch {
         /// Tenant named by the offer.
         negotiated: TenantId,
@@ -182,6 +200,7 @@ pub enum ProtocolError {
         command: TenantId,
     },
     /// The bounded ready queue is full.
+    #[error("command queue is full at {capacity}; retry after {retry_after_ticks} logical ticks")]
     Overloaded {
         /// Maximum queued command count.
         capacity: usize,
@@ -189,60 +208,6 @@ pub enum ProtocolError {
         retry_after_ticks: u32,
     },
 }
-
-/// Formats an inclusive protocol version interval.
-fn display_range(formatter: &mut fmt::Formatter<'_>, min: u16, max: u16) -> fmt::Result {
-    write!(formatter, "{min}..={max}")
-}
-
-impl fmt::Display for ProtocolError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::InvalidVersionRange { min, max } => {
-                formatter.write_str("invalid protocol version range ")?;
-                display_range(formatter, min, max)?;
-                formatter.write_str("; set the minimum no greater than the maximum")
-            }
-            Self::UnsupportedVersion {
-                offered_min,
-                offered_max,
-                supported_min,
-                supported_max,
-            } => {
-                formatter.write_str("unsupported protocol version range ")?;
-                display_range(formatter, offered_min, offered_max)?;
-                formatter.write_str("; supported range is ")?;
-                display_range(formatter, supported_min, supported_max)
-            }
-            Self::CapabilityMissing { capability } => write!(
-                formatter,
-                "required protocol capability {capability:?} is absent; enable it or remove the dependent request"
-            ),
-            Self::HeadlessQuestion => formatter.write_str(
-                "human question cannot be served headlessly; attach an authorized response surface or remove the question requirement",
-            ),
-            Self::NoPrincipal => formatter.write_str(
-                "human question needs the host-authenticated principal; bind one with ProtocolOffer::authenticated",
-            ),
-            Self::TenantMismatch {
-                negotiated,
-                command,
-            } => write!(
-                formatter,
-                "protocol offer is scoped to tenant {negotiated}, but command belongs to tenant {command}"
-            ),
-            Self::Overloaded {
-                capacity,
-                retry_after_ticks,
-            } => write!(
-                formatter,
-                "command queue is full at {capacity}; retry after {retry_after_ticks} logical ticks"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ProtocolError {}
 
 /// Selects the highest overlapping protocol version without mutating state.
 ///

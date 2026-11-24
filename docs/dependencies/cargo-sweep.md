@@ -70,7 +70,7 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Executor process groups, orphan reaping (larry#85) | `lgwks_std::process` | processkit: kill-on-drop dies with its owner under kill -9 |
 | Workspace directory mode reset before removal (larry#334, #366) | `lgwks_std::fs::capability::Dir` holds the walk; `rustix` =1.1.6 `openat`/`chmodat` until the estate adds a mode-reset call, gap crates#1113 | `std::fs::set_permissions` by path: follows a link swapped in after the check (CWE-367, CWE-59) |
 | Executor ledger of live groups (larry#85) | `lgwks_deps` `sqlite` | a pid file: no start instant, so a reused pid reads as live |
-| Typed errors | the estate's `lgwks_macros::Error` derive, which makes a `#[from]` field the source (lgwks_ast 6.1.1 `error_derive/parse.rs`); the hand-written impls move onto it in larry#435 | `thiserror` (removed larry#339: its gap #842 closed) |
+| Typed errors | the estate's `lgwks_macros::Error` derive (`Display`, `Error`, `From`; a `#[from]` or `#[source]` field is the source, lgwks_ast 6.1.1 `error_derive/parse.rs`), on every error type since larry#435; `RouteError`, `RerankError` (an `Option` source) and `mutants::Fault` (a source inside a non-`Error` field) keep hand-written impls | `thiserror` (removed larry#339: its gap #842 closed) |
 | Memory, durable product state | Logical-DB | any substitute store: refused |
 
 Gap issues (logicalworks-crates): #848 web layer; #849 SQLite lane; #850 remote MCP; #846 Nova; #1113 mode

@@ -4,62 +4,38 @@
 //! ADR 0065); the table rows in that file call [`governance_once`] and [`tracker_once`].
 
 use std::ffi::OsString;
-use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use larry_demo::governance;
+use lgwks_macros::Error;
 
 use super::diagnose;
 
 /// Why `larry governance` or `larry tracker` stopped without its verdict; each keeps its cause.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(super) enum GovernanceRun {
     /// The arguments were not `[FLAG] [--root DIR]`.
+    #[error(
+        "usage: larry governance [--report] [--root DIR] | larry tracker [--check] [--root DIR] (got {0:?})"
+    )]
     Usage(Vec<OsString>),
     /// No root was given and the working directory is unreadable.
-    NoDirectory(io::Error),
+    #[error("governance: no working directory: {0}")]
+    NoDirectory(#[source] io::Error),
     /// Standard output could not be written.
-    Stdout(io::Error),
+    #[error("governance: stdout unwritable: {0}")]
+    Stdout(#[source] io::Error),
     /// Standard error could not be written.
-    Stderr(io::Error),
+    #[error("governance: stderr unwritable: {0}")]
+    Stderr(#[source] io::Error),
     /// `--check` found the committed page differs from the render.
+    #[error("FAIL: tools/tracker/index.html is stale — run `larry tracker`")]
     Stale,
     /// The tracker could not read, render or write.
-    Tracker(governance::TrackerError),
-}
-
-impl fmt::Display for GovernanceRun {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Usage(ref rest) => write!(
-                out,
-                "usage: larry governance [--report] [--root DIR] | larry tracker [--check] [--root DIR] (got {rest:?})"
-            ),
-            Self::NoDirectory(ref cause) => {
-                write!(out, "governance: no working directory: {cause}")
-            }
-            Self::Stdout(ref cause) => write!(out, "governance: stdout unwritable: {cause}"),
-            Self::Stderr(ref cause) => write!(out, "governance: stderr unwritable: {cause}"),
-            Self::Stale => {
-                out.write_str("FAIL: tools/tracker/index.html is stale — run `larry tracker`")
-            }
-            Self::Tracker(ref cause) => write!(out, "FAIL: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for GovernanceRun {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::NoDirectory(ref cause) | Self::Stdout(ref cause) | Self::Stderr(ref cause) => {
-                Some(cause)
-            }
-            Self::Tracker(ref cause) => Some(cause),
-            Self::Usage(_) | Self::Stale => None,
-        }
-    }
+    #[error("FAIL: {0}")]
+    Tracker(#[source] governance::TrackerError),
 }
 
 /// The root and flag `larry governance` and `larry tracker` take: `[FLAG] [--root DIR]`, in any

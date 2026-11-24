@@ -8,7 +8,6 @@
 //! out beside the client, never the client's output.
 
 use std::error::Error;
-use std::fmt;
 use std::io;
 use std::num::TryFromIntError;
 use std::time::Duration;
@@ -28,53 +27,20 @@ type TestResult = Result<(), Box<dyn Error>>;
 type Refused = (Result<Completion, ModelError>, u64);
 
 /// Why one simulation could not be driven to its assertions.
-#[derive(Debug)]
+#[derive(Debug, lgwks_macros::Error)]
 enum ClockSimError {
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0}")]
+    Draw(#[from] DrawError),
     /// A drawn number does not fit the type its use needs.
-    Range(TryFromIntError),
+    #[error("drawn number out of range: {0}")]
+    Range(#[from] TryFromIntError),
     /// The mock endpoint could not start.
-    Mock(io::Error),
+    #[error("the mock endpoint failed: {0}")]
+    Mock(#[from] io::Error),
     /// The drawn settings were refused as a config.
-    Config(ModelError),
-}
-
-impl fmt::Display for ClockSimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
-            Self::Mock(ref cause) => write!(out, "the mock endpoint failed: {cause}"),
-            Self::Config(ref cause) => write!(out, "the drawn config was refused: {cause}"),
-        }
-    }
-}
-
-impl Error for ClockSimError {}
-
-impl From<DrawError> for ClockSimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<TryFromIntError> for ClockSimError {
-    fn from(cause: TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<io::Error> for ClockSimError {
-    fn from(cause: io::Error) -> Self {
-        Self::Mock(cause)
-    }
-}
-
-impl From<ModelError> for ClockSimError {
-    fn from(cause: ModelError) -> Self {
-        Self::Config(cause)
-    }
+    #[error("the drawn config was refused: {0}")]
+    Config(#[from] ModelError),
 }
 
 /// Seeds each simulation sweeps.

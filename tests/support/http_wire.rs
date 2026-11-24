@@ -23,50 +23,32 @@ pub(crate) struct Request {
 }
 
 /// Why a request was refused before it reached routing.
-#[derive(Debug)]
+#[derive(Debug, lgwks_macros::Error)]
 pub(crate) enum Refusal {
     /// The peer closed before sending a byte.
+    #[error("the peer closed before sending a byte")]
     Closed,
     /// The head was unreadable, oversized or not HTTP.
+    #[error("malformed request head")]
     Head,
     /// The head was not UTF-8.
-    Text(std::str::Utf8Error),
+    #[error("request head is not UTF-8: {0}")]
+    Text(#[source] std::str::Utf8Error),
     /// The `Content-Length` was not a number.
-    Length(std::num::ParseIntError),
+    #[error("Content-Length is not a number: {0}")]
+    Length(#[source] std::num::ParseIntError),
     /// A body without a `Content-Length` (or with chunked framing).
+    #[error("Content-Length is required")]
     LengthRequired,
     /// The declared body exceeds the cap; nothing past the head was read.
+    #[error("declared body of {declared} bytes")]
     TooLarge {
         /// The `Content-Length` the client declared.
         declared: usize,
     },
     /// The socket failed or the client stalled past the read timeout.
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::Closed => out.write_str("the peer closed before sending a byte"),
-            Self::Head => out.write_str("malformed request head"),
-            Self::Text(ref cause) => write!(out, "request head is not UTF-8: {cause}"),
-            Self::Length(ref cause) => write!(out, "Content-Length is not a number: {cause}"),
-            Self::LengthRequired => out.write_str("Content-Length is required"),
-            Self::TooLarge { declared } => write!(out, "declared body of {declared} bytes"),
-            Self::Io(ref cause) => write!(out, "socket: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for Refusal {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Text(ref cause) => Some(cause),
-            Self::Length(ref cause) => Some(cause),
-            Self::Io(ref cause) => Some(cause),
-            Self::Closed | Self::Head | Self::LengthRequired | Self::TooLarge { .. } => None,
-        }
-    }
+    #[error("socket: {0}")]
+    Io(#[source] std::io::Error),
 }
 
 /// Read one request from `stream`, never buffering more than the head limit

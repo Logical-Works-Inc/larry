@@ -10,6 +10,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
 
+use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 use super::{ExecError, Ledger, digest_hex, identity, state_dir};
@@ -19,19 +20,23 @@ use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id
 const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
 
 /// Why `larry route` did not finish.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RouteCliError {
     /// The arguments are not a `larry route` command.
+    #[error("route: {0}; {}", USAGE)]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
+    #[error("route: every argument must be UTF-8 text")]
     NotUtf8,
     /// `route add` needs a flag it was not given.
+    #[error("route add needs {flag}")]
     Missing {
         /// The flag.
         flag: &'static str,
     },
     /// A numeric flag holds something that is not a number.
+    #[error("route {flag} is not a number: {reason}")]
     BadNumber {
         /// The flag.
         flag: &'static str,
@@ -39,53 +44,34 @@ pub enum RouteCliError {
         reason: String,
     },
     /// A route, a route id or a resolution was refused.
-    Route(RouteError),
+    #[error("{}{__field_0}", route_prefix(__field_0))]
+    Route(#[source] RouteError),
     /// The state directory or the store failed.
-    Exec(ExecError),
+    #[error("route: {0}")]
+    Exec(#[source] ExecError),
     /// Standard output could not be written.
-    Output(io::Error),
+    #[error("route output unwritable: {0}")]
+    Output(#[source] io::Error),
 }
 
-impl fmt::Display for RouteCliError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Usage(reason) => write!(out, "route: {reason}; {USAGE}"),
-            Self::NotUtf8 => out.write_str("route: every argument must be UTF-8 text"),
-            Self::Missing { flag } => write!(out, "route add needs {flag}"),
-            Self::BadNumber { flag, ref reason } => {
-                write!(out, "route {flag} is not a number: {reason}")
-            }
-            // A field refusal already opens with `route <field>`, so this door adds no
-            // second prefix (larry#228); every other refusal, a new variant included,
-            // gets the prefix by default, so none reaches the user bare (larry#295).
-            Self::Route(
-                ref cause @ (RouteError::BadId
-                | RouteError::ReservedId
-                | RouteError::BadUrl
-                | RouteError::BadModel
-                | RouteError::BadKeyEnv
-                | RouteError::KeyEnvOutsideNamespace
-                | RouteError::KeyEnvNotThisTenants { .. }
-                | RouteError::BadTemperature
-                | RouteError::BadResidency
-                | RouteError::BadRequestBytes
-                | RouteError::BadDescribe),
-            ) => write!(out, "{cause}"),
-            Self::Route(ref cause) => write!(out, "route: {cause}"),
-            Self::Exec(ref cause) => write!(out, "route: {cause}"),
-            Self::Output(ref cause) => write!(out, "route output unwritable: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for RouteCliError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Route(ref cause) => Some(cause),
-            Self::Exec(ref cause) => Some(cause),
-            Self::Output(ref cause) => Some(cause),
-            Self::Usage(_) | Self::NotUtf8 | Self::Missing { .. } | Self::BadNumber { .. } => None,
-        }
+/// What a route refusal is prefixed with. A field refusal already opens with
+/// `route <field>`, so this door adds no second prefix (larry#228); every other
+/// refusal, a new variant included, gets the prefix by default, so none reaches
+/// the user bare (larry#295).
+const fn route_prefix(cause: &RouteError) -> &'static str {
+    match *cause {
+        RouteError::BadId
+        | RouteError::ReservedId
+        | RouteError::BadUrl
+        | RouteError::BadModel
+        | RouteError::BadKeyEnv
+        | RouteError::KeyEnvOutsideNamespace
+        | RouteError::KeyEnvNotThisTenants { .. }
+        | RouteError::BadTemperature
+        | RouteError::BadResidency
+        | RouteError::BadRequestBytes
+        | RouteError::BadDescribe => "",
+        _ => "route: ",
     }
 }
 

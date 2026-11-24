@@ -5,8 +5,7 @@
 //! nothing, and each task's goal, files and commands are checked by the one
 //! executor parser (`Task::shell`), never by a second copy of its rules.
 
-use std::fmt;
-
+use lgwks_macros::Error;
 use lgwks_std::json::{self, Map, Value};
 
 use crate::executor::{Task, TaskError, is_writable_path};
@@ -62,22 +61,26 @@ pub(crate) struct TaskSet {
 }
 
 /// Why a task set was refused; nothing ran.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SetError {
     /// The set exceeds 4 MiB.
+    #[error("the task set is {len} bytes, over 4 MiB")]
     TooLarge {
         /// Its length in bytes.
         len: usize,
     },
     /// The set is not UTF-8 JSON.
-    NotJson(json::Error),
+    #[error("the task set is not JSON: {0}")]
+    NotJson(#[source] json::Error),
     /// The set, or task `index`, is not a JSON object.
+    #[error("{} is not a JSON object", place(*index))]
     NotAnObject {
         /// The task, or `None` for the set itself.
         index: Option<usize>,
     },
     /// The set, or task `index`, carries a key outside the format.
+    #[error("{} has unknown key {key}", place(*index))]
     UnknownKey {
         /// The task, or `None` for the set itself.
         index: Option<usize>,
@@ -85,6 +88,7 @@ pub enum SetError {
         key: String,
     },
     /// A key is absent or holds the wrong JSON type.
+    #[error("{} key {key} is missing or has the wrong type", place(*index))]
     WrongType {
         /// The task, or `None` for the set itself.
         index: Option<usize>,
@@ -92,23 +96,28 @@ pub enum SetError {
         key: &'static str,
     },
     /// The set name is empty, too long or outside `[a-z0-9._-]`.
+    #[error("the set name must be 1 to 64 of [a-z0-9._-]")]
     BadName,
     /// The set holds no task, or more than 256.
+    #[error("the set holds {count} tasks; 1 to 256")]
     TaskCount {
         /// The number of tasks.
         count: usize,
     },
     /// Task `index` has an id that is empty, too long or outside `[a-z0-9._-]`.
+    #[error("task {index} id must be 1 to 64 of [a-z0-9._-]")]
     BadId {
         /// The task.
         index: usize,
     },
     /// Task `index` repeats an earlier id.
+    #[error("task {index} repeats an earlier id")]
     DuplicateId {
         /// The task.
         index: usize,
     },
     /// Task `index` starts from no file, or more than 64.
+    #[error("task {index} starts from {count} files; 1 to 64")]
     FileCount {
         /// The task.
         index: usize,
@@ -116,6 +125,7 @@ pub enum SetError {
         count: usize,
     },
     /// Task `index` names an origin file outside the repository or inside `.git`.
+    #[error("task {index} file {path:?} is not a repo-relative path outside .git")]
     BadFile {
         /// The task.
         index: usize,
@@ -123,6 +133,7 @@ pub enum SetError {
         path: String,
     },
     /// Task `index` has an origin file over 256 KiB.
+    #[error("task {index} file {path:?} is over 256 KiB")]
     FileTooLarge {
         /// The task.
         index: usize,
@@ -131,6 +142,7 @@ pub enum SetError {
     },
     /// Task `index` carries no acceptance command, or more than 16: a task no
     /// command checks would count as accepted for nothing.
+    #[error("task {index} carries {count} acceptance commands; 1 to 16")]
     AcceptanceCount {
         /// The task.
         index: usize,
@@ -138,75 +150,21 @@ pub enum SetError {
         count: usize,
     },
     /// Task `index` is refused by the executor's own task parser.
+    #[error("task {index}: {cause}")]
     Task {
         /// The task.
         index: usize,
         /// The parser's reason.
+        #[source]
         cause: TaskError,
     },
 }
 
-impl fmt::Display for SetError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let place = |index: Option<usize>| match index {
-            Some(task) => format!("task {task}"),
-            None => String::from("the set"),
-        };
-        match *self {
-            Self::TooLarge { len } => write!(out, "the task set is {len} bytes, over 4 MiB"),
-            Self::NotJson(ref cause) => write!(out, "the task set is not JSON: {cause}"),
-            Self::NotAnObject { index } => write!(out, "{} is not a JSON object", place(index)),
-            Self::UnknownKey { index, ref key } => {
-                write!(out, "{} has unknown key {key}", place(index))
-            }
-            Self::WrongType { index, key } => {
-                write!(
-                    out,
-                    "{} key {key} is missing or has the wrong type",
-                    place(index)
-                )
-            }
-            Self::BadName => out.write_str("the set name must be 1 to 64 of [a-z0-9._-]"),
-            Self::TaskCount { count } => write!(out, "the set holds {count} tasks; 1 to 256"),
-            Self::BadId { index } => write!(out, "task {index} id must be 1 to 64 of [a-z0-9._-]"),
-            Self::DuplicateId { index } => write!(out, "task {index} repeats an earlier id"),
-            Self::FileCount { index, count } => {
-                write!(out, "task {index} starts from {count} files; 1 to 64")
-            }
-            Self::BadFile { index, ref path } => write!(
-                out,
-                "task {index} file {path:?} is not a repo-relative path outside .git"
-            ),
-            Self::FileTooLarge { index, ref path } => {
-                write!(out, "task {index} file {path:?} is over 256 KiB")
-            }
-            Self::AcceptanceCount { index, count } => write!(
-                out,
-                "task {index} carries {count} acceptance commands; 1 to 16"
-            ),
-            Self::Task { index, ref cause } => write!(out, "task {index}: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for SetError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::NotJson(ref cause) => Some(cause),
-            Self::Task { ref cause, .. } => Some(cause),
-            Self::TooLarge { .. }
-            | Self::NotAnObject { .. }
-            | Self::UnknownKey { .. }
-            | Self::WrongType { .. }
-            | Self::BadName
-            | Self::TaskCount { .. }
-            | Self::BadId { .. }
-            | Self::DuplicateId { .. }
-            | Self::FileCount { .. }
-            | Self::BadFile { .. }
-            | Self::FileTooLarge { .. }
-            | Self::AcceptanceCount { .. } => None,
-        }
+/// Where a refusal is: one task of the set, or the set itself.
+fn place(index: Option<usize>) -> String {
+    match index {
+        Some(task) => format!("task {task}"),
+        None => String::from("the set"),
     }
 }
 
@@ -221,13 +179,14 @@ fn is_name(text: &str) -> bool {
 
 /// Refuses any key of `object` outside `allowed`.
 fn known_keys(object: &Map, allowed: &[&str], index: Option<usize>) -> Result<(), SetError> {
-    match object.keys().find(|key| !allowed.contains(key)) {
-        Some(key) => Err(SetError::UnknownKey {
+    let unknown = object.keys().find(|key| !allowed.contains(key));
+    if let Some(key) = unknown {
+        return Err(SetError::UnknownKey {
             index,
             key: key.to_owned(),
-        }),
-        None => Ok(()),
+        });
     }
+    Ok(())
 }
 
 /// The strings of array `key` of task `index`.

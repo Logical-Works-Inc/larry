@@ -3,8 +3,7 @@
 //! picodollars (tokens times micro-dollars per million tokens), so no float
 //! rounds a cost and one run prints the same figures on every target.
 
-use std::fmt;
-
+use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 /// Highest price accepted: 10,000 dollars per million tokens, in micro-dollars.
@@ -59,15 +58,17 @@ pub enum PriceFault {
 }
 
 /// Why `LARRY_EVAL_PRICE_IN` or `LARRY_EVAL_PRICE_OUT` could not be used.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PriceError {
     /// The variable is unset or empty: a cost is never guessed.
+    #[error("{variable} is unset: give the arm's dollars per million tokens, e.g. 0.30")]
     Missing {
         /// The variable.
         variable: &'static str,
     },
     /// The variable is set and refused.
+    #[error("{variable} {}", fault.why())]
     Refused {
         /// The variable.
         variable: &'static str,
@@ -76,26 +77,16 @@ pub enum PriceError {
     },
 }
 
-impl fmt::Display for PriceError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Missing { variable } => write!(
-                out,
-                "{variable} is unset: give the arm's dollars per million tokens, e.g. 0.30"
-            ),
-            Self::Refused { variable, fault } => {
-                let why = match fault {
-                    PriceFault::Malformed => "is not a plain decimal like 0.30",
-                    PriceFault::TooPrecise => "has more than 6 fraction digits",
-                    PriceFault::TooLarge => "is over 10000 dollars per million tokens",
-                };
-                write!(out, "{variable} {why}")
-            }
+impl PriceFault {
+    /// What a refused setting is told, after its variable's name.
+    const fn why(self) -> &'static str {
+        match self {
+            Self::Malformed => "is not a plain decimal like 0.30",
+            Self::TooPrecise => "has more than 6 fraction digits",
+            Self::TooLarge => "is over 10000 dollars per million tokens",
         }
     }
 }
-
-impl std::error::Error for PriceError {}
 
 /// The value of an all-ASCII-digit string, `None` past `u64::MAX`.
 fn decimal(digits: &str) -> Option<u64> {

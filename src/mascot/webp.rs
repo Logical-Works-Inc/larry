@@ -5,8 +5,9 @@
 //! is complete (Kraft sum one), as libwebp requires of a code with two or more symbols.
 //! Source: RFC 9649 sections 3 to 5; RFC 1951 section 3.2.2 for canonical codes.
 
-use std::fmt;
 use std::num::TryFromIntError;
+
+use lgwks_macros::Error;
 
 /// Largest width or height: the header stores each minus one in 14 bits.
 const MAX_SIDE: u32 = 16_384;
@@ -36,9 +37,10 @@ const LEFT: usize = 2;
 const MAX_LENGTH: u8 = 15;
 
 /// Why an image was not encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum WebpError {
     /// The width or height is zero or past 16384.
+    #[error("a {width}x{height} image is outside 1 to {} pixels a side", MAX_SIDE)]
     Size {
         /// The width given.
         width: u32,
@@ -46,6 +48,7 @@ pub(crate) enum WebpError {
         height: u32,
     },
     /// The buffer is not width x height x 4 RGBA bytes.
+    #[error("{actual} RGBA bytes for an image {}", needs(*expected))]
     Pixels {
         /// The bytes the size needs, when they are addressable.
         expected: Option<usize>,
@@ -53,44 +56,21 @@ pub(crate) enum WebpError {
         actual: usize,
     },
     /// The encoded image is past the RIFF size field.
+    #[error("the encoded image exceeds the RIFF size field")]
     TooLarge,
     /// A value does not fit the field it is written to.
-    Narrow(TryFromIntError),
+    #[error("a value does not fit its field: {0}")]
+    Narrow(#[source] TryFromIntError),
     /// A symbol had no code, or a code length passed 15: the encoder broke its own contract.
+    #[error("symbol {0} has no prefix code")]
     Uncoded(usize),
 }
 
-impl fmt::Display for WebpError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Size { width, height } => write!(
-                out,
-                "a {width}x{height} image is outside 1 to {MAX_SIDE} pixels a side"
-            ),
-            Self::Pixels {
-                expected: Some(expected),
-                actual,
-            } => write!(
-                out,
-                "{actual} RGBA bytes for an image that needs {expected}"
-            ),
-            Self::Pixels {
-                expected: None,
-                actual,
-            } => write!(out, "{actual} RGBA bytes for an image too large to address"),
-            Self::TooLarge => out.write_str("the encoded image exceeds the RIFF size field"),
-            Self::Narrow(ref cause) => write!(out, "a value does not fit its field: {cause}"),
-            Self::Uncoded(symbol) => write!(out, "symbol {symbol} has no prefix code"),
-        }
-    }
-}
-
-impl std::error::Error for WebpError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Narrow(ref cause) => Some(cause),
-            _ => None,
-        }
+/// What a pixel buffer's size is judged against: the bytes the image needs, or that they cannot be addressed.
+fn needs(expected: Option<usize>) -> String {
+    match expected {
+        Some(bytes) => format!("that needs {bytes}"),
+        None => "too large to address".to_owned(),
     }
 }
 

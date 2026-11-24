@@ -11,7 +11,8 @@
 //! owner must atomically revalidate authority, baseline and fence at dispatch.
 
 use std::collections::BTreeMap;
-use std::fmt;
+
+use lgwks_macros::Error;
 
 use crate::ids::{CommandId, ContentDigest, OperationId, RunId, TenantId, WorkspaceId};
 use crate::state::RunState;
@@ -411,59 +412,43 @@ impl ContinueCoordinator {
 }
 
 /// Explicit safe failures of projection and continuation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum WorkspaceError {
     /// Wrong authenticated tenant or workspace.
+    #[error("work belongs to another tenant or workspace")]
     ScopeMismatch,
     /// Empty, control-containing or oversized title.
+    #[error("work title must be nonblank, control-free and at most 256 UTF-8 bytes")]
     InvalidTitle,
     /// Unknown run in this scoped projection.
+    #[error("work is absent from this workspace projection")]
     MissingWork,
     /// Revision, baseline or fence no longer matches.
+    #[error("work changed; refresh before continuing")]
     StaleWork,
     /// Same revision describes different content.
+    #[error("same work revision carries conflicting content")]
     ConflictingSnapshot,
     /// Terminal state cannot be continued or rewritten.
+    #[error("terminal work cannot be continued or rewritten")]
     TerminalWork,
     /// Cancellation is still settling owned work.
+    #[error("cancellation is in progress; continuation is refused")]
     CancellingWork,
     /// Bounded view or identity retention is full.
+    #[error("workspace projection capacity reached; resynchronize with the owner")]
     CapacityExceeded,
     /// A retry changed its target or binding.
+    #[error("continue identity was reused with different content")]
     ConflictingRetry,
     /// Owner acknowledgement did not bind the requested operation.
+    #[error("owner receipt does not match the continuation request")]
     InvalidReceipt,
     /// Owner refused current authority, claim or effect admission.
+    #[error("workspace owner refused continuation")]
     OwnerRefused,
     /// Transport cannot establish whether the owner accepted the request.
+    #[error("continuation outcome is unknown; reconcile with the same identity")]
     OutcomeUnknown,
 }
-
-impl fmt::Display for WorkspaceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match *self {
-            Self::ScopeMismatch => "work belongs to another tenant or workspace",
-            Self::InvalidTitle => {
-                "work title must be nonblank, control-free and at most 256 UTF-8 bytes"
-            }
-            Self::MissingWork => "work is absent from this workspace projection",
-            Self::StaleWork => "work changed; refresh before continuing",
-            Self::ConflictingSnapshot => "same work revision carries conflicting content",
-            Self::TerminalWork => "terminal work cannot be continued or rewritten",
-            Self::CancellingWork => "cancellation is in progress; continuation is refused",
-            Self::CapacityExceeded => {
-                "workspace projection capacity reached; resynchronize with the owner"
-            }
-            Self::ConflictingRetry => "continue identity was reused with different content",
-            Self::InvalidReceipt => "owner receipt does not match the continuation request",
-            Self::OwnerRefused => "workspace owner refused continuation",
-            Self::OutcomeUnknown => {
-                "continuation outcome is unknown; reconcile with the same identity"
-            }
-        };
-        f.write_str(message)
-    }
-}
-
-impl std::error::Error for WorkspaceError {}

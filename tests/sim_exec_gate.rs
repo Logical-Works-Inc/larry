@@ -25,7 +25,6 @@ mod sim_lanes;
 
 use std::error::Error;
 use std::ffi::OsStr;
-use std::fmt;
 use std::num::TryFromIntError;
 use std::path::Path;
 
@@ -150,34 +149,18 @@ fn run_case(
 type Case = (Vec<&'static str>, bool);
 
 /// Why one case could not be driven to a verdict inside its lane.
-#[derive(Debug)]
+#[derive(Debug, lgwks_macros::Error)]
 enum CaseFault {
     /// The binary could not be spawned or its report not read; the cause as text, because a
     /// boxed error cannot cross a lane.
+    #[error("case run: {0}")]
     Run(String),
     /// A lane or case index names a fixture or case that is not there.
+    #[error("case or lane index out of range")]
     Index,
     /// A lane or case index does not fit `usize`.
-    Width(TryFromIntError),
-}
-
-impl fmt::Display for CaseFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Run(ref cause) => write!(out, "case run: {cause}"),
-            Self::Index => out.write_str("case or lane index out of range"),
-            Self::Width(ref cause) => write!(out, "case or lane index too wide: {cause}"),
-        }
-    }
-}
-
-impl Error for CaseFault {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            Self::Width(ref cause) => Some(cause),
-            Self::Run(_) | Self::Index => None,
-        }
-    }
+    #[error("case or lane index too wide: {0}")]
+    Width(#[source] TryFromIntError),
 }
 
 /// Every case, drawn in order from a fresh stream on [`SIM_SEED`]: the same sequence in both

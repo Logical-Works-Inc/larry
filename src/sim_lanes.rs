@@ -6,8 +6,9 @@
 //! `tests/sim_model_client.rs`), so one owner serves every sweep.
 
 use std::any::Any;
-use std::fmt;
 use std::thread;
+
+use lgwks_macros::Error;
 
 /// Most lanes one sweep ever runs, whatever the caller asks for.
 pub(crate) const MAX_LANES: u64 = 16;
@@ -16,11 +17,13 @@ pub(crate) const MAX_LANES: u64 = 16;
 const MACHINE_LANES: u64 = 8;
 
 /// Why a sweep gave no outputs.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Error)]
 pub(crate) enum LaneError {
     /// A sweep was asked to run on no lane at all.
+    #[error("a sweep needs at least one lane")]
     NoLanes,
     /// A lane's work panicked, most often a failed assertion; its message is kept.
+    #[error("lane {lane} panicked: {message}")]
     Panicked {
         /// The lane that panicked.
         lane: u64,
@@ -28,17 +31,6 @@ pub(crate) enum LaneError {
         message: String,
     },
 }
-
-impl fmt::Display for LaneError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::NoLanes => out.write_str("a sweep needs at least one lane"),
-            Self::Panicked { lane, ref message } => write!(out, "lane {lane} panicked: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for LaneError {}
 
 /// The lanes this machine offers a sweep: its available parallelism, between one and
 /// [`MACHINE_LANES`]. A machine that cannot say, or one core, runs the sweep serially with the
