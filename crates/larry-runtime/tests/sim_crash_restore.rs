@@ -26,7 +26,7 @@ use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::projection::replay_authorizations;
 use larry_runtime::runtime::{TickItem, restore};
-use lgwks_bot::journal::JournalError;
+use lgwks_bot::kernel::journal::JournalError;
 use sim_kit::{
     Offer, Sim, dispatch, fresh_journal, read_work, reader, remove, reopen, replay, trace, work,
 };

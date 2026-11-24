@@ -19,7 +19,7 @@ use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::runtime::{Runtime, RuntimeSettings};
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 
 #[path = "../../../../tests/support/temp_dir.rs"]
 pub(crate) mod temp_dir;

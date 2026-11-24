@@ -6,7 +6,7 @@ use std::fs::File;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
 use lgwks_std::process::{ProcessIdentity, reap_orphaned_group};
 use lgwks_std::sign::SecretKey;

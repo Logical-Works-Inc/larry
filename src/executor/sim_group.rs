@@ -12,7 +12,7 @@ use std::fmt;
 use std::io;
 use std::time::Duration;
 
-use lgwks_bot::clock::{Clock, ClockError};
+use lgwks_bot::kernel::clock::{Clock, ClockError};
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::{ExecError, GROUP_PROBE_DEADLINE, await_gone, settle_with};

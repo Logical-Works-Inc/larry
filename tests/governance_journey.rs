@@ -29,7 +29,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use lgwks_bot::clock::Clock;
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::hash;
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;

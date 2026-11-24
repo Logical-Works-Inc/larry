@@ -242,7 +242,7 @@ fn probe_after_sleep_restored_at(placed: Duration) -> Result<Probe, Box<dyn std:
     let mut restored: TestRuntime = restore(
         settings_that_outlive_a_year(SecurityEpoch::INITIAL, 1)?,
         ScriptedOwner::new(),
-        lgwks_bot::clock::Clock::virtual_at(placed),
+        lgwks_bot::kernel::clock::Clock::virtual_at(placed),
         rt.into_journal(),
     )?;
     restored.submit(work_in(

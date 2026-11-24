@@ -147,7 +147,7 @@ mod tests {
         BudgetSnapshot, CapabilitySnapshot, DenialReason, EffectRequest, PinnedInputs,
         PolicySnapshot, ValiditySnapshot,
     };
-    use lgwks_bot::clock::Clock;
+    use lgwks_bot::kernel::clock::Clock;
 
     use super::Proof;
 

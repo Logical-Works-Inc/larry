@@ -72,13 +72,13 @@ fn steer_runtime(
         Some(journal) => restore(
             steer_settings(),
             ScriptedOwner::new(),
-            lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO),
+            lgwks_bot::kernel::clock::Clock::virtual_at(std::time::Duration::ZERO),
             journal,
         )?,
         None => LiveRuntime::new(
             steer_settings(),
             ScriptedOwner::new(),
-            lgwks_bot::clock::Clock::virtual_at(std::time::Duration::ZERO),
+            lgwks_bot::kernel::clock::Clock::virtual_at(std::time::Duration::ZERO),
         )?,
     })
 }

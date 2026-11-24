@@ -1,6 +1,6 @@
 //! The journal's file (larry#75): every accepted command and recorded event is
 //! staged as the in-memory index takes it, and the staged records reach an
-//! `lgwks_bot::journal::RecordJournal` in one write and one sync (group commit)
+//! `lgwks_bot::kernel::journal::RecordJournal` in one write and one sync (group commit)
 //! before the runtime reaches an owner and before a tick returns. A kill -9
 //! therefore loses no fact an owner or a caller ever saw, and the next open
 //! replays every one.
@@ -17,7 +17,7 @@ use std::path::Path;
 use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::event::{CausalRef, Event, EventKind, EventSequence};
 use larry_contracts::ids::{CommandId, RunId, TenantId};
-use lgwks_bot::journal::{DurabilityPromise, RecordJournal};
+use lgwks_bot::kernel::journal::{DurabilityPromise, RecordJournal};
 use lgwks_std::json::serde::{Deserialize, Serialize};
 
 use super::JournalEntry;
@@ -242,7 +242,7 @@ mod tests {
     use larry_contracts::event::{Event, EventKind, EventSequence};
     use larry_contracts::ids::{CommandId, RunId, TenantId};
 
-    use lgwks_bot::journal::{JournalError, RecordJournal};
+    use lgwks_bot::kernel::journal::{JournalError, RecordJournal};
 
     use super::super::Journal;
     use super::{JournalEntry, decode, encode};

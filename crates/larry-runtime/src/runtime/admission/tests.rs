@@ -12,8 +12,8 @@ use larry_contracts::event::EventKind;
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_contracts::state::RunState;
-use lgwks_bot::clock::Clock;
-use lgwks_bot::journal::JournalError;
+use lgwks_bot::kernel::clock::Clock;
+use lgwks_bot::kernel::journal::JournalError;
 
 use crate::MAX_READY_WORK;
 use crate::error::RuntimeError;

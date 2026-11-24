@@ -338,7 +338,8 @@ pub fn decide(
         // declared allowance on an ahead clock.
         Err(_) => Duration::ZERO,
     };
-    let holds = lgwks_bot::skew::lease_holds(remaining, Duration::ZERO, validity.skew_bound);
+    let holds =
+        lgwks_bot::kernel::skew::lease_holds(remaining, Duration::ZERO, validity.skew_bound);
     if !holds {
         return denied(DenialReason::AuthorityExpired);
     }

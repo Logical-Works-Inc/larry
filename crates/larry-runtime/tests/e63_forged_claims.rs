@@ -342,7 +342,7 @@ fn e63_a_proof_past_its_lease_is_refused_before_the_owner_is_reached()
         1,
     );
     let owner = ScriptedOwner::scripted([EffectOutcome::Unknown { operation }]);
-    let clock = lgwks_bot::clock::Clock::virtual_at(placed);
+    let clock = lgwks_bot::kernel::clock::Clock::virtual_at(placed);
     let mut runtime: TestRuntime = Runtime::new(settings, owner, clock.clone())?;
     runtime.submit(command)?;
     runtime.tick()?;
@@ -465,7 +465,8 @@ fn runtime_for(
         BudgetUnit::Requests,
         1,
     );
-    let clock = lgwks_bot::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
+    let clock =
+        lgwks_bot::kernel::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
     Ok(Runtime::new(settings, owner, clock)?)
 }
 
@@ -499,6 +500,7 @@ fn runtime_with(operation: OperationId) -> Result<TestRuntime, Box<dyn std::erro
         1,
     );
     let owner = ScriptedOwner::scripted([EffectOutcome::Succeeded { operation }]);
-    let clock = lgwks_bot::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
+    let clock =
+        lgwks_bot::kernel::clock::Clock::virtual_at(at.duration_since(SystemTime::UNIX_EPOCH)?);
     Ok(Runtime::new(settings, owner, clock)?)
 }
