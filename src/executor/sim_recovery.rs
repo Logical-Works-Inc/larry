@@ -16,7 +16,9 @@ use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
 use super::super::gate::{finish, policy, task_settings};
-use super::{JOURNALS_DIR, journal_live, journal_path, recover, recovered_evidence};
+use super::{
+    JOURNALS_DIR, RunLock, journal_live, journal_path, recover, recovered_evidence, run_held,
+};
 
 /// What every simulation here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -65,6 +67,50 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
     assert!(
         !journal_live(&state, &scopes, id)?,
         "a journal whose lock was released is not live"
+    );
+    Ok(())
+}
+
+/// The starting run (larry#456): a run holds its `<task>.lock` before its journal is locked,
+/// so between the two its journal is unlocked. A run lock held is live for the reap
+/// (`run_held`), for the workspace sweep (`journal_live`) and for recovery, which skips that
+/// journal without stopping and still sets the next, dead one aside; released, it is not.
+#[test]
+fn sim_a_held_run_lock_is_live_before_its_journal_is_locked() -> TestResult {
+    let (scopes, capacity) = settings()?;
+    let state = scratch_directory()?;
+    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+    let mut seeded = Seeded::from_seed(SEEDS[0]);
+    let starting = format!("018f0000-0000-7000-8000-{:012x}", seeded.below(1 << 40)?);
+    // Sorted after the starting run, so a sweep that stopped at the skip never reaches it.
+    let dead = "ffff0000-0000-7000-8000-000000000002";
+    assert!(!run_held(&state, &starting)?, "no lock file is no live run");
+    let lock = RunLock::take(&state, &starting)?.ok_or("the first take holds the lock")?;
+    // The journal exists and is unlocked, as it is between a run's create and its lock.
+    drop(Journal::open(&journal_path(&state, &starting), capacity)?);
+    drop(Journal::open(&journal_path(&state, dead), capacity)?);
+    assert!(
+        run_held(&state, &starting)?,
+        "a held run lock is a live run"
+    );
+    assert!(
+        journal_live(&state, &scopes, &starting)?,
+        "the workspace sweep reads a held run lock as live"
+    );
+    let swept = recover(&state, &scopes)?;
+    assert_eq!(swept.set_aside, 1, "only the dead run is set aside");
+    assert!(
+        journal_path(&state, &starting).exists(),
+        "the starting run keeps its journal"
+    );
+    assert!(
+        recovered_evidence(&state, dead)?.is_some(),
+        "the sweep goes on past the held run to the dead one"
+    );
+    lock.release()?;
+    assert!(
+        !run_held(&state, &starting)?,
+        "a released run lock is not live"
     );
     Ok(())
 }

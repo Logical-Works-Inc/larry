@@ -330,7 +330,7 @@ fn virtual_group_gone(clock: &Clock, pgid: i32) -> Result<bool, GroupSimError> {
 fn racing_start(directory: &Path) -> Result<usize, GroupSimError> {
     let ledger = Ledger::open(directory)?;
     let clock = Clock::virtual_at(Duration::ZERO);
-    ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))
+    ledger.reap_with(&|_task| Ok(false), |pgid| virtual_group_gone(&clock, pgid))
 }
 
 /// The racing starts scenario for one seed: `rows` dead rows, then `starts` handles reap
@@ -511,7 +511,7 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
         )?;
     }
     let clock = Clock::virtual_at(Duration::ZERO);
-    let first = ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))?;
+    let first = ledger.reap_with(&|_task| Ok(false), |pgid| virtual_group_gone(&clock, pgid))?;
     let stranger_up = process_group_exists(stranger_pid)?;
     let trace = format!("damaged={damage} reap1={first} stranger_up_after_reap1={stranger_up}");
     if !stranger_up {
@@ -525,10 +525,10 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
         });
     }
     owned.wait()?;
-    let second = ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))?;
+    let second = ledger.reap_with(&|_task| Ok(false), |pgid| virtual_group_gone(&clock, pgid))?;
     stranger.kill()?;
     stranger.wait()?;
-    let third = ledger.reap_with(|pgid| virtual_group_gone(&clock, pgid))?;
+    let third = ledger.reap_with(&|_task| Ok(false), |pgid| virtual_group_gone(&clock, pgid))?;
     let rows = ledger.live_tasks()?;
     if second != 1 || third != 1 || !rows.is_empty() {
         return Err(GroupSimError::Final {
