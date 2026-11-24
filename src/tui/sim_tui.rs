@@ -25,6 +25,10 @@ use super::worker::{Ended, Event};
 #[path = "sim_worker.rs"]
 mod worker_panics;
 
+#[cfg(test)]
+#[path = "sim_cells.rs"]
+mod cells;
+
 /// Seeds each simulation runs.
 const SEEDS: u64 = 256;
 
