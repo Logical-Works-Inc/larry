@@ -1,29 +1,25 @@
 //! The temp-path rule (larry#267, larry#293, larry#311): in test code a temp directory may be named
 //! with the process id only inside the one guard that empties the directory before use and removes
-//! it on drop. A fixture named `<label>-<pid>` that is never removed lands a later run in a dead
-//! run's tree when the system reuses that id: larry#243 measured 3,566 such directories in the
-//! system temporary directory, and larry#267 names six fixtures whose stale contents failed the
-//! tests that followed them.
+//! it on drop, or a later run lands in a dead run's tree when the system reuses that id (larry#243
+//! measured 3,566 such directories; larry#267 names six fixtures whose stale contents failed
+//! later tests).
 //!
-//! The rule reads a syntax tree, not text and not a lexer of its own (larry#293, ADR 0061): every
-//! Rust source is parsed by the estate reader `lgwks_ast`, and the rule judges one function at a
-//! time. A function that reaches a temp source and names `std::process::id`, as a call or as a
-//! value, through any `use` path, alias, `self` import, glob or `::std` prefix, is refused at its
-//! first use. Patterns, closure arguments, method calls and a shadowing local are not the process
-//! id.
+//! The rule reads a syntax tree from the estate reader `lgwks_ast` (larry#293, ADR 0061) and
+//! judges one function at a time: one that reaches a temp source and names `std::process::id`, as
+//! a call or a value, through any `use` path, alias, `self` import, glob or `::std` prefix, is
+//! refused at its first use. The checked parse runs on every source; the verdict and follow passes
+//! run only on a text that can raise them (larry#415, ADR 0109).
 //!
 //! The roots are the workspace's members, read from the root `Cargo.toml` (larry#311, ADR 0063):
-//! the `[workspace] members` array, each entry a literal path or a trailing `*` glob, plus the root
-//! package when the manifest declares `[package]`. Every member's `src` and `tests` are read, a
-//! missing one is a typed refusal naming it, and `#[path]` and `include!` modules are followed and
-//! inherit the test-code status of the file that names them. The sources are parsed once each on a
-//! scoped pool of at most the host's available cores, and each answer is stored at its path's
-//! index, so the count of workers can never change the report (larry#316). The directory walk never
-//! follows a symlink (CWE-59).
+//! the `[workspace] members` array (a literal path or a trailing `*` glob) plus the root package.
+//! Every member's `src` and `tests` are read, a missing one is a typed refusal, and `#[path]` and
+//! `include!` modules are followed and inherit the test-code status of the file naming them. The
+//! sources are parsed on a scoped pool of at most the host's cores, each answer stored at its
+//! path's index, so the worker count never changes the report (larry#316). The walk never follows
+//! a symlink (CWE-59).
 //!
-//! Source: The Rust Reference on path expressions, use declarations, modules and macros-by-example;
-//! the Cargo Book on workspaces; POSIX `mkstemp(3)` (a temporary name must be unique and owned by
-//! its maker); CWE-377 (insecure temporary file) and CWE-59 (link following).
+//! Source: The Rust Reference on paths, use declarations, modules and macros; the Cargo Book on
+//! workspaces; POSIX `mkstemp(3)`; CWE-377 (insecure temporary file) and CWE-59 (link following).
 
 mod syntax;
 mod uses;
@@ -39,11 +35,9 @@ use super::error::GovernanceError;
 use super::read::{self, ReadFault};
 use syntax::{crate_root, follow_names, is_test_code, verdicts};
 
-/// The one guard of the crate's tests and the one guard of the integration tests. Each empties its
-/// directory before use and removes it on drop (`executor::sim_tree::scratch`, `TempDir` behind
-/// `support/temp_dir.rs`), so the process id there names a directory its owner replaces and then
-/// removes, never a leftover. Every other temp path in test code reaches its directory through one
-/// of them.
+/// The one guard of the crate's tests and the one of the integration tests: each empties its
+/// directory before use and removes it on drop, so the process id there names no leftover, and
+/// every other temp path in test code reaches its directory through one of them.
 const GUARDS: [&str; 2] = ["src/executor/sim_tree.rs", "tests/support/temp_dir.rs"];
 
 /// The directories the rule reads under every workspace member, in order.
@@ -85,40 +79,29 @@ impl Workspace {
     /// is a typed refusal.
     pub(crate) fn read(root: &Path) -> Result<Self, GovernanceError> {
         let manifest = root.join("Cargo.toml");
+        let broken = |cause: String| GovernanceError::Workspace { cause };
+        let unreadable = |cause: io::Error| GovernanceError::Unreadable {
+            relative: String::from("Cargo.toml"),
+            cause,
+        };
         let bytes = match std::fs::symlink_metadata(&manifest) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(GovernanceError::Workspace {
-                    cause: String::from("Cargo.toml is a symbolic link"),
-                });
+                return Err(broken(String::from("Cargo.toml is a symbolic link")));
             }
             Ok(metadata) if !metadata.is_file() => {
-                return Err(GovernanceError::Workspace {
-                    cause: String::from("Cargo.toml is not a file"),
-                });
+                return Err(broken(String::from("Cargo.toml is not a file")));
             }
-            Ok(_) => std::fs::read(&manifest).map_err(|cause| GovernanceError::Unreadable {
-                relative: String::from("Cargo.toml"),
-                cause,
-            })?,
+            Ok(_) => std::fs::read(&manifest).map_err(unreadable)?,
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
                     members: Vec::new(),
                 });
             }
-            Err(cause) => {
-                return Err(GovernanceError::Unreadable {
-                    relative: String::from("Cargo.toml"),
-                    cause,
-                });
-            }
+            Err(cause) => return Err(unreadable(cause)),
         };
         let text = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
-            Err(cause) => {
-                return Err(GovernanceError::Workspace {
-                    cause: format!("Cargo.toml is not UTF-8: {cause}"),
-                });
-            }
+            Err(cause) => return Err(broken(format!("Cargo.toml is not UTF-8: {cause}"))),
         };
         let mut members = Vec::new();
         if section(text, "package").is_some() {
@@ -332,12 +315,17 @@ pub(crate) fn errors(root: &Path) -> Result<Vec<String>, GovernanceError> {
 #[cfg(test)]
 pub(super) fn errors_on(root: &Path, lanes: usize) -> Result<Vec<String>, GovernanceError> {
     let workspace = Workspace::read(root)?;
-    rule_errors_with(root, &workspace, Some(lanes))
+    rule_errors_with(root, &workspace, Some(lanes), true)
 }
 
-/// The lanes one whole-tree check may use: the host's available parallelism and never more than
-/// its pending files, and never fewer than one, so a host that cannot report its cores still
-/// checks every file in path order.
+/// Every refusal over `root` with every pass run on every source: what the gated report equals.
+#[cfg(test)]
+pub(super) fn errors_ungated(root: &Path) -> Result<Vec<String>, GovernanceError> {
+    rule_errors_with(root, &Workspace::read(root)?, None, false)
+}
+
+/// The lanes one check may use: the host's cores, at most one per pending file and at least one,
+/// so a host that cannot report its cores still checks every file in path order.
 fn lane_count(files: usize) -> usize {
     let cores = match std::thread::available_parallelism() {
         Ok(count) => count.get(),
@@ -346,21 +334,21 @@ fn lane_count(files: usize) -> usize {
     cores.clamp(1, files.max(1))
 }
 
-/// Every refusal the rule raises over the sources of `workspace`: the member roots, the walk, the
-/// parse, the verdicts and the followed modules.
+/// Every refusal the rule raises over the sources of `workspace`.
 pub(crate) fn rule_errors(
     root: &Path,
     workspace: &Workspace,
 ) -> Result<Vec<String>, GovernanceError> {
-    rule_errors_with(root, workspace, None)
+    rule_errors_with(root, workspace, None, true)
 }
 
 /// The refusals over `workspace`'s sources, every round of followed modules scanned on `lanes`
-/// threads when one names them, else on the host's own lane count.
+/// threads when one names them, else on the host's own lane count; `gated` as for [`scan`].
 fn rule_errors_with(
     root: &Path,
     workspace: &Workspace,
     lanes: Option<usize>,
+    gated: bool,
 ) -> Result<Vec<String>, GovernanceError> {
     let mut errors = Vec::new();
     let mut queue: VecDeque<Source> = VecDeque::new();
@@ -413,7 +401,7 @@ fn rule_errors_with(
             Some(lanes) => lanes.clamp(1, pending.len().max(1)),
             None => lane_count(pending.len()),
         };
-        for scanned in scan_all(&canonical_root, &pending, lanes) {
+        for scanned in scan_all(&canonical_root, &pending, lanes, gated) {
             errors.extend(scanned.errors);
             queue.extend(scanned.follows);
         }
@@ -426,12 +414,12 @@ fn rule_errors_with(
 /// Scans every pending source on at most `lanes` scoped threads: one cursor hands each thread the
 /// next path, each answer lands at its path's index, and the answers are read back in path order,
 /// so the report never depends on which lane finished first.
-fn scan_all(canonical_root: &Path, pending: &[Source], lanes: usize) -> Vec<Scanned> {
+fn scan_all(canonical_root: &Path, pending: &[Source], lanes: usize, gated: bool) -> Vec<Scanned> {
     let lanes = lanes.clamp(1, pending.len().max(1));
     let mut scanned: Vec<Option<Scanned>> = pending.iter().map(|_| None).collect();
     if lanes == 1 {
         for (slot, source) in scanned.iter_mut().zip(pending) {
-            *slot = Some(scan(canonical_root, &source.0, &source.1, source.2));
+            *slot = Some(scan(canonical_root, &source.0, &source.1, source.2, gated));
         }
     } else {
         let cursor = AtomicUsize::new(0);
@@ -445,7 +433,9 @@ fn scan_all(canonical_root: &Path, pending: &[Source], lanes: usize) -> Vec<Scan
                             let Some(source) = pending.get(at) else {
                                 break;
                             };
-                            mine.push((at, scan(canonical_root, &source.0, &source.1, source.2)));
+                            let answer =
+                                scan(canonical_root, &source.0, &source.1, source.2, gated);
+                            mine.push((at, answer));
                         }
                         mine
                     })
@@ -483,8 +473,7 @@ fn scan_all(canonical_root: &Path, pending: &[Source], lanes: usize) -> Vec<Scan
         .collect()
 }
 
-/// The order the rule reports in: by the file, then by the line inside it, so a report reads in
-/// the order a person opens the files.
+/// The report order: by file, then by line, the order a person opens the files.
 fn sort_by_file_and_line(errors: &mut [String]) {
     errors.sort_by_key(|error| match error.rsplit_once(':') {
         Some((file, line)) => match line.parse::<usize>() {
@@ -562,73 +551,90 @@ pub(super) fn entry_name(entry: &Path) -> Result<&str, EntryError> {
 }
 
 /// Reads, parses and judges one source file; a reader refusal is a message naming the file, never
-/// a pass.
-fn scan(canonical_root: &Path, path: &Path, relative: &str, inherited_test: bool) -> Scanned {
-    let mut scanned = Scanned {
-        errors: Vec::new(),
+/// a pass. The checked parse always runs, so a syntax fault or an over-budget tree refuses whatever
+/// the text holds; `gated` skips the verdict and follow passes on a text that cannot raise them
+/// (larry#415), and `false` runs both on every source, the reference the simulation compares to.
+fn scan(
+    canonical_root: &Path,
+    path: &Path,
+    relative: &str,
+    inherited_test: bool,
+    gated: bool,
+) -> Scanned {
+    let refused = |error: GovernanceError| Scanned {
+        errors: vec![error.to_string()],
         follows: Vec::new(),
     };
+    let named = || String::from(relative);
     let contents = match read_source(canonical_root, relative) {
         Ok(SourceRead::Contents(contents)) => contents,
         Ok(SourceRead::TooLarge(bytes)) => {
-            scanned.errors.push(
-                GovernanceError::SourceTooLarge {
-                    relative: String::from(relative),
-                    bytes,
-                }
-                .to_string(),
-            );
-            return scanned;
+            return refused(GovernanceError::SourceTooLarge {
+                relative: named(),
+                bytes,
+            });
         }
         Err(cause) => {
-            scanned.errors.push(
-                GovernanceError::Unreadable {
-                    relative: String::from(relative),
-                    cause,
-                }
-                .to_string(),
-            );
-            return scanned;
+            return refused(GovernanceError::Unreadable {
+                relative: named(),
+                cause,
+            });
         }
     };
     let text = match std::str::from_utf8(&contents) {
         Ok(text) => text,
-        Err(_) => {
-            scanned.errors.push(
-                GovernanceError::SourceNotUtf8 {
-                    relative: String::from(relative),
-                }
-                .to_string(),
-            );
-            return scanned;
-        }
+        Err(_) => return refused(GovernanceError::SourceNotUtf8 { relative: named() }),
     };
     let tree: Parsed = match try_parse(text, Language::Rust) {
         Ok(tree) => tree,
         Err(cause) => {
-            scanned.errors.push(
-                GovernanceError::Source {
-                    relative: String::from(relative),
-                    cause,
-                }
-                .to_string(),
-            );
-            return scanned;
+            return refused(GovernanceError::Source {
+                relative: named(),
+                cause,
+            });
         }
     };
+    let mut scanned = Scanned {
+        errors: Vec::new(),
+        follows: Vec::new(),
+    };
+    let (verdict_possible, follow_possible) =
+        (!gated || may_refuse(text), !gated || may_follow(text));
+    if !verdict_possible && !follow_possible {
+        return scanned;
+    }
     let test_code = inherited_test || is_test_code(relative, &tree);
-    scanned.follows = follows(
-        canonical_root,
-        path,
-        relative,
-        &tree,
-        test_code,
-        &mut scanned.errors,
-    );
-    if test_code {
+    if follow_possible {
+        scanned.follows = follows(
+            canonical_root,
+            path,
+            relative,
+            &tree,
+            test_code,
+            &mut scanned.errors,
+        );
+    }
+    if test_code && verdict_possible {
         scanned.errors.extend(verdicts(relative, text, &tree));
     }
     scanned
+}
+
+/// Whether the verdict pass can raise anything over `text`: a verdict needs the process id and a
+/// temp source in one function. Every path to the id names `process` and every temp source names
+/// `temp_dir`, a literal that starts the system temp directory (so it holds `tmp`) or `TMPDIR`; a
+/// syntax tree expands no macro, so each is spelled in the text, and a source without them raises
+/// nothing.
+pub(super) fn may_refuse(text: &str) -> bool {
+    text.contains("process")
+        && ["temp_dir", "tmp", "TMPDIR"]
+            .iter()
+            .any(|token| text.contains(token))
+}
+
+/// Whether the follow pass can name a module over `text`: a `#[path` attribute or an `include!`.
+pub(super) fn may_follow(text: &str) -> bool {
+    text.contains("#[path") || text.contains("include")
 }
 
 /// The `#[path = "..."]` and `include!("...")` sources `tree` names, resolved beside its file and
