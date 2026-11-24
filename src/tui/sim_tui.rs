@@ -399,6 +399,7 @@ fn unreachable_model(
     let state = root.to_string_lossy().into_owned();
     crate::executor::Settings::from_env(move |name| match name {
         "LARRY_STATE_DIR" => Some(state.clone()),
+        "PATH" => Some(String::from("bin")),
         "LARRY_MODEL_URL" => Some(String::from("http://127.0.0.1:9/v1")),
         "LARRY_MODEL" => Some(String::from("sim-model")),
         "LARRY_MODEL_KEY" => Some(String::from("sim-key")),
@@ -519,6 +520,7 @@ fn sim_tui_header_status_names_why_commands_are_off() -> Result<(), Box<dyn std:
         let state = state.clone();
         crate::executor::Settings::from_env(move |name| match name {
             "LARRY_STATE_DIR" => Some(state.clone()),
+            "PATH" => Some(String::from("bin")),
             "LARRY_POLICY" => policy.map(str::to_owned),
             _ => None,
         })

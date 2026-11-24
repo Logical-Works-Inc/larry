@@ -37,7 +37,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use exec_cli::deadline::{await_fifo_writer, await_group_exit};
@@ -738,5 +738,50 @@ fn exec_refuses_an_unknown_policy_name() -> TestResult {
     ];
     let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
     assert_refused(&output, "root");
+    Ok(())
+}
+
+#[test]
+fn a_bad_model_timeout_does_not_fail_a_task_with_no_brief() -> TestResult {
+    // larry#213: model settings are parsed only when a task reaches a model, so a typo in
+    // one of them fails nothing a task with no brief uses.
+    let (state, origin) = fixture()?;
+    let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
+    let env: [(&str, &OsStr); 5] = [
+        ("LARRY_STATE_DIR", state.path().as_os_str()),
+        ("LARRY_MODEL_URL", OsStr::new("http://127.0.0.1:9/v1")),
+        ("LARRY_MODEL", OsStr::new("mock-model")),
+        ("LARRY_MODEL_KEY", OsStr::new("test-key")),
+        ("LARRY_MODEL_TIMEOUT_MS", OsStr::new("abc")),
+    ];
+    let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
+    let report = report_of(&output)?;
+    assert!(
+        flag_of(&report, "accepted")?,
+        "a task with no brief never reads the model's settings"
+    );
+    Ok(())
+}
+
+#[test]
+fn exec_refuses_an_unset_path_typed() -> TestResult {
+    // larry#213: an unset PATH is a typed refusal, never the empty string every command
+    // would then be looked up under. The child gets no PATH at all.
+    let (state, origin) = fixture()?;
+    let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+        .arg("exec")
+        .env_clear()
+        .env("LARRY_STATE_DIR", state.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(task.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    assert_refused(&output, "PATH is unset");
+    assert!(output.stdout.is_empty(), "a refused run seals no report");
     Ok(())
 }

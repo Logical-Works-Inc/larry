@@ -21,6 +21,8 @@ pub enum ExecError {
     Output(std::io::Error),
     /// `LARRY_STATE_DIR` is unset or empty.
     StateDirUnset,
+    /// `PATH` is unset: no command is looked up under an empty path (larry#213).
+    PathUnset,
     /// `LARRY_EXEC_TIMEOUT_MS` is not a whole number of milliseconds in 1..=86400000.
     BadTimeout {
         /// The value that was refused.
@@ -211,6 +213,9 @@ impl fmt::Display for ExecError {
             Self::NotUnicode { ref name } => {
                 write!(out, "exec {name} is not UTF-8; set it to UTF-8 text")
             }
+            Self::PathUnset => out.write_str(
+                "exec PATH is unset; set it to the directories the commands are found in",
+            ),
             Self::Confine(ref cause) => write!(out, "exec confinement: {cause}"),
             Self::SnapshotTooLarge { what, limit } => write!(
                 out,
@@ -249,6 +254,7 @@ impl std::error::Error for ExecError {
             Self::Confine(ref cause) => Some(cause),
             Self::KeyMissing
             | Self::StateDirUnset
+            | Self::PathUnset
             | Self::BadTimeout { .. }
             | Self::BadPolicy { .. }
             | Self::Git { .. }
