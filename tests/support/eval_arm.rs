@@ -12,6 +12,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+#[path = "stdin_feed.rs"]
+mod stdin_feed;
+use stdin_feed::feed_stdin;
+
 /// What every journey returns.
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -145,9 +149,8 @@ impl Ran {
 /// Runs `larry eval` with `set` on stdin to its end.
 pub(super) fn score_arm(env: &[(&'static str, OsString)], set: &[u8]) -> TestResult<Ran> {
     let mut child = spawn_arm(env, true)?;
-    let mut stdin = child.stdin.take().ok_or("child stdin was not piped")?;
-    stdin.write_all(set)?;
-    drop(stdin);
+    let stdin = child.stdin.take().ok_or("child stdin was not piped")?;
+    feed_stdin(stdin, set)?;
     let output: Output = child.wait_with_output()?;
     let card = if output.stdout.is_empty() {
         None

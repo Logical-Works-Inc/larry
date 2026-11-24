@@ -287,6 +287,36 @@ fn a_fat_fingered_price_or_set_spends_nothing() -> TestResult {
     Ok(())
 }
 
+/// Bytes of padding after a valid set: past every pipe buffer (64 KiB on Linux), so the write
+/// is still going when a refusing child exits without having read any of it.
+const PIPE_OVERFLOW: usize = 262_144;
+
+/// larry#444: `larry eval` refuses an unset price before it reads stdin, so a set larger than
+/// the pipe can never be written whole. The broken pipe is the child having stopped reading:
+/// the harness takes its status and stderr and the run is the refusal, never an I/O error.
+#[test]
+fn a_set_larger_than_the_pipe_to_a_refusing_eval_is_a_refusal() -> TestResult {
+    let mut set = json!({"name": "s", "tasks": [task("one", 1, &[])]}).to_string();
+    set.push_str(&" ".repeat(PIPE_OVERFLOW));
+    let state = TempDir::new()?;
+    mock_model::run(Config::seeded(12), |handle: &Handle| {
+        let base = operator(&state, handle.addr(), &CLAUDE, "1");
+        let env = with(&base, "LARRY_EVAL_PRICE_OUT", None);
+        let ran = score_arm(&env, set.as_bytes())?;
+        assert_eq!(ran.code, Some(1), "refused with exit 1");
+        assert!(ran.card.is_none(), "no scorecard");
+        assert!(
+            ran.stderr.contains("LARRY_EVAL_PRICE_OUT is unset"),
+            "stderr names it: {}",
+            ran.stderr
+        );
+        assert_eq!(handle.served(), 0, "nothing reached the gateway");
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })?;
+    assert_eq!(origins_left(&state)?, 0, "no origin was made");
+    Ok(())
+}
+
 /// The gateway's lie for each task in order, and the ending it must score.
 const LIES: [(Option<Fault>, &str); 11] = [
     (Some(Fault::Delay), "accepted"),

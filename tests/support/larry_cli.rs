@@ -7,8 +7,11 @@
 
 use std::error::Error;
 use std::ffi::OsStr;
-use std::io::Write;
 use std::process::{Child, Command, Output, Stdio};
+
+#[path = "stdin_feed.rs"]
+mod stdin_feed;
+use stdin_feed::feed_stdin;
 
 /// Starts `larry` with `args`, only PATH and `env` set, writes `input` to its
 /// stdin and closes it. The one-shot children of the executor and CLI journeys
@@ -29,13 +32,9 @@ pub(crate) fn spawn_larry_args(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(stdin) = child.stdin.take() {
         // A refused input may exit before it reads stdin; the broken pipe is the refusal itself.
-        match stdin.write_all(input) {
-            Ok(()) => {}
-            Err(ref cause) if cause.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Err(cause) => return Err(cause.into()),
-        }
+        feed_stdin(stdin, input)?;
     }
     Ok(child)
 }
