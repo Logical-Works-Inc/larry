@@ -55,6 +55,8 @@ pub enum TuiError {
     Terminal(io::Error),
     /// The working directory could not be read.
     Directory(io::Error),
+    /// The session running at quit had stopped on a panic; the text names it (larry#412).
+    Session(String),
 }
 
 impl fmt::Display for TuiError {
@@ -62,6 +64,7 @@ impl fmt::Display for TuiError {
         match *self {
             Self::Terminal(ref cause) => write!(out, "terminal: {cause}"),
             Self::Directory(ref cause) => write!(out, "working directory: {cause}"),
+            Self::Session(ref why) => write!(out, "session: {why}"),
         }
     }
 }
@@ -70,6 +73,7 @@ impl std::error::Error for TuiError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Terminal(ref cause) | Self::Directory(ref cause) => Some(cause),
+            Self::Session(_) => None,
         }
     }
 }
@@ -223,8 +227,9 @@ fn header(
 ///
 /// # Errors
 ///
-/// [`TuiError`] when the terminal or the working directory fails; a session's
-/// own failure is shown in the frame, never returned.
+/// [`TuiError`] when the terminal or the working directory fails, or when the
+/// session still running at quit had stopped on a panic; every other failure of
+/// a session is shown in the frame, never returned.
 pub fn run() -> Result<(), TuiError> {
     let cwd = std::env::current_dir().map_err(TuiError::Directory)?;
     // A refused environment is the settings' error, shown in the welcome box.
@@ -238,22 +243,30 @@ pub fn run() -> Result<(), TuiError> {
     let (welcome, status) = header(&settings, &cwd, home.as_deref());
     let (width, height) = terminal::size().map_err(TuiError::Terminal)?;
     let mut app = App::new(welcome, status, usize::from(width), usize::from(height));
+    // Declared before the terminal, so an unwind restores the screen before the worker's
+    // drop reaps the session.
+    let mut worker: Option<Worker> = None;
     let mut screen = Terminal::enter().map_err(TuiError::Terminal)?;
-    let outcome = drive(&mut app, &mut screen, &settings, &cwd);
+    let outcome = drive(&mut app, &mut screen, &mut worker, &settings, &cwd);
+    // Every return reaps the session here, so its panic is reported, never dropped (larry#412).
+    let panicked = match worker.take().and_then(Worker::finish) {
+        Some(why) => Err(TuiError::Session(why)),
+        None => Ok(()),
+    };
     let left = screen.leave().map_err(TuiError::Terminal);
-    outcome.and(left)
+    outcome.and(panicked).and(left)
 }
 
 /// The loop: paint, wait for a key or a tick, take the session's events, act.
 fn drive(
     app: &mut App,
     screen: &mut Terminal,
+    worker: &mut Option<Worker>,
     settings: &Result<Settings, ExecError>,
     cwd: &Path,
 ) -> Result<(), TuiError> {
     let clock = Instant::now();
     let mut shown: Option<Frame> = None;
-    let mut worker: Option<Worker> = None;
     let mut bytes = Vec::new();
     loop {
         let frame = app.draw();
@@ -279,14 +292,14 @@ fn drive(
             }
         }
         for _ in 0..EVENTS_PER_TURN {
-            let Some(event) = worker.as_ref().and_then(Worker::next) else {
+            let Some(event) = worker.as_mut().and_then(Worker::next) else {
                 break;
             };
             let last = matches!(event, Event::Ended(_));
             effects.extend(app.handle(Input::Worker(event)));
             if last {
                 // The session ended: reap its thread now.
-                worker = None;
+                *worker = None;
             }
         }
         effects.extend(app.handle(Input::Tick(clock.elapsed())));
@@ -294,7 +307,7 @@ fn drive(
             match effect {
                 Effect::Quit => return Ok(()),
                 Effect::Start(instruction) => {
-                    worker = start(app, settings, instruction, cwd);
+                    *worker = start(app, settings, instruction, cwd);
                 }
                 Effect::Decide(decision) => {
                     if let Some(running) = worker.as_ref() {

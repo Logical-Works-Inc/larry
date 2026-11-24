@@ -82,7 +82,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `model::wire`, `model::wire::sim` (`sim_wire.rs`) | The request body and the reply parser, cached and written tokens in every provider shape; the seeded usage round trips (larry#230, ADR 0043) |
 | `tui` | Bare `larry`: the terminal guard, key mapping and the drive loop over a real session (ADR 0045) |
 | `tui::app`, `tui::ask` | The pure state: keys and session events in, effects and one frame out; no terminal, no clock; the question's title, answers, highlighted marker and the fit that keeps its title and first command row (larry#325) |
-| `tui::worker` | `run_session` on its own thread; bounded event and answer channels; approve, decline, cancel, join |
+| `tui::worker`, `tui::sim_tui::worker_panics` | `run_session` on its own thread; bounded event and answer channels; approve, decline, cancel, join; a thread that panics ends its task as `Failed` naming the panic (larry#412) |
 | `tui::buffer`, `tui::style` | The cell buffer, its diff and DEC 2026 frame; reset-first SGR, widths, wrap, sanitize |
 | `tui::layout`, `tui::pane`, `tui::sim_tui::chat` | The phone-ratio chat column (44..64) and the artifact pane at 108+ columns; the pane's bounded Output, Diff and Receipt tabs and their paint (larry#244, ADR 0047); the chat/pane column sim reads the frame and holds that no chat text paints right of the pane's rule (larry#340) |
 | `tui::cells`, `tui::composer` | Transcript entries drawn the Codex way; the multi-line composer, history and slash popup |
