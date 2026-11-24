@@ -23,6 +23,10 @@ use crate::json_at::At;
 use crate::mcp::wire;
 use crate::sim_error::SimError;
 
+/// `session/close` and the session bound (larry#411).
+#[path = "sim_close.rs"]
+mod close;
+
 /// What every simulation returns.
 type SimResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -565,6 +569,7 @@ fn live(cwd: &str) -> Entry {
         started: 0,
         cancelled: BTreeSet::new(),
         abandoned: false,
+        closing: false,
     }
 }
 
