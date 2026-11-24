@@ -22,6 +22,9 @@ use super::layout::{CHAT_MAX, CHAT_MIN, SPLIT_MIN, split};
 use super::style::Style;
 use super::worker::{Ended, Event};
 
+#[path = "sim_worker.rs"]
+mod worker_panics;
+
 /// Seeds each simulation runs.
 const SEEDS: u64 = 256;
 
@@ -376,7 +379,7 @@ const WORKER_PATIENCE: Duration = Duration::from_secs(120);
 /// Every event the worker sends, up to and including its `Ended`; `None` when the session sent
 /// nothing inside [`WORKER_PATIENCE`], so a caller fails the run by name instead of ending the
 /// loop early.
-fn every_event(worker: &super::worker::Worker) -> Option<Vec<Event>> {
+fn every_event(worker: &mut super::worker::Worker) -> Option<Vec<Event>> {
     let mut seen = Vec::new();
     loop {
         let event = worker.wait(WORKER_PATIENCE)?;
@@ -423,14 +426,14 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
     );
     let root = crate::executor::sim_tree::scratch("tui-worker")?;
     let settings = unreachable_model(&root)?;
-    let worker = super::worker::Worker::spawn(
+    let mut worker = super::worker::Worker::spawn(
         String::from("write hello.txt"),
         root.to_path_buf(),
         settings.clone(),
         Isolation::Host,
         false,
     )?;
-    let seen = every_event(&worker).ok_or("the session sent no event inside its bound")?;
+    let seen = every_event(&mut worker).ok_or("the session sent no event inside its bound")?;
     assert_eq!(seen.last(), Some(&Event::Ended(Ended::Refused)), "{seen:?}");
     // The sealed refusal reaches the frame as a receipt: not accepted, nothing ran.
     let Some(before_end) = seen.iter().rev().nth(1) else {
@@ -478,14 +481,14 @@ fn sim_tui_worker_refused_confinement_ends_failed_with_the_reason()
     let root = crate::executor::sim_tree::scratch("tui-refused")?;
     let settings = unreachable_model(&root)?;
     let isolation = Isolation::Workspace(crate::executor::Platform::Other);
-    let worker = super::worker::Worker::spawn(
+    let mut worker = super::worker::Worker::spawn(
         String::from("x"),
         root.to_path_buf(),
         settings,
         isolation,
         false,
     )?;
-    let seen = every_event(&worker).ok_or("the session sent no event inside its bound")?;
+    let seen = every_event(&mut worker).ok_or("the session sent no event inside its bound")?;
     match seen.last() {
         Some(&Event::Ended(Ended::Failed(ref why))) => {
             assert!(why.contains("no kernel confinement"), "{why}");

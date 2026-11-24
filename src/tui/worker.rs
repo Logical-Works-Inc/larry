@@ -8,13 +8,16 @@
 //! answer; a frame that is gone answers by dropping it, and a dropped answer is
 //! a decline, so nothing runs unless a person said yes (OWASP ASVS 4.0.3 §4.1.3,
 //! deny by default). The thread is owned: [`Worker`] cancels and joins it on
-//! drop, so no session outlives the frame that started it.
+//! drop, so no session outlives the frame that started it. A thread that panics
+//! sends no `Ended`, so the read that finds its channel closed joins it and
+//! ends the task as [`Ended::Failed`] naming the panic (larry#412).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use lgwks_std::json::Value;
 
@@ -150,7 +153,7 @@ pub(crate) enum Event {
 }
 
 /// The observer the session reports to, on the worker thread.
-struct Relay {
+pub(super) struct Relay {
     /// Where events go.
     events: SyncSender<Event>,
     /// Where the person's answers come from.
@@ -273,6 +276,23 @@ impl Worker {
         isolation: Isolation,
         always: bool,
     ) -> std::io::Result<Self> {
+        Self::start(always, move |relay| {
+            match run_session(&instruction, &cwd, &settings, isolation, relay) {
+                Ok(done) => {
+                    relay.send(Event::Receipt(receipt_of(&done.report)));
+                    Ok(done.stop)
+                }
+                Err(cause) => Err(cause),
+            }
+        })
+    }
+
+    /// Runs `job` on the session thread with its relay; the job's outcome is the last event.
+    /// `spawn` is its one production caller; the worker sims give it a job that breaks.
+    pub(super) fn start<F>(always: bool, job: F) -> std::io::Result<Self>
+    where
+        F: FnOnce(&mut Relay) -> Result<Stop, ExecError> + Send + 'static,
+    {
         let (event_tx, events) = sync_channel(EVENTS);
         let (decisions, decision_rx) = sync_channel(1);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -286,14 +306,7 @@ impl Worker {
             .name(String::from("larry-session"))
             .spawn(move || {
                 let mut relay = relay;
-                let outcome =
-                    match run_session(&instruction, &cwd, &settings, isolation, &mut relay) {
-                        Ok(done) => {
-                            relay.send(Event::Receipt(receipt_of(&done.report)));
-                            Ok(done.stop)
-                        }
-                        Err(cause) => Err(cause),
-                    };
+                let outcome = job(&mut relay);
                 relay.send(Event::Ended(ended(outcome)));
             })?;
         Ok(Self {
@@ -304,16 +317,49 @@ impl Worker {
         })
     }
 
-    /// The next event, if one is waiting. A session that is gone sent
-    /// [`Event::Ended`] last, so an empty and a closed channel read the same.
-    pub(crate) fn next(&self) -> Option<Event> {
-        self.events.as_ref()?.try_iter().next()
+    /// The next event, if one is waiting; the frame reads with it between paints.
+    pub(crate) fn next(&mut self) -> Option<Event> {
+        self.wait(Duration::ZERO)
     }
 
-    /// The next event within `patience`; the worker sims wait on it instead of sleeping.
-    #[cfg(test)]
-    pub(crate) fn wait(&self, patience: std::time::Duration) -> Option<Event> {
-        self.events.as_ref()?.recv_timeout(patience).ok()
+    /// The next event within `patience`. A session that ended sent [`Event::Ended`] last, so
+    /// a closed channel after it reads as nothing. A channel that closed with no `Ended` is a
+    /// thread that panicked: the read joins it and ends the task as [`Ended::Failed`] naming
+    /// the panic, once (larry#412). The worker sims wait on it instead of sleeping.
+    pub(crate) fn wait(&mut self, patience: Duration) -> Option<Event> {
+        let got = self.events.as_ref()?.recv_timeout(patience);
+        match got {
+            Ok(event) => Some(event),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                self.events = None;
+                self.join().map(|why| Event::Ended(Ended::Failed(why)))
+            }
+        }
+    }
+
+    /// Stops and reaps the session at quit: the panic it stopped on, if it panicked, so the
+    /// caller reports it once the screen is restored (larry#412).
+    pub(crate) fn finish(mut self) -> Option<String> {
+        self.halt();
+        self.join()
+    }
+
+    /// Cancels, then drops both channels so a session blocked on a send or on an answer
+    /// wakes to a decline and ends.
+    fn halt(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        self.decisions = None;
+        self.events = None;
+    }
+
+    /// Joins the thread, once: the text its panic carried, if it panicked.
+    fn join(&mut self) -> Option<String> {
+        let payload = self.thread.take()?.join().err()?;
+        Some(format!(
+            "the session stopped on a panic: {}",
+            crate::panic_text(&*payload)
+        ))
     }
 
     /// Answers the command the session asked about; a session that already
@@ -334,11 +380,10 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // Cancel, then drop both channels so a session blocked on a send or on
-        // an answer wakes to a decline and ends; then reap the thread.
-        self.cancel.store(true, Ordering::Release);
-        self.decisions = None;
-        self.events = None;
+        self.halt();
+        // `tui::run` finishes its worker on every return, so a thread still held here is the
+        // frame's own unwind: that panic is the failure the process reports, and std's panic
+        // hook named this session's panic as it happened. The join reaps the thread.
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
