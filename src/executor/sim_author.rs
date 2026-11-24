@@ -7,7 +7,9 @@
 
 use std::error::Error;
 use std::fs;
+use std::time::Duration;
 
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::json::{Map, Value, json};
 use lgwks_std::seeded::Seeded;
 
@@ -532,7 +534,11 @@ fn sim_a_context_past_its_bound_falls_back_to_one_file() -> TestResult {
 /// `None`). Its pause refuses every wait, and the simulation only asks it `fits`,
 /// so it never sends.
 fn bounded_client(bound: Option<usize>) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(bound)?, |_wait| false))
+    Ok(ModelClient::new(
+        sim_config(bound)?,
+        Clock::virtual_at(Duration::ZERO),
+        |_wait| false,
+    ))
 }
 
 /// escaper (RFC 8259 section 7: a control byte is written as a six-byte `\u` escape):

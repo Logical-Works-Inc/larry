@@ -30,7 +30,7 @@ use larry_runtime::runtime::restore;
 use lgwks_bot::kernel::journal::JournalError;
 
 use super::ExecError;
-use super::gate::{task_settings, with_expiry};
+use super::gate::{lease_start, task_settings, with_expiry};
 
 /// The directory under the state directory that holds the task journals.
 pub(super) const JOURNALS_DIR: &str = "journals";
@@ -161,14 +161,11 @@ const fn unknown(intent: &EffectIntent) -> EffectOutcome {
 /// Replays, restores and ticks one journal a dead executor left, so the
 /// reservation it proves is recorded as settled before the file is set aside.
 fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError> {
-    let run_settings = with_expiry(task_settings(policy), SystemTime::now())?;
+    // One clock: the lease starts at its reading and the restored runtime ticks on it (larry#436).
+    let clock = larry_runtime::live_clock()?;
+    let run_settings = with_expiry(task_settings(policy), lease_start(&clock)?)?;
     let journal = Journal::open(path, run_settings.journal_capacity)?;
-    let mut runtime = restore::<FoldProjection, _>(
-        run_settings,
-        Recovered,
-        larry_runtime::live_clock()?,
-        journal,
-    )?;
+    let mut runtime = restore::<FoldProjection, _>(run_settings, Recovered, clock, journal)?;
     runtime.tick()?;
     Ok(())
 }

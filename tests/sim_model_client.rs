@@ -15,6 +15,8 @@
 mod json_at;
 use json_at::At;
 
+#[path = "sim_model_client/clock.rs"]
+mod clock;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/mock_model.rs"]
@@ -25,10 +27,11 @@ mod sim_lanes;
 use std::error::Error;
 use std::io::Write;
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::json::{self, Value};
 use mock_model::{Config, Fault};
 
@@ -38,8 +41,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// One `LARRY_MODEL_*` table: the variables a case sets.
 type Settings = Vec<(&'static str, String)>;
 
-/// What one paced run observed: the outcome, the waits the client asked for and
-/// the requests the mock served.
+/// What one paced run observed: the outcome, the waits asked for, the requests served.
 type Paced = (Result<Completion, ModelError>, Vec<Duration>, u64);
 
 /// Seeds every behaviour case runs over.
@@ -82,9 +84,15 @@ fn config_from(table: Settings) -> Result<ModelConfig, ModelError> {
     })
 }
 
+/// A clock no case moves: none of them waits, so the retry budget never runs out.
+fn frozen() -> Clock {
+    Clock::virtual_at(Duration::ZERO)
+}
+
 /// A client for `table` whose retries go ahead at once, never waiting.
 fn client_from(table: Settings) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(config_from(table)?, |_wait| true))
+    let config = config_from(table)?;
+    Ok(ModelClient::new(config, frozen(), |_wait| true))
 }
 
 /// One user turn.
@@ -665,27 +673,19 @@ fn paced(
     overrides: &[(&'static str, &str)],
     go_on: bool,
 ) -> Result<Paced, Box<dyn Error>> {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let recorder = Arc::clone(&calls);
+    let (recorder, calls) = mpsc::sync_channel(16);
     let limited = Some(Fault::RateLimit {
         retry_after_secs: hint,
     });
     let (outcome, served) = mock_model::run(scripted(seed, vec![limited, None]), |handle| {
         let table = with(settings(&base_of(handle.addr()), "test-key"), overrides);
-        let client = ModelClient::new(config_from(table)?, move |wait| {
-            if let Ok(mut waits) = recorder.lock() {
-                waits.push(wait);
-            }
-            go_on
+        let client = ModelClient::new(config_from(table)?, frozen(), move |wait| {
+            recorder.try_send(wait).is_ok() && go_on
         });
         let outcome = client.complete(&[user("paced")]);
         Ok::<_, Box<dyn Error>>((outcome, handle.served()))
     })?;
-    let Ok(recorded) = calls.lock() else {
-        return Err("pause recorder poisoned".into());
-    };
-    let waits = recorded.clone();
-    Ok((outcome, waits, served))
+    Ok((outcome, calls.try_iter().collect(), served))
 }
 
 #[test]

@@ -249,7 +249,7 @@ pub(crate) fn run_command(
         .stderr(Stdio::from(OwnedFd::from(stderr_child)));
     // Computed before the spawn: an overflow found inside the scope below would leave
     // the live leader unkilled, and the scope would wait on it.
-    let deadline = started_at.checked_add(timeout).ok_or_else(|| {
+    let deadline = clock.now().checked_add(timeout).ok_or_else(|| {
         spawn_failure(program, io::Error::other("the command deadline overflowed"))
     })?;
     let spawned = command.spawn();
@@ -420,20 +420,21 @@ fn track(
 }
 
 /// Waits for the command's status in slices of at most [`CANCEL_POLL`] until
-/// `deadline`, checking `cancelled` after each slice: the person's Esc ends a
-/// running command, not only the next step (larry#242). A cancel kills the
-/// group and takes the status exactly as the deadline does, so exactly one of
-/// `interrupted` and `timed_out` is set; a waiter that ends without a status is
+/// `deadline`, a reading of `clock` (larry#436): the timeout is decided on the injected
+/// timeline, never the wall, so a seeded run on a virtual clock drives it. It checks `cancelled`
+/// after each slice: the person's Esc ends a running command, not only the next step
+/// (larry#242). A cancel kills the group and takes the status exactly as the deadline does, so
+/// exactly one of `interrupted` and `timed_out` is set; a waiter that ends without a status is
 /// the fault it always was.
 fn wait_for_status(
     clock: &Clock,
     receiver: &mpsc::Receiver<io::Result<ExitStatus>>,
     pgid: i32,
-    deadline: Instant,
+    deadline: Duration,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(io::Result<ExitStatus>, bool, bool), ExecError> {
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_sub(clock.now());
         if left.is_zero() {
             settle_group(clock, pgid)?;
             return Ok((flatten(receiver.recv()), true, false));

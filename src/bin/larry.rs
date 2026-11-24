@@ -253,6 +253,8 @@ enum ModelCheck {
     Config(ModelError),
     /// The gateway refused or the exchange failed.
     Exchange(ModelError),
+    /// The host's clock reads before the Unix epoch, so no retry budget can be timed (larry#436).
+    Clock(larry_runtime::error::RuntimeError),
     /// The reply could not be written to standard output.
     Reply(io::Error),
 }
@@ -265,6 +267,7 @@ impl fmt::Display for ModelCheck {
             Self::Env(ref cause) => write!(out, "model: {cause}"),
             Self::Config(ref cause) => write!(out, "model config: {cause}"),
             Self::Exchange(ref cause) => write!(out, "model failed: {cause}"),
+            Self::Clock(ref cause) => write!(out, "model clock: {cause}"),
             Self::Reply(ref cause) => write!(out, "model reply unwritable: {cause}"),
         }
     }
@@ -276,6 +279,7 @@ impl std::error::Error for ModelCheck {
             Self::Prompt(ref cause) | Self::Reply(ref cause) => Some(cause),
             Self::Env(ref cause) => Some(cause),
             Self::Config(ref cause) | Self::Exchange(ref cause) => Some(cause),
+            Self::Clock(ref cause) => Some(cause),
             Self::EmptyPrompt => None,
         }
     }
@@ -297,7 +301,8 @@ fn model_once() -> Result<(), ModelCheck> {
     }
     let config = ModelConfig::from_env(process_env().map_err(ModelCheck::Env)?)
         .map_err(ModelCheck::Config)?;
-    let client = ModelClient::new(config, pause);
+    let clock = larry_runtime::live_clock().map_err(ModelCheck::Clock)?;
+    let client = ModelClient::new(config, clock, pause);
     let completion: Completion = client
         .complete(&[Message::new(Role::User, prompt)])
         .map_err(|error: ModelError| ModelCheck::Exchange(error))?;

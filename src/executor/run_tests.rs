@@ -5,13 +5,24 @@
 //! counts those bytes exactly, and one seed always yields one captured trace.
 //! Source: tail(1) and head(1), the end of a log is where its error is.
 
+use std::cell::Cell;
 use std::ffi::OsStr;
+use std::fmt;
 use std::io::{self, Read};
+use std::num::TryFromIntError;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
-use lgwks_std::seeded::Seeded;
+use lgwks_bot::kernel::clock::Clock;
+use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::{CAPTURE_CHUNK, Captured, HEAD_BYTES, Place, TAIL_BYTES, capture, command_for};
+use super::{
+    CAPTURE_CHUNK, Captured, ExecError, HEAD_BYTES, Place, TAIL_BYTES, capture, command_for,
+    wait_for_status,
+};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -245,4 +256,169 @@ fn a_panicking_reader_reports_its_message() {
         !message.contains("Any { .. }"),
         "the payload is never debug-printed: {message}"
     );
+}
+
+/// Seeds the command-timeout simulation sweeps.
+const WAIT_SEEDS: u64 = 64;
+
+/// The largest virtual step a seed draws, in microseconds: small enough that the real slice each
+/// poll waits (never past the virtual time left) stays within a few milliseconds.
+const MAX_STEP_US: u64 = 500;
+
+/// The most steps a drawn deadline spans.
+const MAX_STEPS: u64 = 12;
+
+/// The polls after which the simulation cancels a wait that ignores the injected clock, so a wait
+/// that never reaches its deadline ends in a failed assertion rather than a hang.
+const POLL_CAP: u64 = 10_000;
+
+/// Why one command-timeout simulation could not be driven to its assertions.
+#[derive(Debug)]
+enum WaitSimError {
+    /// The seeded stream refused a draw.
+    Draw(DrawError),
+    /// A drawn number or a process id does not fit the type its use needs.
+    Range(TryFromIntError),
+    /// The command could not be started, or its status could not be read.
+    Process(io::Error),
+    /// The wait itself failed.
+    Wait(ExecError),
+}
+
+impl fmt::Display for WaitSimError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
+            Self::Range(ref cause) => write!(out, "number out of range: {cause}"),
+            Self::Process(ref cause) => write!(out, "the command failed: {cause}"),
+            Self::Wait(ref cause) => write!(out, "the wait failed: {cause}"),
+        }
+    }
+}
+
+impl std::error::Error for WaitSimError {}
+
+impl From<DrawError> for WaitSimError {
+    fn from(cause: DrawError) -> Self {
+        Self::Draw(cause)
+    }
+}
+
+impl From<TryFromIntError> for WaitSimError {
+    fn from(cause: TryFromIntError) -> Self {
+        Self::Range(cause)
+    }
+}
+
+impl From<io::Error> for WaitSimError {
+    fn from(cause: io::Error) -> Self {
+        Self::Process(cause)
+    }
+}
+
+impl From<ExecError> for WaitSimError {
+    fn from(cause: ExecError) -> Self {
+        Self::Wait(cause)
+    }
+}
+
+/// One seed's wait on a command that never ends by itself, its status held back until the group is
+/// killed. Each cancel poll moves a virtual clock by a drawn step and a drawn poll may cancel, so
+/// the wait ends on the clock's readings alone: its outcome and its poll count are asserted
+/// against the rule worked out here, and the trace is returned for the hash.
+fn timeout_trace(seed: u64) -> Result<String, WaitSimError> {
+    let mut stream = Seeded::from_seed(seed.wrapping_add(5 << 40));
+    let step_us = stream.below(MAX_STEP_US)?.saturating_add(1);
+    let steps = stream.below(MAX_STEPS)?.saturating_add(1);
+    // The deadline sits on a reading or just before one, so the equal and the strict case both run.
+    let deadline_us = step_us
+        .saturating_mul(steps)
+        .saturating_sub(stream.below(step_us)?);
+    // Half the seeds cancel at a drawn poll; the rest never do.
+    let cancel_at = match stream.below(2)? {
+        0 => POLL_CAP,
+        _ => stream.below(steps)?.saturating_add(1),
+    };
+    let step = Duration::from_micros(step_us);
+    let deadline = Duration::from_micros(deadline_us);
+    let clock = Clock::virtual_at(Duration::ZERO);
+    let polls = Cell::new(0_u64);
+    // A refused step cancels: the assertions below then name the clock's reading.
+    let cancelled = || {
+        let poll = polls.get().saturating_add(1);
+        polls.set(poll);
+        clock.advance(step).is_err() || poll >= cancel_at
+    };
+    // A group of its own that this test owns, so the one kill the wait makes ends it.
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "exec sleep 20"])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let pgid = i32::try_from(child.id())?;
+    let (status, timed_out, interrupted) =
+        std::thread::scope(|scope| -> Result<_, WaitSimError> {
+            // The sender stays alive until the command ends, so no status arrives before the kill.
+            let (sender, receiver) = mpsc::sync_channel::<io::Result<ExitStatus>>(1);
+            scope.spawn(move || sender.send(child.wait()));
+            Ok(wait_for_status(
+                &clock, &receiver, pgid, deadline, &cancelled,
+            )?)
+        })?;
+    assert!(
+        !status?.success(),
+        "seed {seed}: the group was killed, not left to finish"
+    );
+    let expected_polls = deadline_us.div_ceil(step_us);
+    let cancelled_first = cancel_at <= expected_polls;
+    let want_polls = if cancelled_first {
+        cancel_at
+    } else {
+        expected_polls
+    };
+    assert_eq!(
+        (timed_out, interrupted),
+        (!cancelled_first, cancelled_first),
+        "seed {seed}: a cancel poll before the deadline's reading wins, else the deadline does"
+    );
+    assert_eq!(
+        polls.get(),
+        want_polls,
+        "seed {seed}: the wait ended on the first reading it could"
+    );
+    let reached = Duration::from_micros(step_us.saturating_mul(want_polls));
+    assert_eq!(
+        clock.now(),
+        reached,
+        "seed {seed}: the clock moved one step per poll and no other way"
+    );
+    if timed_out {
+        assert!(
+            clock.now() >= deadline && clock.now().saturating_sub(step) < deadline,
+            "seed {seed}: the timeout flips at the first reading past the deadline, read {:?}",
+            clock.now()
+        );
+    }
+    Ok(format!(
+        "step_us={step_us} deadline_us={deadline_us} cancel_at={cancel_at} polls={} timed_out={timed_out} interrupted={interrupted} now_us={}",
+        polls.get(),
+        clock.now().as_micros()
+    ))
+}
+
+/// The command timeout is decided on the injected clock, never the wall: for every seed a wait
+/// with a drawn deadline and a drawn cancel ends at the first reading past the deadline, or at
+/// the cancel poll when that comes first, with the group killed, and one seed gives one trace
+/// hash (larry#436, SD-4).
+#[test]
+fn sim_the_command_timeout_decides_on_the_injected_clock() -> TestResult {
+    for seed in 0..WAIT_SEEDS {
+        let first = blake3_hex(timeout_trace(seed)?.as_bytes());
+        let second = blake3_hex(timeout_trace(seed)?.as_bytes());
+        assert_eq!(first, second, "seed {seed}: one seed gives one trace hash");
+    }
+    Ok(())
 }

@@ -341,6 +341,9 @@ pub(crate) fn run_session(
         bytes: &document,
     };
     let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
+        // The retry budget's timeline, built before the copy so a host whose clock refuses
+        // copies nothing (larry#436).
+        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
         // Opened inside the gate: a denied session copies nothing.
         let island = match isolation {
             Isolation::Host => None,
@@ -348,7 +351,7 @@ pub(crate) fn run_session(
                 Some(Island::open(platform, settings, &task_id, cwd)?)
             }
         };
-        let client = ModelClient::new(config, backoff);
+        let client = ModelClient::new(config, clock, backoff);
         let mut turn = Turn {
             client: &client,
             settings,
