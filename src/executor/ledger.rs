@@ -2,10 +2,9 @@
 //! receipt signing key and the tenant's model routes, in `<state>/executor.db`
 //! (larry#85, larry#86, larry#201).
 
-use std::fs::{File, TryLockError};
+use std::fs::File;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use lgwks_bot::clock::Clock;
 use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
@@ -14,10 +13,6 @@ use lgwks_std::sign::SecretKey;
 
 use super::ExecError;
 use super::run::await_gone;
-
-/// The longest `open` waits for another executor's lock on the state directory (larry#214).
-/// Past it the open is refused with [`ExecError::LedgerLockTimeout`], never a wait forever.
-const LEDGER_LOCK_BOUND: Duration = Duration::from_secs(60);
 
 /// Schema of the live-group table, version 1. `IF NOT EXISTS` because two executors
 /// starting at once on one state directory both read `user_version` 0 and both run the
@@ -68,39 +63,24 @@ pub(crate) struct Ledger {
 impl Ledger {
     /// Opens, creating if needed, the ledger under the state directory.
     ///
-    /// Open and migration run under an exclusive lock on `executor.db.lock`, so
-    /// executors starting together on one state directory open the store one at a
-    /// time. Without it the second of two first opens was refused at once with
-    /// "database is locked": `lgwks_deps::sqlite::open` switches a fresh file to
-    /// WAL before it sets its busy timeout (logicalworks-crates#873), and
-    /// `migrate` reads and writes `user_version` outside one transaction (#872).
-    /// The kernel releases the lock when its holder dies, so a `kill -9` mid-open
-    /// leaves nothing to clear; a live holder keeps it for one open and one
-    /// migration, each under the store's own 60 s busy bound.
+    /// Executors starting together on one state directory open the store at once:
+    /// `lgwks_deps::sqlite::open` sets its 60 s busy timeout before its first
+    /// statement and moves a fresh file to WAL under a blocking kernel lock
+    /// (logicalworks-crates#873), and `migrate` runs each step in one immediate
+    /// transaction (#872). Every wait is the store's busy handler, which sleeps, so
+    /// a waiter leaves the core to the holder (larry#398 removed the lock loop that
+    /// spun beside it).
     ///
     /// The store holds the receipt key, so it is created owner-only before SQLite
     /// opens it (SQLite gives the write-ahead files the database's mode), and a
     /// store left wider by an earlier release is narrowed on every open.
-    pub(crate) fn open(state_dir: &Path) -> Result<Ledger, ExecError> {
-        Self::open_within(state_dir, LEDGER_LOCK_BOUND)
-    }
-
-    /// [`Ledger::open`] with the lock wait bounded by `bound` (larry#214): a held lock
-    /// is tried again, yielding between tries, until `bound` has elapsed, then refused.
     ///
     /// # Errors
     ///
-    /// [`ExecError::LedgerLockTimeout`] when another executor holds the lock for the
-    /// whole bound; the other ledger errors as [`Ledger::open`] documents.
-    fn open_within(state_dir: &Path, bound: Duration) -> Result<Ledger, ExecError> {
-        std::fs::create_dir_all(state_dir).map_err(ExecError::LedgerLock)?;
-        let lock = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(state_dir.join("executor.db.lock"))
-            .map_err(ExecError::LedgerLock)?;
-        lock_within(&lock, bound)?;
+    /// [`ExecError::StateDir`] when the state directory cannot be made, and the
+    /// store, key-store and migration errors of each step.
+    pub(crate) fn open(state_dir: &Path) -> Result<Ledger, ExecError> {
+        std::fs::create_dir_all(state_dir).map_err(ExecError::StateDir)?;
         let database = state_dir.join("executor.db");
         File::options()
             .create(true)
@@ -132,7 +112,6 @@ impl Ledger {
                 Err(error) => return Err(ExecError::KeyStore(error)),
             }
         }
-        lock.unlock().map_err(ExecError::LedgerLock)?;
         Ok(Ledger { conn })
     }
 
@@ -399,30 +378,6 @@ impl Ledger {
     }
 }
 
-/// Takes `lock` exclusively, trying again until `bound` has elapsed on a monotonic
-/// clock, then answers [`ExecError::LedgerLockTimeout`].
-///
-/// # Errors
-///
-/// [`ExecError::LedgerLockTimeout`] when the lock stays held for `bound`, and
-/// [`ExecError::LedgerLock`] when the lock itself fails.
-fn lock_within(lock: &File, bound: Duration) -> Result<(), ExecError> {
-    let started = Instant::now();
-    loop {
-        match lock.try_lock() {
-            Ok(()) => return Ok(()),
-            Err(TryLockError::WouldBlock) => {
-                let waited = started.elapsed();
-                if waited >= bound {
-                    return Err(ExecError::LedgerLockTimeout { waited });
-                }
-                std::thread::yield_now();
-            }
-            Err(TryLockError::Error(cause)) => return Err(ExecError::LedgerLock(cause)),
-        }
-    }
-}
-
 /// The route table's reads and writes (larry#201), a child module so the
 /// connection stays private to the ledger.
 #[path = "ledger_routes.rs"]
@@ -556,32 +511,6 @@ mod tests {
             ],
             "the refused tenant wrote no row and the rotation replaced the digest"
         );
-        Ok(())
-    }
-
-    /// A ledger lock another executor holds for the whole bound is refused with the typed
-    /// timeout, and the same open succeeds once the holder lets go (larry#214).
-    #[test]
-    fn a_held_ledger_lock_returns_the_typed_timeout() -> Result<(), Box<dyn std::error::Error>> {
-        use std::time::Duration;
-        let directory = scratch_directory()?;
-        let holder = std::fs::File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(directory.join("executor.db.lock"))?;
-        holder.lock()?;
-        let refused = Ledger::open_within(&directory, Duration::from_millis(30));
-        assert!(
-            matches!(
-                refused,
-                Err(crate::executor::ExecError::LedgerLockTimeout { .. })
-            ),
-            "a held lock past its bound is the typed timeout"
-        );
-        drop(holder);
-        let reopened = Ledger::open_within(&directory, Duration::from_millis(30));
-        assert!(reopened.is_ok(), "a released lock opens the ledger");
         Ok(())
     }
 

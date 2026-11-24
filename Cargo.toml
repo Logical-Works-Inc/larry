@@ -119,6 +119,11 @@ required-features = ["rerank"]
 # shipped build; the shipped `larry` binary keeps `json` alone.
 lgwks_std = { workspace = true, features = ["json", "hash"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+# Test support only: the ledger lock test reads the waiter's thread CPU clock (larry#398).
+# The same pinned crate as the build; `time` adds no dependency and stays out of `larry`.
+rustix = { workspace = true, features = ["time"] }
+
 [lints]
 workspace = true
 
