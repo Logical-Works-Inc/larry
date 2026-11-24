@@ -1,8 +1,9 @@
 //! The blocking completion client: one exchange per attempt, retried within the
 //! config's [`RetryPolicy`], with every bound checked before a byte is sent.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::http::{self, BodyPolicy, Error as HttpError, FailureKind, Options, RedirectPolicy};
 
 use super::config::ModelConfig;
@@ -50,8 +51,12 @@ impl Request {
 pub struct ModelClient {
     /// Everything one completion needs, fixed at construction.
     config: ModelConfig,
+    /// The timeline the retry budget is measured on (larry#436, SD-4): the caller
+    /// injects it, so a seeded run on a virtual clock drives the deadline and no
+    /// retry decision reads the wall.
+    clock: Clock,
     /// Waits out one retry backoff and says whether to retry. The caller owns
-    /// the clock and cancellation: the executor waits on its cancel token, the
+    /// the wait and cancellation: the executor waits on its cancel token, the
     /// `larry model` check refuses any wait, and a test records the wait. A
     /// `false` stops retrying and the last refusal is returned.
     pause: Box<dyn Fn(Duration) -> bool + Send + Sync>,
@@ -66,15 +71,18 @@ impl std::fmt::Debug for ModelClient {
 }
 
 impl ModelClient {
-    /// A client for `config` whose retries wait through `pause`, which returns
-    /// `false` to stop retrying (cancelled, or the caller will not wait).
+    /// A client for `config` whose retry budget is measured on `clock` and whose
+    /// retries wait through `pause`, which returns `false` to stop retrying
+    /// (cancelled, or the caller will not wait).
     #[must_use]
     pub fn new(
         config: ModelConfig,
+        clock: Clock,
         pause: impl Fn(Duration) -> bool + Send + Sync + 'static,
     ) -> Self {
         Self {
             config,
+            clock,
             pause: Box::new(pause),
         }
     }
@@ -132,10 +140,11 @@ impl ModelClient {
 
     /// Attempt the exchange until it succeeds, fails terminally, or the retry
     /// budget and deadline run out. `max_attempts` counts the first try, so a
-    /// policy of three sends at most three requests.
+    /// policy of three sends at most three requests. The deadline is the time
+    /// spent on the injected clock since the first try (larry#436).
     fn with_retry(&self, body: &[u8]) -> Result<Completion, ModelError> {
         let policy = self.config.retry();
-        let started = Instant::now();
+        let started = self.clock.now();
         let mut failures: u32 = 0;
         loop {
             let refusal = match self.attempt(body) {
@@ -147,7 +156,7 @@ impl ModelClient {
             }
             let retry_index = failures;
             failures = failures.saturating_add(1);
-            let elapsed = started.elapsed();
+            let elapsed = self.clock.now().saturating_sub(started);
             if !policy.should_retry(failures, elapsed) {
                 return Err(refusal);
             }

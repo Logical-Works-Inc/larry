@@ -38,6 +38,7 @@ use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
+use lgwks_bot::kernel::clock::Clock;
 
 use super::ExecError;
 use super::Report;
@@ -267,6 +268,20 @@ fn denied_report(
     )
 }
 
+/// The instant `clock` reads, placed after the Unix epoch the way the runtime places its tick
+/// (a reading is elapsed time since 1970-01-01T00:00Z), so a lease started here and the tick
+/// the runtime pins on the same clock are one timeline (larry#436, SD-4).
+///
+/// # Errors
+///
+/// [`RuntimeError::ClockOutOfRange`] when the platform's `SystemTime` cannot hold the reading.
+pub(super) fn lease_start(clock: &Clock) -> Result<SystemTime, RuntimeError> {
+    let elapsed = clock.now();
+    SystemTime::UNIX_EPOCH
+        .checked_add(elapsed)
+        .ok_or(RuntimeError::ClockOutOfRange { elapsed })
+}
+
 /// `now + lease` as an instant, or the typed refusal when the platform cannot
 /// hold the reading.
 pub(super) fn lease_end(now: SystemTime, lease: Duration) -> Result<SystemTime, RuntimeError> {
@@ -417,7 +432,10 @@ pub(super) fn admit_and_run(
     // One grant, scope for scope the policy admits and the executor is capable
     // of: the display's cover check needs one grant that stands alone.
     let granted: BTreeSet<Scope> = policy.intersection(&capabilities).copied().collect();
-    let now = SystemTime::now();
+    // The one clock of this run, built once: the lease starts at its reading and the runtime
+    // ticks on the same clock, so the expiry and the tick share one timeline (larry#436).
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let now = lease_start(&clock).map_err(ExecError::Gate)?;
     // One settings record decides the policy revision, the admission lease and
     // the security generation the fence starts at, so the executor keeps no
     // copy of any of them (larry#212).
@@ -468,7 +486,6 @@ pub(super) fn admit_and_run(
     // A journal already here is a dead run's the recovery kept for a passing fault
     // (larry#394): this retry's failure must never remove that evidence.
     let leftover = path.try_exists().map_err(ExecError::Journals)?;
-    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     let opened = Journal::open(&path, run_settings.journal_capacity)
         .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
     let outcome = match opened {
@@ -667,6 +684,11 @@ where
         None => String::from("gate: the request is already recorded under this run id"),
     }
 }
+
+/// Seeded simulations of the admission lease on an injected clock (larry#436).
+#[cfg(test)]
+#[path = "sim_gate_clock.rs"]
+mod sim_clock;
 
 #[cfg(test)]
 mod tests {

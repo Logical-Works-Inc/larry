@@ -7,7 +7,9 @@
 //! keeps the usage of its last chunk. One seed drives every count, shape and framing.
 
 use std::error::Error;
+use std::time::Duration;
 
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::json::{Map, Value, json};
 use lgwks_std::seeded::{DrawError, Seeded};
 
@@ -389,7 +391,11 @@ fn sim_usage_shapes_round_trip_for_every_seed() -> TestResult {
 
 /// A client that only answers `fits`: its pause refuses every wait and it never sends.
 fn client(bound: Option<usize>) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(bound)?, |_wait| false))
+    Ok(ModelClient::new(
+        sim_config(bound)?,
+        Clock::virtual_at(Duration::ZERO),
+        |_wait| false,
+    ))
 }
 
 /// giant-and-empty (larry#230: the executor shares a prompt prefix only when the

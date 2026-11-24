@@ -63,7 +63,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `lib` | The effect-free DEMO session state, `replace_file` (the whole-or-nothing write) and `diagnose` (one stderr line) |
 | `executor`, `executor::error` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004); `ExecError`, its message and its source chain (ADR 0100) |
 | `executor::identity` | The identities a run derives: the state directory's tenant and worker, its run, operation and command ids, and the run id itself, a fresh UUID version 7 or the idempotency key's (larry#182, ADR 0037) |
-| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; a retry answered from its evidence (ADR 0019, 0037) |
+| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; a retry answered from its evidence (ADR 0019, 0037); the admission lease starts at one live clock's reading, `lease_start`, simulated in `executor::gate::sim_clock` (larry#436) |
 | `executor::recovery`, `executor::sim_*` | The task journals a killed executor left: their path, liveness by the journal's own lock, and the recovery that sets each aside as `<task>.recovered` or `<task>.refused` without reaching the world; the seeded simulations of the identity, the recovery, the report rows and the sweep: `executor::sim_ledger` the sealed-report rows and the live-group rows, `executor::sim_workspace` the workspace and origin sweeps (larry#75, larry#182 defect 3, larry#214, ADR 0023, ADR 0037) |
 | `executor::task`, `executor::task::confine` | The bounded task document, its optional `idempotency_key`, and its typed refusals; whether acceptance runs confined: a brief, or the MCP door's flag, because a remote peer drove the run (larry#324, ADR 0088) |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance, every prompt on one byte-stable prefix per brief (ADR 0008, ADR 0043) |
@@ -77,7 +77,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `eval::set` | The bounded task set and its typed refusals, checked before any task runs |
 | `eval::score` | Whole-number prices and costs, nearest-rank percentiles, the card; an incomplete cost prints `unknown` per accepted task (larry#340) |
 | `model` | The blocking chat-completions client, built per task over its route; no gateway or model is compiled in (ADR 0003, 0039) |
-| `model::client` | One exchange per attempt, retried within the `RetryPolicy` |
+| `model::client` | One exchange per attempt, retried within the `RetryPolicy`, its deadline read on the injected `lgwks_bot::kernel::clock::Clock` the caller passes to `ModelClient::new`, never the wall (larry#436), simulated in `tests/sim_model_client/clock.rs` |
 | `model::config`, `model::route` | Key read from the route's variable (never shown; a stored route's is `LARRY_KEY_<TAG>_*` under its own tenant's tag and no other's, refused at add and again at resolve, larry#328), timeout, retry, the `env` route; the route (id, URL, model, key variable, residency), its checks and the resolver (larry#201) |
 | `model::wire`, `model::wire::sim` (`sim_wire.rs`) | The request body and the reply parser, cached and written tokens in every provider shape; the seeded usage round trips (larry#230, ADR 0043) |
 | `tui` | Bare `larry`: the terminal guard, key mapping and the drive loop over a real session (ADR 0045) |

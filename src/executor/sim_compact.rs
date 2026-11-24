@@ -11,7 +11,9 @@
 use std::error::Error;
 use std::fmt;
 use std::io::Write;
+use std::time::Duration;
 
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::hash::Hasher;
 use lgwks_std::json;
 use lgwks_std::seeded::{DrawError, Seeded};
@@ -117,7 +119,11 @@ fn step(rng: &mut Seeded, tenant: &str, index: usize) -> Result<(String, Answer)
 
 /// A client that never sends, whose route bound is `window` bytes.
 fn client(window: usize) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(Some(window))?, |_| false))
+    Ok(ModelClient::new(
+        sim_config(Some(window))?,
+        Clock::virtual_at(Duration::ZERO),
+        |_| false,
+    ))
 }
 
 /// One seeded session of `tenant`: a window, an instruction and up to 300 steps,

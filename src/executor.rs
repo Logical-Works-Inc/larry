@@ -398,7 +398,9 @@ fn model_step<'task>(
         return Ok(None);
     };
     let route = settings.route(ledger, task.route())?;
-    let client = ModelClient::new(settings.model_config(&route)?, backoff);
+    // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let client = ModelClient::new(settings.model_config(&route)?, clock, backoff);
     Ok(Some(ModelStep {
         route,
         brief,

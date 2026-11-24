@@ -9,7 +9,9 @@
 //! number, and the bound on shrinks still ends the session typed.
 
 use std::error::Error;
+use std::time::Duration;
 
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::seeded::Seeded;
 
 use super::{Answer, Conversation, MAX_SHRINKS, Overflow, quarters};
@@ -32,7 +34,11 @@ fn upto(rng: &mut Seeded, bound: u64) -> Result<usize, SimError> {
 
 /// A client that never sends, whose route bound is `window` bytes.
 fn client(window: usize) -> Result<ModelClient, ModelError> {
-    Ok(ModelClient::new(sim_config(Some(window))?, |_wait| false))
+    Ok(ModelClient::new(
+        sim_config(Some(window))?,
+        Clock::virtual_at(Duration::ZERO),
+        |_wait| false,
+    ))
 }
 
 /// A gateway's `status` refusal carrying `detail`.
