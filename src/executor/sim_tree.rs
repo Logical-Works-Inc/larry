@@ -64,16 +64,22 @@ impl AsRef<Path> for Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        match std::fs::remove_dir_all(&self.path) {
-            Ok(()) => {}
-            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
-            Err(cause) => {
+        remove_tree(&self.path);
+    }
+}
+
+/// Removes a test tree when its guard drops. A tree already gone is fine; one that stays is
+/// counted in [`LEFT`] and named on standard error, never dropped in silence.
+fn remove_tree(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+        Err(cause) => {
+            LEFT.fetch_add(1, Ordering::Relaxed);
+            let mut errors = io::stderr().lock();
+            let said = writeln!(errors, "scratch {} left: {cause}", path.display());
+            if said.is_err() {
                 LEFT.fetch_add(1, Ordering::Relaxed);
-                let mut errors = io::stderr().lock();
-                let said = writeln!(errors, "scratch {} left: {cause}", self.path.display());
-                if said.is_err() {
-                    LEFT.fetch_add(1, Ordering::Relaxed);
-                }
             }
         }
     }
@@ -110,7 +116,7 @@ impl Deref for Leftover {
 
 impl Drop for Leftover {
     fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.path));
+        remove_tree(&self.path);
     }
 }
 

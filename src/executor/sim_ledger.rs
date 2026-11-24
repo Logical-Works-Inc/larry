@@ -667,3 +667,66 @@ fn sim_a_saboteur_damages_rows_and_no_group_outside_its_identity_dies_for_every_
     }
     Ok(())
 }
+
+/// How long the busy-store simulation lets a write wait: the store's own 60 s bound, cut so
+/// the simulation ends, on the same SQLite busy handler.
+const BUSY_WAIT: Duration = Duration::from_millis(300);
+
+/// This thread's own CPU clock: a sleeping wait does not advance it, a spin does, and host
+/// load changes neither, so the bound below cannot pass or fail on how busy the machine is.
+fn thread_cpu() -> Result<Duration, std::num::TryFromIntError> {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+    Ok(Duration::new(
+        u64::try_from(now.tv_sec)?,
+        u32::try_from(now.tv_nsec)?,
+    ))
+}
+
+/// A ledger write on a store another executor is writing waits on the store's busy handler,
+/// spends under 5% of the wait on the CPU, is refused as a typed statement error once the
+/// bound passes, and lands once the holder lets go (larry#398: the lock loop this replaced
+/// spun a full core per waiter for 60 s and starved the holder on a 1 to 2 vCPU host).
+#[test]
+fn sim_a_ledger_write_on_a_busy_store_waits_without_spinning() -> TestResult {
+    let directory = scratch_directory()?;
+    let ledger = Ledger::open(&directory)?;
+    let holder = lgwks_deps::sqlite::open(&directory.join("executor.db"))?;
+    holder.execute_batch("BEGIN IMMEDIATE")?;
+    ledger.conn.busy_timeout(BUSY_WAIT)?;
+    let before = thread_cpu()?;
+    let refused = ledger.keep_report("busy-run", "digest", b"report");
+    let spent = thread_cpu()?.saturating_sub(before);
+    holder.execute_batch("ROLLBACK")?;
+    assert!(
+        matches!(refused, Err(ExecError::Sql(_))),
+        "a write past the busy bound is the typed statement error: {refused:?}"
+    );
+    assert!(
+        spent.saturating_mul(20) < BUSY_WAIT,
+        "the waiting write spent {spent:?} of CPU over a {BUSY_WAIT:?} wait"
+    );
+    ledger.keep_report("busy-run", "digest", b"report")?;
+    assert_eq!(
+        ledger.report("busy-run", 6)?,
+        Some(b"report".to_vec()),
+        "the write lands once the holder lets go"
+    );
+    Ok(())
+}
+
+/// A state directory that cannot be made is the typed state-directory error, naming the
+/// cause, before any store file is touched.
+#[test]
+fn sim_a_state_directory_that_is_a_file_is_the_typed_state_dir_error() -> TestResult {
+    let directory = scratch_directory()?;
+    let state = directory.join("state");
+    std::fs::write(&state, "a file where the state directory goes")?;
+    match Ledger::open(&state.join("inner")) {
+        Err(ExecError::StateDir(cause)) => {
+            assert_eq!(cause.kind(), std::io::ErrorKind::NotADirectory, "{cause}");
+            Ok(())
+        }
+        Err(other) => Err(format!("the state directory error, not: {other}").into()),
+        Ok(_) => Err("a state directory under a file opened".into()),
+    }
+}
