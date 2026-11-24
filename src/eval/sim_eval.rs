@@ -272,6 +272,56 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
     Ok(())
 }
 
+/// broken-machine (larry#399): a finished card says `complete: true` and `stopped: null`, and
+/// the card of an arm a fault stopped keeps every other field of the same outcomes, says
+/// `complete: false` and names the task and its cause. Catches a partial card printed as
+/// complete, a finished one printed as partial, and a stop that drops or alters a scored outcome.
+#[test]
+fn sim_a_stopped_card_keeps_every_field_and_says_it_is_partial() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::from_seed(seed.wrapping_add(9 << 40));
+        let mut outcomes = Vec::new();
+        for index in 0..rng.index(12)? {
+            let ending = match rng.below(3)? {
+                0 => Ending::Accepted,
+                1 => Ending::Rejected,
+                _ => Ending::Refused(format!("refusal {index}")),
+            };
+            outcomes.push(Outcome {
+                id: format!("t{index}"),
+                ending,
+                micros: rng.below(1 << 30)?,
+                tokens: Some(plain(rng.below(1 << 20)?, rng.below(1 << 16)?)),
+            });
+        }
+        let prices = Prices::micro(rng.below(1 << 24)?, rng.below(1 << 24)?);
+        let finished = card("set", "model", prices, &outcomes);
+        let sheet = finished.json();
+        assert_eq!(sheet["complete"], json!(true), "seed {seed}: finished");
+        assert_eq!(
+            sheet["stopped"],
+            Value::Null,
+            "seed {seed}: nothing stopped it"
+        );
+        let task = format!("t{}", outcomes.len());
+        let cause = format!("exec could not write out/{seed}.txt");
+        let stopped = finished.clone().stopped(&task, &cause);
+        let marked = stopped.json();
+        assert_eq!(marked["complete"], json!(false), "seed {seed}: partial");
+        assert_eq!(
+            marked["stopped"],
+            json!({"task": task, "cause": cause}),
+            "seed {seed}: the task and its cause"
+        );
+        let mut partial = marked.clone();
+        let object = partial.as_object_mut().ok_or("card object")?;
+        object.insert(String::from("complete"), json!(true));
+        object.insert(String::from("stopped"), Value::Null);
+        assert_eq!(&partial, sheet, "seed {seed}: every other field kept");
+    }
+    Ok(())
+}
+
 /// The card's cost per accepted task: `unknown` when a cost is missing, else the floor
 /// share of the known sum, and absent only for a complete card with no accepted task. The
 /// dollar field says the same thing as the picodollar field in every case (larry#340).

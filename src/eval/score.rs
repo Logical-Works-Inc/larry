@@ -268,6 +268,20 @@ impl Scorecard {
         }
         self
     }
+
+    /// The card of an arm an infrastructure fault stopped at `task` (larry#399): the outcomes
+    /// before it stand and were paid for, `complete` is false and `stopped` names the task and
+    /// its typed cause.
+    pub(crate) fn stopped(mut self, task: &str, cause: &str) -> Scorecard {
+        if let Some(object) = self.json.as_object_mut() {
+            object.insert(String::from("complete"), json!(false));
+            object.insert(
+                String::from("stopped"),
+                json!({"task": task, "cause": cause}),
+            );
+        }
+        self
+    }
 }
 
 /// Scores `outcomes` of model `model` over set `set` at `prices`. Cost per accepted
@@ -359,6 +373,8 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
             "p50_micros": percentile(&micros, 50),
             "p95_micros": percentile(&micros, 95),
             "p99_micros": percentile(&micros, 99),
+            "complete": true,
+            "stopped": Value::Null,
             "results": results,
         }),
     }
