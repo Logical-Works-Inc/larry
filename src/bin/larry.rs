@@ -19,7 +19,6 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use larry_demo::eval::{EvalError, MAX_SET_BYTES, PriceError, Prices, Scorecard};
 use larry_demo::executor::routes::{RouteCliError, run as route_run};
 use larry_demo::executor::{
     ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, process_env,
@@ -31,6 +30,11 @@ use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelErro
 #[path = "larry/governance_cli.rs"]
 mod governance_cli;
 use governance_cli::{governance_once, tracker_once};
+
+/// `larry eval`, split out by responsibility when a stopped arm's card took the path (larry#399).
+#[path = "larry/eval_cli.rs"]
+mod eval_cli;
+use eval_cli::eval_once;
 
 /// Arguments read from the command line; `larry route add` takes the most: a
 /// subcommand, an id and eight flags with their values.
@@ -56,16 +60,6 @@ const REPORT_LIMIT: u64 = 268_435_457;
 const _: () = assert!(
     REPORT_LIMIT == 268_435_457 && MAX_REPORT_BYTES == 268_435_456,
     "REPORT_LIMIT is MAX_REPORT_BYTES plus one"
-);
-
-/// Set bytes `larry eval` reads: one past the set bound, so an oversize set
-/// reaches the parser's typed `TooLarge` refusal.
-const SET_LIMIT: u64 = 4_194_305;
-
-/// `SET_LIMIT` is the set bound plus one, checked at compile time.
-const _: () = assert!(
-    SET_LIMIT == 4_194_305 && MAX_SET_BYTES == 4_194_304,
-    "SET_LIMIT is MAX_SET_BYTES plus one"
 );
 
 /// The interactive check never blocks on a clock: a retry that needs no wait
@@ -409,50 +403,6 @@ fn key_once() -> Result<(), ExecError> {
     print_line(&lgwks_std::hex::encode(public.to_bytes()))
 }
 
-/// Why `larry eval` printed no scorecard; each variant keeps its cause.
-#[derive(Debug)]
-enum EvalRun {
-    /// The executor settings or standard input failed.
-    Exec(ExecError),
-    /// A price setting is missing or refused.
-    Price(PriceError),
-    /// The set was refused or a task failed outside the arm's doing.
-    Eval(EvalError),
-}
-
-impl fmt::Display for EvalRun {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Exec(ref cause) => write!(out, "eval: {cause}"),
-            Self::Price(ref cause) => write!(out, "eval price: {cause}"),
-            Self::Eval(ref cause) => write!(out, "{cause}"),
-        }
-    }
-}
-
-impl std::error::Error for EvalRun {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Exec(ref cause) => Some(cause),
-            Self::Price(ref cause) => Some(cause),
-            Self::Eval(ref cause) => Some(cause),
-        }
-    }
-}
-
-/// `larry eval`: run every task of the matched set on standard input as one arm (the
-/// model `LARRY_MODEL_*` pins, priced by `LARRY_EVAL_PRICE_IN`/`_OUT`) and print its
-/// scorecard. Prices and the set are checked before the first model call (larry#87).
-fn eval_once() -> Result<(), EvalRun> {
-    let settings =
-        Settings::from_env(process_env().map_err(EvalRun::Exec)?).map_err(EvalRun::Exec)?;
-    let prices = Prices::from_env(process_env().map_err(EvalRun::Exec)?).map_err(EvalRun::Price)?;
-    let bytes = read_stdin(SET_LIMIT).map_err(EvalRun::Exec)?;
-    let card: Scorecard =
-        larry_demo::eval::run(&bytes, &settings, prices).map_err(EvalRun::Eval)?;
-    print_line(card.json()).map_err(EvalRun::Exec)
-}
-
 /// `larry serve`: bind `LARRY_SERVE_ADDR` (loopback by default), print one JSON line naming
 /// the bound address, the edge's liveness path, the tenant probe and how many tenants hold a
 /// key in `LARRY_STATE_DIR`, then serve until SIGTERM or SIGINT and exit 0.
@@ -648,9 +598,8 @@ fn main() -> ExitCode {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{
-        COMMANDS, EvalRun, Failed, MAX_ARGUMENTS, ModelCheck, Refusal, bounded, find, help_text,
-    };
+    use super::eval_cli::EvalRun;
+    use super::{COMMANDS, Failed, MAX_ARGUMENTS, ModelCheck, Refusal, bounded, find, help_text};
 
     /// Every subcommand refusal keeps its cause as a source, never an empty `Error` impl
     /// (larry#343).
@@ -683,6 +632,11 @@ mod tests {
         assert!(eval.source().is_some(), "eval price");
         let eval = EvalRun::Eval(EvalError::ModelUnconfigured);
         assert!(eval.source().is_some(), "eval task");
+        let eval = EvalRun::Unprinted {
+            stopped: Box::new(EvalError::ModelUnconfigured),
+            output: Box::new(ExecError::StateDirUnset),
+        };
+        assert!(eval.source().is_some(), "eval stopped and unprinted");
     }
 
     /// Every row is found by its own name and by no other, and help prints it

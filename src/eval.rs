@@ -61,6 +61,31 @@ pub enum EvalError {
         /// The conversion that refused the duration.
         cause: TryFromIntError,
     },
+    /// A fault outside the arm's doing stopped it partway (larry#399): the card of the
+    /// outcomes scored before it is kept, marked partial, and `cause` is why it stopped.
+    Stopped {
+        /// The partial card: `complete` false, `stopped` naming the task and the cause.
+        card: Box<Scorecard>,
+        /// The task's own failure.
+        cause: Box<EvalError>,
+    },
+}
+
+impl EvalError {
+    /// The partial card of an arm a fault stopped partway, `None` for a run that scored
+    /// nothing (larry#399).
+    #[must_use]
+    pub fn card(&self) -> Option<&Scorecard> {
+        match *self {
+            Self::Stopped { ref card, .. } => Some(card),
+            Self::Set(_)
+            | Self::ModelUnconfigured
+            | Self::StatePath(_)
+            | Self::Origin { .. }
+            | Self::Exec { .. }
+            | Self::Overlong { .. } => None,
+        }
+    }
 }
 
 impl fmt::Display for EvalError {
@@ -78,6 +103,9 @@ impl fmt::Display for EvalError {
             Self::Overlong { ref id, ref cause } => {
                 write!(out, "eval task {id} ran too long to time: {cause}")
             }
+            Self::Stopped { ref cause, .. } => {
+                write!(out, "{cause}; the partial card keeps the outcomes before it")
+            }
         }
     }
 }
@@ -89,6 +117,7 @@ impl std::error::Error for EvalError {
             Self::Origin { ref cause, .. } => Some(cause),
             Self::Exec { ref cause, .. } => Some(cause),
             Self::Overlong { ref cause, .. } => Some(cause),
+            Self::Stopped { ref cause, .. } => Some(&**cause),
             Self::ModelUnconfigured | Self::StatePath(_) => None,
         }
     }
@@ -310,8 +339,10 @@ fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outco
 }
 
 /// Runs every task of the set in `bytes` as one arm and scores it. The whole set is
-/// checked first; a refused set, an unconfigured model or an infrastructure failure
-/// stops with a typed error, while a model refusal is the arm's and is scored.
+/// checked first; a refused set or an unconfigured model stops with a typed error before
+/// anything is spent, and a model refusal is the arm's and is scored. An infrastructure
+/// failure ends the arm at its task with [`EvalError::Stopped`], which keeps the card of
+/// every outcome before it, since those were paid for (larry#399).
 pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecard, EvalError> {
     let set = TaskSet::parse(bytes).map_err(EvalError::Set)?;
     let route = match settings.arm_route() {
@@ -330,7 +361,18 @@ pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecar
     })?;
     let mut outcomes = Vec::with_capacity(set.tasks.len());
     for (index, task) in set.tasks.iter().enumerate() {
-        outcomes.push(run_one(settings, index, task)?);
+        match run_one(settings, index, task) {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(cause) => {
+                let partial = card(&set.name, route.model(), prices, &outcomes)
+                    .with_route(route.id())
+                    .stopped(&task.id, &cause.to_string());
+                return Err(EvalError::Stopped {
+                    card: Box::new(partial),
+                    cause: Box::new(cause),
+                });
+            }
+        }
     }
     Ok(card(&set.name, route.model(), prices, &outcomes).with_route(route.id()))
 }
