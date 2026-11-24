@@ -2,6 +2,7 @@
 //! and the model step that writes a brief's files before acceptance (larry#123).
 
 mod author;
+mod ceiling;
 mod compact;
 mod confine;
 mod error;
@@ -47,6 +48,7 @@ use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use session::SessionError;
 pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop, run_session};
+pub(crate) use task::Knobs;
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -215,8 +217,11 @@ type EnvReader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub struct Settings {
     /// Directory holding the ledger and the workspaces.
     state_dir: PathBuf,
-    /// Longest an acceptance command may run before its group is killed.
+    /// Longest an acceptance command may run before its group is killed, when its task
+    /// names no timeout of its own.
     timeout: Duration,
+    /// What this tenant lets a task name: its shell, base, timeout and deadline (larry#439).
+    ceilings: ceiling::Ceilings,
     /// The PATH the acceptance commands and git run under.
     path: String,
     /// The scopes `LARRY_POLICY` admits; what the gate authorizes tasks against.
@@ -230,6 +235,7 @@ impl fmt::Debug for Settings {
         out.debug_struct("Settings")
             .field("state_dir", &self.state_dir)
             .field("timeout", &self.timeout)
+            .field("ceilings", &self.ceilings)
             .field("path", &self.path)
             .field("policy", &self.policy)
             .finish_non_exhaustive()
@@ -244,18 +250,22 @@ impl Settings {
         read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Result<Settings, ExecError> {
         let state_dir = state_dir(&read)?;
-        let timeout_ms = match read("LARRY_EXEC_TIMEOUT_MS") {
-            None => DEFAULT_TIMEOUT_MS,
+        let explicit = match read("LARRY_EXEC_TIMEOUT_MS") {
+            None => None,
             Some(value) => match value.parse::<u64>() {
-                Ok(milliseconds) if (1..=MAX_TIMEOUT_MS).contains(&milliseconds) => milliseconds,
+                Ok(milliseconds) if (1..=MAX_TIMEOUT_MS).contains(&milliseconds) => {
+                    Some(milliseconds)
+                }
                 _ => return Err(ExecError::BadTimeout { value }),
             },
         };
+        let (ceilings, timeout) = ceiling::Ceilings::from_env(&read, explicit, DEFAULT_TIMEOUT_MS)?;
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
         let policy = gate::policy(&read)?;
         Ok(Settings {
             state_dir,
-            timeout: Duration::from_millis(timeout_ms),
+            timeout,
+            ceilings,
             path,
             policy,
             read: Arc::new(read),
@@ -318,6 +328,9 @@ const fn backoff(wait: Duration) -> bool {
 /// task runs only after the admission gate authorized it (larry#164): the task body is the
 /// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
+    // The tenant's ceilings decide first: a shell, base, timeout or deadline past one is
+    // refused before the ledger opens, so nothing is cloned and nothing runs (larry#439).
+    let limits = settings.ceilings.limits(task, settings.timeout)?;
     let (ledger, key) = prepare(settings)?;
     let task_id = identity::run_id(task, &settings.state_dir)?;
     let task_digest = digest_hex(task.bytes());
@@ -351,7 +364,12 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         bytes: task.bytes(),
     };
     let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
-        run_task(task, settings, &task_id, &task_digest, &ledger, &key)
+        let run = Run {
+            task_id: &task_id,
+            task_digest: &task_digest,
+            limits,
+        };
+        run_task(task, settings, &run, &ledger, &key)
     })?;
     if resumable && report.carries_a_seal() {
         ledger.keep_report(&task_id, &task_digest, report.bytes())?;
@@ -419,19 +437,33 @@ fn model_step<'task>(
     }))
 }
 
+/// What names one gated run and bounds it: its id, its document's digest and the limits the
+/// tenant's ceilings admitted (larry#439).
+struct Run<'run> {
+    /// The run's task id.
+    task_id: &'run str,
+    /// The digest of the task document.
+    task_digest: &'run str,
+    /// The command timeout and whole-task deadline it runs under.
+    limits: ceiling::Limits,
+}
+
 /// The task body the gate authorizes: clones the repository at the base, has
 /// the model write the brief's files when the task carries one, runs each
 /// acceptance command in order, and returns the report with the staged diff,
 /// sealed under the state directory's key. It runs at most once, inside the
-/// gate's bound owner reach.
+/// gate's bound owner reach, and ends typed once its whole-task deadline is spent.
 fn run_task(
     task: &Task,
     settings: &Settings,
-    task_id: &str,
-    task_digest: &str,
+    run: &Run<'_>,
     ledger: &Ledger,
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Report, ExecError> {
+    let (task_id, task_digest) = (run.task_id, run.task_digest);
+    // The one clock the deadline reads, anchored like every executor clock (larry#268).
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let deadline = ceiling::Deadline::start(&clock, run.limits);
     // A brief lets the model write the tree, so the command that runs next is model-chosen
     // code; it runs confined to the workspace. `larry_submit_task` confines too, because a
     // remote peer drives the run and no person watches a command (larry#324, ADR 0088).
@@ -442,6 +474,7 @@ fn run_task(
         confine::supported(confine::Platform::host()).map_err(ExecError::Confine)?;
     }
     let step = model_step(task, settings, ledger)?;
+    deadline.cap(run.limits.timeout)?;
     let workspace = Workspace::create(
         &settings.state_dir,
         task.repo(),
@@ -487,21 +520,25 @@ fn run_task(
     };
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
-        // An acceptance command has no person watching it who could cancel it,
-        // so only the timeout ends it (larry#242).
+        // An acceptance command has no person watching it who could cancel it, so only its
+        // timeout or the task's deadline ends it (larry#242, larry#439).
         let place = match confine {
             Some(ref confine) => Place::Confined(confine),
             None => Place::Open(workspace.path()),
         };
+        let (timeout, capped) = deadline.cap(run.limits.timeout)?;
         let result = run_command(
-            argv,
+            &task.argv_for(argv),
             place,
             &settings.path,
-            settings.timeout,
+            timeout,
             ledger,
             task_id,
             &|| false,
         )?;
+        // The group the deadline killed is already reaped; the task ends typed and no later
+        // command starts.
+        deadline.after(capped, result.timed_out())?;
         results.push(result.into_json());
     }
     let diff = workspace.diff(task.base())?;

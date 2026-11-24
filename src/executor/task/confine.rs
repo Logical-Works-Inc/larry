@@ -20,6 +20,7 @@ impl Task {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Knobs;
     use super::Task;
 
     /// larry#324: a brief, or the MCP door's flag, confines the acceptance commands; a plain
@@ -36,7 +37,8 @@ mod tests {
             briefed.confines_acceptance(),
             "a brief means the model wrote the tree"
         );
-        let mcp = Task::shell_via("r", "g", &["f"], &["true"], None)?.confining_acceptance();
+        let mcp = Task::shell_via("r", "g", &["f"], &["true"], None, Knobs::default())?
+            .confining_acceptance();
         assert!(
             mcp.confines_acceptance(),
             "larry_submit_task confines its task"

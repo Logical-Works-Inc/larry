@@ -21,21 +21,40 @@ pub(super) fn owned_argvs(
     Ok(acceptance)
 }
 
+/// Longest shell program name or path, in bytes (larry#439).
+const MAX_SHELL_BYTES: usize = 256;
+
 /// Refuses a repository path or base the executor would hand to git unsafely.
 pub(super) fn check_repo_and_base(repo_text: &str, base_text: &str) -> Result<(), TaskError> {
     if repo_text.is_empty() || repo_text.len() > MAX_REPO_BYTES || repo_text.contains('\0') {
         return Err(TaskError::BadRepo);
     }
-    if base_text.is_empty()
-        || base_text.len() > MAX_BASE_BYTES
-        || base_text.starts_with('-')
-        || base_text
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-    {
+    if !is_base(base_text) {
         return Err(TaskError::BadBase);
     }
     Ok(())
+}
+
+/// Whether `text` is a word git may be handed as one argument and never read as an option:
+/// 1 to `max` bytes, no leading `-`, no whitespace or control character.
+fn is_word(text: &str, max: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= max
+        && !text.starts_with('-')
+        && !text
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+}
+
+/// Whether `text` is a base the clone may check out; a tenant's base ceiling reads it too.
+pub(in crate::executor) fn is_base(text: &str) -> bool {
+    is_word(text, MAX_BASE_BYTES)
+}
+
+/// Whether `text` names a shell program: a name or path the tenant's shell ceiling holds
+/// (larry#439).
+pub(in crate::executor) fn is_shell(text: &str) -> bool {
+    is_word(text, MAX_SHELL_BYTES)
 }
 
 /// Refuses acceptance commands outside the command, argv and argument bounds. A task names 1
