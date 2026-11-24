@@ -47,8 +47,9 @@ use group::{await_group_gone, settle_group, status_after_kill};
 const CANCEL_POLL: Duration = Duration::from_millis(25);
 
 /// How long a reader may keep draining once the group is settled: past it, a stream still
-/// receiving bytes belongs to a child that left the group, and the run ends typed rather than
-/// joining with no deadline (larry#334). A stream with nothing buffered is reported at once.
+/// receiving bytes, or silent, belongs to a child that left the group, and the run ends typed
+/// rather than joining with no deadline (larry#334). Silence is read for the grace too: a
+/// sibling's fork holds the writer until its `exec` (larry#454).
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// One captured stream: its first bytes, its last bytes, and how many bytes fell between them.
@@ -525,8 +526,8 @@ fn capture_pair(argv0: &str) -> Result<(UnixStream, UnixStream), ExecError> {
 }
 
 /// Reads one stream until its end, or until the command's group is settled and its writer is
-/// still there. Past `settled`, a read that blocks is the end at once; a stream that keeps
-/// yielding bytes is given [`DRAIN_GRACE`] from the first settled read and then reported open,
+/// still there. Past `settled`, a stream that keeps yielding bytes or stays silent is given
+/// [`DRAIN_GRACE`] from the first settled read and then reported open,
 /// so a child that left the group cannot hold the run (larry#334). The read timeout
 /// [`capture_pair`] armed makes the flag visible within [`CANCEL_POLL`], so a cancel is
 /// honoured just as quickly.
@@ -583,20 +584,17 @@ fn drain(
                 })?;
                 captured.push(filled)?;
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            // A silent read is retried like an interrupted one, settled or not: a sibling command
+            // forked between this pair's creation and its own `exec` holds a copy of the writer,
+            // and on a loaded host that copy outlives many read timeouts (larry#454). The grace
+            // above, on the clock, is what ends a stream a child that left the group still holds.
             Err(error)
                 if matches!(
                     error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                if settled_now {
-                    return Ok(Drained {
-                        captured,
-                        open: true,
-                    });
-                }
-            }
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
             Err(error) => return Err(error),
         }
     }

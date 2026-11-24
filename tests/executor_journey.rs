@@ -552,7 +552,11 @@ fn two_tasks_at_once_never_share_a_workspace() -> TestResult {
     let second = report_of(&second_child.wait_with_output()?)?;
     let first_pwd = text_of(result_at(&first, 0)?, "stdout")?.trim_end();
     let second_pwd = text_of(result_at(&second, 0)?, "stdout")?.trim_end();
-    assert!(!first_pwd.is_empty(), "the first pwd must report a path");
+    assert!(
+        !first_pwd.is_empty(),
+        "the first pwd must report a path: {}",
+        result_at(&first, 0)?
+    );
     assert_ne!(
         first_pwd, second_pwd,
         "two concurrent tasks must run in different workspaces"

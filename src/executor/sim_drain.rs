@@ -84,6 +84,64 @@ fn sim_a_settled_stream_that_keeps_writing_is_read_for_exactly_the_grace() -> Te
     Ok(())
 }
 
+/// A settled stream that is silent for a while and then ends is whole: a sibling command forked
+/// between this pair's creation and its own `exec` holds a copy of the writer, and on a loaded
+/// host it can hold it past many read timeouts (larry#454). Silence ends the drain only once the
+/// grace has passed on the clock, exactly as bytes do.
+#[test]
+fn sim_a_settled_stream_silent_inside_the_grace_is_whole_when_it_ends() -> TestResult {
+    for seed in 0..SEEDS {
+        let mut seeded = Seeded::from_seed(seed);
+        let step_ms = seeded.below(400)?.saturating_add(1);
+        let inside = reads_inside_grace(step_ms)?;
+        // Silent for up to every read inside the grace but the last two, then three bytes and the
+        // end, both read inside it.
+        let silent = seeded.below(inside.saturating_sub(1))?;
+        let clock = Cell::new(Duration::ZERO);
+        let settled = AtomicBool::new(true);
+        let mut reads = 0_u64;
+        let drained = drain(
+            |chunk| {
+                reads = reads.saturating_add(1);
+                clock.set(clock.get().saturating_add(Duration::from_millis(step_ms)));
+                match reads.cmp(&silent.saturating_add(1)) {
+                    std::cmp::Ordering::Less => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                    std::cmp::Ordering::Equal => Ok(3_usize.min(chunk.len())),
+                    std::cmp::Ordering::Greater => Ok(0),
+                }
+            },
+            || clock.get(),
+            &settled,
+        )?;
+        assert!(
+            !drained.open,
+            "seed {seed}: a stream that ended inside the grace is whole"
+        );
+        assert_eq!(drained.captured.bytes, 3, "seed {seed}: its bytes are kept");
+        // Silent past the grace: reported open after exactly the reads inside it.
+        let clock = Cell::new(Duration::ZERO);
+        let mut quiet = 0_u64;
+        let open = drain(
+            |_chunk| {
+                quiet = quiet.saturating_add(1);
+                clock.set(clock.get().saturating_add(Duration::from_millis(step_ms)));
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            },
+            || clock.get(),
+            &settled,
+        )?;
+        assert!(
+            open.open,
+            "seed {seed}: a writer silent past the grace is reported open"
+        );
+        assert_eq!(
+            quiet, inside,
+            "seed {seed}: silence is read until the grace, no longer"
+        );
+    }
+    Ok(())
+}
+
 /// One scripted read: bytes, a would-block, an interruption, or a fault.
 enum Step {
     /// Yields this many bytes.
