@@ -412,8 +412,8 @@ fn a_malformed_200_body_is_a_malformed_error_and_is_not_retried() -> TestResult 
 
 /// The wait is idle, so the 64 seeds run at once on the bounded lanes against one mock whose
 /// script delays its first 64 requests: each client times out on its own 150 ms clock, the mock
-/// admits all 64 connections, and the totals stand in for the old per-seed `served == 1`: exactly
-/// 64 requests reached it (none resent) and each seed's own body arrived once.
+/// admits all 64 connections, and no seed's body arrives twice: a timeout is never resent, at
+/// any load, however many requests the host let through in time (larry#454).
 #[test]
 fn a_delay_past_the_timeout_is_a_timeout() -> TestResult {
     let delayed = vec![Some(Fault::Delay); usize::try_from(SEEDS)?];
@@ -445,11 +445,9 @@ fn a_delay_past_the_timeout_is_a_timeout() -> TestResult {
                 "seed {seed}: a reply that outlasts the timeout is a timeout"
             );
         }
-        assert_eq!(
-            handle.served(),
-            SEEDS,
-            "a timeout is never resent: one request per seed"
-        );
+        // The 150 ms covers connect and send too, so on a loaded host a client can time out
+        // before the mock reads its request (56 of 64 on toronto, larry#454). How many arrive is
+        // the scheduler's choice; that none arrives twice is the client's, and that is the oracle.
         let bodies = handle.requests();
         for seed in 0..SEEDS {
             let wanted = format!("\"slow {seed}\"");
@@ -457,7 +455,7 @@ fn a_delay_past_the_timeout_is_a_timeout() -> TestResult {
                 .iter()
                 .filter(|body| String::from_utf8_lossy(body).contains(&wanted))
                 .count();
-            assert_eq!(arrived, 1, "seed {seed}: its own request arrived once");
+            assert!(arrived <= 1, "seed {seed}: a timeout is never resent");
         }
         Ok::<_, Box<dyn Error>>(())
     })
