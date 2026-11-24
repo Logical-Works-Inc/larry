@@ -201,6 +201,69 @@ fn sim_a_group_that_never_goes_away_stops_at_the_bound() -> TestResult {
     Ok(())
 }
 
+/// Longest pause the backoff may sleep between two probes on a real clock.
+const PAUSE_MAX: Duration = super::PROBE_PAUSE_MAX;
+
+/// Most probes a group that never goes away may cost across the whole 5 s bound: 500 pauses at
+/// the cap plus the doubling steps below it. The yield loop this replaces spun millions.
+const MAX_PROBES: u64 = 520;
+
+/// The group waits pause on a bounded backoff on a real clock, never a yield loop (larry#427):
+/// walking the schedule a wall-clock wait sleeps, a group that never goes away costs at most
+/// [`MAX_PROBES`] probes over the 5 s bound and no pause passes the deadline left, and for every
+/// seed a group gone at a drawn instant is seen no later than one capped pause after it and no
+/// later than its own age plus the first pause. Source: crossbeam `Backoff` (spin, then park),
+/// and the 1 to 2 vCPU budget host the waiter competes on.
+#[test]
+fn sim_the_group_wait_backoff_probes_a_bounded_number_of_times() -> TestResult {
+    let mut waited = Duration::ZERO;
+    let mut probes = 0_u64;
+    let mut attempt = 0_u32;
+    while waited < GROUP_PROBE_DEADLINE {
+        let left = GROUP_PROBE_DEADLINE.saturating_sub(waited);
+        let pause = super::probe_pause(attempt, left);
+        assert!(
+            pause <= PAUSE_MAX,
+            "attempt {attempt}: {pause:?} passes the cap"
+        );
+        assert!(
+            pause <= left,
+            "attempt {attempt}: {pause:?} passes the deadline"
+        );
+        assert!(!pause.is_zero(), "attempt {attempt}: a zero pause spins");
+        waited = waited.saturating_add(pause);
+        probes = probes.saturating_add(1);
+        attempt = attempt.saturating_add(1);
+    }
+    assert!(
+        probes <= MAX_PROBES,
+        "a group that never goes away cost {probes} probes over the bound"
+    );
+    assert_eq!(
+        waited, GROUP_PROBE_DEADLINE,
+        "the last pause ends on the bound"
+    );
+    for seed in 0..SEEDS {
+        let mut seeded = Seeded::from_seed(seed.wrapping_add(3 << 40));
+        let gone_at = Duration::from_micros(seeded.below(4_000_000)?);
+        let (mut at, mut attempt) = (Duration::ZERO, 0_u32);
+        while at < gone_at {
+            at = at.saturating_add(super::probe_pause(attempt, Duration::MAX));
+            attempt = attempt.saturating_add(1);
+        }
+        let lag = at.saturating_sub(gone_at);
+        assert!(
+            lag <= PAUSE_MAX,
+            "seed {seed}: gone at {gone_at:?}, seen {lag:?} late"
+        );
+        assert!(
+            lag <= gone_at.saturating_add(super::PROBE_PAUSE_FIRST),
+            "seed {seed}: gone at {gone_at:?}, seen {lag:?} late, past its age plus one pause"
+        );
+    }
+    Ok(())
+}
+
 /// The signal schedules one seed drives, each asserted against the rule and returned as a trace.
 fn settle_trace(seed: u64) -> Result<String, GroupWaitSimError> {
     let mut seeded = Seeded::from_seed(seed.wrapping_add(2 << 40));
