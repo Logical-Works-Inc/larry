@@ -11,12 +11,13 @@
 mod score;
 mod set;
 
-use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::num::TryFromIntError;
 use std::path::PathBuf;
 use std::time::Instant;
+
+use lgwks_macros::Error;
 
 use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
 use crate::executor::{hold_origin, origin_lock_path};
@@ -29,44 +30,57 @@ use set::{EvalTask, TaskSet};
 pub use set::{MAX_SET_BYTES, SetError};
 
 /// Why `larry eval` stopped without a scorecard.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EvalError {
     /// The task set was refused before any task ran.
-    Set(SetError),
+    #[error("eval set: {0}")]
+    Set(#[source] SetError),
     /// No model route is configured (no tenant default and no `LARRY_MODEL_*`
     /// environment route), so no arm is configured.
+    #[error(
+        "eval has no model route (larry route add, or LARRY_MODEL_URL, LARRY_MODEL and LARRY_MODEL_KEY): an arm needs its model"
+    )]
     ModelUnconfigured,
     /// The state directory is not UTF-8, so no task document can name an origin in it.
+    #[error("eval state directory is not UTF-8: {}", __field_0.display())]
     StatePath(PathBuf),
     /// An origin directory or file could not be written or removed.
+    #[error("eval origin of {id}: {cause}")]
     Origin {
         /// The task.
         id: String,
         /// The cause.
+        #[source]
         cause: io::Error,
     },
     /// The executor failed on something that is not the arm's doing (the ledger, git,
     /// a process group): the run stops rather than score infrastructure as the model.
+    #[error("eval task {id}: {cause}")]
     Exec {
         /// The task.
         id: String,
         /// The cause.
+        #[source]
         cause: ExecError,
     },
     /// A task ran longer than `u64::MAX` microseconds.
+    #[error("eval task {id} ran too long to time: {cause}")]
     Overlong {
         /// The task.
         id: String,
         /// The conversion that refused the duration.
+        #[source]
         cause: TryFromIntError,
     },
     /// A fault outside the arm's doing stopped it partway (larry#399): the card of the
     /// outcomes scored before it is kept, marked partial, and `cause` is why it stopped.
+    #[error("{cause}; the partial card keeps the outcomes before it")]
     Stopped {
         /// The partial card: `complete` false, `stopped` naming the task and the cause.
         card: Box<Scorecard>,
         /// The task's own failure.
+        #[source]
         cause: Box<EvalError>,
     },
 }
@@ -84,41 +98,6 @@ impl EvalError {
             | Self::Origin { .. }
             | Self::Exec { .. }
             | Self::Overlong { .. } => None,
-        }
-    }
-}
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Set(ref cause) => write!(out, "eval set: {cause}"),
-            Self::ModelUnconfigured => out.write_str(
-                "eval has no model route (larry route add, or LARRY_MODEL_URL, LARRY_MODEL and LARRY_MODEL_KEY): an arm needs its model",
-            ),
-            Self::StatePath(ref path) => {
-                write!(out, "eval state directory is not UTF-8: {}", path.display())
-            }
-            Self::Origin { ref id, ref cause } => write!(out, "eval origin of {id}: {cause}"),
-            Self::Exec { ref id, ref cause } => write!(out, "eval task {id}: {cause}"),
-            Self::Overlong { ref id, ref cause } => {
-                write!(out, "eval task {id} ran too long to time: {cause}")
-            }
-            Self::Stopped { ref cause, .. } => {
-                write!(out, "{cause}; the partial card keeps the outcomes before it")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Set(ref cause) => Some(cause),
-            Self::Origin { ref cause, .. } => Some(cause),
-            Self::Exec { ref cause, .. } => Some(cause),
-            Self::Overlong { ref cause, .. } => Some(cause),
-            Self::Stopped { ref cause, .. } => Some(&**cause),
-            Self::ModelUnconfigured | Self::StatePath(_) => None,
         }
     }
 }

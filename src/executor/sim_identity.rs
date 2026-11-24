@@ -13,6 +13,7 @@
 
 use std::path::Path;
 
+use lgwks_macros::Error;
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 
@@ -25,46 +26,17 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Why this simulation's own helper refused: a key it could not draw, or a
 /// document it could not build. The refusals this change is about travel as the
 /// typed `TaskError`, never as this one.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum SimFault {
     /// A seeded draw had no value, or refused.
-    Draw(lgwks_std::seeded::DrawError),
+    #[error("seeded draw: {0}")]
+    Draw(#[from] lgwks_std::seeded::DrawError),
     /// A drawn byte did not fit its range.
-    Narrow(std::num::TryFromIntError),
+    #[error("seeded byte: {0}")]
+    Narrow(#[from] std::num::TryFromIntError),
     /// The drawn filler was shorter than the slice taken from it.
+    #[error("the drawn filler is shorter than the slice taken")]
     Short,
-}
-
-impl std::fmt::Display for SimFault {
-    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw: {cause}"),
-            Self::Narrow(ref cause) => write!(out, "seeded byte: {cause}"),
-            Self::Short => out.write_str("the drawn filler is shorter than the slice taken"),
-        }
-    }
-}
-
-impl std::error::Error for SimFault {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Draw(ref cause) => Some(cause),
-            Self::Narrow(ref cause) => Some(cause),
-            Self::Short => None,
-        }
-    }
-}
-
-impl From<lgwks_std::seeded::DrawError> for SimFault {
-    fn from(cause: lgwks_std::seeded::DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<std::num::TryFromIntError> for SimFault {
-    fn from(cause: std::num::TryFromIntError) -> Self {
-        Self::Narrow(cause)
-    }
 }
 
 /// The seeds every actor replays: named rather than drawn, so a failure prints the

@@ -9,13 +9,13 @@
 //! what must hold: no row survives its settled group, and no group dies that its
 //! row does not name. One seed drives every draw, so a failing seed replays exactly.
 
-use std::fmt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::{Clock, ClockError};
+use lgwks_macros::Error;
 use lgwks_std::process::{ProcessIdentity, identify_process, process_group_exists};
 use lgwks_std::seeded::Seeded;
 
@@ -222,27 +222,37 @@ fn trace_hash(trace: &str) -> String {
 }
 
 /// Why a group-row simulation refused: a call under it, or one of its own oracles (larry#214).
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum GroupSimError {
     /// A ledger call failed.
-    Exec(ExecError),
+    #[error("ledger call: {0}")]
+    Exec(#[from] ExecError),
     /// A process, file or group probe failed.
-    Io(std::io::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
     /// A statement the simulation runs by hand failed.
-    Sql(lgwks_deps::storefront::rusqlite::Error),
+    #[error("statement: {0}")]
+    Sql(#[from] lgwks_deps::storefront::rusqlite::Error),
     /// The seeded draw failed.
-    Draw(lgwks_std::seeded::DrawError),
+    #[error("draw: {0}")]
+    Draw(#[from] lgwks_std::seeded::DrawError),
     /// A count did not fit its integer type.
-    Int(std::num::TryFromIntError),
+    #[error("integer: {0}")]
+    Int(#[from] std::num::TryFromIntError),
     /// A row's identity was refused.
-    Identity(lgwks_std::process::ProcessIdentityError),
+    #[error("identity: {0}")]
+    Identity(#[from] lgwks_std::process::ProcessIdentityError),
     /// The executor's own group could not be identified.
+    #[error("the executor's own group could not be identified")]
     GroupDown,
     /// The virtual clock refused the step this simulation asked of it.
-    Clock(ClockError),
+    #[error("the virtual clock refused a step: {0}")]
+    Clock(#[from] ClockError),
     /// A racing start panicked.
+    #[error("a racing start panicked")]
     Racer,
     /// Rows survived the racing starts.
+    #[error("seed {seed:#x}: {count} rows survive the racing starts")]
     Survivors {
         /// The seed that drew the scenario.
         seed: u64,
@@ -250,6 +260,7 @@ enum GroupSimError {
         count: usize,
     },
     /// Fewer rows were settled than rows were written.
+    #[error("seed {seed:#x}: {settled} settled for {rows} rows, one row went unsettled")]
     Unsettled {
         /// The seed that drew the scenario.
         seed: u64,
@@ -259,11 +270,13 @@ enum GroupSimError {
         rows: usize,
     },
     /// A group was signalled by a row that does not name it.
+    #[error("seed {seed:#x}: a stranger's group was signalled by a row it does not name")]
     Stranger {
         /// The seed that drew the scenario.
         seed: u64,
     },
     /// The damaged rows did not settle once each.
+    #[error("seed {seed:#x}: {first} settled, expected the {expected} damaged rows")]
     Settled {
         /// The seed that drew the scenario.
         seed: u64,
@@ -273,6 +286,9 @@ enum GroupSimError {
         expected: usize,
     },
     /// One state directory's reap settled or removed a row another directory recorded.
+    #[error(
+        "seed {seed:#x}: a foreign reap settled {foreign}, and {left} of {rows} rows stayed with their own directory"
+    )]
     Crossed {
         /// The seed that drew the scenario.
         seed: u64,
@@ -284,6 +300,9 @@ enum GroupSimError {
         rows: usize,
     },
     /// The owned or stranger row settled other than once.
+    #[error(
+        "seed {seed:#x}: the owned and stranger rows settle once each, got {second} and {third}"
+    )]
     Final {
         /// The seed that drew the scenario.
         seed: u64,
@@ -293,138 +312,8 @@ enum GroupSimError {
         third: usize,
     },
     /// The shared scratch guard could not make its directory.
-    Tree(crate::sim_error::SimError),
-}
-
-impl fmt::Display for GroupSimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Exec(ref cause) => write!(out, "ledger call: {cause}"),
-            Self::Io(ref cause) => write!(out, "io: {cause}"),
-            Self::Sql(ref cause) => write!(out, "statement: {cause}"),
-            Self::Draw(ref cause) => write!(out, "draw: {cause}"),
-            Self::Int(ref cause) => write!(out, "integer: {cause}"),
-            Self::Identity(ref cause) => write!(out, "identity: {cause}"),
-            Self::GroupDown => out.write_str("the executor's own group could not be identified"),
-            Self::Clock(ref cause) => write!(out, "the virtual clock refused a step: {cause}"),
-            Self::Racer => out.write_str("a racing start panicked"),
-            Self::Survivors { seed, count } => {
-                write!(
-                    out,
-                    "seed {seed:#x}: {count} rows survive the racing starts"
-                )
-            }
-            Self::Unsettled {
-                seed,
-                settled,
-                rows,
-            } => write!(
-                out,
-                "seed {seed:#x}: {settled} settled for {rows} rows, one row went unsettled"
-            ),
-            Self::Stranger { seed } => write!(
-                out,
-                "seed {seed:#x}: a stranger's group was signalled by a row it does not name"
-            ),
-            Self::Settled {
-                seed,
-                first,
-                expected,
-            } => write!(
-                out,
-                "seed {seed:#x}: {first} settled, expected the {expected} damaged rows"
-            ),
-            Self::Crossed {
-                seed,
-                foreign,
-                left,
-                rows,
-            } => write!(
-                out,
-                "seed {seed:#x}: a foreign reap settled {foreign}, and {left} of {rows} rows stayed with their own directory"
-            ),
-            Self::Final {
-                seed,
-                second,
-                third,
-            } => write!(
-                out,
-                "seed {seed:#x}: the owned and stranger rows settle once each, got {second} and {third}"
-            ),
-            Self::Tree(ref cause) => write!(out, "scratch tree: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for GroupSimError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Exec(ref cause) => Some(cause),
-            Self::Io(ref cause) => Some(cause),
-            Self::Sql(ref cause) => Some(cause),
-            Self::Draw(ref cause) => Some(cause),
-            Self::Int(ref cause) => Some(cause),
-            Self::Identity(ref cause) => Some(cause),
-            Self::Clock(ref cause) => Some(cause),
-            Self::GroupDown
-            | Self::Racer
-            | Self::Survivors { .. }
-            | Self::Unsettled { .. }
-            | Self::Stranger { .. }
-            | Self::Settled { .. }
-            | Self::Crossed { .. }
-            | Self::Final { .. } => None,
-            Self::Tree(ref cause) => Some(cause),
-        }
-    }
-}
-
-impl From<crate::sim_error::SimError> for GroupSimError {
-    fn from(cause: crate::sim_error::SimError) -> Self {
-        Self::Tree(cause)
-    }
-}
-
-impl From<ExecError> for GroupSimError {
-    fn from(cause: ExecError) -> Self {
-        Self::Exec(cause)
-    }
-}
-
-impl From<ClockError> for GroupSimError {
-    fn from(cause: ClockError) -> Self {
-        Self::Clock(cause)
-    }
-}
-
-impl From<std::io::Error> for GroupSimError {
-    fn from(cause: std::io::Error) -> Self {
-        Self::Io(cause)
-    }
-}
-
-impl From<lgwks_deps::storefront::rusqlite::Error> for GroupSimError {
-    fn from(cause: lgwks_deps::storefront::rusqlite::Error) -> Self {
-        Self::Sql(cause)
-    }
-}
-
-impl From<lgwks_std::seeded::DrawError> for GroupSimError {
-    fn from(cause: lgwks_std::seeded::DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<std::num::TryFromIntError> for GroupSimError {
-    fn from(cause: std::num::TryFromIntError) -> Self {
-        Self::Int(cause)
-    }
-}
-
-impl From<lgwks_std::process::ProcessIdentityError> for GroupSimError {
-    fn from(cause: lgwks_std::process::ProcessIdentityError) -> Self {
-        Self::Identity(cause)
-    }
+    #[error("scratch tree: {0}")]
+    Tree(#[from] crate::sim_error::SimError),
 }
 
 /// Whether the group is gone within the deadline on a virtual clock this probe advances: one

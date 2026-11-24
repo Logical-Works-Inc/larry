@@ -6,24 +6,15 @@
 //! `value.at(..).is_err()` directly. Included by path into each test crate that reads
 //! replies; every use is an assertion in those tests.
 
-use std::fmt;
-
 use lgwks_std::json::Value;
 
 /// A JSON reply lacked the member a test read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, lgwks_macros::Error)]
+#[error("the reply has no member at {pointer}")]
 pub(crate) struct Missing {
     /// The RFC 6901 pointer that named no member.
     pointer: String,
 }
-
-impl fmt::Display for Missing {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(out, "the reply has no member at {}", self.pointer)
-    }
-}
-
-impl std::error::Error for Missing {}
 
 /// Reads a member of a JSON value by an RFC 6901 pointer such as `/result/content/0/text`.
 pub(crate) trait At {

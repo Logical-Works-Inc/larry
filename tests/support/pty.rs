@@ -7,7 +7,6 @@
 //! includes this file.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -39,9 +38,13 @@ const TOOLS: [&str; 6] = ["sh", "git", "script", "stty", "cp", "sleep"];
 
 /// Why the terminal's tools could not be resolved into a PATH: a typed setup refusal that names
 /// the tool, so a host without one says so instead of failing later with "not found" (larry#296).
-#[derive(Debug)]
+#[derive(Debug, lgwks_macros::Error)]
 pub(crate) enum SetupError {
     /// No searched directory holds the tool.
+    #[error(
+        "the terminal needs `{tool}`, which these directories do not hold: {}",
+        joined(searched)
+    )]
     Missing {
         /// The tool's name.
         tool: &'static str,
@@ -49,50 +52,25 @@ pub(crate) enum SetupError {
         searched: Vec<PathBuf>,
     },
     /// A candidate's metadata could not be read.
+    #[error(
+        "the terminal cannot read the candidate `{}` for `{tool}`: {cause}",
+        path.display()
+    )]
     Unreadable {
         /// The tool being looked up.
         tool: &'static str,
         /// The candidate path.
         path: PathBuf,
         /// The operating system's refusal.
+        #[source]
         cause: io::Error,
     },
 }
 
-impl fmt::Display for SetupError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Missing { tool, ref searched } => {
-                let dirs: Vec<String> = searched
-                    .iter()
-                    .map(|dir| dir.display().to_string())
-                    .collect();
-                write!(
-                    out,
-                    "the terminal needs `{tool}`, which these directories do not hold: {}",
-                    dirs.join(":")
-                )
-            }
-            Self::Unreadable {
-                tool,
-                ref path,
-                ref cause,
-            } => write!(
-                out,
-                "the terminal cannot read the candidate `{}` for `{tool}`: {cause}",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SetupError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Unreadable { ref cause, .. } => Some(cause),
-            Self::Missing { .. } => None,
-        }
-    }
+/// The searched directories as one `:`-joined text.
+fn joined(dirs: &[PathBuf]) -> String {
+    let shown: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+    shown.join(":")
 }
 
 /// The executable for `tool` in the first of `search` that holds one: a plain stat of each

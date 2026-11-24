@@ -24,13 +24,13 @@ mod sim_tui;
 mod style;
 mod worker;
 
-use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
+use lgwks_macros::Error;
 
 use crate::executor::{ExecError, Isolation, Settings, process_env};
 use app::{App, Effect, Input, Key};
@@ -48,34 +48,18 @@ const STATUS_REASON: usize = 100;
 const EVENTS_PER_TURN: usize = worker::EVENTS;
 
 /// Why the frontend stopped.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TuiError {
     /// The terminal refused raw mode, a size, a read or a write.
-    Terminal(io::Error),
+    #[error("terminal: {0}")]
+    Terminal(#[source] io::Error),
     /// The working directory could not be read.
-    Directory(io::Error),
+    #[error("working directory: {0}")]
+    Directory(#[source] io::Error),
     /// The session running at quit had stopped on a panic; the text names it (larry#412).
+    #[error("session: {0}")]
     Session(String),
-}
-
-impl fmt::Display for TuiError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Terminal(ref cause) => write!(out, "terminal: {cause}"),
-            Self::Directory(ref cause) => write!(out, "working directory: {cause}"),
-            Self::Session(ref why) => write!(out, "session: {why}"),
-        }
-    }
-}
-
-impl std::error::Error for TuiError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Terminal(ref cause) | Self::Directory(ref cause) => Some(cause),
-            Self::Session(_) => None,
-        }
-    }
 }
 
 /// The terminal in raw mode on the alternate screen; dropping it restores both.

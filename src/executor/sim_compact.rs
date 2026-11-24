@@ -8,15 +8,15 @@
 //! conversation. The window a gateway's refusal names is `sim_refusal`'s
 //! (larry#236).
 
-use std::error::Error;
-use std::fmt;
+use std::error::Error as StdError;
 use std::io::Write;
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::Clock;
+use lgwks_macros::Error;
 use lgwks_std::hash::Hasher;
 use lgwks_std::json;
-use lgwks_std::seeded::{DrawError, Seeded};
+use lgwks_std::seeded::Seeded;
 
 use super::super::session::sim::text;
 use super::{Answer, Conversation, KEEP_EXCHANGES, MAX_RECORD_LINES, Overflow, quarters};
@@ -27,7 +27,7 @@ use crate::model::{
 use crate::sim_error::SimError;
 
 /// What every simulation returns.
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), Box<dyn StdError>>;
 
 /// Seeds each simulation runs: every request is encoded whole, so 24 seeds of up
 /// to [`STEPS`] steps keep a debug run within the mutation gate's budget.
@@ -41,53 +41,20 @@ const STEPS: u64 = 200;
 const SYSTEM: &str = "You are Larry, a terminal agent.";
 
 /// Why a simulated session could not run to its end.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum DriveError {
     /// The seeded input could not be built.
-    Sim(SimError),
+    #[error("seeded input: {0}")]
+    Sim(#[from] SimError),
     /// The client could not be built.
-    Model(ModelError),
+    #[error("client: {0}")]
+    Model(#[from] ModelError),
     /// The conversation could not be sent.
-    Overflow(Overflow),
+    #[error("overflow: {0}")]
+    Overflow(#[from] Overflow),
     /// A request lacked what a check reads.
+    #[error("missing: {0}")]
     Missing(&'static str),
-}
-
-impl fmt::Display for DriveError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Sim(ref cause) => write!(out, "seeded input: {cause}"),
-            Self::Model(ref cause) => write!(out, "client: {cause}"),
-            Self::Overflow(ref cause) => write!(out, "overflow: {cause}"),
-            Self::Missing(what) => write!(out, "missing: {what}"),
-        }
-    }
-}
-
-impl Error for DriveError {}
-
-impl From<SimError> for DriveError {
-    fn from(cause: SimError) -> Self {
-        Self::Sim(cause)
-    }
-}
-
-impl From<DrawError> for DriveError {
-    fn from(cause: DrawError) -> Self {
-        Self::Sim(SimError::Draw(cause))
-    }
-}
-
-impl From<ModelError> for DriveError {
-    fn from(cause: ModelError) -> Self {
-        Self::Model(cause)
-    }
-}
-
-impl From<Overflow> for DriveError {
-    fn from(cause: Overflow) -> Self {
-        Self::Overflow(cause)
-    }
 }
 
 /// A drawn number below `bound`, as a length.
@@ -145,7 +112,7 @@ fn drive(
         let request = conversation.prepare(&model)?;
         check(&conversation, &request)?;
         let refused = quarters(request.bytes(), 3) >= 16_384 && conversation.tally.shrinks < 2;
-        if rng.below(16)? == 0 && refused {
+        if rng.below(16).map_err(SimError::Draw)? == 0 && refused {
             conversation.shrink(request.bytes(), WindowRefusal::default())?;
             let shorter = conversation.prepare(&model)?;
             check(&conversation, &shorter)?;

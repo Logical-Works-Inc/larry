@@ -14,9 +14,10 @@ mod config;
 mod route;
 mod wire;
 
-use std::fmt;
 use std::num::{ParseFloatError, ParseIntError};
 use std::str::Utf8Error;
+
+use lgwks_macros::Error;
 
 pub use client::ModelClient;
 pub(crate) use client::Request;
@@ -67,17 +68,20 @@ const LIMIT_MARKERS: [&str; 2] = [
 const MAX_REPLY_BYTES: usize = 4_194_304;
 
 /// Why one completion failed. Every refusal is a typed variant; no catch-all exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ModelError {
     /// The gateway did not answer within the configured timeout.
+    #[error("the model gateway timed out")]
     Timeout,
     /// The gateway answered 429. `retry_after` is its hint in seconds, when it sent one.
+    #[error("the model gateway rate limited the request{}", retry_hint(*retry_after))]
     RateLimited {
         /// The `Retry-After` value in seconds, if the header was a whole number.
         retry_after: Option<u64>,
     },
     /// The gateway answered a 5xx status.
+    #[error("the model gateway failed with status {status}{}", with_detail(detail))]
     Server {
         /// The status code.
         status: u16,
@@ -86,6 +90,10 @@ pub enum ModelError {
     },
     /// The gateway answered with a status that is never retried: a 4xx other than
     /// 429, or a 3xx, which the client does not follow.
+    #[error(
+        "the model gateway refused with status {status}{}",
+        with_detail(detail)
+    )]
     Client {
         /// The status code.
         status: u16,
@@ -93,9 +101,11 @@ pub enum ModelError {
         detail: String,
     },
     /// The reply is not a completion document. The reason names what is missing.
+    #[error("malformed model reply: {0}")]
     Malformed(&'static str),
     /// A `data:` chunk of a streamed reply is not JSON, so the content it carried is lost and
     /// the assembled reply is not the model's (larry#396).
+    #[error("malformed model reply: the stream chunk on line {line} is not JSON (column {column})")]
     StreamChunk {
         /// The reply line the chunk is on, from 1.
         line: usize,
@@ -105,100 +115,59 @@ pub enum ModelError {
     /// The model did not finish its reply: the gateway's `finish_reason` names a cut
     /// (`length`, `max_tokens`), a filter (`content_filter`, `SAFETY`) or another reason the
     /// client does not read as finished, so the content is never used (larry#396).
+    #[error("the model did not finish its reply (finish_reason {reason})")]
     Unfinished {
         /// The gateway's reason, at most 64 characters, control characters replaced.
         reason: String,
     },
     /// The reply body is not UTF-8.
-    NotUtf8(Utf8Error),
+    #[error("the model reply is not UTF-8: {0}")]
+    NotUtf8(#[source] Utf8Error),
     /// The connection failed, or the reply could not be read to its end. The estate client's
     /// error is kept whole: its stage (resolve, connect, TLS, send, body) and kind tell a bad
     /// host from a dead network, and its sanitized cause never carries the URL (larry#434).
-    Transport(lgwks_std::http::Error),
+    #[error("the model gateway could not be reached: {0}")]
+    Transport(#[source] lgwks_std::http::Error),
     /// No API key is configured, so nothing was sent.
+    #[error("no model API key is configured (LARRY_MODEL_KEY)")]
     MissingKey,
     /// The variable a route names for its key is unset or empty, so nothing was
     /// sent. The name is the variable's, never the key's value.
+    #[error("the route's key variable {variable} is unset or empty")]
     KeyUnset {
         /// The variable the route reads its key from.
         variable: String,
     },
     /// A `LARRY_MODEL_*` variable the environment route needs is unset.
+    #[error("{0} is unset")]
     Unset(&'static str),
     /// The environment route fails its field checks.
-    BadRoute(RouteError),
+    #[error("the environment route: {0}")]
+    BadRoute(#[source] RouteError),
     /// A `LARRY_MODEL_*` whole-number setting does not parse.
+    #[error("{variable} is not a whole number: {cause}")]
     BadInteger {
         /// The variable that was set.
         variable: &'static str,
         /// Why it does not parse.
+        #[source]
         cause: ParseIntError,
     },
     /// A `LARRY_MODEL_*` decimal setting does not parse.
+    #[error("{variable} is not a number: {cause}")]
     BadFloat {
         /// The variable that was set.
         variable: &'static str,
         /// Why it does not parse.
+        #[source]
         cause: ParseFloatError,
     },
     /// A `LARRY_MODEL_*` setting parses but is outside what the client accepts.
+    #[error("{0} is out of range")]
     OutOfRange(&'static str),
     /// A request or reply exceeded its size bound. Nothing past the bound was read.
+    #[error("a model request or reply exceeded its size bound")]
     BodyTooLarge,
-}
-
-impl fmt::Display for ModelError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Timeout => out.write_str("the model gateway timed out"),
-            Self::RateLimited {
-                retry_after: Some(seconds),
-            } => write!(
-                out,
-                "the model gateway rate limited the request; retry after {seconds}s"
-            ),
-            Self::RateLimited { retry_after: None } => {
-                out.write_str("the model gateway rate limited the request")
-            }
-            Self::Server { status, ref detail } => {
-                write!(out, "the model gateway failed with status {status}")?;
-                with_detail(out, detail)
-            }
-            Self::Client { status, ref detail } => {
-                write!(out, "the model gateway refused with status {status}")?;
-                with_detail(out, detail)
-            }
-            Self::Malformed(reason) => write!(out, "malformed model reply: {reason}"),
-            Self::StreamChunk { line, column } => write!(
-                out,
-                "malformed model reply: the stream chunk on line {line} is not JSON (column {column})"
-            ),
-            Self::Unfinished { ref reason } => write!(
-                out,
-                "the model did not finish its reply (finish_reason {reason})"
-            ),
-            Self::NotUtf8(ref cause) => write!(out, "the model reply is not UTF-8: {cause}"),
-            Self::Transport(ref cause) => {
-                write!(out, "the model gateway could not be reached: {cause}")
-            }
-            Self::MissingKey => out.write_str("no model API key is configured (LARRY_MODEL_KEY)"),
-            Self::KeyUnset { ref variable } => {
-                write!(out, "the route's key variable {variable} is unset or empty")
-            }
-            Self::Unset(variable) => write!(out, "{variable} is unset"),
-            Self::BadRoute(ref cause) => write!(out, "the environment route: {cause}"),
-            Self::BadInteger {
-                variable,
-                ref cause,
-            } => write!(out, "{variable} is not a whole number: {cause}"),
-            Self::BadFloat {
-                variable,
-                ref cause,
-            } => write!(out, "{variable} is not a number: {cause}"),
-            Self::OutOfRange(variable) => write!(out, "{variable} is out of range"),
-            Self::BodyTooLarge => out.write_str("a model request or reply exceeded its size bound"),
-        }
-    }
 }
 
 /// Whether a member of a refusal's code names the context window: the stem itself, or the
@@ -316,24 +285,19 @@ fn number_before(text: &str, marker: &str) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
-/// Append the gateway's reason after a status, when it gave one.
-fn with_detail(out: &mut fmt::Formatter<'_>, detail: &str) -> fmt::Result {
+/// The gateway's reason after a status, when it gave one.
+fn with_detail(detail: &str) -> String {
     if detail.is_empty() {
-        return Ok(());
+        return String::new();
     }
-    write!(out, ": {detail}")
+    format!(": {detail}")
 }
 
-impl std::error::Error for ModelError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::NotUtf8(ref cause) => Some(cause),
-            Self::BadInteger { ref cause, .. } => Some(cause),
-            Self::BadFloat { ref cause, .. } => Some(cause),
-            Self::BadRoute(ref cause) => Some(cause),
-            Self::Transport(ref cause) => Some(cause),
-            _ => None,
-        }
+/// The wait a rate-limited gateway asked for, when it said.
+fn retry_hint(retry_after: Option<u64>) -> String {
+    match retry_after {
+        Some(seconds) => format!("; retry after {seconds}s"),
+        None => String::new(),
     }
 }
 

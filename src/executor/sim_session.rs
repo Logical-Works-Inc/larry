@@ -9,7 +9,6 @@
 //! refusal and nothing runs.
 
 use std::collections::BTreeSet;
-use std::fmt;
 use std::io;
 use std::mem::discriminant;
 use std::num::TryFromIntError;
@@ -17,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use lgwks_macros::Error;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
@@ -338,80 +338,35 @@ fn flip_when_listed(
 }
 
 /// Why one cancel run could not be driven to its assertions.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum CancelSimError {
     /// The marker text could not be built.
-    Text(SimError),
+    #[error("marker text: {0}")]
+    Text(#[from] SimError),
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0}")]
+    Draw(#[from] DrawError),
     /// A drawn number does not fit its type.
-    Range(TryFromIntError),
+    #[error("drawn number out of range: {0}")]
+    Range(#[from] TryFromIntError),
     /// The executor refused the run or the ledger.
-    Exec(ExecError),
+    #[error("executor: {0}")]
+    Exec(#[from] ExecError),
     /// A scratch directory or a group probe failed.
-    Io(io::Error),
+    #[error("scratch or probe: {0}")]
+    Io(#[from] io::Error),
     /// The ledger witness thread panicked.
+    #[error("the ledger witness thread panicked")]
     WitnessPanicked,
     /// The command's record lacks a field the run needs.
+    #[error("missing: {0}")]
     Missing(&'static str),
     /// A tree still present after its guard dropped, named so the leak can be found.
+    #[error("the tree {} outlived its guard", __field_0.display())]
     Leaked(PathBuf),
     /// A lane of the seed sweep failed outright.
-    Lane(LaneError),
-}
-
-impl From<LaneError> for CancelSimError {
-    fn from(cause: LaneError) -> Self {
-        Self::Lane(cause)
-    }
-}
-
-impl fmt::Display for CancelSimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Text(ref cause) => write!(out, "marker text: {cause}"),
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
-            Self::Exec(ref cause) => write!(out, "executor: {cause}"),
-            Self::Io(ref cause) => write!(out, "scratch or probe: {cause}"),
-            Self::WitnessPanicked => out.write_str("the ledger witness thread panicked"),
-            Self::Missing(what) => write!(out, "missing: {what}"),
-            Self::Leaked(ref path) => write!(out, "the tree {} outlived its guard", path.display()),
-            Self::Lane(ref cause) => write!(out, "seed sweep: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for CancelSimError {}
-
-impl From<SimError> for CancelSimError {
-    fn from(cause: SimError) -> Self {
-        Self::Text(cause)
-    }
-}
-
-impl From<DrawError> for CancelSimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<TryFromIntError> for CancelSimError {
-    fn from(cause: TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<ExecError> for CancelSimError {
-    fn from(cause: ExecError) -> Self {
-        Self::Exec(cause)
-    }
-}
-
-impl From<io::Error> for CancelSimError {
-    fn from(cause: io::Error) -> Self {
-        Self::Io(cause)
-    }
+    #[error("seed sweep: {0}")]
+    Lane(#[from] LaneError),
 }
 
 /// One schedule of one seed against `run_command`: asserts what the result and the

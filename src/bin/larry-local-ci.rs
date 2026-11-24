@@ -5,13 +5,13 @@
 //! head it attests, so it cannot vouch for a later commit. `--list` prints the
 //! lanes as JSON and runs nothing.
 use std::ffi::OsString;
-use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
+use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 /// One gate: its name, the program and arguments it runs, and extra environment.
@@ -112,20 +112,25 @@ const LANES: [Lane; 10] = [
 ];
 
 /// Why the run stopped without a receipt.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum LocalCiError {
     /// An argument other than `--list`.
+    #[error("unknown argument {0:?}; usage: larry-local-ci [--list]")]
     Usage(OsString),
     /// `git` ran but could not name the checkout, its branch or its head.
+    #[error("git could not report {0}")]
     Git(&'static str),
     /// A lane's program, or `git`, could not be started or read.
+    #[error("lane {lane} did not start: {cause}")]
     Spawn {
         /// The lane.
         lane: &'static str,
         /// The cause.
+        #[source]
         cause: io::Error,
     },
     /// A lane exited non-zero or was killed.
+    #[error("lane {lane} {}", ended(*code))]
     Red {
         /// The lane.
         lane: &'static str,
@@ -133,47 +138,36 @@ enum LocalCiError {
         code: Option<i32>,
     },
     /// One or more lanes were red; each was reported as it failed.
-    Failed(Vec<&'static str>),
+    #[error("red lanes: {}; no receipt written", lanes.join(", "))]
+    Failed {
+        /// The red lanes, in lane order.
+        lanes: Vec<&'static str>,
+    },
     /// The log could not be written.
-    Log(io::Error),
+    #[error("log unwritable: {0}")]
+    Log(#[source] io::Error),
     /// `HOME` is unset, so the receipt has no home.
+    #[error("HOME is unset; the receipt has nowhere to go")]
     Home,
     /// The clock reads before 1970.
-    Clock(SystemTimeError),
+    #[error("the clock reads before 1970: {0}")]
+    Clock(#[source] SystemTimeError),
     /// The receipt could not be written.
+    #[error("receipt {} unwritable: {cause}", path.display())]
     Receipt {
         /// The receipt file.
         path: PathBuf,
         /// The cause.
+        #[source]
         cause: io::Error,
     },
 }
 
-impl fmt::Display for LocalCiError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Usage(ref arg) => write!(
-                out,
-                "unknown argument {arg:?}; usage: larry-local-ci [--list]"
-            ),
-            Self::Git(what) => write!(out, "git could not report {what}"),
-            Self::Spawn { lane, ref cause } => write!(out, "lane {lane} did not start: {cause}"),
-            Self::Red {
-                lane,
-                code: Some(code),
-            } => write!(out, "lane {lane} failed with exit {code}"),
-            Self::Red { lane, code: None } => write!(out, "lane {lane} was killed by a signal"),
-            Self::Failed(ref lanes) => {
-                write!(out, "red lanes: {}; no receipt written", lanes.join(", "))
-            }
-            Self::Log(ref cause) => write!(out, "log unwritable: {cause}"),
-            Self::Home => out.write_str("HOME is unset; the receipt has nowhere to go"),
-            Self::Clock(ref cause) => write!(out, "the clock reads before 1970: {cause}"),
-            Self::Receipt {
-                ref path,
-                ref cause,
-            } => write!(out, "receipt {} unwritable: {cause}", path.display()),
-        }
+/// How a red lane ended: with an exit code, or killed by a signal.
+fn ended(code: Option<i32>) -> String {
+    match code {
+        Some(code) => format!("failed with exit {code}"),
+        None => "was killed by a signal".to_owned(),
     }
 }
 
@@ -292,7 +286,7 @@ fn local_ci() -> Result<(), LocalCiError> {
         }
     }
     if !red.is_empty() {
-        return Err(LocalCiError::Failed(red));
+        return Err(LocalCiError::Failed { lanes: red });
     }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"], "the branch")?;
     let head = git(&["rev-parse", "HEAD"], "the head")?;

@@ -7,7 +7,6 @@
 
 use std::cell::Cell;
 use std::ffi::OsStr;
-use std::fmt;
 use std::io::{self, Read};
 use std::num::TryFromIntError;
 use std::os::unix::process::CommandExt;
@@ -17,6 +16,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::Clock;
+use lgwks_macros::Error;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::{
@@ -273,53 +273,20 @@ const MAX_STEPS: u64 = 12;
 const POLL_CAP: u64 = 10_000;
 
 /// Why one command-timeout simulation could not be driven to its assertions.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum WaitSimError {
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0}")]
+    Draw(#[from] DrawError),
     /// A drawn number or a process id does not fit the type its use needs.
-    Range(TryFromIntError),
+    #[error("number out of range: {0}")]
+    Range(#[from] TryFromIntError),
     /// The command could not be started, or its status could not be read.
-    Process(io::Error),
+    #[error("the command failed: {0}")]
+    Process(#[from] io::Error),
     /// The wait itself failed.
-    Wait(ExecError),
-}
-
-impl fmt::Display for WaitSimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "number out of range: {cause}"),
-            Self::Process(ref cause) => write!(out, "the command failed: {cause}"),
-            Self::Wait(ref cause) => write!(out, "the wait failed: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for WaitSimError {}
-
-impl From<DrawError> for WaitSimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<TryFromIntError> for WaitSimError {
-    fn from(cause: TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<io::Error> for WaitSimError {
-    fn from(cause: io::Error) -> Self {
-        Self::Process(cause)
-    }
-}
-
-impl From<ExecError> for WaitSimError {
-    fn from(cause: ExecError) -> Self {
-        Self::Wait(cause)
-    }
+    #[error("the wait failed: {0}")]
+    Wait(#[from] ExecError),
 }
 
 /// One seed's wait on a command that never ends by itself, its status held back until the group is

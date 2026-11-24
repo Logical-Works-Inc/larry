@@ -14,7 +14,6 @@
 //! and one question's wait holds no other run's commands.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::time::SystemTime;
 
 use larry_contracts::authority::Scope;
@@ -22,6 +21,7 @@ use larry_contracts::command::{Command, CommandKind};
 use larry_contracts::ids::{CommandId, ContentDigest, OperationId, RunId, TenantId, WorkerId};
 use larry_contracts::replay::DenialReason;
 use larry_contracts::state::RunState;
+use lgwks_macros::Error;
 use lgwks_std::json::serde::{Deserialize, Serialize};
 
 use super::{DisplayedEffect, Runtime, TickReport};
@@ -165,44 +165,53 @@ enum QuestionStatus {
 }
 
 /// Why a question or an answer was refused; nothing was written.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum QuestionError {
     /// The runtime's configured bound of pending questions is reached.
+    #[error("{capacity} questions are pending; answer one first")]
     PendingFull {
         /// The bound.
         capacity: usize,
     },
     /// The effect already has a question.
+    #[error("operation {operation} already has a question")]
     AlreadyAsked {
         /// The effect's operation.
         operation: OperationId,
     },
     /// The question expires no later than it is asked.
+    #[error("the question expires before it is asked")]
     ExpiredWhenAsked,
     /// The question's respondent is its requester, so no answer can count.
+    #[error("the question's responder is its requester; a worker cannot approve itself")]
     RequesterIsRespondent,
     /// The answer arrived from an offer with no host-authenticated principal.
+    #[error("the answer to question {question} arrived with no authenticated principal")]
     UnboundPrincipal {
         /// The question.
         question: CommandId,
     },
     /// No question has this identity.
+    #[error("no question {question}")]
     UnknownQuestion {
         /// The identity the answer named.
         question: CommandId,
     },
     /// The answer's tenant, respondent or effect is not the question's.
+    #[error("the answer's tenant, respondent or effect is not question {question}'s")]
     BindingMismatch {
         /// The question.
         question: CommandId,
     },
     /// The question already has its answer.
+    #[error("question {question} already has its answer")]
     AlreadyAnswered {
         /// The question.
         question: CommandId,
     },
     /// An approved scope the question did not offer.
+    #[error("question {question} did not offer scope {scope:?}")]
     ScopeOutsideQuestion {
         /// The question.
         question: CommandId,
@@ -210,55 +219,18 @@ pub enum QuestionError {
         scope: Scope,
     },
     /// The answer arrived at or past the question's expiry.
+    #[error("question {question} expired; expiry is not consent, ask again")]
     Expired {
         /// The question.
         question: CommandId,
     },
     /// The run is cancelling, closed, or has a cancellation pending.
+    #[error("run {run} is cancelled or closed")]
     RunClosed {
         /// The run.
         run: RunId,
     },
 }
-
-impl fmt::Display for QuestionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::PendingFull { capacity } => {
-                write!(f, "{capacity} questions are pending; answer one first")
-            }
-            Self::AlreadyAsked { operation } => {
-                write!(f, "operation {operation} already has a question")
-            }
-            Self::ExpiredWhenAsked => f.write_str("the question expires before it is asked"),
-            Self::RequesterIsRespondent => f.write_str(
-                "the question's responder is its requester; a worker cannot approve itself",
-            ),
-            Self::UnboundPrincipal { question } => write!(
-                f,
-                "the answer to question {question} arrived with no authenticated principal"
-            ),
-            Self::UnknownQuestion { question } => write!(f, "no question {question}"),
-            Self::BindingMismatch { question } => write!(
-                f,
-                "the answer's tenant, respondent or effect is not question {question}'s"
-            ),
-            Self::AlreadyAnswered { question } => {
-                write!(f, "question {question} already has its answer")
-            }
-            Self::ScopeOutsideQuestion { question, scope } => {
-                write!(f, "question {question} did not offer scope {scope:?}")
-            }
-            Self::Expired { question } => write!(
-                f,
-                "question {question} expired; expiry is not consent, ask again"
-            ),
-            Self::RunClosed { run } => write!(f, "run {run} is cancelled or closed"),
-        }
-    }
-}
-
-impl std::error::Error for QuestionError {}
 
 /// The run an `Ask` or `Answer` command names, or `None` for any other kind.
 pub(super) fn run_of(command: &Command) -> Option<Result<RunId, RuntimeError>> {

@@ -9,6 +9,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lgwks_macros::Error;
 use lgwks_std::json;
 use lgwks_std::seeded::{DrawError, Seeded};
 
@@ -20,86 +21,35 @@ use super::patterns::Patterns;
 use super::tracker::TrackerError;
 
 /// Why a simulation helper could not build its case.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum SimError {
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0:?}")]
+    Draw(#[from] DrawError),
     /// A scratch file could not be read or written.
-    Io(io::Error),
+    #[error("scratch io: {0}")]
+    Io(#[from] io::Error),
     /// The checker refused to load or compile.
-    Refused(GovernanceError),
+    #[error("checker refused: {0}")]
+    Refused(#[from] GovernanceError),
     /// A JSON text the case reads did not parse.
+    #[error("json refused: {0}")]
     Json(json::Error),
     /// A text the case mutates is not in the tree.
+    #[error("the tree lacks {0}")]
     Absent(String),
     /// A case text could not be formatted.
-    Format(fmt::Error),
+    #[error("case text refused: {0}")]
+    Format(#[from] fmt::Error),
     /// A lane of the seed sweep failed outright.
-    Lane(LaneError),
+    #[error("seed sweep: {0}")]
+    Lane(#[from] LaneError),
     /// The tracker could not be rendered or read.
-    Tracker(TrackerError),
+    #[error("tracker: {0}")]
+    Tracker(#[from] TrackerError),
     /// The shared scratch guard could not make its directory.
-    Tree(crate::sim_error::SimError),
-}
-
-impl fmt::Display for SimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause:?}"),
-            Self::Io(ref cause) => write!(out, "scratch io: {cause}"),
-            Self::Refused(ref cause) => write!(out, "checker refused: {cause}"),
-            Self::Json(ref cause) => write!(out, "json refused: {cause}"),
-            Self::Absent(ref what) => write!(out, "the tree lacks {what}"),
-            Self::Format(ref cause) => write!(out, "case text refused: {cause}"),
-            Self::Lane(ref cause) => write!(out, "seed sweep: {cause}"),
-            Self::Tracker(ref cause) => write!(out, "tracker: {cause}"),
-            Self::Tree(ref cause) => write!(out, "scratch tree: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for SimError {}
-
-impl From<TrackerError> for SimError {
-    fn from(cause: TrackerError) -> Self {
-        Self::Tracker(cause)
-    }
-}
-
-impl From<fmt::Error> for SimError {
-    fn from(cause: fmt::Error) -> Self {
-        Self::Format(cause)
-    }
-}
-
-impl From<LaneError> for SimError {
-    fn from(cause: LaneError) -> Self {
-        Self::Lane(cause)
-    }
-}
-
-impl From<DrawError> for SimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<io::Error> for SimError {
-    fn from(cause: io::Error) -> Self {
-        Self::Io(cause)
-    }
-}
-
-impl From<GovernanceError> for SimError {
-    fn from(cause: GovernanceError) -> Self {
-        Self::Refused(cause)
-    }
-}
-
-impl From<crate::sim_error::SimError> for SimError {
-    fn from(cause: crate::sim_error::SimError) -> Self {
-        Self::Tree(cause)
-    }
+    #[error("scratch tree: {0}")]
+    Tree(#[from] crate::sim_error::SimError),
 }
 
 /// What every simulation returns.

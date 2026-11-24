@@ -10,9 +10,7 @@
 //! key it trusts, then re-derives the verdict, so a seal over a success claim
 //! the results contradict is refused too.
 
-use std::error::Error;
-use std::fmt;
-
+use lgwks_macros::Error;
 use lgwks_std::json::{self, Value};
 use lgwks_std::sign::{self, PublicKey, SecretKey, Signature};
 
@@ -40,100 +38,57 @@ const DIFF_TRUNCATED: &str = "diff_truncated";
 pub const MAX_REPORT_BYTES: usize = 268_435_456;
 
 /// Why a receipt was refused. A refused receipt is never a success.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ReceiptError {
     /// The report exceeded [`MAX_REPORT_BYTES`].
+    #[error("receipt report is too large ({len} bytes)")]
     TooLarge {
         /// Report length in bytes.
         len: usize,
     },
     /// The report was not UTF-8.
-    NotUtf8(std::str::Utf8Error),
+    #[error("receipt report is not UTF-8: {0}")]
+    NotUtf8(#[source] std::str::Utf8Error),
     /// The report was not JSON.
-    Malformed(json::Error),
+    #[error("receipt report is not valid JSON: {0}")]
+    Malformed(#[source] json::Error),
     /// The report was not a JSON object.
+    #[error("receipt report is not a JSON object")]
     NotAnObject,
     /// The report carried no receipt.
+    #[error("receipt is missing from the report")]
     MissingReceipt,
     /// The receipt named an algorithm other than ed25519.
+    #[error("receipt algorithm is not ed25519")]
     BadAlgorithm,
     /// The receipt named no key.
+    #[error("receipt names no key")]
     MissingKey,
     /// The key was not 64 hex characters.
-    KeyNotHex(lgwks_std::hex::DecodeError),
+    #[error("receipt key is not a 64-hex ed25519 public key: {0}")]
+    KeyNotHex(#[source] lgwks_std::hex::DecodeError),
     /// The key's 32 bytes do not encode an ed25519 point.
-    KeyNotPoint(sign::KeyError),
+    #[error("receipt key is not a 64-hex ed25519 public key: {0}")]
+    KeyNotPoint(#[source] sign::KeyError),
     /// The receipt was sealed under a key the verifier does not trust.
+    #[error("receipt is sealed under an untrusted key")]
     UntrustedKey,
     /// The receipt named no signature.
+    #[error("receipt names no signature")]
     MissingSignature,
     /// The signature was not 128 hex characters.
-    SignatureNotHex(lgwks_std::hex::DecodeError),
+    #[error("receipt signature is not 128 hex characters: {0}")]
+    SignatureNotHex(#[source] lgwks_std::hex::DecodeError),
     /// The seal does not match the report: a byte of it changed.
-    Mismatch(sign::VerifyError),
+    #[error("receipt does not match the report: it was altered: {0}")]
+    Mismatch(#[source] sign::VerifyError),
     /// The sealed verdict contradicts the sealed results, or names no task.
+    #[error("receipt verdict contradicts the sealed results or names no task")]
     Inconsistent,
     /// The receipt claims accepted over a diff it says it cut (larry#206).
+    #[error("receipt claims accepted over a truncated diff")]
     TruncatedDiffAccepted,
-}
-
-impl ReceiptError {
-    /// The refusal text; a cause, when there is one, follows it.
-    const fn fixed(&self) -> &'static str {
-        match *self {
-            Self::TooLarge { .. } => "receipt report is too large",
-            Self::NotUtf8(_) => "receipt report is not UTF-8",
-            Self::Malformed(_) => "receipt report is not valid JSON",
-            Self::NotAnObject => "receipt report is not a JSON object",
-            Self::MissingReceipt => "receipt is missing from the report",
-            Self::BadAlgorithm => "receipt algorithm is not ed25519",
-            Self::MissingKey => "receipt names no key",
-            Self::KeyNotHex(_) | Self::KeyNotPoint(_) => {
-                "receipt key is not a 64-hex ed25519 public key"
-            }
-            Self::UntrustedKey => "receipt is sealed under an untrusted key",
-            Self::MissingSignature => "receipt names no signature",
-            Self::SignatureNotHex(_) => "receipt signature is not 128 hex characters",
-            Self::Mismatch(_) => "receipt does not match the report: it was altered",
-            Self::Inconsistent => "receipt verdict contradicts the sealed results or names no task",
-            Self::TruncatedDiffAccepted => "receipt claims accepted over a truncated diff",
-        }
-    }
-}
-
-impl fmt::Display for ReceiptError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.fixed())?;
-        if let Self::TooLarge { len } = *self {
-            return write!(formatter, " ({len} bytes)");
-        }
-        match self.source() {
-            Some(cause) => write!(formatter, ": {cause}"),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Error for ReceiptError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            Self::NotUtf8(ref utf8) => Some(utf8),
-            Self::Malformed(ref json) => Some(json),
-            Self::KeyNotHex(ref hex) | Self::SignatureNotHex(ref hex) => Some(hex),
-            Self::KeyNotPoint(ref point) => Some(point),
-            Self::Mismatch(ref seal) => Some(seal),
-            Self::TooLarge { .. }
-            | Self::NotAnObject
-            | Self::MissingReceipt
-            | Self::BadAlgorithm
-            | Self::MissingKey
-            | Self::UntrustedKey
-            | Self::MissingSignature
-            | Self::Inconsistent
-            | Self::TruncatedDiffAccepted => None,
-        }
-    }
 }
 
 /// What a verified receipt says about its run.

@@ -25,6 +25,7 @@ use larry_demo::executor::{
     state_public_key, trusted_key, verify,
 };
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
+use lgwks_macros::Error;
 
 /// `larry governance` and `larry tracker`, split out by responsibility (ADR 0065).
 #[path = "larry/governance_cli.rs"]
@@ -241,48 +242,29 @@ fn help_once() -> io::Result<()> {
 }
 
 /// Why `larry model` failed; each variant keeps its cause.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum ModelCheck {
     /// Standard input could not be read as UTF-8 text.
-    Prompt(io::Error),
+    #[error("model prompt unreadable: {0}")]
+    Prompt(#[source] io::Error),
     /// The prompt on standard input was empty.
+    #[error("model: the prompt on stdin is empty")]
     EmptyPrompt,
     /// A variable Larry reads is not UTF-8.
-    Env(ExecError),
+    #[error("model: {0}")]
+    Env(#[source] ExecError),
     /// A `LARRY_MODEL_*` setting is missing or unusable.
-    Config(ModelError),
+    #[error("model config: {0}")]
+    Config(#[source] ModelError),
     /// The gateway refused or the exchange failed.
-    Exchange(ModelError),
+    #[error("model failed: {0}")]
+    Exchange(#[source] ModelError),
     /// The host's clock reads before the Unix epoch, so no retry budget can be timed (larry#436).
-    Clock(larry_runtime::error::RuntimeError),
+    #[error("model clock: {0}")]
+    Clock(#[source] larry_runtime::error::RuntimeError),
     /// The reply could not be written to standard output.
-    Reply(io::Error),
-}
-
-impl fmt::Display for ModelCheck {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Prompt(ref cause) => write!(out, "model prompt unreadable: {cause}"),
-            Self::EmptyPrompt => out.write_str("model: the prompt on stdin is empty"),
-            Self::Env(ref cause) => write!(out, "model: {cause}"),
-            Self::Config(ref cause) => write!(out, "model config: {cause}"),
-            Self::Exchange(ref cause) => write!(out, "model failed: {cause}"),
-            Self::Clock(ref cause) => write!(out, "model clock: {cause}"),
-            Self::Reply(ref cause) => write!(out, "model reply unwritable: {cause}"),
-        }
-    }
-}
-
-impl std::error::Error for ModelCheck {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Prompt(ref cause) | Self::Reply(ref cause) => Some(cause),
-            Self::Env(ref cause) => Some(cause),
-            Self::Config(ref cause) | Self::Exchange(ref cause) => Some(cause),
-            Self::Clock(ref cause) => Some(cause),
-            Self::EmptyPrompt => None,
-        }
-    }
+    #[error("model reply unwritable: {0}")]
+    Reply(#[source] io::Error),
 }
 
 /// `larry model`: send standard input as one user turn to the gateway that
@@ -375,30 +357,14 @@ fn route_once(rest: &[OsString]) -> Result<(), Failed<RouteCliError>> {
 }
 
 /// A subcommand that failed reading the environment, or failed itself.
-#[derive(Debug)]
-enum Failed<E> {
+#[derive(Debug, Error)]
+enum Failed<E: std::error::Error + 'static> {
     /// A variable Larry reads is not UTF-8.
-    Env(ExecError),
+    #[error("{0}")]
+    Env(#[source] ExecError),
     /// The subcommand's own failure.
-    Run(E),
-}
-
-impl<E: fmt::Display> fmt::Display for Failed<E> {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Env(ref cause) => write!(out, "{cause}"),
-            Self::Run(ref cause) => write!(out, "{cause}"),
-        }
-    }
-}
-
-impl<E: fmt::Debug + fmt::Display + std::error::Error + 'static> std::error::Error for Failed<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Env(ref cause) => Some(cause),
-            Self::Run(ref cause) => Some(cause),
-        }
-    }
+    #[error("{0}")]
+    Run(#[source] E),
 }
 
 /// `larry key`: print the state directory's receipt public key as 64 hex characters,

@@ -290,6 +290,20 @@ fn a_named_limit_shrinks_to_the_model_own_window() -> TestResult {
         90_000,
         "vLLM names only the limit, at one byte a token"
     );
+    // A gateway that counts zero tokens names no rate: the window is the named limit at one
+    // byte a token, never three quarters of the refused request (larry#236).
+    let mut zero = Conversation::new(SYSTEM, String::from("task"), 1_000_000);
+    zero.shrink(
+        1_000_000,
+        WindowRefusal {
+            counted: Some(0),
+            limit: Some(100_000),
+        },
+    )?;
+    assert_eq!(
+        zero.window, 90_000,
+        "a zero count sizes at one byte a token"
+    );
     assert_eq!(
         shrink(1_000_000, "context_length_exceeded")?,
         750_000,

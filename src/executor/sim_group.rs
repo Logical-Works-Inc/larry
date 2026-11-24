@@ -8,7 +8,6 @@
 //! A virtual clock moves only when this file advances it, so a wait that ended early, late
 //! or on the probe count is visible in the trace instead of hidden behind the scheduler.
 
-use std::fmt;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
@@ -16,6 +15,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::{Clock, ClockError};
+use lgwks_macros::Error;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::{ExecError, GROUP_PROBE_DEADLINE, await_gone, settle_with, status_after_kill};
@@ -44,62 +44,29 @@ const EPERM: i32 = super::EPERM;
 const EIO: i32 = 5;
 
 /// Why one group-wait simulation could not be driven to its assertions.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum GroupWaitSimError {
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0}")]
+    Draw(#[from] DrawError),
     /// A drawn number does not fit the type its use needs.
-    Range(std::num::TryFromIntError),
+    #[error("drawn number out of range: {0}")]
+    Range(#[from] std::num::TryFromIntError),
     /// A drawn multiplication left the range a duration holds.
+    #[error("a drawn duration overflowed")]
     Overflow,
     /// The virtual clock refused the step this simulation asked of it.
-    Clock(ClockError),
+    #[error("the virtual clock refused a step: {0}")]
+    Clock(#[from] ClockError),
     /// The leader's status could not be queued for the wait.
-    Send(mpsc::SendError<io::Result<ExitStatus>>),
+    #[error("the status could not be queued: {0}")]
+    Send(#[from] mpsc::SendError<io::Result<ExitStatus>>),
     /// The wait answered with the waiter's own fault where a status was expected.
-    Status(io::Error),
+    #[error("the waiter's own fault: {0}")]
+    Status(#[source] io::Error),
     /// The wait refused with an error this simulation does not expect.
-    Exec(ExecError),
-}
-
-impl fmt::Display for GroupWaitSimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
-            Self::Overflow => out.write_str("a drawn duration overflowed"),
-            Self::Clock(ref cause) => write!(out, "the virtual clock refused a step: {cause}"),
-            Self::Send(ref cause) => write!(out, "the status could not be queued: {cause}"),
-            Self::Status(ref cause) => write!(out, "the waiter's own fault: {cause}"),
-            Self::Exec(ref cause) => write!(out, "the wait refused: {cause}"),
-        }
-    }
-}
-
-impl From<mpsc::SendError<io::Result<ExitStatus>>> for GroupWaitSimError {
-    fn from(cause: mpsc::SendError<io::Result<ExitStatus>>) -> Self {
-        Self::Send(cause)
-    }
-}
-
-impl std::error::Error for GroupWaitSimError {}
-
-impl From<DrawError> for GroupWaitSimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<std::num::TryFromIntError> for GroupWaitSimError {
-    fn from(cause: std::num::TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<ClockError> for GroupWaitSimError {
-    fn from(cause: ClockError) -> Self {
-        Self::Clock(cause)
-    }
+    #[error("the wait refused: {0}")]
+    Exec(#[source] ExecError),
 }
 
 /// The 5 s bound in whole milliseconds, compared the way the wait reads it.

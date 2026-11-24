@@ -5,11 +5,11 @@
 //! denied until Nova, logicalworks-crates#846); it only writes the files named,
 //! and never through a symlink the clone carries.
 
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 
 use crate::model::{Completion, Message, ModelClient, ModelError, Role};
@@ -88,57 +88,34 @@ pub(crate) fn is_writable_path(path: &str) -> bool {
 }
 
 /// Why the model step could not write one file.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AuthorFault {
     /// A component of the path is a symlink in the clone.
+    #[error("a component of the path is a symlink")]
     Symlink,
     /// The path names something other than a regular file.
+    #[error("the path is not a regular file")]
     NotAFile,
     /// The current content exceeds the bound sent to the model.
+    #[error("the file is {len} bytes, over the {}-byte bound", MAX_SOURCE_BYTES)]
     TooLarge {
         /// The file's length in bytes.
         len: u64,
     },
     /// The current content is not UTF-8 text.
-    NotText(std::str::Utf8Error),
+    #[error("the file is not UTF-8 text: {0}")]
+    NotText(#[source] std::str::Utf8Error),
     /// The file or a parent directory could not be read or written.
-    Io(io::Error),
+    #[error("{0}")]
+    Io(#[source] io::Error),
     /// The model gateway refused or failed.
-    Model(ModelError),
+    #[error("{0}")]
+    Model(#[source] ModelError),
     /// The model's reply holds nothing but whitespace once its fence is removed, so it is
     /// never written as the file (larry#396).
+    #[error("the model's reply is empty, so the file is not written")]
     EmptyReply,
-}
-
-impl fmt::Display for AuthorFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Symlink => out.write_str("a component of the path is a symlink"),
-            Self::NotAFile => out.write_str("the path is not a regular file"),
-            Self::TooLarge { len } => write!(
-                out,
-                "the file is {len} bytes, over the {MAX_SOURCE_BYTES}-byte bound"
-            ),
-            Self::NotText(ref cause) => write!(out, "the file is not UTF-8 text: {cause}"),
-            Self::Io(ref cause) => write!(out, "{cause}"),
-            Self::Model(ref cause) => write!(out, "{cause}"),
-            Self::EmptyReply => {
-                out.write_str("the model's reply is empty, so the file is not written")
-            }
-        }
-    }
-}
-
-impl std::error::Error for AuthorFault {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Io(ref cause) => Some(cause),
-            Self::Model(ref cause) => Some(cause),
-            Self::NotText(ref cause) => Some(cause),
-            Self::Symlink | Self::NotAFile | Self::TooLarge { .. } | Self::EmptyReply => None,
-        }
-    }
 }
 
 /// The typed refusal for `path`.

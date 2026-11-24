@@ -38,12 +38,12 @@
 //! not confine on this host each refuse the session with a typed [`ConfineError`];
 //! nothing runs bare.
 
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use lgwks_bot::rt::process::{LandlockRules, PathAccess, SandboxProfile};
+use lgwks_macros::Error;
 
 use super::run::clip;
 
@@ -151,20 +151,25 @@ impl Platform {
 }
 
 /// Why a command could not be confined; the session starts nothing.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConfineError {
     /// The platform has no wrapper (Windows, the BSDs): commands are refused.
+    #[error(
+        "{platform} has no kernel confinement for commands, so Larry runs none (macOS and Linux have one)"
+    )]
     Unsupported {
         /// The platform's name.
         platform: &'static str,
     },
     /// The platform's wrapper program is not installed.
+    #[error("the confinement tool {tool} is not installed")]
     MissingWrapper {
         /// The wrapper's path.
         tool: &'static str,
     },
     /// A path the confinement names could not be resolved.
+    #[error("the workspace path {} cannot be confined: {source}", path.display())]
     Path {
         /// The path.
         path: PathBuf,
@@ -173,6 +178,11 @@ pub enum ConfineError {
     },
     /// The workspace copy is not a directory beneath the state directory, so a read
     /// exception for it would open the state directory and the key store in it.
+    #[error(
+        "the workspace copy {} is not beneath the state directory {}, so confining the state would open it",
+        workspace.display(),
+        state.display()
+    )]
     NotBeneath {
         /// The workspace copy.
         workspace: PathBuf,
@@ -180,8 +190,12 @@ pub enum ConfineError {
         state: PathBuf,
     },
     /// The estate refused the profile or the rules: not UTF-8, a control byte, over a bound.
-    Invalid(io::Error),
+    #[error("the confinement was refused: {0}")]
+    Invalid(#[source] io::Error),
     /// The state directory's path needs more read rules than the allowlist holds.
+    #[error(
+        "the state directory needs {roots} read rules, more than the {bound} the confinement holds; put it where its path has fewer siblings"
+    )]
     TooManyRoots {
         /// The roots the walk found.
         roots: usize,
@@ -189,72 +203,16 @@ pub enum ConfineError {
         bound: usize,
     },
     /// The state directory is the walk's own root, so nothing could be granted around it.
+    #[error(
+        "the state directory is the root of the read walk, so no read rule can leave it open and close the state"
+    )]
     StateAtRoot,
     /// The wrapper ran and did not confine, or did not run at all.
+    #[error("the confinement does not hold on this host: {detail}")]
     Probe {
         /// What the probe saw.
         detail: String,
     },
-}
-
-impl fmt::Display for ConfineError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Unsupported { platform } => write!(
-                out,
-                "{platform} has no kernel confinement for commands, so Larry runs none (macOS and Linux have one)"
-            ),
-            Self::MissingWrapper { tool } => {
-                write!(out, "the confinement tool {tool} is not installed")
-            }
-            Self::Path {
-                ref path,
-                ref source,
-            } => {
-                write!(
-                    out,
-                    "the workspace path {} cannot be confined: {source}",
-                    path.display()
-                )
-            }
-            Self::Invalid(ref cause) => write!(out, "the confinement was refused: {cause}"),
-            Self::TooManyRoots { roots, bound } => write!(
-                out,
-                "the state directory needs {roots} read rules, more than the {bound} the confinement holds; put it where its path has fewer siblings"
-            ),
-            Self::StateAtRoot => write!(
-                out,
-                "the state directory is the root of the read walk, so no read rule can leave it open and close the state"
-            ),
-            Self::NotBeneath {
-                ref workspace,
-                ref state,
-            } => write!(
-                out,
-                "the workspace copy {} is not beneath the state directory {}, so confining the state would open it",
-                workspace.display(),
-                state.display()
-            ),
-            Self::Probe { ref detail } => {
-                write!(out, "the confinement does not hold on this host: {detail}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConfineError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Path { ref source, .. } => Some(source),
-            Self::Invalid(ref cause) => Some(cause),
-            Self::Unsupported { .. }
-            | Self::MissingWrapper { .. }
-            | Self::NotBeneath { .. }
-            | Self::TooManyRoots { .. }
-            | Self::StateAtRoot
-            | Self::Probe { .. } => None,
-        }
-    }
 }
 
 /// Whether `platform` can confine a command, `present` saying whether a tool is installed: the

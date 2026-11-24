@@ -1,53 +1,62 @@
 //! Why `larry governance` could not check at all: each refusal is a typed variant, printed as the
 //! text the Python checker raised for the same case, so the one-error report keeps its wording.
 
-use std::fmt;
 use std::io;
 
 use lgwks_ast::ParseError;
+use lgwks_macros::Error;
 use lgwks_std::pattern::PatternError;
 
 /// A refusal that stops the whole check before or while it reads the documents.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum GovernanceError {
     /// A governed document is a symbolic link (CWE-59).
+    #[error("symbolic-link document is not admitted: {relative}")]
     Symlink {
         /// The document, relative to the root.
         relative: String,
     },
     /// A governed name is a directory.
+    #[error("[Errno 21] Is a directory: {relative}")]
     IsDirectory {
         /// The directory, relative to the root.
         relative: String,
     },
     /// A governed name is not a regular file: a FIFO, device or socket (larry#336).
+    #[error("not a regular file: {relative}")]
     NotRegular {
         /// The entry, relative to the root.
         relative: String,
     },
     /// A document is past the 2 MiB bound.
+    #[error("document exceeds byte limit: {relative}")]
     TooLarge {
         /// The document, relative to the root.
         relative: String,
     },
     /// More documents than the bound, counted before any is read.
+    #[error("document count exceeds {limit}")]
     TooMany {
         /// The bound.
         limit: usize,
     },
     /// A document or directory could not be read.
+    #[error("cannot read {relative}: {cause}")]
     Unreadable {
         /// The path, relative to the root.
         relative: String,
         /// The operating system's cause.
+        #[source]
         cause: io::Error,
     },
     /// A document is not UTF-8.
+    #[error("{codec}")]
     NotUtf8 {
         /// CPython's `UnicodeDecodeError` text for it.
         codec: String,
     },
     /// A Rust source is past the reader's byte bound.
+    #[error("source file exceeds byte limit: {relative} ({bytes} bytes)")]
     SourceTooLarge {
         /// The file, relative to the root.
         relative: String,
@@ -55,124 +64,56 @@ pub(crate) enum GovernanceError {
         bytes: usize,
     },
     /// The estate reader refused a Rust source (larry#293, ADR 0058).
+    #[error("source file refused: {relative}: {cause}")]
     Source {
         /// The file, relative to the root.
         relative: String,
         /// The reader's typed refusal.
+        #[source]
         cause: ParseError,
     },
     /// A Rust source is not UTF-8.
+    #[error("source file is not UTF-8: {relative}")]
     SourceNotUtf8 {
         /// The file, relative to the root.
         relative: String,
     },
     /// A workspace member's source root is missing, named so a missing root cannot pass with zero
     /// files read (larry#311).
+    #[error("source tree is missing: {relative}")]
     MissingRoot {
         /// The directory, relative to the root.
         relative: String,
     },
     /// The root manifest refused the workspace read: a symlink, an unsupported member form, or
     /// bytes that are not UTF-8 (larry#311).
+    #[error("workspace refused: {cause}")]
     Workspace {
         /// The cause the reader reported.
         cause: String,
     },
     /// A checker pattern did not compile.
+    #[error("pattern refused: {pattern}: {cause}")]
     Pattern {
         /// The pattern.
         pattern: String,
         /// The engine's cause.
+        #[source]
         cause: PatternError,
     },
     /// `urlsplit` refused a bracket placement.
+    #[error("Invalid IPv6 URL")]
     InvalidIpv6Url,
     /// `urlsplit` refused an IPvFuture literal.
+    #[error("IPvFuture address is invalid")]
     InvalidIpvFuture,
     /// `urlsplit` refused an IPv4 address in brackets.
+    #[error("An IPv4 address cannot be in brackets")]
     BracketedIpv4,
     /// `urlsplit` refused a bracketed host that is no address.
+    #[error("{host} does not appear to be an IPv4 or IPv6 address")]
     NotAnAddress {
         /// Python's `repr` of the host.
         host: String,
     },
-}
-
-impl fmt::Display for GovernanceError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Symlink { ref relative } => {
-                write!(out, "symbolic-link document is not admitted: {relative}")
-            }
-            Self::IsDirectory { ref relative } => {
-                write!(out, "[Errno 21] Is a directory: {relative}")
-            }
-            Self::NotRegular { ref relative } => {
-                write!(out, "not a regular file: {relative}")
-            }
-            Self::TooLarge { ref relative } => {
-                write!(out, "document exceeds byte limit: {relative}")
-            }
-            Self::TooMany { limit } => write!(out, "document count exceeds {limit}"),
-            Self::Unreadable {
-                ref relative,
-                ref cause,
-            } => write!(out, "cannot read {relative}: {cause}"),
-            Self::NotUtf8 { ref codec } => out.write_str(codec),
-            Self::SourceTooLarge {
-                ref relative,
-                bytes,
-            } => {
-                write!(
-                    out,
-                    "source file exceeds byte limit: {relative} ({bytes} bytes)"
-                )
-            }
-            Self::Source {
-                ref relative,
-                ref cause,
-            } => write!(out, "source file refused: {relative}: {cause}"),
-            Self::SourceNotUtf8 { ref relative } => {
-                write!(out, "source file is not UTF-8: {relative}")
-            }
-            Self::MissingRoot { ref relative } => {
-                write!(out, "source tree is missing: {relative}")
-            }
-            Self::Workspace { ref cause } => write!(out, "workspace refused: {cause}"),
-            Self::Pattern {
-                ref pattern,
-                ref cause,
-            } => write!(out, "pattern refused: {pattern}: {cause}"),
-            Self::InvalidIpv6Url => out.write_str("Invalid IPv6 URL"),
-            Self::InvalidIpvFuture => out.write_str("IPvFuture address is invalid"),
-            Self::BracketedIpv4 => out.write_str("An IPv4 address cannot be in brackets"),
-            Self::NotAnAddress { ref host } => {
-                write!(out, "{host} does not appear to be an IPv4 or IPv6 address")
-            }
-        }
-    }
-}
-
-impl std::error::Error for GovernanceError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Unreadable { ref cause, .. } => Some(cause),
-            Self::Pattern { ref cause, .. } => Some(cause),
-            Self::Source { ref cause, .. } => Some(cause),
-            Self::Symlink { .. }
-            | Self::IsDirectory { .. }
-            | Self::NotRegular { .. }
-            | Self::TooLarge { .. }
-            | Self::TooMany { .. }
-            | Self::NotUtf8 { .. }
-            | Self::SourceTooLarge { .. }
-            | Self::SourceNotUtf8 { .. }
-            | Self::MissingRoot { .. }
-            | Self::Workspace { .. }
-            | Self::InvalidIpv6Url
-            | Self::InvalidIpvFuture
-            | Self::BracketedIpv4
-            | Self::NotAnAddress { .. } => None,
-        }
-    }
 }

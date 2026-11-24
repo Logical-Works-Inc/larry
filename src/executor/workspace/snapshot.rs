@@ -15,10 +15,11 @@
 //! git-apply(1) and CWE-59 (a link followed out of a tree).
 
 use std::ffi::OsStr;
-use std::fmt;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+
+use lgwks_macros::Error;
 
 use super::{Diff, ExecError, Git, Workspace, flag, spawn_error};
 use crate::executor::author::checked_target;
@@ -90,42 +91,24 @@ pub(crate) struct Copied {
 }
 
 /// Why a verified change did not go back into the folder.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub(crate) enum ApplyFault {
     /// The diff was cut at its bound, so it is not the whole change.
+    #[error("the change is over 1 MiB, so it cannot be applied whole")]
     Truncated,
     /// The diff's bytes no longer hash to the digest it was sealed with.
+    #[error("the change no longer matches its digest")]
     DigestMismatch,
     /// The patch file or git could not be written or started.
-    Io(io::Error),
+    #[error("the change could not be handed to git: {0}")]
+    Io(#[source] io::Error),
     /// git refused the patch; the folder is unchanged.
+    #[error("git refused the change: {detail}")]
     Git {
         /// Git's refusal, clipped.
         detail: String,
     },
-}
-
-impl fmt::Display for ApplyFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Truncated => {
-                out.write_str("the change is over 1 MiB, so it cannot be applied whole")
-            }
-            Self::DigestMismatch => out.write_str("the change no longer matches its digest"),
-            Self::Io(ref cause) => write!(out, "the change could not be handed to git: {cause}"),
-            Self::Git { ref detail } => write!(out, "git refused the change: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for ApplyFault {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Io(ref cause) => Some(cause),
-            Self::Truncated | Self::DigestMismatch | Self::Git { .. } => None,
-        }
-    }
 }
 
 /// `arguments` behind the overrides every git call inside the person's folder takes: that
@@ -166,21 +149,17 @@ fn too_many(what: &'static str, limit: usize) -> ExecError {
 /// Kills and reaps a child whose output is no longer wanted, then returns `error`, or the
 /// failure that names both when the child could not be ended.
 fn abandon(child: &mut std::process::Child, error: ExecError) -> ExecError {
-    if let Err(fault) = child.kill() {
-        return ExecError::cleanup(
-            error,
-            "the listing child could not be killed",
-            ExecError::Reap(fault),
-        );
+    let failed = match child.kill() {
+        Err(fault) => Some(("the listing child could not be killed", fault)),
+        Ok(()) => child
+            .wait()
+            .err()
+            .map(|fault| ("the listing child could not be reaped", fault)),
+    };
+    match failed {
+        Some((step, fault)) => ExecError::cleanup(error, step, ExecError::Reap(fault)),
+        None => error,
     }
-    if let Err(fault) = child.wait() {
-        return ExecError::cleanup(
-            error,
-            "the listing child could not be reaped",
-            ExecError::Reap(fault),
-        );
-    }
-    error
 }
 
 /// Every entry of the folder `origin`, relative and sorted: git's listing when `origin`

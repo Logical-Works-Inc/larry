@@ -7,12 +7,12 @@
 //! explicit resync. The host supplies authenticated tenant scope; a cursor is
 //! neither a credential nor a grant. Persistence remains the journal owner's.
 
-use core::fmt;
 use std::collections::BTreeMap;
 use std::mem::size_of;
 
 use larry_contracts::event::CausalRef;
 use larry_contracts::ids::{ContentDigest, TenantId};
+use lgwks_macros::Error;
 use lgwks_std::json::serde::{Deserialize, Serialize};
 
 use crate::journal::{Journal, JournalEntry};
@@ -28,20 +28,25 @@ pub const MAX_NOTIFICATIONS: usize = 256;
 pub const MAX_NOTIFICATION_BYTES: usize = 8_388_608;
 
 /// A refused consumer operation. No error advances its cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum CursorError {
     /// Tenant supplied by the host differs from the cursor/subscription scope.
+    #[error("consumer tenant mismatch; read refused")]
     TenantMismatch,
     /// The cursor's position or prefix is absent from this journal. Start an
     /// explicit full resynchronization with `subscribe(tenant, None, limits)`.
+    #[error("stale cursor; explicitly subscribe from origin to resynchronize")]
     StaleCursor,
     /// A zero, excessive or unusably small resource bound was requested.
+    #[error("consumer bounds must be nonzero and within page and notification ceilings")]
     InvalidBounds,
     /// Live notifications overflowed. Call `resync_consumer`, which preserves
     /// the unread position while re-establishing the live subscription.
+    #[error("notification window overflowed; resync_consumer before reading again")]
     ResyncRequired,
     /// One indivisible entry cannot fit the configured decoded page budget.
+    #[error("entry needs {required} decoded bytes, page permits {limit}; cursor unchanged")]
     EntryTooLarge {
         /// Required decoded bytes including envelope and causal parents.
         required: usize,
@@ -49,27 +54,6 @@ pub enum CursorError {
         limit: usize,
     },
 }
-
-impl fmt::Display for CursorError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TenantMismatch => formatter.write_str("consumer tenant mismatch; read refused"),
-            Self::StaleCursor => formatter
-                .write_str("stale cursor; explicitly subscribe from origin to resynchronize"),
-            Self::InvalidBounds => formatter.write_str(
-                "consumer bounds must be nonzero and within page and notification ceilings",
-            ),
-            Self::ResyncRequired => formatter
-                .write_str("notification window overflowed; resync_consumer before reading again"),
-            Self::EntryTooLarge { required, limit } => write!(
-                formatter,
-                "entry needs {required} decoded bytes, page permits {limit}; cursor unchanged"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CursorError {}
 
 /// Validated resource ceilings, immutable for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

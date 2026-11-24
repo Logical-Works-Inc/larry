@@ -10,6 +10,7 @@
 
 use crate::executor::{ExecError, Report, Settings, Task, execute};
 use crate::model::{RouteError, is_route_id};
+use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 use std::path::{Component, Path};
 
@@ -179,14 +180,17 @@ fn tool_error(code: &str, message: &str) -> Value {
 }
 
 /// Why a task failed validation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Error)]
 enum TaskError {
     /// An argument outside the schema.
+    #[error("unknown argument; allowed: goal, repo, files, acceptance, route")]
     UnknownArgument,
     /// A required argument is absent.
+    #[error("`{0}` is required")]
     Missing(&'static str),
     /// An argument has the wrong JSON type; the refusal names the form this
     /// door reads, so a client that sent the other door's shape learns it.
+    #[error("`{key}` must be {form}")]
     WrongType {
         /// The argument.
         key: &'static str,
@@ -194,45 +198,26 @@ enum TaskError {
         form: &'static str,
     },
     /// A string is empty or blank.
+    #[error("`{0}` must not be empty")]
     Empty(&'static str),
     /// A string exceeds its byte bound.
+    #[error("`{0}` exceeds {1} bytes")]
     TooLong(&'static str, usize),
     /// A string holds a NUL byte.
+    #[error("`{0}` contains a NUL byte")]
     Nul(&'static str),
     /// A list holds too few or too many entries.
+    #[error("`{0}` must hold {1} to {2} entries")]
     Count(&'static str, usize, usize),
     /// A file path escapes the repository.
+    #[error("files must be repo-relative paths without `..`")]
     NotRepoRelative,
     /// The route is not a route id.
+    #[error(
+        "`route` must be a route id: 1 to {} bytes of a-z, 0-9, _ and -",
+        MAX_ROUTE_BYTES
+    )]
     BadRoute,
-}
-
-impl std::fmt::Display for TaskError {
-    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::UnknownArgument => {
-                write!(
-                    out,
-                    "unknown argument; allowed: goal, repo, files, acceptance, route"
-                )
-            }
-            Self::Missing(key) => write!(out, "`{key}` is required"),
-            Self::WrongType { key, form } => write!(out, "`{key}` must be {form}"),
-            Self::Empty(key) => write!(out, "`{key}` must not be empty"),
-            Self::TooLong(key, max) => write!(out, "`{key}` exceeds {max} bytes"),
-            Self::Nul(key) => write!(out, "`{key}` contains a NUL byte"),
-            Self::Count(key, min, max) => {
-                write!(out, "`{key}` must hold {min} to {max} entries")
-            }
-            Self::NotRepoRelative => {
-                write!(out, "files must be repo-relative paths without `..`")
-            }
-            Self::BadRoute => write!(
-                out,
-                "`route` must be a route id: 1 to {MAX_ROUTE_BYTES} bytes of a-z, 0-9, _ and -"
-            ),
-        }
-    }
 }
 
 /// A task that passed the schema, every string borrowed from the arguments.

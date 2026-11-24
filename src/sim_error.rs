@@ -4,106 +4,41 @@
 //! a variant a caller can match, never a boxed string.
 
 use std::env::VarError;
-use std::error::Error;
-use std::fmt;
 use std::io;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
 
+use lgwks_macros::Error;
 use lgwks_std::json;
 use lgwks_std::seeded::DrawError;
 
 use crate::executor::ExecError;
 
 /// Why a simulation helper could not build its input.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum SimError {
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0}")]
+    Draw(#[from] DrawError),
     /// A drawn number does not fit its target type.
-    Range(TryFromIntError),
+    #[error("drawn number out of range: {0}")]
+    Range(#[from] TryFromIntError),
     /// A scratch directory or a stream could not be read or written.
-    Io(io::Error),
+    #[error("scratch directory: {0}")]
+    Io(#[from] io::Error),
     /// A generated document failed to encode or a printed one to parse.
-    Json(json::Error),
+    #[error("json: {0}")]
+    Json(#[from] json::Error),
     /// Printed output was not UTF-8.
-    Utf8(FromUtf8Error),
+    #[error("output is not UTF-8: {0}")]
+    Utf8(#[from] FromUtf8Error),
     /// A fixed table or a path lacked what the helper needs.
+    #[error("missing: {0}")]
     Missing(&'static str),
     /// The executor refused a step the helper needs (a ledger, an origin, a workspace).
-    Exec(ExecError),
+    #[error("executor: {0}")]
+    Exec(#[from] ExecError),
     /// An environment variable the helper reads is unset or not text.
-    Env(VarError),
-}
-
-impl fmt::Display for SimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
-            Self::Io(ref cause) => write!(out, "scratch directory: {cause}"),
-            Self::Json(ref cause) => write!(out, "json: {cause}"),
-            Self::Utf8(ref cause) => write!(out, "output is not UTF-8: {cause}"),
-            Self::Missing(what) => write!(out, "missing: {what}"),
-            Self::Exec(ref cause) => write!(out, "executor: {cause}"),
-            Self::Env(ref cause) => write!(out, "environment: {cause}"),
-        }
-    }
-}
-
-impl Error for SimError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            Self::Draw(ref cause) => Some(cause),
-            Self::Range(ref cause) => Some(cause),
-            Self::Io(ref cause) => Some(cause),
-            Self::Json(ref cause) => Some(cause),
-            Self::Utf8(ref cause) => Some(cause),
-            Self::Missing(_) => None,
-            Self::Exec(ref cause) => Some(cause),
-            Self::Env(ref cause) => Some(cause),
-        }
-    }
-}
-
-impl From<ExecError> for SimError {
-    fn from(cause: ExecError) -> Self {
-        Self::Exec(cause)
-    }
-}
-
-impl From<VarError> for SimError {
-    fn from(cause: VarError) -> Self {
-        Self::Env(cause)
-    }
-}
-
-impl From<DrawError> for SimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<TryFromIntError> for SimError {
-    fn from(cause: TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<io::Error> for SimError {
-    fn from(cause: io::Error) -> Self {
-        Self::Io(cause)
-    }
-}
-
-impl From<json::Error> for SimError {
-    fn from(cause: json::Error) -> Self {
-        Self::Json(cause)
-    }
-}
-
-impl From<FromUtf8Error> for SimError {
-    fn from(cause: FromUtf8Error) -> Self {
-        Self::Utf8(cause)
-    }
+    #[error("environment: {0}")]
+    Env(#[from] VarError),
 }

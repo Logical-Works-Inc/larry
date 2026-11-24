@@ -26,6 +26,7 @@
 use std::fmt;
 use std::path::Path;
 
+use lgwks_macros::Error;
 use lgwks_std::json::{self, Value, json};
 
 use super::ExecError;
@@ -62,37 +63,25 @@ pub(crate) const OBSERVED_BYTES: usize = 4096;
 const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below by running shell commands. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"done\": \"<one-line summary>\"} ends the task. Run one command per reply.";
 
 /// Why a session was refused before anything ran.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SessionError {
     /// The instruction is empty or blank.
+    #[error("the instruction is empty")]
     EmptyInstruction,
     /// The instruction is over 64 KiB.
+    #[error("the instruction is {len} bytes, over {}", MAX_INSTRUCTION_BYTES)]
     InstructionTooLarge {
         /// Its length in bytes.
         len: usize,
     },
     /// The instruction holds a NUL byte.
+    #[error("the instruction holds a NUL byte")]
     NulInInstruction,
     /// The working directory is not a directory Larry can work in.
+    #[error("the working directory is not a directory")]
     NotADirectory,
 }
-
-impl fmt::Display for SessionError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::EmptyInstruction => out.write_str("the instruction is empty"),
-            Self::InstructionTooLarge { len } => write!(
-                out,
-                "the instruction is {len} bytes, over {MAX_INSTRUCTION_BYTES}"
-            ),
-            Self::NulInInstruction => out.write_str("the instruction holds a NUL byte"),
-            Self::NotADirectory => out.write_str("the working directory is not a directory"),
-        }
-    }
-}
-
-impl std::error::Error for SessionError {}
 
 /// Why a session ended; the names are the Agent Client Protocol's stop reasons.
 #[derive(Debug, Clone, PartialEq, Eq)]

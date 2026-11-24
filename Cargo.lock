@@ -1553,6 +1553,7 @@ name = "larry-contracts"
 version = "0.1.0"
 dependencies = [
  "lgwks_bot",
+ "lgwks_macros",
  "lgwks_std",
 ]
 
@@ -1566,6 +1567,7 @@ dependencies = [
  "lgwks_ast",
  "lgwks_bot",
  "lgwks_deps",
+ "lgwks_macros",
  "lgwks_std",
  "rustix",
  "unicode-width",
@@ -1578,6 +1580,7 @@ dependencies = [
  "larry-contracts",
  "larry-runtime",
  "lgwks_bot",
+ "lgwks_macros",
  "lgwks_std",
 ]
 

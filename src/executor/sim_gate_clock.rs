@@ -6,12 +6,12 @@
 //! reading is elapsed time since 1970-01-01T00:00Z (`larry_runtime::live_clock`), and OWASP ASVS
 //! 4.0.3 section 4.1.3 (a lease that cannot be replayed on a stopped clock is not testable).
 
-use std::fmt;
 use std::num::TryFromIntError;
 use std::time::{Duration, SystemTime, SystemTimeError};
 
 use larry_runtime::error::RuntimeError;
 use lgwks_bot::kernel::clock::{Clock, ClockError};
+use lgwks_macros::Error;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::{DrawError, Seeded};
 
@@ -30,65 +30,26 @@ const MAX_START_SECS: u64 = 4_000_000_000;
 const MAX_STEP_NS: u64 = 3_600_000_000_000;
 
 /// Why one expiry simulation could not be driven to its assertions.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum ExpirySimError {
     /// The seeded stream refused a draw.
-    Draw(DrawError),
+    #[error("seeded draw refused: {0}")]
+    Draw(#[from] DrawError),
     /// A drawn number does not fit the type its use needs.
-    Range(TryFromIntError),
+    #[error("drawn number out of range: {0}")]
+    Range(#[from] TryFromIntError),
     /// The virtual clock refused the step this simulation asked of it.
-    Clock(ClockError),
+    #[error("the virtual clock refused a step: {0}")]
+    Clock(#[from] ClockError),
     /// The runtime refused to start a lease.
-    Lease(RuntimeError),
+    #[error("the lease was refused: {0}")]
+    Lease(#[from] RuntimeError),
     /// The expiry moved backwards across the step.
-    Backwards(SystemTimeError),
+    #[error("the expiry moved backwards: {0}")]
+    Backwards(#[from] SystemTimeError),
     /// A drawn sum left the range an instant holds.
+    #[error("a drawn instant overflowed")]
     Overflow,
-}
-
-impl fmt::Display for ExpirySimError {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Draw(ref cause) => write!(out, "seeded draw refused: {cause}"),
-            Self::Range(ref cause) => write!(out, "drawn number out of range: {cause}"),
-            Self::Clock(ref cause) => write!(out, "the virtual clock refused a step: {cause}"),
-            Self::Lease(ref cause) => write!(out, "the lease was refused: {cause}"),
-            Self::Backwards(ref cause) => write!(out, "the expiry moved backwards: {cause}"),
-            Self::Overflow => out.write_str("a drawn instant overflowed"),
-        }
-    }
-}
-
-impl std::error::Error for ExpirySimError {}
-
-impl From<DrawError> for ExpirySimError {
-    fn from(cause: DrawError) -> Self {
-        Self::Draw(cause)
-    }
-}
-
-impl From<TryFromIntError> for ExpirySimError {
-    fn from(cause: TryFromIntError) -> Self {
-        Self::Range(cause)
-    }
-}
-
-impl From<ClockError> for ExpirySimError {
-    fn from(cause: ClockError) -> Self {
-        Self::Clock(cause)
-    }
-}
-
-impl From<RuntimeError> for ExpirySimError {
-    fn from(cause: RuntimeError) -> Self {
-        Self::Lease(cause)
-    }
-}
-
-impl From<SystemTimeError> for ExpirySimError {
-    fn from(cause: SystemTimeError) -> Self {
-        Self::Backwards(cause)
-    }
 }
 
 /// BLAKE3 of a trace, as 64 hex characters: one seed must give one trace hash.

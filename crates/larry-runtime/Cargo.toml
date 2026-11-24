@@ -14,12 +14,11 @@ description = "The Larry runtime: bounded journal, deterministic tick, admission
 # (workspace stdlib+) and lgwks_deps is the estate's own admission
 # storefront — so this crate adds **no** registered third-party edge.
 #
-# `thiserror` is deliberately NOT used here even though it is the estate's
-# error-derive choice: its register row names `larry-contracts` as the single
-# `allowed_consumers` entry. Widening that row is a Director sign-off, not a
-# local convenience, so this crate hand-writes `Display` + `Error` instead.
+# Errors derive `Display`, `Error` and `From` from the estate's `lgwks_macros::Error`
+# (larry#435); `thiserror` is not used.
 [dependencies]
 larry-contracts = { path = "../larry-contracts" }
+lgwks_macros = { workspace = true }
 # The tick's clock is lgwks_bot's declared clock (larry#74); Larry keeps no clock of its own.
 # `wire` carries `journal::RecordJournal`, the journal's file (larry#75, ADR 0023).
 lgwks_bot = { workspace = true, features = ["wire"] }
