@@ -15,11 +15,14 @@ pub mod routes;
 mod run;
 mod session;
 #[cfg(test)]
+mod sim_env;
+#[cfg(test)]
 pub(crate) mod sim_tree;
 mod task;
 mod workspace;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,8 +74,17 @@ fn read_by_larry(name: &str) -> bool {
 ///
 /// [`ExecError::NotUnicode`] naming the first such variable.
 pub fn process_env() -> Result<impl Fn(&str) -> Option<String> + Send + Sync + 'static, ExecError> {
-    let mut table = std::collections::BTreeMap::new();
-    for (name, value) in std::env::vars_os() {
+    let table = snapshot(std::env::vars_os())?;
+    Ok(move |name: &str| table.get(name).cloned())
+}
+
+/// The variables Larry reads out of `vars`, as text: the one place a byte string from the
+/// environment becomes a setting. A refusal names the variable, never its value.
+fn snapshot(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<BTreeMap<String, String>, ExecError> {
+    let mut table = BTreeMap::new();
+    for (name, value) in vars {
         let lossy = name.to_string_lossy().into_owned();
         if !read_by_larry(&lossy) {
             continue;
@@ -86,7 +98,7 @@ pub fn process_env() -> Result<impl Fn(&str) -> Option<String> + Send + Sync + '
             }
         }
     }
-    Ok(move |name: &str| table.get(name).cloned())
+    Ok(table)
 }
 
 /// The non-empty `LARRY_STATE_DIR` that `read` yields.
@@ -239,8 +251,7 @@ impl Settings {
                 _ => return Err(ExecError::BadTimeout { value }),
             },
         };
-        // An absent PATH is the empty string: the optional value collects to nothing.
-        let path: String = read("PATH").into_iter().collect();
+        let path = read("PATH").ok_or(ExecError::PathUnset)?;
         let policy = gate::policy(&read)?;
         Ok(Settings {
             state_dir,

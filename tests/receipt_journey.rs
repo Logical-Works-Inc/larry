@@ -19,6 +19,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Output;
 use std::time::Instant;
@@ -446,6 +447,38 @@ fn an_offline_verifier_trusts_only_the_printed_key() -> TestResult {
     );
     assert_refused(&run_verify(&[], &output.stdout)?, "LARRY_STATE_DIR");
     assert_refused(&verify_in(state.path(), b"")?, "not valid JSON");
+    Ok(())
+}
+
+#[test]
+fn verify_refuses_a_non_unicode_receipt_key_typed() -> TestResult {
+    // larry#213: a key that is not text is refused, never read as unset, which would fall back
+    // to this machine's own key and verify a report the offline key never signed.
+    let (state, origin) = fixture()?;
+    let output = run_exec(
+        state.path(),
+        &task_json(origin.path(), "HEAD", r#"[["true"]]"#),
+        None,
+    )?;
+    report_of(&output)?;
+    let bytes: &[u8] = b"\xff\xfe";
+    let env: [(&str, &OsStr); 2] = [
+        ("LARRY_STATE_DIR", state.path().as_os_str()),
+        ("LARRY_RECEIPT_KEY", OsStr::from_bytes(bytes)),
+    ];
+    let refused = run_verify(&env, &output.stdout)?;
+    assert_refused(&refused, "LARRY_RECEIPT_KEY");
+    assert!(
+        refused.stdout.is_empty(),
+        "a refused key prints no verdict, though the state directory's own key would verify"
+    );
+    assert!(
+        !refused
+            .stderr
+            .windows(bytes.len())
+            .any(|window| window == bytes),
+        "the refusal names the variable and never prints its bytes"
+    );
     Ok(())
 }
 
