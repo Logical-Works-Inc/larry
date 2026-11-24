@@ -14,10 +14,10 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 # Ship checklist
 
 ## How a session ships the next item
-1. Take the first unchecked line of the first section that has one. Lines in a section ship in order unless marked parallel. A newer Director order beats this order; record it here in the same PR.
+1. Take the first issue the work graph #423 lists as ready (`is:open label:leaf -label:claimed -is:blocked`, `P0` first), and add `claimed`. Its line here, when it has one, ships in the same PR. A newer Director order beats this order; record it in #423.
 2. Read the issue, then work it as AGENTS.md says: research, plan, build in the run path, the Gates, a PR whose body says `Closes #N`, merge on green.
 3. In that same PR, tick the line and append `PR #M, <the measured number>`; the squash SHA appears only at merge, so `git log` holds it. A line is ticked only when its proof ran and printed.
-4. New work enters as an issue and a line here in the PR that files it. Never delete a line: tick it, or strike it with the reason and the Director's order.
+4. New work enters as an issue under its epic in #423, with a `P` label and `leaf` or `epic`. Never delete a line: tick it, or strike it with the reason and the Director's order.
 
 ## Shipped
 - [x] #112 newest estate pins, #116 runner by visibility: PR #113, ea3645d. #117 public-alpha warning, SECURITY.md, CONTRIBUTING.md, licence clause: PR #118, 4ff17c5.
