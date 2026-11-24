@@ -11,6 +11,9 @@ use lgwks_std::seeded::Seeded;
 use super::sim_support::{Scratch, SimError, SimResult};
 use super::temp_paths;
 
+#[path = "sim_temp_gate.rs"]
+mod gate;
+
 /// The refusal the rule writes for `relative` at `line`.
 pub(super) fn refusal(relative: &str, line: usize) -> String {
     format!("a process id names a temp directory outside the guard: {relative}:{line}")
