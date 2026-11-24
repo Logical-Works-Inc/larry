@@ -186,8 +186,8 @@ impl ModelClient {
             .user_agent(USER_AGENT)
             .header("Authorization", format!("Bearer {}", self.config.api_key()));
         let url = format!("{}/chat/completions", self.config.base_url());
-        let response = http::post_with(&url, "application/json", body, &options)
-            .map_err(|failure| map_transport(&failure))?;
+        let response =
+            http::post_with(&url, "application/json", body, &options).map_err(map_transport)?;
         if !(200..300).contains(&response.status()) {
             let retry_after = response
                 .headers()
@@ -225,17 +225,58 @@ fn retry_after_wait(refusal: &ModelError) -> Option<Duration> {
     }
 }
 
-/// Fold an `lgwks_std::http` failure into this module's typed error.
-fn map_transport(error: &HttpError) -> ModelError {
-    match *error {
+/// Fold an `lgwks_std::http` failure into this module's typed error. A timeout and a body past
+/// its bound have their own variants; every other failure keeps the estate error whole, its
+/// stage and kind included (larry#434).
+fn map_transport(error: HttpError) -> ModelError {
+    match error {
         HttpError::BodyTooLarge { .. } => ModelError::BodyTooLarge,
         HttpError::Failure {
             kind: FailureKind::Timeout,
             ..
         } => ModelError::Timeout,
-        HttpError::Failure { .. }
-        | HttpError::InvalidUrl
-        | HttpError::RedirectLimitTooLarge { .. } => ModelError::Transport,
-        _ => ModelError::Transport,
+        other => ModelError::Transport(other),
+    }
+}
+
+/// A refused connection keeps its stage and kind, in the message and as the source, so an
+/// operator tells a bad host from a dead network (larry#434). Source: `lgwks_std::http::Error`.
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use lgwks_std::http::{Error as HttpError, FailureKind, FailureStage};
+
+    use super::{ModelError, map_transport};
+
+    #[test]
+    fn a_transport_failure_keeps_its_stage_and_kind() {
+        let resolve = HttpError::Failure {
+            stage: FailureStage::Resolve,
+            kind: FailureKind::Transport,
+            cause: None,
+        };
+        let mapped = map_transport(resolve.clone());
+        assert_eq!(mapped, ModelError::Transport(resolve));
+        let text = mapped.to_string();
+        assert!(
+            text.contains("Resolve") && text.contains("Transport"),
+            "the message names the stage and kind: {text}"
+        );
+        assert!(mapped.source().is_some(), "the estate error is the source");
+        let timeout = HttpError::Failure {
+            stage: FailureStage::Connect,
+            kind: FailureKind::Timeout,
+            cause: None,
+        };
+        assert_eq!(map_transport(timeout), ModelError::Timeout);
+        assert_eq!(
+            map_transport(HttpError::BodyTooLarge { limit: 1 }),
+            ModelError::BodyTooLarge
+        );
+        assert!(matches!(
+            map_transport(HttpError::InvalidUrl),
+            ModelError::Transport(HttpError::InvalidUrl)
+        ));
     }
 }

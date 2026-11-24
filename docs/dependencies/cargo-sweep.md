@@ -19,7 +19,7 @@ sources:
 # Cargo sweep
 
 Read 2026-11-03. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
-`lgwks_ast`, `lgwks_deps`, all at their newest release: 5.0.0, 10.0.2, 6.1.1, 8.0.0 on 2026-11-23); Loco.rs where the estate
+`lgwks_ast`, `lgwks_deps`, all at their newest release: 5.0.0, 10.0.3, 6.1.1, 8.0.0 on 2026-11-24); Loco.rs where the estate
 owns nothing; any other crate only with a `gap` issue on its manifest line. Labels: MEASURED, READ, DOC.
 
 ## Measured with cargo (MEASURED, stable toolchain, load average 4 to 6)
@@ -73,8 +73,8 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Typed errors | the estate's `lgwks_macros::Error` derive, which makes a `#[from]` field the source (lgwks_ast 6.1.1 `error_derive/parse.rs`); the hand-written impls move onto it in larry#435 | `thiserror` (removed larry#339: its gap #842 closed) |
 | Memory, durable product state | Logical-DB | any substitute store: refused |
 
-Gap issues (Logical-Works-Inc/logicalworks-crates): #848 web layer; #849 the SQLite lane; #850 remote MCP;
-#846 Nova; #1113 a mode reset from a held `Dir`; #1141 a durable file replace. Each manifest line cites one.
+Gap issues (logicalworks-crates): #848 web layer; #849 SQLite lane; #850 remote MCP; #846 Nova; #1113 mode
+reset from a held `Dir`; #1141 durable file replace; #1143 process-group exit wait. Each manifest line cites one.
 
 ## Where Loco is used, and where it is refused
 
