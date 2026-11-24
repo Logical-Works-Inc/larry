@@ -244,8 +244,9 @@ fn check_tenant(name: &str) -> Result<(), ServeError> {
 /// # Errors
 ///
 /// [`ServeError::BadTenant`] for a name the edge would refuse,
-/// [`ServeError::Entropy`] when the OS has none, and [`ServeError::Store`] when
-/// the store fails.
+/// [`ServeError::Entropy`] when the OS has none, [`ServeError::KeysFull`] for a
+/// new tenant when the store holds [`MAX_TENANT_KEYS`] keys (a rotation still
+/// succeeds), and [`ServeError::Store`] when the store fails.
 pub fn issue_key(
     read: impl Fn(&str) -> Option<String>,
     tenant: &str,
@@ -254,9 +255,14 @@ pub fn issue_key(
     let secret = lgwks_std::random::bytes::<KEY_BYTES>().map_err(ServeError::Entropy)?;
     let key = format!("{KEY_PREFIX}{}", lgwks_std::hex::encode(secret));
     let digest = lgwks_std::hash::blake3(key.as_bytes()).to_hex();
-    state_ledger(&read)
-        .and_then(|ledger| ledger.set_tenant_key(tenant, &digest))
+    let written = state_ledger(&read)
+        .and_then(|ledger| ledger.set_tenant_key(tenant, &digest, MAX_TENANT_KEYS))
         .map_err(ServeError::Store)?;
+    if !written {
+        return Err(ServeError::KeysFull {
+            cap: MAX_TENANT_KEYS,
+        });
+    }
     Ok(key)
 }
 

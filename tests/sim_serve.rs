@@ -625,6 +625,78 @@ fn reload_pass(seed: u64) -> Result<String, Box<dyn Error>> {
     Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
 }
 
+/// One cap pass (larry#397): a store filled to the cap refuses a key for a new tenant with
+/// a typed refusal and writes no row, still rotates a tenant that holds one, still loads at
+/// start and on SIGHUP, and takes the new tenant once a revoke frees a slot. The seed picks
+/// which tenants rotate and which one is revoked. Returns the trace hash.
+fn cap_pass(seed: u64) -> Result<String, Box<dyn Error>> {
+    let mut rng = Seeded::from_seed(seed);
+    let state = fresh_state_dir()?;
+    issue_key(&state, "ada")?;
+    fill_key_store(&state, 0, CAP_ROWS.saturating_sub(1))?;
+    let late = format!("late-{}", rng.index(CAP_ROWS)?);
+    let refused = issue_key(&state, &late).err().ok_or("a key past the cap")?;
+    assert!(
+        refused
+            .to_string()
+            .contains("holds the cap of 65536 tenant keys"),
+        "seed {seed:#x}: a new tenant at the cap is refused by name: {refused}"
+    );
+    let rotated = format!("tenant-{}", rng.index(CAP_ROWS.saturating_sub(1))?);
+    let first = issue_key(&state, "ada")?;
+    let second = issue_key(&state, &rotated)?;
+    let mut serving = start_host(&state)?;
+    assert_eq!(
+        get(serving.addr(), "/t/ada/whoami", Some(&first))?.0,
+        200,
+        "seed {seed:#x}: a key rotated at the cap admits its tenant"
+    );
+    serving.signal("HUP")?;
+    let reload = serving.next_line()?;
+    assert!(
+        reload.contains("\"reloaded\":true") && reload.contains("\"keyed_tenants\":65536"),
+        "seed {seed:#x}: a store at the cap reloads open: {reload}"
+    );
+    let victim = format!("tenant-{}", rng.index(CAP_ROWS.saturating_sub(1))?);
+    assert!(
+        revoke(&state, &victim)?.status.success(),
+        "seed {seed:#x}: revoke"
+    );
+    issue_key(&state, &late)?;
+    serving.signal("HUP")?;
+    let after = serving.next_line()?;
+    assert!(
+        after.contains("\"reloaded\":true") && after.contains("\"keyed_tenants\":65536"),
+        "seed {seed:#x}: a freed slot takes the new tenant and the store still loads: {after}"
+    );
+    let (status, stderr) = serving.signal_and_wait("TERM")?;
+    assert!(status.success(), "seed {seed:#x}: stops clean: {stderr}");
+    let mut trace = Hasher::new();
+    for line in [
+        late.as_str(),
+        rotated.as_str(),
+        victim.as_str(),
+        &reload,
+        &after,
+    ] {
+        trace.write_framed(line.as_bytes());
+    }
+    trace.write_framed(&[u8::from(first != second)]);
+    Ok(lgwks_std::hex::encode(trace.finalize().as_bytes()))
+}
+
+#[test]
+fn sim_serve_key_refuses_a_new_tenant_at_the_cap_and_the_store_still_loads() -> TestResult {
+    for seed in DENIAL_SEEDS.into_iter().take(2) {
+        assert_eq!(
+            cap_pass(seed)?,
+            cap_pass(seed)?,
+            "seed {seed:#x}: the same seed gives the same cap trace"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn sim_each_reload_prints_one_line_counting_the_store_it_read_for_every_seed() -> TestResult {
     for seed in DENIAL_SEEDS {

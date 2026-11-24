@@ -56,6 +56,12 @@ pub enum ServeError {
         /// The cap the edge admits.
         cap: u32,
     },
+    /// The store holds the cap of keys, so a new tenant gets none; a rotation
+    /// of a tenant that holds one still succeeds (larry#397).
+    KeysFull {
+        /// The cap the edge admits.
+        cap: u32,
+    },
     /// The tenant holds no key, so there is nothing to revoke.
     NoKey {
         /// The tenant named.
@@ -122,6 +128,10 @@ impl fmt::Display for ServeError {
                 out,
                 "serve: the key store holds {count} tenant keys, past the cap of {cap}; startup refused"
             ),
+            Self::KeysFull { cap } => write!(
+                out,
+                "serve: the key store holds the cap of {cap} tenant keys; revoke one before keying a new tenant"
+            ),
             Self::NoKey { ref tenant } => write!(out, "serve: {tenant:?} holds no key to revoke"),
             Self::Snapshot { ref cause } => write!(
                 out,
@@ -153,6 +163,7 @@ impl std::error::Error for ServeError {
             | Self::PlaintextFlag { .. }
             | Self::BadTenant { .. }
             | Self::KeyCap { .. }
+            | Self::KeysFull { .. }
             | Self::NoKey { .. }
             | Self::Snapshot { .. }
             | Self::Watcher { .. } => None,
