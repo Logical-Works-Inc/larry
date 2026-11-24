@@ -3,6 +3,8 @@
 //! caller injected (larry#214, larry#268) and pausing on a backoff, never spinning (larry#427).
 
 use std::io;
+use std::process::ExitStatus;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::{Clock, TimeSource};
@@ -99,6 +101,38 @@ fn settle_with(clock: &Clock, mut signal: impl FnMut() -> io::Result<()>) -> Res
                 attempt = attempt.saturating_add(1);
             }
             Err(error) => return Err(ExecError::Reap(error)),
+        }
+    }
+}
+
+/// The leader's status after the signal that ends it, a cancel or a deadline. On Linux the
+/// command's group is made by the `setsid` the command starts under, after `spawn` has returned,
+/// so a signal that lands first finds no group, which [`settle_with`] reads as gone: the leader
+/// then runs on, and the wait would last as long as the command (larry#442). The signal is
+/// therefore repeated every `slice` that brings no status, until the status arrives or
+/// [`GROUP_PROBE_DEADLINE`] has passed on `clock` with the leader still running, which is
+/// [`ExecError::GroupSurvived`]. A waiter that ended without a status is its own fault, and
+/// nothing is signalled for it.
+pub(super) fn status_after_kill(
+    clock: &Clock,
+    receiver: &Receiver<io::Result<ExitStatus>>,
+    pgid: i32,
+    slice: Duration,
+    mut signal: impl FnMut() -> Result<(), ExecError>,
+) -> Result<io::Result<ExitStatus>, ExecError> {
+    let started = clock.now();
+    loop {
+        match receiver.recv_timeout(slice) {
+            Ok(status) => return Ok(status),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Ok(Err(io::Error::other("the waiter ended without a status")));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if past_deadline(clock, started) {
+                    return Err(ExecError::GroupSurvived { pgid });
+                }
+                signal()?;
+            }
         }
     }
 }
