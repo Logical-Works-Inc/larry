@@ -92,13 +92,19 @@ const FIRST_TICKED_ADR: u32 = 92;
 /// More entries than this in `docs/adr` is refused before they are judged.
 const MAX_ADRS: usize = 4096;
 
-/// The ADR numbers at or past `FIRST_TICKED_ADR` that `checklist` never names as `ADR NNNN`.
+/// The ADR numbers at or past `FIRST_TICKED_ADR` that no line of `checklist` names as `ADR NNNN`
+/// beside the `PR #` that shipped it: a decision named with no PR has not shipped (larry#427).
 fn unnamed(checklist: &str, numbers: &[u32]) -> Vec<u32> {
     numbers
         .iter()
         .copied()
         .filter(|&number| number >= FIRST_TICKED_ADR)
-        .filter(|number| !checklist.contains(&format!("ADR {number:04}")))
+        .filter(|number| {
+            let name = format!("ADR {number:04}");
+            !checklist
+                .lines()
+                .any(|line| line.contains(&name) && line.contains("PR #"))
+        })
         .collect()
 }
 
@@ -142,6 +148,14 @@ fn an_adr_past_the_floor_with_no_line_is_named_and_an_older_one_is_not() {
         unnamed("ADR 93 without padding", &[93]),
         [93],
         "the number is four digits"
+    );
+    assert_eq!(
+        unnamed(
+            "- [ ] #4 planned (ADR 0095), no PR yet\n- [x] #5 PR #6",
+            &[95]
+        ),
+        [95],
+        "an ADR named on a line with no PR has not shipped"
     );
 }
 

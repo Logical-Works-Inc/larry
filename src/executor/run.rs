@@ -14,9 +14,7 @@ use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use lgwks_bot::kernel::clock::Clock;
-use lgwks_std::process::{
-    ProcessIdentity, identify_process, kill_process_group, process_group_exists,
-};
+use lgwks_std::process::{ProcessIdentity, identify_process};
 
 use super::ExecError;
 use super::confine::{Confine, SETSID};
@@ -37,16 +35,10 @@ const TAIL_BYTES: usize = 524_288;
 /// Bytes read from a pipe per piece.
 const CAPTURE_CHUNK: usize = 8_192;
 
-/// The kernel's error number for "no such process".
-const ESRCH: i32 = 3;
-
-/// The kernel's error number for "operation not permitted", the same on Linux and Darwin.
-const EPERM: i32 = 1;
-
-/// Time a process group is given before it counts as surviving (larry#214, larry#268): killed
-/// members are briefly zombies, and a count of yields measured the scheduler rather than time,
-/// so both group waits end on this one bound read from the clock their caller injected.
-pub(super) const GROUP_PROBE_DEADLINE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(super) use group::GROUP_PROBE_DEADLINE;
+pub(super) use group::await_gone;
+use group::{await_group_gone, settle_group};
 
 /// Longest one slice of the command wait sleeps before it checks the person's cancel again
 /// (larry#242): it bounds Esc-to-kill latency. `tui_journey_esc_kills_running_command` prints
@@ -687,80 +679,9 @@ fn discard(child: &mut Child, error: ExecError) -> ExecError {
     error
 }
 
-/// Whether `clock` has reached [`GROUP_PROBE_DEADLINE`] past the wait's one start reading.
-/// This is the only bound either group wait reads (larry#268): one reading of the injected
-/// clock, never a count of yields.
-fn past_deadline(clock: &Clock, started: Duration) -> bool {
-    clock.now().saturating_sub(started) >= GROUP_PROBE_DEADLINE
-}
-
-/// SIGKILLs a process group; a group that is already gone is settled.
-///
-/// macOS refuses a signal to a group whose remaining members are zombies with
-/// `EPERM` (openvax/mhctools#620), and BSD `kill(2)` sends nothing to any member
-/// when one target fails the check, so one refusal can leave live members
-/// unsignalled. The kill is therefore repeated while `EPERM` persists, until
-/// [`GROUP_PROBE_DEADLINE`] has passed on `clock`, so it lands once the zombie is
-/// reaped; refusing at the first `EPERM` failed 7 of 24 parallel runs of the timeout
-/// journey (MEASURED, larry#131). A refusal that outlasts the bound is handed to
-/// [`await_group_gone`], which never presumes the group gone and ends a member
-/// that really refuses in [`ExecError::GroupSurvived`].
-fn settle_group(clock: &Clock, pgid: i32) -> Result<(), ExecError> {
-    settle_with(clock, || kill_process_group(pgid))
-}
-
-/// [`settle_group`] over a signal the caller supplies, so the refusal schedule can be
-/// driven: an `EPERM` is repeated until [`GROUP_PROBE_DEADLINE`] has passed on `clock`, a
-/// group the kernel says is gone settles at once, and any other refusal is typed.
-fn settle_with(clock: &Clock, mut signal: impl FnMut() -> io::Result<()>) -> Result<(), ExecError> {
-    let started = clock.now();
-    loop {
-        match signal() {
-            Ok(()) => return Ok(()),
-            Err(error) if error.raw_os_error() == Some(ESRCH) => return Ok(()),
-            Err(error) if error.raw_os_error() == Some(EPERM) => {
-                if past_deadline(clock, started) {
-                    return Ok(());
-                }
-                std::thread::yield_now();
-            }
-            Err(error) => return Err(ExecError::Reap(error)),
-        }
-    }
-}
-
-/// Probes the group until it is gone, yielding between probes; fails once
-/// [`GROUP_PROBE_DEADLINE`] has passed on `clock` with the group still there.
-pub(super) fn await_group_gone(clock: &Clock, pgid: i32) -> Result<(), ExecError> {
-    if await_gone(clock, || {
-        process_group_exists(pgid).map_err(ExecError::Reap)
-    })? {
-        return Ok(());
-    }
-    Err(ExecError::GroupSurvived { pgid })
-}
-
-/// Waits for `still_there` to answer that the group is gone, yielding between probes, and
-/// answers whether it did: `false` once [`GROUP_PROBE_DEADLINE`] has passed on `clock` with
-/// the group still there. `still_there` is the probe's own answer, so the caller passes
-/// `process_group_exists` and a `true` keeps waiting (larry#268); both decisions are the
-/// probe's and one clock reading, so the seeded sim can drive them to the deadline and
-/// before it on a virtual clock. The error type is the probe's, so a sim can report a
-/// refused clock advance as itself. Visible to the executor so the ledger's reap and its
-/// simulation share this one wait instead of a second copy (larry#308).
-pub(super) fn await_gone<E>(
-    clock: &Clock,
-    mut still_there: impl FnMut() -> Result<bool, E>,
-) -> Result<bool, E> {
-    let started = clock.now();
-    while still_there()? {
-        if past_deadline(clock, started) {
-            return Ok(false);
-        }
-        std::thread::yield_now();
-    }
-    Ok(true)
-}
+/// Settling a command's process group, bounded by one clock reading (larry#268, larry#427).
+#[path = "group.rs"]
+mod group;
 
 /// Seeded simulations of the bounded capture (larry#206).
 #[cfg(test)]
@@ -771,8 +692,3 @@ mod tests;
 #[cfg(test)]
 #[path = "sim_drain.rs"]
 mod sim_drain;
-
-/// Seeded simulations of the group wait's one deadline, on a virtual clock (larry#268).
-#[cfg(test)]
-#[path = "sim_group.rs"]
-mod sim_group;
