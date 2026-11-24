@@ -116,7 +116,16 @@ where
                         let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
                         let authority_live = self.fence.authorize(key, &live.intent).is_ok()
                             && live.proof.check().is_ok();
-                        Some(retry::decide(live, max_attempts, at, authority_live)?)
+                        // Only the owner can say its endpoint deduplicates; the
+                        // submitter's strategy is a claim (larry#197).
+                        let window = self.owner.deduplication_window(&live.intent);
+                        Some(retry::decide(
+                            live,
+                            max_attempts,
+                            at,
+                            authority_live,
+                            window,
+                        )?)
                     };
                     let reach = match decision {
                         Some(decision) => {

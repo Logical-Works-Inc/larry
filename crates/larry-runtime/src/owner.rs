@@ -12,7 +12,7 @@
 //! that fails to *reach* the endpoint is indistinguishable from one whose
 //! reply was lost, and the correct record for both is the same: unknown.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use larry_contracts::effect::{EffectIntent, EffectOutcome};
 
@@ -57,6 +57,15 @@ pub trait EffectOwner {
     /// unknown. Implementations must reuse `intent.operation` verbatim so a
     /// supporting endpoint can deduplicate.
     fn reconcile(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome;
+
+    /// How long this owner's endpoint remembers `intent.operation` and refuses a
+    /// second application of it. The submitter's `IdempotentRetrySafe` is only a
+    /// claim; only the owner knows what its endpoint promises, so `None`, the
+    /// default, means an effect that may have reached the owner is never sent
+    /// again (lgwks_bot RQ-009, larry#197).
+    fn deduplication_window(&self, _intent: &EffectIntent) -> Option<Duration> {
+        None
+    }
 }
 
 /// Declared, deterministic owner doubles for exercising the runtime.
@@ -78,11 +87,11 @@ pub mod fixture {
 
     use larry_contracts::ids::OperationId;
 
-    use super::{EffectIntent, EffectOutcome, EffectOwner, SystemTime};
+    use super::{Duration, EffectIntent, EffectOutcome, EffectOwner, SystemTime};
 
     /// An owner that returns scripted outcomes in order and records the
     /// operations it was asked about.
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Clone)]
     pub struct ScriptedOwner {
         /// Outcomes consumed in fixture order.
         scripted: VecDeque<EffectOutcome>,
@@ -90,6 +99,12 @@ pub mod fixture {
         dispatched: Vec<OperationId>,
         /// Status queries observed by this fixture.
         reconciled: Vec<OperationId>,
+    }
+
+    impl Default for ScriptedOwner {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl ScriptedOwner {
@@ -101,11 +116,13 @@ pub mod fixture {
         /// success.
         #[must_use]
         pub fn new() -> Self {
-            Self::default()
+            Self::scripted([])
         }
 
         /// An owner that returns `outcomes` in order and then reports
-        /// unknown forever after.
+        /// unknown forever after. Its endpoint is declared to deduplicate on
+        /// the operation id for as long as any lease, so the retry rule's
+        /// other conjuncts are what a test exercises (larry#197).
         #[must_use]
         pub fn scripted(outcomes: impl IntoIterator<Item = EffectOutcome>) -> Self {
             Self {
@@ -158,6 +175,10 @@ pub mod fixture {
         fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
             self.reconciled.push(intent.operation);
             self.next(intent.operation)
+        }
+
+        fn deduplication_window(&self, _intent: &EffectIntent) -> Option<Duration> {
+            Some(Duration::MAX)
         }
     }
 

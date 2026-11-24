@@ -5,6 +5,7 @@ use std::time::SystemTime;
 
 use larry_contracts::effect::EffectIntent;
 use larry_contracts::ids::TenantId;
+use lgwks_bot::kernel::effect::EffectKey;
 
 /// A run the runtime is tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,10 @@ pub(super) struct LiveEffect {
     /// that happened. It is what keeps an endpoint's answer from being read as
     /// evidence about an effect that never left the process.
     pub(super) sent: bool,
+    /// The key the last mutating reach warranted and handed the owner, `None`
+    /// until this process takes one. The retry rule compares it with the intent
+    /// a resend would carry, so a changed intent is never resent (larry#197).
+    pub(super) dispatched: Option<EffectKey>,
     /// How many times the owner has been asked to *perform* the effect. Bounded
     /// by `MAX_EFFECT_ATTEMPTS` for strategies that declare retry safe.
     pub(super) dispatches: u8,
