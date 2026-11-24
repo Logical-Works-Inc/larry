@@ -44,11 +44,84 @@ const REFUSED_EXT: &str = "refused";
 /// next start, so a backlog never stalls a task without bound.
 const MAX_RECOVERED: usize = 1024;
 
+/// The extension of a run's liveness lock (larry#456).
+const LOCK_EXT: &str = "lock";
+
 /// The journal file of `task_id` under `state`.
 pub(super) fn journal_path(state: &Path, task_id: &str) -> PathBuf {
     state
         .join(JOURNALS_DIR)
         .join(format!("{task_id}.{JOURNAL_EXT}"))
+}
+
+/// A run's liveness lock, `<task>.lock`, held from before its journal exists until after
+/// the run removes it (larry#456). The journal's own lock cannot say this alone: between a
+/// run creating its journal and locking it, another executor's recovery could take the
+/// journal, and a run that dropped its journal's lock before removing it left a window where
+/// recovery set a finished run aside. A run removes its lock file last; nobody else creates
+/// or removes one, so a lock taken on a file another run still holds is always refused.
+pub(super) struct RunLock {
+    /// The locked file; dropping it releases the lock.
+    file: std::fs::File,
+    /// Where it lives, removed by the run that made it.
+    path: PathBuf,
+}
+
+impl RunLock {
+    /// The run's own lock, created and taken before its journal is opened; `None` when a live
+    /// run with this id already holds it (a keyed retry while the first still runs).
+    pub(super) fn take(state: &Path, task_id: &str) -> Result<Option<Self>, ExecError> {
+        let path = journal_path(state, task_id).with_extension(LOCK_EXT);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(ExecError::Journals)?;
+        Self::held(file, path)
+    }
+
+    /// Another run's lock, never created: `Ok(None)` when that run is live, `Err` for a fault,
+    /// and a held guard (or `Some(None)` when the run made no lock file) when it is not.
+    fn probe(journal: &Path) -> Result<Option<Option<Self>>, ExecError> {
+        let path = journal.with_extension(LOCK_EXT);
+        match std::fs::OpenOptions::new().write(true).open(&path) {
+            Ok(file) => Ok(Self::held(file, path)?.map(Some)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(None)),
+            Err(error) => Err(ExecError::Journals(error)),
+        }
+    }
+
+    /// `file` locked without waiting, or `None` when another process holds it.
+    fn held(file: std::fs::File, path: PathBuf) -> Result<Option<Self>, ExecError> {
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file, path })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(ExecError::Journals(error)),
+        }
+    }
+
+    /// Ends the run: its lock file is removed while still held, then released.
+    pub(super) fn release(self) -> Result<(), ExecError> {
+        let removed = match std::fs::remove_file(&self.path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(ExecError::Journals(error))
+            }
+            _ => Ok(()),
+        };
+        drop(self.file);
+        removed
+    }
+}
+
+/// Whether a live run still holds `task_id`'s run lock: its recorded process groups are its own
+/// and no start-up reap may signal them (larry#456).
+///
+/// # Errors
+///
+/// [`ExecError::Journals`] when the lock cannot be probed.
+pub(super) fn run_held(state: &Path, task_id: &str) -> Result<bool, ExecError> {
+    Ok(RunLock::probe(&journal_path(state, task_id))?.is_none())
 }
 
 /// Whether another executor still holds `task_id`'s journal, so its evidence is
@@ -77,6 +150,11 @@ pub(super) fn journal_live(
     if !path.try_exists().map_err(ExecError::Journals)? {
         return Ok(false);
     }
+    // The run's own lock first: probing its journal while it starts would take that lock from
+    // it (larry#456). The guard is held across the journal probe and then dropped, never removed.
+    let Some(_guard) = RunLock::probe(&path)? else {
+        return Ok(true);
+    };
     let capacity = task_settings(policy).journal_capacity;
     match Journal::open(&path, capacity) {
         Err(RuntimeError::Durable(JournalError::Locked { .. })) => Ok(true),
@@ -236,6 +314,14 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery
     paths.sort();
     paths.truncate(MAX_RECOVERED);
     for path in paths {
+        // A live run holds its lock for its whole life; one that finished removed its journal
+        // before its lock, so a journal gone once the lock is held settled on its own (larry#456).
+        let Some(guard) = RunLock::probe(&path)? else {
+            continue;
+        };
+        if !path.try_exists().map_err(ExecError::Journals)? {
+            continue;
+        }
         let kept_as = match recover_one(&path, policy) {
             Ok(()) => RECOVERED_EXT,
             Err(RuntimeError::Durable(JournalError::Locked { .. })) => continue,
@@ -248,6 +334,10 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery
             }
         };
         std::fs::rename(&path, path.with_extension(kept_as)).map_err(ExecError::Journals)?;
+        // The dead run's lock goes with its journal, so its evidence is one entry.
+        if let Some(lock) = guard {
+            lock.release()?;
+        }
         recovery.set_aside = recovery.set_aside.saturating_add(1);
     }
     Ok(recovery)

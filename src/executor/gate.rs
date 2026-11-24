@@ -45,7 +45,7 @@ use super::Report;
 use super::Settings;
 use super::Task;
 use super::identity;
-use super::recovery::{JOURNALS_DIR, journal_path, recovered_evidence};
+use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
 
 /// The prefix every policy revision digest carries, so a revision computed here
 /// can never collide with a digest computed for another purpose.
@@ -486,6 +486,10 @@ pub(super) fn admit_and_run(
     // A journal already here is a dead run's the recovery kept for a passing fault
     // (larry#394): this retry's failure must never remove that evidence.
     let leftover = path.try_exists().map_err(ExecError::Journals)?;
+    // The run's liveness lock, taken before its journal exists and released after the journal
+    // is gone, so no other executor's recovery opens this run's journal (larry#456). `None` is a
+    // live run with this id; its journal's own lock then refuses this open, as before.
+    let lock = RunLock::take(&settings.state_dir, task_id)?;
     let opened = Journal::open(&path, run_settings.journal_capacity)
         .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
     let outcome = match opened {
@@ -505,7 +509,12 @@ pub(super) fn admit_and_run(
         }
         Err(error) => Err(ExecError::Gate(error)),
     };
-    finish(&path, outcome, leftover)
+    let finished = finish(&path, outcome, leftover);
+    // A release fault never hides the task's own outcome, only a success.
+    match (lock.map(RunLock::release), finished) {
+        (Some(Err(fault)), Ok(_)) => Err(fault),
+        (_, finished) => finished,
+    }
 }
 
 /// What one task presents to its runtime once the journal is open.
