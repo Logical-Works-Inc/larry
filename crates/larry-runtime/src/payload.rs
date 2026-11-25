@@ -257,6 +257,9 @@ pub enum CommandRefusal {
     /// The display the command was admitted with named a security epoch the
     /// fence has since left, so the reduce dispatched nothing.
     StaleDisplayEpoch,
+    /// The proposal named an operation id this runtime already holds for some
+    /// effect, of any tenant, so its run never moved (larry#198).
+    DuplicateOperation,
 }
 
 /// The body of a [`EventKind::CommandRefused`](larry_contracts::event::EventKind::CommandRefused)
