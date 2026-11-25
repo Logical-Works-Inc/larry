@@ -580,6 +580,22 @@ where
             }
             .into());
         }
+        // One operation id names one effect of one tenant: the live table, the
+        // journal fold and the fence's revocation by name all key by it. A reuse
+        // is refused before its run moves, so no transition is journaled for an
+        // effect that never exists, and the refusal is recorded beside the
+        // durable acceptance so a restart reads it (larry#198, larry#371).
+        if self.live.contains_key(&proposal.operation()) {
+            self.record_command_refused(
+                command_id,
+                tenant,
+                run,
+                CommandRefusal::DuplicateOperation,
+            )?;
+            return Err(RuntimeError::DuplicateOperation {
+                operation: proposal.operation(),
+            });
+        }
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection alone: recording the command already
         // created a run view, so a projection-based check would read `Draft`
@@ -600,11 +616,6 @@ where
             return Err(RuntimeError::EffectLimitReached {
                 run,
                 capacity: MAX_EFFECTS_PER_RUN,
-            });
-        }
-        if self.live.contains_key(&proposal.operation()) {
-            return Err(RuntimeError::DuplicateOperation {
-                operation: proposal.operation(),
             });
         }
         // A question bound to this effect is the only way past it: an
