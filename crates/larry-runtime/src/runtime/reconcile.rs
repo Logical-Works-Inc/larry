@@ -9,9 +9,21 @@ use larry_contracts::state::{RunState, TransitionEvent};
 
 use super::{LiveEffect, OwnerReach, Runtime, TickItem, TickReport, retry};
 use crate::error::RuntimeError;
+use crate::fence::FenceRefusal;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
 use lgwks_bot::kernel::retry::RetryRefusal;
+
+/// What the estate retry rule left an open retry-safe effect to do this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// Admitted: reach the owner again.
+    Reach,
+    /// Refused for authority alone: the fence reports it, and the budget waits.
+    Fenced(FenceRefusal),
+    /// Refused otherwise, or the run is cancelling: one `Unknown`, budget spent.
+    Spend,
+}
 
 impl<P, O> Runtime<P, O>
 where
@@ -110,22 +122,35 @@ where
                     // (larry#332).
                     let cancelling =
                         self.projection.run_state(live.intent.run) == Some(RunState::Cancelling);
-                    let decision = if cancelling {
-                        None
+                    let step = if cancelling {
+                        Retry::Spend
                     } else {
+                        // Authority is the fence's answer. The admission proof
+                        // is checked at the reach itself, which denies a lapsed
+                        // one whatever the retry rule decided (larry#77).
                         let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
-                        let authority_live = self.fence.authorize(key, &live.intent).is_ok()
-                            && live.proof.check().is_ok();
-                        Some(retry::decide(live, max_attempts, at, authority_live)?)
-                    };
-                    let reach = match decision {
-                        Some(decision) => {
-                            decision.permits_retry()
-                                || decision.refusals() == [RetryRefusal::AuthorityNotLive]
+                        let fenced = self.fence.authorize(key, &live.intent).err();
+                        // Only the owner can say its endpoint deduplicates; the
+                        // submitter's strategy is a claim (larry#197).
+                        let window = self.owner.deduplication_window(&live.intent);
+                        let decision =
+                            retry::decide(live, max_attempts, at, fenced.is_none(), window)?;
+                        match fenced {
+                            _ if decision.permits_retry() => Retry::Reach,
+                            // Refused for authority alone: the fence's refusal,
+                            // reported, with the budget kept for its return.
+                            Some(refusal)
+                                if decision.refusals() == [RetryRefusal::AuthorityNotLive] =>
+                            {
+                                Retry::Fenced(refusal)
+                            }
+                            _ => Retry::Spend,
                         }
-                        None => false,
                     };
-                    if reach {
+                    if let Retry::Fenced(refusal) = step {
+                        report.fenced.push((operation, refusal));
+                        None
+                    } else if step == Retry::Reach {
                         self.reach_owner(live.intent, OwnerReach::Mutate, at, report)?
                     } else {
                         // The estate rule refused the retry. The effect stays

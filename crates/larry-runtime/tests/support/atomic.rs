@@ -2,7 +2,7 @@
 //! protocol ingress falsifiers. Nothing here reaches a network; the owner
 //! models an atomic effect boundary over deterministic seeded identity.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::SecurityEpoch;
 use larry_contracts::binding::{BindingError, BindingField, EffectTarget, ResolvedEffect};
@@ -139,6 +139,12 @@ impl EffectOwner for AtomicOwner {
             operation: intent.operation,
         }
     }
+
+    /// The boundary is keyed by operation id for good, so a resend of a lost
+    /// reply is the binding's to refuse, not the retry rule's (larry#197).
+    fn deduplication_window(&self, _intent: &EffectIntent) -> Option<Duration> {
+        Some(Duration::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +202,11 @@ mod tests {
             "an unbound intent is refused, never dispatched"
         );
         assert!(owner.executed().is_empty(), "nothing was executed");
+        assert_eq!(
+            owner.deduplication_window(&intent),
+            Some(Duration::MAX),
+            "the boundary deduplicates by operation id for good"
+        );
         Ok(())
     }
 }
