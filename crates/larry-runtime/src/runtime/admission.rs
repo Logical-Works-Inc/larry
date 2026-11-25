@@ -678,6 +678,7 @@ where
                 // Nothing has reached the owner yet: the reservation is
                 // durable, and the reach that follows is what sets this.
                 sent: false,
+                dispatched: None,
                 dispatches: 0,
                 reconciliations: 0,
                 dispatched_at_tick: self.tick_count,

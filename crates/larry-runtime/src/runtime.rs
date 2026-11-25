@@ -175,6 +175,7 @@ impl TickReport {
     pub fn fenced(&self) -> &[(OperationId, FenceRefusal)] {
         &self.fenced
     }
+
     /// One command's, effect's or run's typed refusal, in the order the tick
     /// refused them.
     ///
@@ -689,6 +690,9 @@ where
                 // alternative fails open, and the direction here is the same
                 // one the dispatch budget below already takes.
                 sent: true,
+                // The journal keeps no key; the retry rule reads the one this
+                // intent names at its recorded attempt (larry#197).
+                dispatched: None,
                 dispatches,
                 reconciliations,
                 // Zero, so a restored effect is reconcilable on the first tick

@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use larry_contracts::ids::OperationId;
 use larry_contracts::replay::ReplayRecord;
+use lgwks_bot::kernel::journal::EffectEvidence;
 use lgwks_bot::kernel::retry::{
     DedupScope, DeduplicationContract, LateArrival, RetryDecision, RetryFacts, retry_admissible,
 };
@@ -64,22 +65,33 @@ fn span(from: SystemTime, to: SystemTime) -> Duration {
 /// Whether an open effect may be sent again now, by lgwks_bot's RQ-009 rule.
 ///
 /// The authority lease runs from the pinned observation to the end of
-/// validity (E30). It is both the retry deadline and the window the endpoint's
-/// deduplication has to cover, because Larry attests no retention beyond it.
-/// `IdempotentRetrySafe` declares that the endpoint deduplicates on the stable
-/// operation ID, so past the lease the contract's late arrival is
-/// `Unspecified`. `authority_live` is the caller's fence check. The rule
-/// reports every conjunct it fails.
+/// validity (E30) and is the retry deadline. Each input is a fact from its own
+/// source (larry#197):
+///
+/// - `dispatched` is the key the last mutating reach warranted, or the one the
+///   intent names at its recorded attempt after a restore, and `proposed` is the
+///   digest of the intent a resend would carry, so a changed intent is refused;
+/// - the deduplication contract is the owner's `window`, never the submitter's
+///   strategy, and past it the late arrival is `Unspecified`;
+/// - an effect no reach has sent carries the evidence that it did not happen.
+///
+/// `authority_live` is the caller's fence check. The rule reports every
+/// conjunct it fails.
 pub(super) fn decide(
     live: &LiveEffect,
     max_attempts: u8,
     at: SystemTime,
     authority_live: bool,
+    window: Option<Duration>,
 ) -> Result<RetryDecision, RuntimeError> {
     let operation = live.intent.operation;
     let lease = span(live.admitted_at, live.valid_until);
     let elapsed = span(live.admitted_at, at);
-    let key = effect_key(&live.intent, live.dispatches)?;
+    let dispatched = match live.dispatched {
+        Some(key) => key,
+        None => effect_key(&live.intent, live.dispatches)?,
+    };
+    let proposed = effect_key(&live.intent, live.dispatches.saturating_add(1))?.digest();
     let scope = match DedupScope::new(live.intent.tenant.to_string()) {
         Ok(scope) => scope,
         Err(_) => {
@@ -89,22 +101,26 @@ pub(super) fn decide(
             });
         }
     };
-    let contract = DeduplicationContract::new(
-        key.action(),
-        key.digest(),
-        scope,
-        lease,
-        LateArrival::Unspecified,
-    );
     let mut facts = RetryFacts::new(
         RetryPolicy::new(u32::from(max_attempts), Duration::ZERO, lease),
         u32::from(live.dispatches),
         lgwks_bot::error::DispatchCertainty::Unsettled.retry_class(),
-        key,
-        key.digest(),
+        dispatched,
+        proposed,
     )
-    .with_elapsed(elapsed)
-    .with_contract(contract);
+    .with_elapsed(elapsed);
+    if let Some(retention) = window {
+        facts = facts.with_contract(DeduplicationContract::new(
+            dispatched.action(),
+            dispatched.digest(),
+            scope,
+            retention,
+            LateArrival::Unspecified,
+        ));
+    }
+    if !live.sent {
+        facts = facts.with_evidence(EffectEvidence::NotApplied);
+    }
     if authority_live {
         facts = facts.with_live_authority();
     }
@@ -209,18 +225,38 @@ mod tests {
         Ok(())
     }
 
-    /// The reconciliation arm asks the estate rule and keeps no inline guard.
+    /// The reconciliation arm asks the estate rule, with the owner's window, and
+    /// reaches the owner only when the rule permits or refuses for authority
+    /// alone. The one attempt count left in `reconcile.rs` is the exit bound of
+    /// `is_reconcilable`, which takes a spent effect out of reconciliation and
+    /// never permits a resend (larry#197).
     #[test]
-    fn larry_keeps_no_retry_rule_of_its_own() {
+    fn larry_keeps_no_retry_rule_of_its_own() -> Result<(), Box<dyn std::error::Error>> {
         let source = include_str!("reconcile.rs");
         assert!(
-            source.contains("retry::decide("),
-            "the retry arm asks the estate rule"
+            source.contains("retry::decide(") && source.contains("deduplication_window("),
+            "the retry arm asks the estate rule with the owner's window"
         );
         assert!(
-            !source.contains("if live.dispatches < max_attempts =>"),
-            "no inline retry guard survives beside the estate rule"
+            source.contains("decision.permits_retry()"),
+            "a resend waits on the estate rule's answer"
         );
+        assert_eq!(
+            source.matches("dispatches < max_attempts").count(),
+            1,
+            "the attempt count appears only as the exit bound"
+        );
+        let exit = source
+            .find("fn is_reconcilable")
+            .ok_or("reconcile.rs names is_reconcilable")?;
+        let bound = source
+            .find("dispatches < max_attempts")
+            .ok_or("reconcile.rs names the exit bound")?;
+        assert!(
+            bound > exit,
+            "the bound lives in is_reconcilable, not the retry arm"
+        );
+        Ok(())
     }
 }
 
@@ -232,6 +268,7 @@ mod sim {
     use larry_contracts::authority::SecurityEpoch;
     use larry_contracts::effect::{EffectIntent, MAX_EFFECT_ATTEMPTS, ReconciliationStrategy};
     use larry_contracts::ids::{EffectId, OperationId, RunId, TenantId};
+    use lgwks_bot::kernel::retry::RetryRefusal;
 
     use super::{LiveEffect, decide};
 
@@ -250,9 +287,12 @@ mod sim {
         }
     }
 
-    /// Over 512 seeds, the decision permits a retry exactly when the attempt
-    /// budget is unspent, the lease has not run out and authority is live, and
-    /// matches the old `dispatches < 3` rule inside the lease.
+    /// Over 512 seeds, against a reference model of RQ-009: a retry is permitted
+    /// exactly when the attempt budget is unspent, the lease has not run out,
+    /// authority is live, the intent a resend carries is the one that was sent,
+    /// and either no reach ever sent it or the owner declared a deduplication
+    /// window still open (larry#197). The submitter's strategy alone never
+    /// permits a resend.
     #[test]
     fn sim_retry_decision_matches_the_attempt_budget_for_every_seed()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -262,6 +302,12 @@ mod sim {
             let lease_secs = below(&mut state, 10_000).saturating_add(1);
             let offset_secs = below(&mut state, lease_secs.saturating_mul(2));
             let authority = below(&mut state, 2) == 1;
+            let sent = below(&mut state, 4) != 0;
+            let window_secs = match below(&mut state, 3) {
+                0 => None,
+                _ => Some(below(&mut state, lease_secs.saturating_mul(2))),
+            };
+            let changed = below(&mut state, 5) == 0;
             let admitted_at = SystemTime::UNIX_EPOCH
                 .checked_add(Duration::from_secs(1_000))
                 .ok_or("fixture time overflow")?;
@@ -271,40 +317,66 @@ mod sim {
             let at = admitted_at
                 .checked_add(Duration::from_secs(offset_secs))
                 .ok_or("fixture time overflow")?;
-            let live = LiveEffect {
-                proof: crate::gate::Proof::lapsed(),
-                intent: EffectIntent::new(
+            let intent = EffectIntent::new(
+                EffectId::from_bytes([7; 16]),
+                OperationId::from_bytes([8; 16]),
+                RunId::from_bytes([9; 16]),
+                TenantId::from_bytes([10; 16]),
+                ReconciliationStrategy::IdempotentRetrySafe,
+                SecurityEpoch::INITIAL,
+            );
+            // The key a reach sent: this intent's, or one another tenant's same
+            // operation named, whose digest differs (a changed intent).
+            let sent_intent = if changed {
+                EffectIntent::new(
                     EffectId::from_bytes([7; 16]),
                     OperationId::from_bytes([8; 16]),
                     RunId::from_bytes([9; 16]),
-                    TenantId::from_bytes([10; 16]),
+                    TenantId::from_bytes([11; 16]),
                     ReconciliationStrategy::IdempotentRetrySafe,
                     SecurityEpoch::INITIAL,
-                ),
-                sent: true,
+                )
+            } else {
+                intent
+            };
+            let live = LiveEffect {
+                proof: crate::gate::Proof::lapsed(),
+                intent,
+                sent,
+                dispatched: Some(crate::fence::effect_key(&sent_intent, dispatches)?),
                 dispatches,
                 reconciliations: 0,
                 dispatched_at_tick: 0,
                 admitted_at,
                 valid_until,
             };
-            let first = decide(&live, MAX_EFFECT_ATTEMPTS, at, authority)?;
-            let second = decide(&live, MAX_EFFECT_ATTEMPTS, at, authority)?;
+            let window = window_secs.map(Duration::from_secs);
+            let first = decide(&live, MAX_EFFECT_ATTEMPTS, at, authority, window)?;
+            let second = decide(&live, MAX_EFFECT_ATTEMPTS, at, authority, window)?;
             assert_eq!(first, second, "seed {seed}: the decision is deterministic");
             let within_lease = offset_secs < lease_secs;
-            let expected = dispatches < MAX_EFFECT_ATTEMPTS && within_lease && authority;
+            let covered = !sent || window_secs.is_some_and(|secs| offset_secs < secs);
+            let expected = dispatches < MAX_EFFECT_ATTEMPTS
+                && within_lease
+                && authority
+                && !changed
+                && covered;
             assert_eq!(
                 first.permits_retry(),
                 expected,
-                "seed {seed}: permitted exactly when budget, lease and authority all hold"
+                "seed {seed}: permitted exactly when budget, lease, authority, an unchanged \
+                 intent and the owner's window or an unsent effect all hold"
             );
-            if within_lease && authority {
-                assert_eq!(
-                    first.permits_retry(),
-                    dispatches < MAX_EFFECT_ATTEMPTS,
-                    "seed {seed}: inside the lease the rule is the attempt budget"
-                );
-            }
+            assert_eq!(
+                first.refusals().contains(&RetryRefusal::IntentChanged),
+                changed,
+                "seed {seed}: a changed intent is named exactly when it changed"
+            );
+            assert_eq!(
+                first.refusals().contains(&RetryRefusal::NotProvenUndone),
+                !covered,
+                "seed {seed}: a sent effect outside the owner's window is never proven safe"
+            );
         }
         Ok(())
     }
