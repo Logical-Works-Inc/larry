@@ -87,4 +87,4 @@ Changing a runtime rule is a specification change, never a refactor.
 
 ## Build
 
-- The dev profile optimizes only `larry-demo`, `larry-runtime` and `larry-contracts` at opt-level 1; dependencies, build scripts and proc macros stay at 0, so cold builds do not pay package-wide release codegen. Test: `tests/cold_build_profile.rs` (`dev_profile_optimizes_workspace_hot_path_only`).
+- The suite-safe dev profile keeps Larry workspace packages at opt-level 1 and dependencies at opt-level 2, with Cargo's default for build scripts and proc macros; selective overrides are refused because the hosted suite is the per-PR cost. Test: `tests/cold_build_profile.rs` (`dev_profile_optimizes_workspace_hot_path_only`) and the hosted `test` job.
