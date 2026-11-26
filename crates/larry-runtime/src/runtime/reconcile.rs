@@ -261,6 +261,7 @@ where
             return Ok(());
         }
         self.advance(run, TransitionEvent::RequestCancellation)?;
+        self.cancelling.insert(run);
         Ok(())
     }
 
@@ -277,12 +278,7 @@ where
         &mut self,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
-        let cancelling: Vec<RunId> = self
-            .runs
-            .keys()
-            .copied()
-            .filter(|run| self.projection.run_state(*run) == Some(RunState::Cancelling))
-            .collect();
+        let cancelling: Vec<RunId> = self.cancelling.iter().copied().collect();
 
         for run in cancelling {
             let still_open = self.live.values().any(|live| {
@@ -297,6 +293,8 @@ where
             }
             if let Err(error) = self.advance(run, TransitionEvent::FinishCancellation) {
                 self.refuse(report, TickItem::Run(run), error)?;
+            } else {
+                self.cancelling.remove(&run);
             }
         }
         Ok(())
