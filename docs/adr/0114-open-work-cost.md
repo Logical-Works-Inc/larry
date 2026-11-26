@@ -4,7 +4,10 @@ title: "ADR 0114: hot runtime lookups are indexed by open work"
 description: "The tick, approval and receipt paths use bounded indexes instead of scanning journal history."
 resource: /docs/adr/0114-open-work-cost.md
 tags: [larry, adr, runtime, performance, open-work]
+generated: {by: codex, at: 2026-11-26}
+verified: {by: codex, method: lgwks-box target/debug/larry governance, 2026-11-26}
 status: accepted
+stale_after: 2027-05-26
 sources: [larry#216, INVARIANTS.md, crates/larry-runtime/tests/open_work_cost.rs]
 ---
 
