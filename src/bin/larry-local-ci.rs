@@ -4,7 +4,7 @@
 //! time; a red lane is reported and no receipt is written. The receipt names the
 //! head it attests, so it cannot vouch for a later commit. `--list` prints the
 //! lanes as JSON and runs nothing.
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -114,9 +114,12 @@ const LANES: [Lane; 10] = [
 /// Why the run stopped without a receipt.
 #[derive(Debug, Error)]
 enum LocalCiError {
-    /// An argument other than `--list`.
-    #[error("unknown argument {0:?}; usage: larry-local-ci [--list]")]
+    /// An argument outside the local CI command line.
+    #[error("unknown argument {0:?}; usage: larry-local-ci [--list | --receipts <dir>]")]
     Usage(OsString),
+    /// `--receipts` was supplied without its directory.
+    #[error("--receipts needs a directory; usage: larry-local-ci [--list | --receipts <dir>]")]
+    MissingReceipts,
     /// `git` ran but could not name the checkout, its branch or its head.
     #[error("git could not report {0}")]
     Git(&'static str),
@@ -146,9 +149,18 @@ enum LocalCiError {
     /// The log could not be written.
     #[error("log unwritable: {0}")]
     Log(#[source] io::Error),
-    /// `HOME` is unset, so the receipt has no home.
-    #[error("HOME is unset; the receipt has nowhere to go")]
-    Home,
+    /// `LARRY_STATE_DIR` is not Unicode, so it cannot be a configured receipt directory.
+    #[error("{variable} is not valid UTF-8")]
+    InvalidDirectory {
+        /// The flag or environment variable that supplied the invalid path.
+        variable: &'static str,
+    },
+    /// A configured receipt directory is empty.
+    #[error("{variable} is empty")]
+    EmptyDirectory {
+        /// The flag or environment variable that supplied the empty path.
+        variable: &'static str,
+    },
     /// The clock reads before 1970.
     #[error("the clock reads before 1970: {0}")]
     Clock(#[source] SystemTimeError),
@@ -236,14 +248,50 @@ fn git(args: &[&str], what: &'static str) -> Result<String, LocalCiError> {
     Ok(line.to_owned())
 }
 
-/// The receipt's file name in the guard's state directory.
+/// The receipt's file name in the selected receipt directory.
 const RECEIPT: &str = "local-ci-receipt.json";
 
-/// Writes the receipt for `root` at `head` beside the guard's state, atomically and durably
-/// through the library's one replace (larry#434).
-fn write_receipt(root: &Path, branch: &str, head: &str) -> Result<PathBuf, LocalCiError> {
-    let home = std::env::var_os("HOME").ok_or(LocalCiError::Home)?;
-    let dir = PathBuf::from(home).join("wwfd").join("state");
+/// Resolves the receipt directory. An explicit flag wins over the environment, and the
+/// environment wins over the checkout-local default.
+fn receipt_directory(
+    receipts: Option<&OsStr>,
+    state_dir: Option<&OsStr>,
+    target_dir: Option<&OsStr>,
+) -> Result<PathBuf, LocalCiError> {
+    if let Some(path) = receipts {
+        if path.is_empty() {
+            return Err(LocalCiError::EmptyDirectory {
+                variable: "--receipts",
+            });
+        }
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = state_dir {
+        let text = path.to_str().ok_or(LocalCiError::InvalidDirectory {
+            variable: "LARRY_STATE_DIR",
+        })?;
+        if text.is_empty() {
+            return Err(LocalCiError::EmptyDirectory {
+                variable: "LARRY_STATE_DIR",
+            });
+        }
+        return Ok(PathBuf::from(text));
+    }
+    let target = match target_dir {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from("target"),
+    };
+    Ok(target.join("local-ci"))
+}
+
+/// Writes the receipt for `root` at `head` in `dir`, atomically and durably through the
+/// library's one replace (larry#434).
+fn write_receipt(
+    dir: &Path,
+    root: &Path,
+    branch: &str,
+    head: &str,
+) -> Result<PathBuf, LocalCiError> {
     let path = dir.join(RECEIPT);
     let failed = |cause| LocalCiError::Receipt {
         path: path.clone(),
@@ -260,20 +308,47 @@ fn write_receipt(root: &Path, branch: &str, head: &str) -> Result<PathBuf, Local
         "attested_at": attested,
         "ci_script": "cargo local-ci",
     });
-    fs::create_dir_all(&dir).map_err(failed)?;
-    larry_demo::replace_file(&dir, RECEIPT, format!("{receipt}\n").as_bytes())
+    fs::create_dir_all(dir).map_err(failed)?;
+    larry_demo::replace_file(dir, RECEIPT, format!("{receipt}\n").as_bytes())
         .map_err(|(path, cause)| LocalCiError::Receipt { path, cause })?;
     Ok(path)
 }
 
+/// The local CI command line after bounded parsing.
+enum LocalCiCommand {
+    /// Run every lane, optionally writing the receipt at this path.
+    Run(Option<OsString>),
+    /// Print the lane table without running it.
+    List,
+}
+
+/// Parses the local CI command line without consulting the environment.
+fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<LocalCiCommand, LocalCiError> {
+    match args.next() {
+        None => Ok(LocalCiCommand::Run(None)),
+        Some(flag) if flag == "--list" && args.next().is_none() => Ok(LocalCiCommand::List),
+        Some(flag) if flag == "--receipts" => match (args.next(), args.next()) {
+            (Some(path), None) => Ok(LocalCiCommand::Run(Some(path))),
+            (None, _) => Err(LocalCiError::MissingReceipts),
+            (Some(_), Some(extra)) => Err(LocalCiError::Usage(extra)),
+        },
+        Some(flag) => Err(LocalCiError::Usage(flag)),
+    }
+}
+
 /// Runs every lane in order from the checkout root, reporting each red one, then writes the
 /// receipt only when every lane passed.
-fn local_ci() -> Result<(), LocalCiError> {
+fn local_ci(receipts: Option<&OsStr>) -> Result<(), LocalCiError> {
     let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"], "the checkout root")?);
     std::env::set_current_dir(&root).map_err(|cause| LocalCiError::Spawn {
         lane: "root",
         cause,
     })?;
+    let directory = receipt_directory(
+        receipts,
+        std::env::var_os("LARRY_STATE_DIR").as_deref(),
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )?;
     let mut red = Vec::new();
     for lane in &LANES {
         match run(lane) {
@@ -290,7 +365,7 @@ fn local_ci() -> Result<(), LocalCiError> {
     }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"], "the branch")?;
     let head = git(&["rev-parse", "HEAD"], "the head")?;
-    let path = write_receipt(&root, &branch, &head)?;
+    let path = write_receipt(&directory, &root, &branch, &head)?;
     let short = match head.get(..7) {
         Some(prefix) => prefix,
         None => head.as_str(),
@@ -314,11 +389,10 @@ fn list() -> Result<(), LocalCiError> {
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    let outcome = match (args.next(), args.next()) {
-        (None, _) => local_ci(),
-        (Some(flag), None) if flag == "--list" => list(),
-        (Some(flag), _) => Err(LocalCiError::Usage(flag)),
+    let outcome = match parse_args(std::env::args_os().skip(1)) {
+        Ok(LocalCiCommand::Run(receipts)) => local_ci(receipts.as_deref()),
+        Ok(LocalCiCommand::List) => list(),
+        Err(error) => Err(error),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -328,5 +402,84 @@ fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    use super::{LocalCiCommand, LocalCiError, parse_args, receipt_directory, write_receipt};
+
+    #[test]
+    fn a_state_dir_receipt_is_written_under_the_requested_directory() {
+        let result = receipt_directory(None, Some(OsStr::new("target/local-ci-test")), None);
+        assert!(result.is_ok(), "a valid state directory is accepted");
+        let Ok(directory) = result else { return };
+        let result = write_receipt(
+            &directory,
+            PathBuf::from("repo").as_path(),
+            "branch",
+            "head",
+        );
+        assert!(result.is_ok(), "the receipt is written");
+        let Ok(path) = result else { return };
+        assert_eq!(
+            path,
+            PathBuf::from("target/local-ci-test/local-ci-receipt.json")
+        );
+    }
+
+    #[test]
+    fn a_receipts_flag_wins_over_the_state_environment() {
+        let result = receipt_directory(
+            Some(OsStr::new("flag")),
+            Some(OsStr::new("state")),
+            Some(OsStr::new("target")),
+        );
+        assert!(result.is_ok(), "a valid receipts flag is accepted");
+        let Ok(directory) = result else { return };
+        assert_eq!(directory, PathBuf::from("flag"));
+    }
+
+    #[test]
+    fn the_default_receipt_directory_is_under_target() {
+        let result = receipt_directory(None, None, None);
+        assert!(result.is_ok(), "the default is valid");
+        let Ok(directory) = result else { return };
+        assert_eq!(directory, PathBuf::from("target/local-ci"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_state_environment_is_refused_by_name() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let result = receipt_directory(None, Some(OsStr::from_bytes(b"state\xff")), None);
+        assert!(result.is_err(), "a non-Unicode state directory is invalid");
+        let Err(error) = result else { return };
+        assert!(matches!(
+            error,
+            LocalCiError::InvalidDirectory {
+                variable: "LARRY_STATE_DIR"
+            }
+        ));
+        assert_eq!(error.to_string(), "LARRY_STATE_DIR is not valid UTF-8");
+    }
+
+    #[test]
+    fn the_receipts_flag_requires_one_directory() {
+        let args = [OsStr::new("--receipts")]
+            .into_iter()
+            .map(OsStr::to_os_string);
+        assert!(matches!(
+            parse_args(args),
+            Err(LocalCiError::MissingReceipts)
+        ));
+        let args = [OsStr::new("--receipts"), OsStr::new("state")]
+            .into_iter()
+            .map(OsStr::to_os_string);
+        assert!(matches!(parse_args(args), Ok(LocalCiCommand::Run(Some(_)))));
     }
 }

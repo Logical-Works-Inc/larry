@@ -105,7 +105,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `governance::sim_*`, `governance::tests`, `governance::fixture` | Seeded ports of the Python controls, parser references, bounds and two-root checks; the controls over a governed fixture tree the tests write for themselves, also included by path into `tests/governance_journey.rs`; `sim_governance` mutates documents in memory only (larry#270) |
 | `src/main.rs` | The demo binary entry |
 | `src/bin/larry.rs`, `src/bin/larry/governance_cli.rs`, `src/bin/larry/eval_cli.rs` | The `larry` launcher: the one `COMMANDS` table each word dispatches from (ADR 0065), the split terminal, `mcp`, `acp`, `model`, `route`, `exec`, `verify`, `key`, `mascot`, `mutants`, `serve`; `governance_cli` the `governance` and `tracker` runs and their typed refusal; `eval_cli` the `eval` run, its card and its typed refusal (ADR 0101) |
-| `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then the local CI receipt |
+| `src/bin/larry-local-ci.rs` | `cargo local-ci`: every gate in AGENTS.md order, then an atomic receipt under `--receipts`, `LARRY_STATE_DIR` or `target/local-ci`; invalid state paths are typed |
 | `src/bin/larry-rerank.rs` | `larry-rerank` (feature `rerank`): one ranked request and its printed receipt |
 | `eval/matched-v1.json`, `eval/errands-v1.json` | The shipped matched task set, 12 POSIX sh tasks; 12 Rust errands with hidden tests, the cache benchmark's set (larry#230) |
 
