@@ -45,7 +45,11 @@ where
                 return Ok(());
             }
         }
-        self.runs.entry(run).or_insert(RunLive { tenant });
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.runs.entry(run) {
+            slot.insert(RunLive { tenant });
+            let count = self.run_counts.entry(tenant).or_insert(0);
+            *count = count.saturating_add(1);
+        }
         // One budget per tenant (larry#208): a tenant enters the budget map
         // only through a tracked run, so the map holds at most the run table's
         // capacity of counters, and a restored tenant keeps the remainder the
@@ -106,11 +110,9 @@ where
     fn free_run_slots(&mut self, tenant: TenantId) -> Result<(), RuntimeError> {
         let share = self.settings.tenant_share(self.settings.run_capacity);
         loop {
-            let held = self
-                .runs
-                .values()
-                .filter(|live| live.tenant == tenant)
-                .count();
+            let Some(held) = self.run_counts.get(&tenant).copied() else {
+                return Ok(());
+            };
             if held < share {
                 return Ok(());
             }
@@ -121,6 +123,9 @@ where
                 return Err(RuntimeError::RunLimitReached { capacity: share });
             };
             self.runs.remove(&victim);
+            if let Some(count) = self.run_counts.get_mut(&tenant) {
+                *count = count.saturating_sub(1);
+            }
         }
     }
 
@@ -278,12 +283,7 @@ where
         disposition: TerminalDisposition,
         report: &mut TickReport,
     ) -> Result<(), RuntimeError> {
-        if self
-            .projection
-            .receipts()
-            .iter()
-            .any(|receipt| receipt.operation() == intent.operation)
-        {
+        if self.projection.has_receipt(intent.operation) {
             return Err(RuntimeError::ReceiptAlreadyPublished {
                 operation: intent.operation,
             });
