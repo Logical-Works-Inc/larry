@@ -210,6 +210,74 @@ pub(crate) fn percentile(sorted: &[u64], percent: usize) -> Option<u64> {
     sorted.get(rank.saturating_sub(1)).copied()
 }
 
+/// Parses a decimal resident-memory value in KiB with checked arithmetic.
+fn parse_rss_kib(text: &str) -> Option<u64> {
+    let mut value = 0_u64;
+    let mut saw_digit = false;
+    for byte in text.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        saw_digit = true;
+        value = value
+            .checked_mul(10)?
+            .checked_add(u64::from(byte.saturating_sub(b'0')))?;
+    }
+    saw_digit.then_some(value)
+}
+
+/// Finds Linux's high-water resident set size in a `/proc/self/status` snapshot.
+fn parse_peak_rss_status(status: &str) -> Option<u64> {
+    for line in status.lines() {
+        let Some(value) = line.strip_prefix("VmHWM:") else {
+            continue;
+        };
+        let value = value.trim().strip_suffix("kB")?.trim();
+        return parse_rss_kib(value);
+    }
+    None
+}
+
+/// Reads Linux's high-water resident set size for this eval process in KiB.
+/// Other targets do not expose the same process metric through the standard library.
+fn peak_rss_kib() -> Option<u64> {
+    let status: Option<String> = {
+        #[cfg(target_os = "linux")]
+        {
+            match std::fs::read_to_string("/proc/self/status") {
+                Ok(status) => Some(status),
+                Err(_cause) => return None,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    };
+    status.as_deref().and_then(parse_peak_rss_status)
+}
+
+#[cfg(test)]
+mod rss_tests {
+    use super::{parse_peak_rss_status, parse_rss_kib};
+
+    #[test]
+    fn rss_parser_accepts_a_decimal_digit_and_rejects_malformed_text() {
+        assert_eq!(parse_rss_kib("7"), Some(7));
+        assert_eq!(parse_rss_kib(""), None);
+        assert_eq!(parse_rss_kib("7 kB"), None);
+    }
+
+    #[test]
+    fn rss_status_scans_past_other_fields_for_high_water_mark() {
+        assert_eq!(
+            parse_peak_rss_status("Name: larry\nVmPeak: 8 kB\nVmHWM: 42 kB\n"),
+            Some(42)
+        );
+        assert_eq!(parse_peak_rss_status("Name: larry\n"), None);
+    }
+}
+
 /// How one task of an arm ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ending {
@@ -337,6 +405,7 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
         None if !cost_complete => Value::String(String::from("unknown").into()),
         None => Value::Null,
     };
+    let peak_rss = peak_rss_kib();
     Scorecard {
         json: json!({
             "set": set,
@@ -364,6 +433,7 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
             "p50_micros": percentile(&micros, 50),
             "p95_micros": percentile(&micros, 95),
             "p99_micros": percentile(&micros, 99),
+            "peak_rss_kib": peak_rss,
             "complete": true,
             "stopped": Value::Null,
             "results": results,

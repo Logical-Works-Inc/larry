@@ -112,6 +112,25 @@
       "goal": "Write lib.sh defining a POSIX sh function greet that prints hello, followed by a comma, a space and its argument, and greet.sh that sources lib.sh from its own directory and calls greet with its first argument.",
       "write": ["lib.sh", "greet.sh"],
       "acceptance": ["test \"$(sh greet.sh ada)\" = 'hello, ada'", "cd / && test \"$(sh \"$OLDPWD/greet.sh\" bo)\" = 'hello, bo'"]
+    },
+    {
+      "id": "session-path",
+      "files": {
+        "README.md": "# session path\n\nUse the `larry acp` session path to complete the task.\n"
+      },
+      "goal": "Use the larry acp session path to write session.txt with a non-empty result.",
+      "write": ["session.txt"],
+      "acceptance": ["test -s session.txt"]
+    },
+    {
+      "id": "multi-file",
+      "files": {
+        "README.md": "# multi-file\n\nWrite both requested files.\n",
+        "input.txt": "session and batch\n"
+      },
+      "goal": "Write a non-empty result to both first.txt and second.txt.",
+      "write": ["first.txt", "second.txt"],
+      "acceptance": ["test -s first.txt", "test -s second.txt"]
     }
   ]
 }

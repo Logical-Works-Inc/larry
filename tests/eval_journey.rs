@@ -111,6 +111,16 @@ fn check_card(seed: u64, arm: &Arm, scored: &Scored) -> TestResult {
         card["cost_complete"], true,
         "every completion reported usage"
     );
+    assert!(
+        card.get("peak_rss_kib").is_some(),
+        "the scorecard names peak RSS"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            card["peak_rss_kib"].as_u64().is_some(),
+            "Linux exposes peak RSS in KiB"
+        );
+    }
     let cache = [&card["cache_complete"], &card["cached_tokens"]];
     assert_eq!(cache, [&json!(false), &json!(0)], "seed {seed}: cache keys");
     let prompt = number(card, "prompt_tokens")?;
@@ -569,7 +579,24 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         .iter()
         .filter_map(|one| one["write"].as_array().map(Vec::len))
         .sum();
-    assert_eq!(ids.len(), 12, "the shipped set holds twelve tasks");
+    assert_eq!(ids.len(), 14, "the shipped set holds fourteen tasks");
+    assert!(
+        ids.iter().any(|id| *id == "session-path"),
+        "the set covers ACP"
+    );
+    assert!(
+        listed.iter().any(|task| {
+            task["id"] == "session-path"
+                && task["goal"]
+                    .as_str()
+                    .is_some_and(|goal| goal.contains("larry acp"))
+        }),
+        "the ACP task names the shipped session path"
+    );
+    assert!(
+        ids.iter().any(|id| *id == "multi-file"),
+        "the set covers multiple files"
+    );
     let state = TempDir::new()?;
     let ran = mock_model::run(Config::seeded(7), |handle: &Handle| {
         let ran = score_arm(
@@ -598,7 +625,7 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         "a clean gateway refuses nothing"
     );
     let sealed = number(card, "accepted")?.checked_add(number(card, "rejected")?);
-    assert_eq!(sealed, Some(12), "every task sealed");
+    assert_eq!(sealed, Some(14), "every task sealed");
     assert_eq!(
         card["cost_complete"], true,
         "every completion reported usage"
