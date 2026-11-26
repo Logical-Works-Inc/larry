@@ -251,37 +251,42 @@ fn git(args: &[&str], what: &'static str) -> Result<String, LocalCiError> {
 /// The receipt's file name in the selected receipt directory.
 const RECEIPT: &str = "local-ci-receipt.json";
 
-/// Resolves the receipt directory. An explicit flag wins over the environment, and the
-/// environment wins over the checkout-local default.
+/// Resolves the receipt directory before git or any lane runs. The flag wins over
+/// `LARRY_STATE_DIR`, which wins over `CARGO_TARGET_DIR/local-ci`; each is made absolute against
+/// the caller's directory, so a relative one still means where the caller stood once the run
+/// moves to the checkout root. `None` is the checkout root's own `target/local-ci`.
 fn receipt_directory(
     receipts: Option<&OsStr>,
     state_dir: Option<&OsStr>,
     target_dir: Option<&OsStr>,
-) -> Result<PathBuf, LocalCiError> {
-    if let Some(path) = receipts {
-        if path.is_empty() {
+) -> Result<Option<PathBuf>, LocalCiError> {
+    let chosen = match (receipts, state_dir, target_dir) {
+        (Some(path), _, _) if path.is_empty() => {
             return Err(LocalCiError::EmptyDirectory {
                 variable: "--receipts",
             });
         }
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(path) = state_dir {
-        let text = path.to_str().ok_or(LocalCiError::InvalidDirectory {
-            variable: "LARRY_STATE_DIR",
-        })?;
-        if text.is_empty() {
-            return Err(LocalCiError::EmptyDirectory {
+        (Some(path), _, _) => PathBuf::from(path),
+        (None, Some(path), _) => {
+            let text = path.to_str().ok_or(LocalCiError::InvalidDirectory {
                 variable: "LARRY_STATE_DIR",
-            });
+            })?;
+            if text.is_empty() {
+                return Err(LocalCiError::EmptyDirectory {
+                    variable: "LARRY_STATE_DIR",
+                });
+            }
+            PathBuf::from(text)
         }
-        return Ok(PathBuf::from(text));
-    }
-    let target = match target_dir {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from("target"),
+        (None, None, Some(target)) => PathBuf::from(target).join("local-ci"),
+        (None, None, None) => return Ok(None),
     };
-    Ok(target.join("local-ci"))
+    std::path::absolute(&chosen)
+        .map(Some)
+        .map_err(|cause| LocalCiError::Receipt {
+            path: chosen,
+            cause,
+        })
 }
 
 /// Writes the receipt for `root` at `head` in `dir`, atomically and durably through the
@@ -339,16 +344,20 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<LocalCiCommand
 /// Runs every lane in order from the checkout root, reporting each red one, then writes the
 /// receipt only when every lane passed.
 fn local_ci(receipts: Option<&OsStr>) -> Result<(), LocalCiError> {
+    let chosen = receipt_directory(
+        receipts,
+        std::env::var_os("LARRY_STATE_DIR").as_deref(),
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )?;
     let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"], "the checkout root")?);
     std::env::set_current_dir(&root).map_err(|cause| LocalCiError::Spawn {
         lane: "root",
         cause,
     })?;
-    let directory = receipt_directory(
-        receipts,
-        std::env::var_os("LARRY_STATE_DIR").as_deref(),
-        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
-    )?;
+    let directory = match chosen {
+        Some(directory) => directory,
+        None => root.join("target").join("local-ci"),
+    };
     let mut red = Vec::new();
     for lane in &LANES {
         match run(lane) {
@@ -405,50 +414,76 @@ fn main() -> ExitCode {
     }
 }
 
+/// The integration tests' one temp guard (larry#267), so the receipt test writes under a fresh
+/// directory it removes, never under the checkout.
+#[cfg(test)]
+#[path = "../../tests/support/temp_dir.rs"]
+mod temp_dir;
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf, absolute};
 
-    use super::{LocalCiCommand, LocalCiError, parse_args, receipt_directory, write_receipt};
+    use super::temp_dir::TempDir;
+    use super::{
+        LocalCiCommand, LocalCiError, RECEIPT, parse_args, receipt_directory, write_receipt,
+    };
+
+    type Check = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn a_state_dir_receipt_is_written_under_the_requested_directory() {
-        let result = receipt_directory(None, Some(OsStr::new("target/local-ci-test")), None);
-        assert!(result.is_ok(), "a valid state directory is accepted");
-        let Ok(directory) = result else { return };
-        let result = write_receipt(
-            &directory,
-            PathBuf::from("repo").as_path(),
-            "branch",
-            "head",
+    fn a_state_dir_receipt_is_written_under_the_requested_directory() -> Check {
+        let dir = TempDir::new()?;
+        let state = dir.join("state");
+        let chosen = receipt_directory(None, Some(state.as_os_str()), None)?;
+        assert_eq!(chosen.as_deref(), Some(state.as_path()));
+        let written = write_receipt(&state, Path::new("repo"), "branch", "head")?;
+        assert_eq!(written, state.join(RECEIPT));
+        let text = std::fs::read_to_string(&written)?;
+        assert!(
+            text.contains("\"head\""),
+            "the receipt names its head: {text}"
         );
-        assert!(result.is_ok(), "the receipt is written");
-        let Ok(path) = result else { return };
-        assert_eq!(
-            path,
-            PathBuf::from("target/local-ci-test/local-ci-receipt.json")
-        );
+        Ok(())
     }
 
     #[test]
-    fn a_receipts_flag_wins_over_the_state_environment() {
-        let result = receipt_directory(
+    fn a_receipts_flag_wins_over_the_state_environment() -> Check {
+        let chosen = receipt_directory(
             Some(OsStr::new("flag")),
             Some(OsStr::new("state")),
             Some(OsStr::new("target")),
-        );
-        assert!(result.is_ok(), "a valid receipts flag is accepted");
-        let Ok(directory) = result else { return };
-        assert_eq!(directory, PathBuf::from("flag"));
+        )?;
+        assert_eq!(chosen, Some(absolute("flag")?));
+        let chosen = receipt_directory(None, Some(OsStr::new("state")), Some(OsStr::new("t")))?;
+        assert_eq!(chosen, Some(absolute("state")?));
+        Ok(())
     }
 
+    /// Each relative source means the caller's directory, before the run moves to the root.
     #[test]
-    fn the_default_receipt_directory_is_under_target() {
-        let result = receipt_directory(None, None, None);
-        assert!(result.is_ok(), "the default is valid");
-        let Ok(directory) = result else { return };
-        assert_eq!(directory, PathBuf::from("target/local-ci"));
+    fn a_relative_receipt_directory_is_absolute_against_the_callers_directory() -> Check {
+        for (flag, state, target, want) in [
+            (Some("r"), None, None, PathBuf::from("r")),
+            (None, Some("s"), None, PathBuf::from("s")),
+            (None, None, Some("t"), Path::new("t").join("local-ci")),
+        ] {
+            let chosen = receipt_directory(
+                flag.map(OsStr::new),
+                state.map(OsStr::new),
+                target.map(OsStr::new),
+            )?;
+            assert_eq!(chosen, Some(std::env::current_dir()?.join(want)));
+        }
+        Ok(())
+    }
+
+    /// With no flag and no variable the checkout root's `target/local-ci` is chosen later.
+    #[test]
+    fn the_default_receipt_directory_is_left_to_the_checkout_root() -> Check {
+        assert_eq!(receipt_directory(None, None, None)?, None);
+        Ok(())
     }
 
     #[cfg(unix)]

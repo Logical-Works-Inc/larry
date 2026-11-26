@@ -23,12 +23,14 @@ receipts from separate runs.
 
 `cargo local-ci --receipts <dir>` writes `local-ci-receipt.json` in `<dir>`.
 Without the flag, `LARRY_STATE_DIR` supplies the directory. Without either,
-the receipt is written under `target/local-ci`, or the configured Cargo target
-directory's `local-ci` child.
+`CARGO_TARGET_DIR/local-ci` does, and with none of them the checkout root's
+`target/local-ci`. A chosen path is made absolute against the caller's
+directory, so a relative one means where the caller stood, not the root.
 
-An invalid `LARRY_STATE_DIR`, including a non-UTF-8 value, fails before lanes
-run. The error names `LARRY_STATE_DIR`. The flag has precedence over the
-environment and its path is passed through as an operating-system path.
+The directory is resolved before git or any lane runs. An empty value, a
+non-UTF-8 `LARRY_STATE_DIR` or a `--receipts` without one directory exits 1
+naming its source and writes nothing. The flag's path is kept as an
+operating-system path.
 
 ## Consequences
 
@@ -45,7 +47,10 @@ share one receipt.
 
 ## Proof
 
-The local CI binary resolves the directory before running lanes, then uses the
-existing atomic receipt replacement. Unit coverage proves flag precedence, the
-target default, and the typed non-UTF-8 refusal. The binary journey runs the
-same command with no flag and with `LARRY_STATE_DIR`.
+`tests/local_ci_journey.rs` drives the shipped `larry-local-ci` from a folder
+that is not a checkout: a non-UTF-8 or empty `LARRY_STATE_DIR`, an empty
+`--receipts` and a `--receipts` with no or two words each exit 1 naming their
+source before git runs, and the folder stays empty. The binary's unit tests
+hold the order, the absolute paths, the root default and the written receipt
+under a `TempDir`. A green run of every lane is the receipt's own journey;
+it is NOT RUN here, because it builds and tests the whole workspace.
