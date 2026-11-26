@@ -571,6 +571,10 @@ impl ProjectionBackend for Diverging {
         self.0.effect_phase(operation)
     }
 
+    fn effect_run(&self, operation: OperationId) -> Option<RunId> {
+        self.0.effect_run(operation)
+    }
+
     fn dispatches(&self, operation: OperationId) -> u8 {
         self.0.dispatches(operation)
     }
@@ -581,6 +585,10 @@ impl ProjectionBackend for Diverging {
 
     fn receipts(&self) -> &[TerminalReceipt] {
         self.0.receipts()
+    }
+
+    fn has_receipt(&self, operation: OperationId) -> bool {
+        self.0.has_receipt(operation)
     }
 
     fn authorizations(&self) -> &[ReplayRecord] {
