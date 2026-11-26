@@ -26,28 +26,35 @@ and key-shaped values into the next model request.
 `Route` refuses `http` unless its authority is loopback. All other routes need
 `https`. The refusal is typed and carries only the host.
 
-`Settings` reads a bounded, comma-separated `LARRY_RESIDENCY_ALLOWLIST` of
-uppercase ISO country codes. A non-empty list requires the resolved route to
-declare one of those codes before its model configuration or key is read.
+`larry route residency <CC,...>` stores at most 64 sorted, uppercase ISO
+country codes for the tenant in `executor.db` beside its routes. `--clear`
+removes the row. A non-empty policy requires the resolved route to declare one
+of those codes before its model configuration or key is read. `route list`
+shows the policy.
 
 The executor advertises `NetworkEgress`, includes it in the default policy,
 and requires it for every briefed task and terminal session. A policy that
 omits it is denied by the existing durable gate before the body runs.
 
-Every terminal prompt says `Working directory: .`. Observation text is scanned
-at the session boundary. Bearer/basic values, key assignments and common token
-shapes become `[REDACTED]` before the observer or conversation receives them.
+Every terminal prompt says `Working directory: .`. The one `process_env`
+snapshot gives the executor every exact value of `LARRY_MODEL_KEY`,
+`LARRY_RECEIPT_KEY` and `LARRY_KEY_*` that it read, when at least 8 bytes.
+Those values and the absolute workspace path are replaced in each observation
+before marker rules. The combined observation is bounded at 8 KiB. Bearer/basic
+values, key assignments and common token shapes become `[REDACTED]` too.
 
 ## Consequences
 
 Remote plaintext routes and routes outside a tenant's declared countries fail
 before the model client reads the key or opens a connection. Local loopback
-HTTP remains available for deterministic mocks and sidecars. Operators that
-set `LARRY_RESIDENCY_ALLOWLIST` must declare matching residency on every route.
+HTTP remains available for deterministic mocks and sidecars. Operators set the
+policy through `larry route residency` and must declare matching residency on
+every route.
 
 ## Proof
 
 `sim_plaintext_non_loopback_is_refused_before_send` proves the route refusal.
 `exec_denies_a_brief_task_when_the_policy_lacks_network_egress` proves the
 shipped executor gate and zero endpoint reach. The session redaction test
-proves secret-shaped values do not enter the conversation.
+proves exact secrets do not enter the conversation. Binary journeys prove the
+tenant policy and legacy-row behavior.

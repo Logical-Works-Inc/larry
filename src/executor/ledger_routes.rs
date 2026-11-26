@@ -8,7 +8,7 @@
 //! single statement, so there is never a moment with two defaults or a default
 //! naming a route that is gone.
 
-use lgwks_deps::storefront::rusqlite::{self, Transaction, TransactionBehavior};
+use lgwks_deps::storefront::rusqlite::{self, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::Ledger;
 use crate::executor::ExecError;
@@ -61,7 +61,7 @@ impl Stored {
         let Ok(request_bytes) = usize::try_from(self.request_bytes) else {
             return Err(damaged(Some(RouteError::BadRequestBytes)));
         };
-        Route::new(&Draft {
+        Route::stored(&Draft {
             id: &self.id,
             kind,
             base_url: &self.base_url,
@@ -77,6 +77,42 @@ impl Stored {
 }
 
 impl Ledger {
+    /// The tenant's canonical residency policy, or none when it has not set one.
+    pub(crate) fn residency(&self, tenant: &str) -> Result<Option<Vec<String>>, ExecError> {
+        self.conn
+            .query_row(
+                "SELECT codes FROM tenant_residency WHERE tenant = ?1",
+                rusqlite::params![tenant],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(ExecError::Sql)
+            .map(|codes| codes.map(|value| value.split(',').map(str::to_owned).collect()))
+    }
+
+    /// Stores the already checked, sorted residency codes for `tenant`.
+    pub(crate) fn set_residency(&self, tenant: &str, codes: &[String]) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "INSERT INTO tenant_residency (tenant, codes) VALUES (?1, ?2) \
+                 ON CONFLICT (tenant) DO UPDATE SET codes = excluded.codes",
+                rusqlite::params![tenant, codes.join(",")],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
+    /// Clears the tenant's residency policy.
+    pub(crate) fn clear_residency(&self, tenant: &str) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "DELETE FROM tenant_residency WHERE tenant = ?1",
+                rusqlite::params![tenant],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
     /// Stores `route` for `tenant`, replacing the fields of the route with its
     /// id, and makes it the tenant's default when `make_default`. A replacement
     /// keeps the default flag it had. One transaction, so a crash leaves the

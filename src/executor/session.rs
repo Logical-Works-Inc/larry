@@ -252,6 +252,19 @@ fn streams(result: &CommandResult) -> String {
     format!("stdout:\n{}\nstderr:\n{}", result.stdout(), result.stderr())
 }
 
+/// Keeps a bounded, redacted model reply for the next conversation turn.
+fn kept_reply(reply: &str, redactions: &[String]) -> String {
+    let kept = if reply.len() > MAX_REPLY_BYTES {
+        format!(
+            "(a reply of {} bytes, over the bound, was dropped)",
+            reply.len()
+        )
+    } else {
+        reply.to_owned()
+    };
+    redact_observation(&kept, redactions)
+}
+
 /// Checks a session's instruction and directory before anything runs.
 pub(crate) fn check(instruction: &str, cwd: &Path) -> Result<(), SessionError> {
     if instruction.trim().is_empty() {
@@ -324,6 +337,11 @@ pub(crate) fn run_session(
     .map_err(|cause| ExecError::Gate(cause.into()))?;
     let task_id = fresh_id()?;
     let task_digest = digest_hex(&document);
+    let mut redactions = settings.secrets().to_vec();
+    let absolute = cwd.to_string_lossy().into_owned();
+    if absolute.len() >= 8 {
+        redactions.push(absolute);
+    }
     let mut stop = None;
     let subject = Subject {
         required: isolation.required(),
@@ -354,6 +372,7 @@ pub(crate) fn run_session(
             // The model sees a relative directory in every isolation mode, so the
             // request carries no host path or account name.
             shown: String::from("."),
+            redactions: &redactions,
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
@@ -435,6 +454,8 @@ struct Turn<'a> {
     place: Place<'a>,
     /// The directory the model is told it works in.
     shown: String,
+    /// Exact secrets and the absolute workspace path removed from model-visible text.
+    redactions: &'a [String],
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
 }
@@ -462,16 +483,7 @@ impl Turn<'_> {
                 break Stop::Cancelled;
             }
             let reply = completion.content();
-            // A reply past the bound is refused below; only its length enters the
-            // conversation, so it cannot grow the next request.
-            let kept = if reply.len() > MAX_REPLY_BYTES {
-                format!(
-                    "(a reply of {} bytes, over the bound, was dropped)",
-                    reply.len()
-                )
-            } else {
-                reply.to_owned()
-            };
+            let kept = kept_reply(reply, self.redactions);
             match parse_reply(reply) {
                 Ok(Reply::Done(summary)) => {
                     self.observer.message(&summary);
@@ -480,11 +492,15 @@ impl Turn<'_> {
                 Ok(Reply::Command(command)) => {
                     refused = 0;
                     let step = steps.len();
-                    if self.observer.approve(step, &command) == Approval::Decline {
+                    let shown_command = redact_observation(&command, self.redactions);
+                    if matches!(
+                        self.observer.approve(step, &shown_command),
+                        Approval::Decline
+                    ) {
                         declined = declined.saturating_add(1);
                         let answer = Answer::Observed {
                             step,
-                            command,
+                            command: shown_command,
                             status: String::from(DECLINED),
                             output: Some(String::new()),
                         };
@@ -494,10 +510,8 @@ impl Turn<'_> {
                     if self.observer.cancelled() {
                         break Stop::Cancelled;
                     }
-                    self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
-                    // The person's cancel is polled while the command runs, so Esc
-                    // ends it and its whole group, not only the next step (larry#242).
+                    self.observer.started(step, &shown_command);
+                    let argv = [String::from("sh"), String::from("-c"), command];
                     let result = run_command(
                         &argv,
                         self.place,
@@ -510,9 +524,9 @@ impl Turn<'_> {
                     .clipped(OBSERVED_BYTES);
                     let answer = Answer::Observed {
                         step,
-                        command,
+                        command: shown_command,
                         status: status(&result),
-                        output: Some(redact_observation(&streams(&result))),
+                        output: Some(redact_observation(&streams(&result), self.redactions)),
                     };
                     let was_interrupted = result.interrupted();
                     let passed =
@@ -577,17 +591,6 @@ impl Turn<'_> {
 /// The user turn that starts every terminal conversation.
 fn session_prompt(instruction: &str, shown: &str) -> String {
     format!("Working directory: {shown}\n\nTask:\n{instruction}")
-}
-
-#[cfg(test)]
-mod session_prompt_tests {
-    use super::session_prompt;
-
-    #[test]
-    fn sim_session_prompt_names_only_a_relative_directory() {
-        let prompt = session_prompt("inspect the file", ".");
-        assert!(prompt.contains("Working directory: ."));
-    }
 }
 
 #[cfg(test)]

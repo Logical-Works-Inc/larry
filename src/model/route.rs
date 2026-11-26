@@ -14,9 +14,13 @@
 
 use std::fmt;
 
-use lgwks_std::json::{Value, json};
-
 use super::route_transport::{authority_of, is_loopback};
+
+#[path = "route_table.rs"]
+mod table;
+pub(crate) use table::Table;
+#[path = "route_view.rs"]
+mod view;
 
 /// The id of the route the operator's environment declares; no stored route may
 /// take it, so a task naming `env` can only mean the environment.
@@ -66,6 +70,20 @@ pub enum RouteError {
     InsecureTransport {
         /// The host that would receive the request.
         host: String,
+    },
+    /// The route is outside the tenant's stored residency policy.
+    ResidencyNotAllowed {
+        /// The route id.
+        route: String,
+        /// The provider's declared residency, or none.
+        residency: Option<String>,
+        /// The tenant's allowed country codes.
+        allowed: Vec<String>,
+    },
+    /// The tenant policy exceeds its country-code bound.
+    ResidencyPolicyTooLarge {
+        /// The maximum number of codes.
+        limit: usize,
     },
     /// The model id is empty, over 256 bytes, or holds whitespace or a control byte.
     BadModel,
@@ -126,6 +144,17 @@ impl fmt::Display for RouteError {
             Self::InsecureTransport { ref host } => {
                 write!(out, "route host {host} requires https unless it is loopback")
             }
+            Self::ResidencyNotAllowed {
+                ref route,
+                ref residency,
+                ref allowed,
+            } => write!(
+                out,
+                "route {route} residency {residency:?} is outside the tenant residency allowlist {allowed:?}"
+            ),
+            Self::ResidencyPolicyTooLarge { limit } => {
+                write!(out, "route residency allows at most {limit} country codes")
+            }
             Self::BadModel => out
                 .write_str("route model must be 1 to 256 bytes with no whitespace or control byte"),
             Self::BadKeyEnv => out.write_str(
@@ -177,6 +206,8 @@ impl std::error::Error for RouteError {
             | Self::ReservedId
             | Self::BadUrl
             | Self::InsecureTransport { .. }
+            | Self::ResidencyNotAllowed { .. }
+            | Self::ResidencyPolicyTooLarge { .. }
             | Self::BadModel
             | Self::BadKeyEnv
             | Self::KeyEnvOutsideNamespace
@@ -330,6 +361,26 @@ impl Route {
             return Err(RouteError::ReservedId);
         }
         let route = Route::build(draft)?;
+        if let Some(refusal) = route.transport_refusal() {
+            return Err(refusal);
+        }
+        let in_namespace = route
+            .key_env
+            .strip_prefix(KEY_ENV_PREFIX)
+            .is_some_and(|rest| !rest.is_empty());
+        if !in_namespace {
+            return Err(RouteError::KeyEnvOutsideNamespace);
+        }
+        Ok(route)
+    }
+
+    /// A legacy stored route may be listed or removed even when it predates the
+    /// HTTPS rule. Resolution calls this check before returning it to a sender.
+    pub(crate) fn stored(draft: &Draft<'_>) -> Result<Route, RouteError> {
+        if draft.id == ENV_ROUTE {
+            return Err(RouteError::ReservedId);
+        }
+        let route = Route::build(draft)?;
         let in_namespace = route
             .key_env
             .strip_prefix(KEY_ENV_PREFIX)
@@ -349,7 +400,11 @@ impl Route {
     ///
     /// The [`RouteError`] of the first field that fails its check.
     pub(crate) fn environment(draft: &Draft<'_>) -> Result<Route, RouteError> {
-        Route::build(draft)
+        let route = Route::build(draft)?;
+        match route.transport_refusal() {
+            Some(refusal) => Err(refusal),
+            None => Ok(route),
+        }
     }
 
     /// Checks every field of `draft` and keeps the result.
@@ -358,11 +413,6 @@ impl Route {
             return Err(RouteError::BadId);
         }
         let host = authority_of(draft.base_url).ok_or(RouteError::BadUrl)?;
-        if draft.base_url.starts_with("http://") && !is_loopback(host) {
-            return Err(RouteError::InsecureTransport {
-                host: host.to_owned(),
-            });
-        }
         if !is_model_id(draft.model) {
             return Err(RouteError::BadModel);
         }
@@ -403,118 +453,26 @@ impl Route {
         })
     }
 
-    /// The route id.
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The provider kind.
-    pub(crate) const fn kind(&self) -> Kind {
-        self.kind
-    }
-
-    /// The base URL, without a trailing slash.
-    pub(crate) fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    /// The URL's host and port.
-    pub(crate) fn host(&self) -> &str {
-        &self.host
-    }
-
-    /// The name of the variable that holds the key.
-    pub(crate) fn key_env(&self) -> &str {
-        &self.key_env
-    }
-
-    /// The binding refusal of this route's key variable under `tenant`, `None`
-    /// when the variable is one only that tenant may name: `LARRY_KEY_<TAG>_`
-    /// for this tenant's tag, then at least one byte. A row stored before the
-    /// binding, or edited in the store, fails here, so its value is never read
-    /// (larry#328, CWE-200).
-    pub(crate) fn key_env_refusal(&self, tenant: &str) -> Option<RouteError> {
-        let prefix = tenant_namespace(tenant);
-        if self
-            .key_env
-            .strip_prefix(&prefix)
-            .is_some_and(|rest| !rest.is_empty())
-        {
-            return None;
-        }
-        Some(RouteError::KeyEnvNotThisTenants {
-            variable: self.key_env.clone(),
-            prefix,
+    /// The transport refusal, when a route would send plaintext off-host.
+    pub(crate) fn transport_refusal(&self) -> Option<RouteError> {
+        (self.base_url.starts_with("http://") && !is_loopback(&self.host)).then(|| {
+            RouteError::InsecureTransport {
+                host: self.host.clone(),
+            }
         })
     }
 
-    /// The model id.
-    pub(crate) fn model(&self) -> &str {
-        &self.model
-    }
-
-    /// The pinned sampling temperature, when there is one.
-    pub(crate) const fn temperature(&self) -> Option<f64> {
-        self.temperature
-    }
-
-    /// The request body bound, in bytes.
-    pub(crate) const fn request_bytes(&self) -> usize {
-        self.request_bytes
-    }
-
-    /// The country where the provider processes the data, when declared.
-    pub(crate) fn residency(&self) -> Option<&str> {
-        self.residency.as_deref()
-    }
-
-    /// What the route is good for.
-    pub(crate) fn describe(&self) -> &str {
-        &self.describe
-    }
-
-    /// What a sealed report says about the route: its id, the model, the
-    /// gateway's host and port, and the residency (`null` when undeclared).
-    /// Never the URL's path, a key or the name of the key's variable.
-    pub(crate) fn seal(&self) -> Value {
-        json!({
-            "id": self.id,
-            "model": self.model,
-            "host": self.host,
-            "residency": self.residency,
+    /// The residency refusal for this route under `allowed`, when a policy exists.
+    pub(crate) fn residency_refusal(&self, allowed: &[String]) -> Option<RouteError> {
+        (!allowed.is_empty()
+            && !self
+                .residency()
+                .is_some_and(|value| allowed.iter().any(|allowed| allowed == value)))
+        .then(|| RouteError::ResidencyNotAllowed {
+            route: self.id.clone(),
+            residency: self.residency.clone(),
+            allowed: allowed.to_vec(),
         })
-    }
-}
-
-/// A tenant's stored routes and which one is the default.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Table {
-    /// The routes, ordered by id.
-    routes: Vec<Route>,
-    /// The id of the default route, when there is one.
-    default: Option<String>,
-}
-
-impl Table {
-    /// A table of `routes` whose default is `default`.
-    pub(crate) fn new(routes: Vec<Route>, default: Option<String>) -> Table {
-        Table { routes, default }
-    }
-
-    /// The routes, ordered by id.
-    pub(crate) fn routes(&self) -> &[Route] {
-        &self.routes
-    }
-
-    /// The id of the default route.
-    pub(crate) fn default_id(&self) -> Option<&str> {
-        self.default.as_deref()
-    }
-
-    /// The stored route `named` asks for, or the default when it names none.
-    pub(crate) fn lookup(&self, named: Option<&str>) -> Option<&Route> {
-        let wanted = named.or(self.default.as_deref())?;
-        self.routes.iter().find(|route| route.id == wanted)
     }
 }
 
@@ -537,17 +495,20 @@ pub(crate) fn resolve(
     named: Option<&str>,
     environment: Option<Route>,
 ) -> Result<Route, RouteError> {
-    if let Some(route) = table.lookup(named) {
-        return match route.key_env_refusal(tenant) {
-            None => Ok(route.clone()),
-            Some(refusal) => Err(refusal),
+    let Some(route) = table.lookup(named) else {
+        return match (named, environment) {
+            (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
+            (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
+            (None, Some(route)) => Ok(route),
+            (None, None) => Err(RouteError::NoRoute),
         };
+    };
+    if let Some(refusal) = route.transport_refusal() {
+        return Err(refusal);
     }
-    match (named, environment) {
-        (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
-        (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
-        (None, Some(route)) => Ok(route),
-        (None, None) => Err(RouteError::NoRoute),
+    match route.key_env_refusal(tenant) {
+        None => Ok(route.clone()),
+        Some(refusal) => Err(refusal),
     }
 }
 

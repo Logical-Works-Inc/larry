@@ -60,14 +60,14 @@ const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 
 /// Largest accepted command timeout, in milliseconds (one day).
 const MAX_TIMEOUT_MS: u64 = 86_400_000;
-/// The most country codes one tenant may allow.
-const MAX_RESIDENCY_CODES: usize = 64;
+/// A private reader name used to carry the one process environment snapshot's
+/// exact secret values into terminal observation redaction.
+const OBSERVATION_SECRETS: &str = "\0larry-observation-secrets";
 
 /// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
 fn read_by_larry(name: &str) -> bool {
     name == "PATH" || name == "HOME" || name.starts_with("LARRY_")
 }
-
 /// The process environment as one snapshot every setting reads from: a
 /// variable that is absent is unset, and a variable Larry reads whose name or
 /// value is not UTF-8 refuses the whole snapshot, so no setting falls back to
@@ -78,7 +78,37 @@ fn read_by_larry(name: &str) -> bool {
 /// [`ExecError::NotUnicode`] naming the first such variable.
 pub fn process_env() -> Result<impl Fn(&str) -> Option<String> + Send + Sync + 'static, ExecError> {
     let table = snapshot(std::env::vars_os())?;
-    Ok(move |name: &str| table.get(name).cloned())
+    let secrets = secret_values(&table).join("\0");
+    Ok(move |name: &str| {
+        if name == OBSERVATION_SECRETS {
+            Some(secrets.clone())
+        } else {
+            table.get(name).cloned()
+        }
+    })
+}
+
+/// The exact secret values Larry read from one environment snapshot.
+fn secret_values(table: &BTreeMap<String, String>) -> Vec<String> {
+    let mut values: Vec<String> = table
+        .iter()
+        .filter(|&(name, value)| {
+            let recognized = match name.as_str() {
+                "LARRY_MODEL_KEY" | "LARRY_RECEIPT_KEY" => true,
+                _ => name.starts_with("LARRY_KEY_"),
+            };
+            value.len() >= 8 && recognized
+        })
+        .map(|(_, value)| value.clone())
+        .collect();
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+/// The explicit empty secret snapshot used by test readers without a process environment.
+fn empty_secret_snapshot() -> String {
+    String::new()
 }
 
 /// The variables Larry reads out of `vars`, as text: the one place a byte string from the
@@ -224,8 +254,8 @@ pub struct Settings {
     path: String,
     /// The scopes `LARRY_POLICY` admits; what the gate authorizes tasks against.
     policy: BTreeSet<Scope>,
-    /// The route residency classes this tenant permits; empty means no extra filter.
-    residency_allowlist: BTreeSet<String>,
+    /// Exact secrets read from this process snapshot, for terminal observation redaction.
+    secrets: Arc<[String]>,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
 }
@@ -258,13 +288,21 @@ impl Settings {
         };
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
         let policy = gate::policy(&read)?;
-        let residency_allowlist = residency_allowlist(&read)?;
+        let secret_text = match read(OBSERVATION_SECRETS) {
+            Some(values) => values,
+            None => empty_secret_snapshot(),
+        };
+        let secrets = secret_text
+            .split('\0')
+            .filter(|value| value.len() >= 8)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
-            residency_allowlist,
+            secrets: Arc::from(secrets.into_boxed_slice()),
             read: Arc::new(read),
         })
     }
@@ -272,6 +310,11 @@ impl Settings {
     /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
     pub(crate) fn state_dir(&self) -> &std::path::Path {
         self.state_dir.as_path()
+    }
+
+    /// The exact secret values in this process snapshot, never formatted or logged.
+    pub(crate) fn secrets(&self) -> &[String] {
+        &self.secrets
     }
 
     /// The route a task naming `named` (or none) sends its model calls to: the
@@ -291,17 +334,6 @@ impl Settings {
     /// The model configuration for calls over `route`: its key is read now, from
     /// the variable the route names.
     pub(crate) fn model_config(&self, route: &Route) -> Result<ModelConfig, ExecError> {
-        if !self.residency_allowlist.is_empty()
-            && !route
-                .residency()
-                .is_some_and(|value| self.residency_allowlist.contains(value))
-        {
-            return Err(ExecError::Residency {
-                route: route.id().to_owned(),
-                residency: route.residency().map(str::to_owned),
-                allowed: self.residency_allowlist.iter().cloned().collect(),
-            });
-        }
         ModelConfig::for_route(route, &|name: &str| (self.read)(name))
             .map_err(ExecError::ModelConfig)
     }
@@ -319,35 +351,6 @@ impl Settings {
         }
         Ok(())
     }
-}
-
-/// Reads the per-tenant route residency allowlist. An unset or empty list means
-/// that this tenant has not imposed an additional country filter.
-fn residency_allowlist(
-    read: &impl Fn(&str) -> Option<String>,
-) -> Result<BTreeSet<String>, ExecError> {
-    let Some(text) = read("LARRY_RESIDENCY_ALLOWLIST") else {
-        return Ok(BTreeSet::new());
-    };
-    let mut allowed = BTreeSet::new();
-    for value in text
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase()) {
-            return Err(ExecError::BadResidencyAllowlist {
-                value: value.to_owned(),
-            });
-        }
-        if allowed.len() >= MAX_RESIDENCY_CODES && !allowed.contains(value) {
-            return Err(ExecError::BadResidencyAllowlist {
-                value: value.to_owned(),
-            });
-        }
-        allowed.insert(value.to_owned());
-    }
-    Ok(allowed)
 }
 
 /// Whether to retry a model refusal after `wait`. The executor never blocks on a
@@ -581,30 +584,4 @@ fn digest_hex(bytes: &[u8]) -> String {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
     hasher.finalize().to_hex()
-}
-
-#[cfg(test)]
-mod residency_tests {
-    use super::{ExecError, residency_allowlist};
-
-    #[test]
-    fn sim_residency_allowlist_accepts_trimmed_countries() {
-        let actual = residency_allowlist(&|name| {
-            (name == "LARRY_RESIDENCY_ALLOWLIST").then(|| " CA, US,CA ".to_owned())
-        });
-        assert!(matches!(actual, Ok(ref values) if values.len() == 2
-            && values.contains("CA")
-            && values.contains("US")));
-    }
-
-    #[test]
-    fn sim_residency_allowlist_rejects_lowercase_codes() {
-        let actual = residency_allowlist(&|name| {
-            (name == "LARRY_RESIDENCY_ALLOWLIST").then(|| "ca".to_owned())
-        });
-        assert!(matches!(
-            actual,
-            Err(ExecError::BadResidencyAllowlist { value }) if value == "ca"
-        ));
-    }
 }

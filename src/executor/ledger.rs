@@ -50,6 +50,11 @@ const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant TEXT NOT NU
     temperature REAL, request_bytes INTEGER NOT NULL, residency TEXT, describe TEXT NOT NULL, \
     is_default INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tenant, id));";
 
+/// Schema of the tenant residency policy, version 6 (larry#203): one canonical
+/// comma-separated ISO code list per tenant, kept beside that tenant's routes.
+const RESIDENCY_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS tenant_residency(tenant TEXT PRIMARY KEY, codes TEXT NOT NULL);";
+
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
 
@@ -92,13 +97,14 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            5,
+            6,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
                 TENANT_KEY_SCHEMA,
                 REPORT_SCHEMA,
                 ROUTE_SCHEMA,
+                RESIDENCY_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;

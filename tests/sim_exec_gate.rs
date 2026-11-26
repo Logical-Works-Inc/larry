@@ -48,14 +48,13 @@ const MOCK_CONNECTIONS: usize = 64;
 /// The seed every case draws from, identical in both passes.
 const SIM_SEED: u64 = 0x5EED_0001;
 
-/// The five policy names, in `Scope` order.
-const NAMES: [&str; 6] = [
+/// The five policy names, in `Scope` order, each once.
+const NAMES: [&str; 5] = [
     "file.read",
     "file.write",
     "net.egress",
     "process.spawn",
     "model.invoke",
-    "net.egress",
 ];
 
 /// Every fault the mock endpoint can answer with, named here so scheduling
