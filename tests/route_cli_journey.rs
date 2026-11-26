@@ -48,7 +48,7 @@ use sealed_report::{denial_lines, flag_of, report_of};
 type TestResult = Result<(), Box<dyn Error>>;
 
 /// The scopes a briefed task needs, so no journey depends on the default policy.
-const POLICY: &str = "file.read,file.write,process.spawn,model.invoke";
+const POLICY: &str = "file.read,file.write,process.spawn,model.invoke,net.egress";
 
 /// Runs `larry route <args>` with only PATH, the state directory and `env` set.
 fn larry_route(
@@ -350,7 +350,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
             "add",
             "main",
             "--url",
-            "http://gateway.test:8443/v1",
+            "https://gateway.test:8443/v1",
             "--model",
             "model-a",
             "--key-env",

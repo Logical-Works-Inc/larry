@@ -49,12 +49,13 @@ const MOCK_CONNECTIONS: usize = 64;
 const SIM_SEED: u64 = 0x5EED_0001;
 
 /// The five policy names, in `Scope` order.
-const NAMES: [&str; 5] = [
+const NAMES: [&str; 6] = [
     "file.read",
     "file.write",
     "net.egress",
     "process.spawn",
     "model.invoke",
+    "net.egress",
 ];
 
 /// Every fault the mock endpoint can answer with, named here so scheduling
@@ -77,10 +78,16 @@ const EVERY_FAULT: [Option<mock_model::Fault>; 9] = [
 type TestResult = Result<(), Box<dyn Error>>;
 
 /// The scopes one task requires, in `Scope` order: read and spawn always,
-/// write and model invoke when the task carries a brief.
+/// write, model invoke and network egress when the task carries a brief.
 fn required(brief: bool) -> Vec<&'static str> {
     match brief {
-        true => Vec::from(["file.read", "file.write", "process.spawn", "model.invoke"]),
+        true => Vec::from([
+            "file.read",
+            "file.write",
+            "net.egress",
+            "process.spawn",
+            "model.invoke",
+        ]),
         false => Vec::from(["file.read", "process.spawn"]),
     }
 }

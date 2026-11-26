@@ -16,6 +16,8 @@ use std::fmt;
 
 use lgwks_std::json::{Value, json};
 
+use super::route_transport::{authority_of, is_loopback};
+
 /// The id of the route the operator's environment declares; no stored route may
 /// take it, so a task naming `env` can only mean the environment.
 pub(crate) const ENV_ROUTE: &str = "env";
@@ -24,7 +26,7 @@ pub(crate) const MAX_ROUTES: u16 = 256;
 /// Longest route id, in bytes.
 const MAX_ID_BYTES: usize = 64;
 /// Longest base URL, in bytes.
-const MAX_URL_BYTES: usize = 2048;
+pub(super) const MAX_URL_BYTES: usize = 2048;
 /// Longest model id, in bytes.
 const MAX_MODEL_BYTES: usize = 256;
 /// Longest key variable name, in bytes.
@@ -60,6 +62,11 @@ pub enum RouteError {
     /// The base URL is not a bare http or https URL: no credentials, query or
     /// fragment, a host made of letters, digits, dots, hyphens and a port.
     BadUrl,
+    /// The route uses plaintext for a host that is not loopback.
+    InsecureTransport {
+        /// The host that would receive the request.
+        host: String,
+    },
     /// The model id is empty, over 256 bytes, or holds whitespace or a control byte.
     BadModel,
     /// The key variable name is not `[A-Z_][A-Z0-9_]{0,63}`.
@@ -116,6 +123,9 @@ impl fmt::Display for RouteError {
             Self::BadUrl => out.write_str(
                 "route url must be a bare http or https base URL: no credentials, query or fragment",
             ),
+            Self::InsecureTransport { ref host } => {
+                write!(out, "route host {host} requires https unless it is loopback")
+            }
             Self::BadModel => out
                 .write_str("route model must be 1 to 256 bytes with no whitespace or control byte"),
             Self::BadKeyEnv => out.write_str(
@@ -166,6 +176,7 @@ impl std::error::Error for RouteError {
             | Self::BadId
             | Self::ReservedId
             | Self::BadUrl
+            | Self::InsecureTransport { .. }
             | Self::BadModel
             | Self::BadKeyEnv
             | Self::KeyEnvOutsideNamespace
@@ -253,29 +264,6 @@ pub(crate) struct Route {
     residency: Option<String>,
     /// What the route is good for.
     describe: String,
-}
-
-/// The host and port of a bare http or https base URL, `None` when `url` is not one.
-fn authority_of(url: &str) -> Option<&str> {
-    if url.len() > MAX_URL_BYTES
-        || url.chars().any(|character| {
-            character.is_control()
-                || character.is_whitespace()
-                || matches!(character, '?' | '#' | '\\' | '@')
-        })
-    {
-        return None;
-    }
-    let (scheme, rest) = url.split_once("://")?;
-    if scheme != "http" && scheme != "https" {
-        return None;
-    }
-    let authority = rest.split('/').next()?;
-    let well_formed = !authority.is_empty()
-        && authority.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
-        });
-    well_formed.then_some(authority)
 }
 
 /// Whether `text` is a route id: 1 to 64 bytes of `a-z`, `0-9`, `_` and `-`.
@@ -370,6 +358,11 @@ impl Route {
             return Err(RouteError::BadId);
         }
         let host = authority_of(draft.base_url).ok_or(RouteError::BadUrl)?;
+        if draft.base_url.starts_with("http://") && !is_loopback(host) {
+            return Err(RouteError::InsecureTransport {
+                host: host.to_owned(),
+            });
+        }
         if !is_model_id(draft.model) {
             return Err(RouteError::BadModel);
         }

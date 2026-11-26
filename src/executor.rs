@@ -9,6 +9,7 @@ mod gate;
 mod identity;
 mod island;
 mod ledger;
+mod observation;
 mod receipt;
 mod recovery;
 pub mod routes;
@@ -59,6 +60,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 
 /// Largest accepted command timeout, in milliseconds (one day).
 const MAX_TIMEOUT_MS: u64 = 86_400_000;
+/// The most country codes one tenant may allow.
+const MAX_RESIDENCY_CODES: usize = 64;
 
 /// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
 fn read_by_larry(name: &str) -> bool {
@@ -221,6 +224,8 @@ pub struct Settings {
     path: String,
     /// The scopes `LARRY_POLICY` admits; what the gate authorizes tasks against.
     policy: BTreeSet<Scope>,
+    /// The route residency classes this tenant permits; empty means no extra filter.
+    residency_allowlist: BTreeSet<String>,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
 }
@@ -253,11 +258,13 @@ impl Settings {
         };
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
         let policy = gate::policy(&read)?;
+        let residency_allowlist = residency_allowlist(&read)?;
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
+            residency_allowlist,
             read: Arc::new(read),
         })
     }
@@ -284,6 +291,17 @@ impl Settings {
     /// The model configuration for calls over `route`: its key is read now, from
     /// the variable the route names.
     pub(crate) fn model_config(&self, route: &Route) -> Result<ModelConfig, ExecError> {
+        if !self.residency_allowlist.is_empty()
+            && !route
+                .residency()
+                .is_some_and(|value| self.residency_allowlist.contains(value))
+        {
+            return Err(ExecError::Residency {
+                route: route.id().to_owned(),
+                residency: route.residency().map(str::to_owned),
+                allowed: self.residency_allowlist.iter().cloned().collect(),
+            });
+        }
         ModelConfig::for_route(route, &|name: &str| (self.read)(name))
             .map_err(ExecError::ModelConfig)
     }
@@ -301,6 +319,35 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+/// Reads the per-tenant route residency allowlist. An unset or empty list means
+/// that this tenant has not imposed an additional country filter.
+fn residency_allowlist(
+    read: &impl Fn(&str) -> Option<String>,
+) -> Result<BTreeSet<String>, ExecError> {
+    let Some(text) = read("LARRY_RESIDENCY_ALLOWLIST") else {
+        return Ok(BTreeSet::new());
+    };
+    let mut allowed = BTreeSet::new();
+    for value in text
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return Err(ExecError::BadResidencyAllowlist {
+                value: value.to_owned(),
+            });
+        }
+        if allowed.len() >= MAX_RESIDENCY_CODES && !allowed.contains(value) {
+            return Err(ExecError::BadResidencyAllowlist {
+                value: value.to_owned(),
+            });
+        }
+        allowed.insert(value.to_owned());
+    }
+    Ok(allowed)
 }
 
 /// Whether to retry a model refusal after `wait`. The executor never blocks on a
@@ -534,4 +581,30 @@ fn digest_hex(bytes: &[u8]) -> String {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
     hasher.finalize().to_hex()
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::{ExecError, residency_allowlist};
+
+    #[test]
+    fn sim_residency_allowlist_accepts_trimmed_countries() {
+        let actual = residency_allowlist(&|name| {
+            (name == "LARRY_RESIDENCY_ALLOWLIST").then(|| " CA, US,CA ".to_owned())
+        });
+        assert!(matches!(actual, Ok(ref values) if values.len() == 2
+            && values.contains("CA")
+            && values.contains("US")));
+    }
+
+    #[test]
+    fn sim_residency_allowlist_rejects_lowercase_codes() {
+        let actual = residency_allowlist(&|name| {
+            (name == "LARRY_RESIDENCY_ALLOWLIST").then(|| "ca".to_owned())
+        });
+        assert!(matches!(
+            actual,
+            Err(ExecError::BadResidencyAllowlist { value }) if value == "ca"
+        ));
+    }
 }

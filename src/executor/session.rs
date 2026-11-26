@@ -40,6 +40,7 @@ use super::digest_hex;
 use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
+use super::observation::redact_observation;
 use super::prepare;
 use super::run::{CommandResult, Place, run_command};
 use super::workspace::report_members;
@@ -350,12 +351,9 @@ pub(crate) fn run_session(
                 Some(ref isle) => isle.place(),
                 None => Place::Open(cwd),
             },
-            // The model is told its directory is `.` in a copy, so the request carries
-            // no run id and no path of the person's.
-            shown: match island {
-                Some(_) => String::from("."),
-                None => cwd.display().to_string(),
-            },
+            // The model sees a relative directory in every isolation mode, so the
+            // request carries no host path or account name.
+            shown: String::from("."),
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
@@ -446,7 +444,7 @@ impl Turn<'_> {
     /// record, what compaction did and how many commands the person declined
     /// or interrupted.
     fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
-        let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
+        let task = session_prompt(instruction, &self.shown);
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut refused = 0_usize;
@@ -514,7 +512,7 @@ impl Turn<'_> {
                         step,
                         command,
                         status: status(&result),
-                        output: Some(streams(&result)),
+                        output: Some(redact_observation(&streams(&result))),
                     };
                     let was_interrupted = result.interrupted();
                     let passed =
@@ -573,6 +571,22 @@ impl Turn<'_> {
     fn refuse(&mut self, line: String) -> Stop {
         self.observer.message(&line);
         Stop::Refusal(line)
+    }
+}
+
+/// The user turn that starts every terminal conversation.
+fn session_prompt(instruction: &str, shown: &str) -> String {
+    format!("Working directory: {shown}\n\nTask:\n{instruction}")
+}
+
+#[cfg(test)]
+mod session_prompt_tests {
+    use super::session_prompt;
+
+    #[test]
+    fn sim_session_prompt_names_only_a_relative_directory() {
+        let prompt = session_prompt("inspect the file", ".");
+        assert!(prompt.contains("Working directory: ."));
     }
 }
 

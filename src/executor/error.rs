@@ -129,6 +129,26 @@ pub enum ExecError {
     /// (larry#201): nothing was sent.
     #[error("exec: {0}")]
     Route(#[source] RouteError),
+    /// The resolved route is outside this tenant's residency allowlist.
+    #[error(
+        "exec route {route} has residency {residency:?}, outside the tenant allowlist {allowed:?}"
+    )]
+    Residency {
+        /// The route id.
+        route: String,
+        /// The provider's declared residency, or none.
+        residency: Option<String>,
+        /// The allowed country codes.
+        allowed: Vec<String>,
+    },
+    /// `LARRY_RESIDENCY_ALLOWLIST` names a value that is not an ISO country code.
+    #[error(
+        "exec LARRY_RESIDENCY_ALLOWLIST is not a comma-separated ISO country-code list: {value}"
+    )]
+    BadResidencyAllowlist {
+        /// The refused item.
+        value: String,
+    },
     /// The model step could not write one of the brief's files; nothing was sealed.
     #[error("exec could not write {path}: {fault}")]
     Author {

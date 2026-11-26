@@ -235,7 +235,7 @@ mod tests {
         Route::new(&Draft {
             id,
             kind: Kind::OpenAiChat,
-            base_url: "http://gateway.test:9/v1",
+            base_url: "https://gateway.test:9/v1",
             model,
             key_env: "LARRY_KEY_TEST",
             temperature: Some(0.5),

@@ -60,24 +60,26 @@ const ADAPTER_SCHEMA: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
-const EXECUTOR_CAPABILITIES: [Scope; 5] = [
+const EXECUTOR_CAPABILITIES: [Scope; 6] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
     Scope::ModelCommand,
+    Scope::NetworkEgress,
 ];
 
-/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
+/// The policy when `LARRY_POLICY` is unset: the five scopes a model task uses. A model
 /// command (larry#93) is never in it: only an operator who isolates the commands
 /// outside Larry, as a Harbor task container does, names `model.command`. A terminal
 /// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
 /// needs no such scope and runs under this policy as it is.
-const DEFAULT_POLICY: [Scope; 4] = [
+const DEFAULT_POLICY: [Scope; 5] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
+    Scope::NetworkEgress,
 ];
 
 /// The policy when `LARRY_POLICY` is unset.
@@ -85,10 +87,13 @@ fn default_policy() -> BTreeSet<Scope> {
     DEFAULT_POLICY.iter().copied().collect()
 }
 
-/// The scopes a terminal session needs (larry#93): everything a briefed task needs,
-/// plus the model choosing the commands.
+/// The scopes a terminal command session needs (larry#93): command execution and
+/// model-command selection. A model brief adds network egress through
+/// [`required_scopes`], so an ordinary confined session stays local by default.
 pub(super) fn session_scopes() -> BTreeSet<Scope> {
-    EXECUTOR_CAPABILITIES.iter().copied().collect()
+    let mut scopes: BTreeSet<Scope> = EXECUTOR_CAPABILITIES.iter().copied().collect();
+    scopes.remove(&Scope::NetworkEgress);
+    scopes
 }
 
 /// The scopes a terminal session needs when Larry itself confines each command to a
@@ -181,7 +186,7 @@ fn named_scope(name: &str) -> Option<Scope> {
         .find(|scope| scope_name(*scope) == name)
 }
 
-/// The `LARRY_POLICY` scopes `read` yields: unset is the four scopes the
+/// The `LARRY_POLICY` scopes `read` yields: unset is the five model-task scopes the
 /// executor uses, the empty string is no scope, names are trimmed and
 /// comma-separated, and an unknown name is a typed refusal.
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
@@ -209,8 +214,8 @@ pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<
 }
 
 /// The scopes one task requires: repository read and process spawn always,
-/// and file write plus model invoke when the task carries a brief the model
-/// writes.
+/// and file write, model invoke and network egress when the task carries a
+/// brief the model writes.
 pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     let mut scopes = BTreeSet::new();
     scopes.insert(Scope::FileRead);
@@ -218,6 +223,7 @@ pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     if task.brief().is_some() {
         scopes.insert(Scope::FileWrite);
         scopes.insert(Scope::ModelInvoke);
+        scopes.insert(Scope::NetworkEgress);
     }
     scopes
 }
@@ -771,7 +777,7 @@ mod tests {
         );
 
         let mut widened = default_policy();
-        widened.insert(Scope::NetworkEgress);
+        widened.insert(Scope::ModelCommand);
         assert_ne!(
             policy_revision(&default_policy()),
             policy_revision(&widened)
