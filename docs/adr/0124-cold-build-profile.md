@@ -44,10 +44,11 @@ after the build with the same 1,349-test workspace workload.
 | Hot estate deps 2 | 264.82 | timeout | rejected, governance timeout |
 | `lgwks_bot` and `bevy_ecs` 2 | 334.33 | 314.175 | rejected, slower suite |
 | Prior Larry-only profile | 170.91 | 296.343 | rejected, slower suite |
+| Hosted CI on head `2083e45` | n/a | 63.630 | 1,360 passed |
 
-The hosted reference is main's `test` job at 74.755 s for 1,353 tests. The
-new PR head's hosted `test` Summary is added after CI completes. Oracle is a
-measurement environment, not a replacement for that hosted judge.
+The hosted main reference was 74.755 s for 1,353 tests. The new head's hosted
+`test` Summary is 63.630 s for 1,360 tests. Oracle is a measurement
+environment, not a replacement for that hosted judge.
 
 No candidate reduced cold build time while preserving suite speed. The
 remaining critical path is estate-owned: `lgwks_bot` and its `edge` path
