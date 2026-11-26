@@ -137,6 +137,18 @@ workspace = true
 debug = 0
 incremental = false
 
+[profile.dev.package."larry-demo"]
+opt-level = 1
+
+[profile.dev.package."larry-contracts"]
+opt-level = 1
+
+[profile.dev.package."larry-runtime"]
+opt-level = 1
+
+[profile.dev.build-override]
+opt-level = 0
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -87,4 +87,4 @@ Changing a runtime rule is a specification change, never a refactor.
 
 ## Build
 
-- The dev profile uses Cargo's unoptimized default and never applies an all-package optimization override, so a cold binary build does not pay release codegen for every dependency. Test: `tests/cold_build_profile.rs` (`cold_build_profile_uses_unoptimized_dev_profile`).
+- The dev profile optimizes only `larry-demo`, `larry-runtime` and `larry-contracts` at opt-level 1; dependencies, build scripts and proc macros stay at 0, so cold builds do not pay package-wide release codegen. Test: `tests/cold_build_profile.rs` (`dev_profile_optimizes_workspace_hot_path_only`).
