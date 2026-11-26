@@ -261,6 +261,28 @@ struct Asked {
     decision: Option<Decision>,
 }
 
+/// The tenant-scoped hot key for one effect's pending question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct QuestionKey {
+    /// The tenant that owns the question.
+    tenant: TenantId,
+    /// The run the question names.
+    run: RunId,
+    /// The operation the question names.
+    operation: OperationId,
+}
+
+impl QuestionKey {
+    /// Builds the index key from the journal envelope and question subject.
+    const fn new(tenant: TenantId, subject: Subject) -> Self {
+        Self {
+            tenant,
+            run: subject.run,
+            operation: subject.operation,
+        }
+    }
+}
+
 impl Asked {
     /// Where the question stands at `at`, its run `closed` or not.
     ///
@@ -284,8 +306,12 @@ impl Asked {
 /// Every question the journal holds, by its `Ask` command's identity.
 #[derive(Debug, Default)]
 pub(super) struct Book {
-    /// Questions in identity order.
+    /// Questions in identity order, retained for exact answer validation.
     asked: BTreeMap<CommandId, Asked>,
+    /// All subject identities, including settled questions, for O(log n) binding.
+    by_subject: BTreeMap<QuestionKey, CommandId>,
+    /// Only questions that can still hold work, keyed by tenant, run and operation.
+    pending: BTreeMap<QuestionKey, CommandId>,
 }
 
 impl Book {
@@ -308,6 +334,7 @@ impl Book {
         match command.content().kind() {
             CommandKind::Ask => {
                 if let Ok(question) = lgwks_std::json::from_slice::<Question>(payload) {
+                    let key = QuestionKey::new(command.tenant(), question.subject);
                     self.asked.insert(
                         command.id(),
                         Asked {
@@ -316,6 +343,8 @@ impl Book {
                             decision: None,
                         },
                     );
+                    self.by_subject.insert(key, command.id());
+                    self.pending.insert(key, command.id());
                 }
             }
             CommandKind::Answer => {
@@ -331,7 +360,9 @@ impl Book {
                     && answer.respondent != asked.question.requester
                     && answer.subject == asked.question.subject
                 {
+                    let key = QuestionKey::new(asked.tenant, answer.subject);
                     asked.decision = Some(answer.decision);
+                    self.pending.remove(&key);
                 }
             }
             _ => {}
@@ -340,11 +371,50 @@ impl Book {
 
     /// The question bound to `tenant`'s effect `operation` on `run`.
     fn bound(&self, tenant: TenantId, run: RunId, operation: OperationId) -> Option<&Asked> {
-        self.asked.values().find(|asked| {
-            asked.tenant == tenant
-                && asked.question.subject.run == run
-                && asked.question.subject.operation == operation
-        })
+        let key = QuestionKey {
+            tenant,
+            run,
+            operation,
+        };
+        self.by_subject
+            .get(&key)
+            .and_then(|question| self.asked.get(question))
+    }
+
+    /// Removes questions that can no longer hold work from the hot index.
+    fn prune_pending(&mut self, at: SystemTime, mut closed: impl FnMut(RunId) -> bool) {
+        let settled: Vec<QuestionKey> = self
+            .pending
+            .iter()
+            .filter_map(|(key, question)| {
+                self.asked.get(question).and_then(|asked| {
+                    (asked.status(at, closed(key.run)) != QuestionStatus::Pending).then_some(*key)
+                })
+            })
+            .collect();
+        for key in settled {
+            self.pending.remove(&key);
+        }
+    }
+
+    /// Counts pending questions without walking settled history.
+    fn pending_count(&mut self, at: SystemTime, closed: impl FnMut(RunId) -> bool) -> usize {
+        self.prune_pending(at, closed);
+        self.pending.len()
+    }
+
+    /// Counts one tenant's pending questions without walking settled history.
+    fn tenant_pending_count(
+        &mut self,
+        tenant: TenantId,
+        at: SystemTime,
+        closed: impl FnMut(RunId) -> bool,
+    ) -> usize {
+        self.prune_pending(at, closed);
+        self.pending
+            .keys()
+            .filter(|key| key.tenant == tenant)
+            .count()
     }
 }
 
@@ -366,38 +436,37 @@ where
     ///
     /// This is the `max_pending_questions` bound: the share below is a second
     /// bound beside it, never a replacement (larry#295, larry#333).
-    fn pending_questions(&self, at: SystemTime) -> usize {
-        self.questions
-            .asked
-            .values()
-            .filter(|asked| {
-                asked.status(at, self.run_closed(asked.question.subject.run))
-                    == QuestionStatus::Pending
-            })
-            .count()
+    fn pending_questions(&mut self, at: SystemTime) -> usize {
+        let projection = &self.projection;
+        let cancel_pending = self.cancel_pending_runs();
+        self.questions.pending_count(at, |run| {
+            projection
+                .run_state(run)
+                .is_some_and(|state| state == RunState::Cancelling || state.is_terminal())
+                || cancel_pending.contains(&run)
+        })
     }
 
     /// How many of `tenant`'s questions are pending at `at`.
     ///
     /// The share is per tenant: one tenant's unanswered questions never refuse
     /// another tenant's ask (larry#333).
-    fn tenant_pending_questions(&self, tenant: TenantId, at: SystemTime) -> usize {
-        self.questions
-            .asked
-            .values()
-            .filter(|asked| {
-                asked.tenant == tenant
-                    && asked.status(at, self.run_closed(asked.question.subject.run))
-                        == QuestionStatus::Pending
-            })
-            .count()
+    fn tenant_pending_questions(&mut self, tenant: TenantId, at: SystemTime) -> usize {
+        let projection = &self.projection;
+        let cancel_pending = self.cancel_pending_runs();
+        self.questions.tenant_pending_count(tenant, at, |run| {
+            projection
+                .run_state(run)
+                .is_some_and(|state| state == RunState::Cancelling || state.is_terminal())
+                || cancel_pending.contains(&run)
+        })
     }
 
     /// Checks an `Ask` or `Answer` before the journal takes it. An answer is
     /// judged against `principal`, the host-authenticated worker the offer
     /// presents, so a client cannot name an identity it does not hold.
     pub(super) fn check_question(
-        &self,
+        &mut self,
         command: &Command,
         at: SystemTime,
         principal: Option<WorkerId>,
@@ -421,7 +490,7 @@ where
     /// is asked, targets an open run, is its effect's only question, and fits
     /// the pending bound.
     fn check_ask(
-        &self,
+        &mut self,
         tenant: TenantId,
         question: &Question,
         at: SystemTime,
