@@ -37,14 +37,14 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 |---|---|
 | `journal` | The bounded append-only authoritative record; `journal::durable` its `RecordJournal` file, group-committed (larry#75, ADR 0023) |
 | `payload` | The typed bodies of the closed event vocabulary, including each outcome's dispatch count (larry#182, ADR 0036) |
-| `projection` | The fold, effect phases, each effect's recorded dispatch count and the replay report (larry#182) |
+| `projection` | The fold, operation-to-run and receipt indexes, effect phases, each effect's recorded dispatch count and the replay report (larry#182, larry#216) |
 | `protocol` | E47 version and capability negotiation: the offer, its typed refusals |
 | `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
 | `fence` (private) | Dispatch-time freshness on one `lgwks_bot::broker` environment, and `effect_key`, the one key an intent derives (larry#76, ADR 0024) |
 | `owner` | The effect-owner trait; test doubles under `fixture` only |
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
 | `error` | Every refused runtime operation |
-| `runtime` | `TickReport`, stage 2 (admit, reserve, dispatch), `restore`; `runtime::settings` the `RuntimeSettings` every capacity, payload ceiling, skew bound, attempt bound, protocol range and lease, with their Cell 05 defaults and the one validation `Runtime::new` and `restore` apply (larry#212, ADR 0056) |
+| `runtime` | `TickReport`, stage 2 (admit, reserve, dispatch), indexed cancellation and per-tenant run counts, `restore`; `runtime::settings` the `RuntimeSettings` every capacity, payload ceiling, skew bound, attempt bound, protocol range and lease, with their Cell 05 defaults and the one validation `Runtime::new` and `restore` apply (larry#212, ADR 0056, larry#216) |
 | `runtime::instant` | The tick's one pinned instant and the live clock's epoch anchor (`live_clock`): `lgwks_bot::clock` read as time since the Unix epoch (larry#74, #182) |
 | `runtime::admission` | E28 durable admission before the acknowledgement, the pending set, safe-boundary promotion, nothing in memory before the sync (ADR 0025, ADR 0036) |
 | `runtime::approval` | E30 durable questions and answers, the question book folded from the journal, the approval gate (ADR 0027) |
