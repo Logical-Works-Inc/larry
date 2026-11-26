@@ -21,6 +21,7 @@ use larry_contracts::replay::DenialReason;
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
 use larry_runtime::owner::fixture::ScriptedOwner;
+use larry_runtime::projection::ProjectionBackend;
 use larry_runtime::protocol::{
     ProtocolCapability, ProtocolError, ProtocolOffer, ProtocolVersionRange,
 };
@@ -628,6 +629,22 @@ fn e30_an_approval_used_after_expiry_is_not_approved() -> Outcome {
         100,
         "an expired approval reserves nothing"
     );
+    Ok(())
+}
+
+/// The shipped runtime path publishes an effect into both indexed witnesses:
+/// the operation resolves to its run and its terminal receipt is keyed by the
+/// operation. This is the red-first regression for the open-work fold.
+#[test]
+fn sim_open_work_cost_scales_with_indexed_state() -> Outcome {
+    let t1 = tenant(1);
+    let mut rt = world(ScriptedOwner::scripted([succeeded(operation(1))]))?.0;
+    rt.submit_protocol(&human(t1), work(10, t1, run(1), 1, 1)?, None)?;
+
+    let report = rt.tick()?;
+    assert_eq!(report.authorized(), &[operation(1)]);
+    assert_eq!(rt.projection().effect_run(operation(1)), Some(run(1)));
+    assert!(rt.projection().has_receipt(operation(1)));
     Ok(())
 }
 
