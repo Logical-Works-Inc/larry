@@ -166,6 +166,11 @@ impl Island {
         Place::Confined(&self.confine)
     }
 
+    /// The isolated tree where a session's artifact paths are checked.
+    pub(crate) fn path(&self) -> &Path {
+        self.workspace.path()
+    }
+
     /// The change the commands made: the sealed diff against the base copy, `None` when
     /// the commands destroyed the work tree.
     pub(crate) fn diff(&self) -> Result<Option<Diff>, ExecError> {

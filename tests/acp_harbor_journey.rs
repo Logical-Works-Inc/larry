@@ -1,19 +1,10 @@
-//! Journeys against the shipped `larry acp` binary as Harbor's generic `acp`
-//! agent drives it on a Terminal-Bench 2.0 task (larry#93).
-//!
-//! Source: the Agent Client Protocol v1 (initialize, session/new, session/prompt,
-//! session/update, session/cancel, stdio transport); Harbor's task layout
-//! (`instruction.md`, `task.toml`, `tests/test.sh`, the verifier writing
-//! `/logs/verifier/reward.txt`); and the executor's own kill -9 contract (larry#75).
-//! Requirement proved: a Harbor task's instruction runs as a terminal session the
-//! model drives one command at a time, the commands change the working directory,
-//! the task's verifier rewards it, and the sealed report verifies; the default
-//! policy refuses with nothing run; a session stops at its step bound, at three
-//! refused replies, and at a cancel before its next command; a kill -9 leaves a
-//! journal the next start recovers; two state directories never share a report or
-//! a key. Every case runs the real process against the seeded mock model, so no
-//! test makes a paid model call. The local verifier run stands in for Harbor's
-//! container: the same files, the same reward contract, no Docker.
+//! Shipped `larry acp` Harbor journeys (larry#93).
+// Journeys against the shipped `larry acp` binary as Harbor's generic `acp`
+// agent drives it on a Terminal-Bench 2.0 task (larry#93).
+//
+// Source: the Agent Client Protocol v1 and Harbor's task layout. The executor's
+// kill -9 contract is covered too. Every case runs the real process against the
+// seeded mock model, so no test makes a paid model call.
 
 #[path = "support/json_at.rs"]
 mod json_at;
@@ -46,18 +37,18 @@ use lgwks_std::json::{self, Value, json};
 use mock_model::{Config, Fault};
 use origin::{TempDir, fixture};
 
-/// What every test here returns.
+// What every test here returns.
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-/// Timed runs of the Harbor task.
+// Timed runs of the Harbor task.
 const SAMPLES: u64 = 16;
 
-/// The task's verifier, as Harbor runs it after the agent: reward 1 when the
-/// working directory holds `hello.txt` with exactly `hello`.
+// The task's verifier, as Harbor runs it after the agent: reward 1 when the
+// working directory holds `hello.txt` with exactly `hello`.
 const TEST_SH: &str = "#!/bin/sh\nmkdir -p \"$LOGS/verifier\"\nif [ \"$(cat \"$WORKDIR/hello.txt\" 2>/dev/null)\" = hello ]; then echo 1 > \"$LOGS/verifier/reward.txt\"; else echo 0 > \"$LOGS/verifier/reward.txt\"; fi\n";
 
-/// Runs `larry <subcommand>` to completion with only `env` set and `input` on
-/// stdin; returns the exit code and stdout.
+// Runs `larry <subcommand>` to completion with only `env` set and `input` on
+// stdin; returns the exit code and stdout.
 fn larry(
     subcommand: &str,
     env: &[(&str, &OsStr)],
@@ -71,8 +62,8 @@ fn larry(
     Ok((child.wait()?.code(), printed))
 }
 
-/// Verifies `report` offline under the key `larry key` prints for `state`; returns
-/// the exit code and the printed verdict.
+// Verifies `report` offline under the key `larry key` prints for `state`; returns
+// the exit code and the printed verdict.
 fn verify(state: &Path, report: &Value) -> TestResult<(Option<i32>, Value)> {
     let (_, key) = larry("key", &[("LARRY_STATE_DIR", state.as_os_str())], b"")?;
     let trusted = OsString::from(String::from_utf8(key)?.trim_end());
@@ -88,7 +79,7 @@ fn verify(state: &Path, report: &Value) -> TestResult<(Option<i32>, Value)> {
     Ok((code, verdict))
 }
 
-/// Writes a Harbor task directory under `root` and returns its instruction.
+// Writes a Harbor task directory under `root` and returns its instruction.
 fn harbor_task(root: &Path) -> TestResult<String> {
     let instruction = "Create a file named hello.txt in the working directory containing exactly the word hello.\n";
     fs::create_dir_all(root.join("tests"))?;
@@ -106,7 +97,7 @@ fn harbor_task(root: &Path) -> TestResult<String> {
     Ok(fs::read_to_string(root.join("instruction.md"))?)
 }
 
-/// Runs the task's verifier against `work` and returns the reward it wrote.
+// Runs the task's verifier against `work` and returns the reward it wrote.
 fn reward(task: &Path, work: &Path, logs: &Path) -> TestResult<String> {
     let status = Command::new("sh")
         .arg(task.join("tests").join("test.sh"))
@@ -120,14 +111,14 @@ fn reward(task: &Path, work: &Path, logs: &Path) -> TestResult<String> {
     Ok(written.trim().to_owned())
 }
 
-/// The sample at rank `per_cent` of the sorted microsecond samples.
+// The sample at rank `per_cent` of the sorted microsecond samples.
 fn rank(sorted: &[u128], per_cent: usize) -> TestResult<u128> {
     let at = sorted.len().saturating_mul(per_cent).div_ceil(100);
     Ok(*sorted.get(at.saturating_sub(1)).ok_or("no samples")?)
 }
 
-/// The Harbor journey: the instruction runs as a session, the model's command
-/// writes the file, the verifier rewards it, and the sealed report verifies.
+// The Harbor journey: the instruction runs as a session, the model's command
+// writes the file, the verifier rewards it, and the sealed report verifies.
 #[test]
 fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestResult {
     let mut micros = Vec::new();
@@ -137,8 +128,9 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
         let logs = TempDir::new()?;
         let instruction = harbor_task(task.path())?;
         let replies = [
-            r#"{"command":"printf 'hello\n' > hello.txt"}"#,
-            "```json\n{\"done\":\"wrote hello.txt\"}\n```",
+            r#"{"command":"printf hello > hello.txt"}"#,
+            r#"{"finish":{"summary":"wrote hello.txt","check":"printf hello > hello.txt","artifacts":["hello.txt"],"state":["ready"],"servers":["none"]}}"#,
+            r#"{"finish":{"summary":"wrote hello.txt","check":"printf hello > hello.txt","artifacts":["hello.txt"],"state":["ready"],"servers":["none"]}}"#,
         ];
         mock_model::run(scripted(seed, &replies), |mock| -> TestResult {
             let started = Instant::now();
@@ -149,7 +141,12 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
             assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
             assert_eq!(
                 kinds(&notes),
-                ["tool_call", "tool_call_update", "agent_message_chunk"],
+                [
+                    "tool_call",
+                    "tool_call_update",
+                    "agent_message_chunk",
+                    "agent_message_chunk",
+                ],
                 "one command, its result, the summary"
             );
             let call = notes.first().ok_or("a first update")?.at("/params")?;
@@ -161,8 +158,11 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
             assert_eq!(*call.at("/update/kind")?, "execute", "an execute call");
             let result = notes.get(1).ok_or("a second update")?;
             assert_eq!(*result.at("/params/update/status")?, "completed", "exit 0");
-            assert_eq!(said(&notes), Some("wrote hello.txt"), "the model's summary");
-            assert_eq!(mock.served(), 2, "two model calls");
+            assert!(
+                said(&notes).is_some_and(|text| text.contains("verification checklist")),
+                "the first finish paints the checklist"
+            );
+            assert_eq!(mock.served(), 3, "command and finish pair");
             let asked = message_text(mock.requests().first().ok_or("a first request")?, 1)?;
             assert!(
                 asked.contains(instruction.trim()),
@@ -257,17 +257,18 @@ fn a_session_past_its_step_bound_ends_max_turn_requests() -> TestResult {
     })
 }
 
-/// The mock's body cap: a model window smaller than the route's 1 MiB bound.
-const SMALL_WINDOW: usize = 32_768;
-
 /// Output that outgrows the model's window: the gateway's 413 (RFC 9110
 /// 15.5.14) shrinks the window, the session clears old output and sends again
 /// with no operator, ends `end_turn`, and keeps its cache prefix byte-identical.
+const SMALL_WINDOW: usize = 32_768;
+
 #[test]
 fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> TestResult {
     let (state, work) = fixture()?;
-    let mut replies = vec![r#"{"command":"yes larry | head -c 4000"}"#; 12];
-    replies.push(r#"{"done":"read every chunk"}"#);
+    let mut replies = vec![r#"{"command":"yes larry | head -c 4000"}"#; 11];
+    replies.push(r#"{"command":"touch compact.txt"}"#);
+    replies.push(r#"{"finish":{"summary":"read every chunk","check":"touch compact.txt","artifacts":["compact.txt"],"state":["chunks read"],"servers":["none"]}}"#);
+    replies.push(r#"{"finish":{"summary":"read every chunk","check":"touch compact.txt","artifacts":["compact.txt"],"state":["chunks read"],"servers":["none"]}}"#);
     let config = Config {
         max_body_bytes: SMALL_WINDOW,
         ..scripted(43, &replies)
@@ -282,7 +283,7 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
         let compaction = report.at("/session/compaction")?;
         assert!(compaction["shrinks"].as_u64() >= Some(1), "{compaction}");
         assert!(compaction["cleared"].as_u64() >= Some(1), "{compaction}");
-        assert_eq!(mock.served(), 13, "each reply served once");
+        assert_eq!(mock.served(), 14, "the check and finish pair are served");
         let requests = mock.requests();
         let first = json::from_slice::<Value>(requests.first().ok_or("a request")?)?;
         let last = json::from_slice::<Value>(requests.last().ok_or("a request")?)?;
@@ -297,8 +298,10 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
             "task stable"
         );
         let text = last.to_string();
-        let compacted = text.contains("Auto-compaction record") || text.contains("cleared by auto");
-        assert!(compacted, "the last request is compacted: {text}");
+        assert!(
+            text.contains("Auto-compaction record") || text.contains("cleared by auto"),
+            "the last request is compacted: {text}"
+        );
         Ok(())
     })
 }
@@ -307,7 +310,7 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
 #[test]
 fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
     let (state, work) = fixture()?;
-    let replies = ["run ls", "[1]", r#"{"command":"ls","done":"x"}"#];
+    let replies = ["run ls", "[1]", r#"{"command":"ls","finish":"x"}"#];
     mock_model::run(scripted(13, &replies), |mock| -> TestResult {
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
@@ -316,7 +319,7 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
         assert_eq!(
             said(&notes),
             Some(
-                "model: 3 replies in a row refused: the object must hold exactly one key, command or done"
+                "model: 3 replies in a row refused: the object must hold exactly one key, command or finish"
             ),
             "the last refusal is named"
         );
@@ -330,7 +333,6 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
     })
 }
 
-/// A cancel during a command stops the session before its next model call.
 #[test]
 fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
     let (state, work) = fixture()?;
@@ -378,8 +380,6 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
     })
 }
 
-/// A kill -9 mid-command leaves the session's journal; the next start recovers
-/// it before its own session runs.
 #[test]
 fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult {
     let (state, work) = fixture()?;
@@ -388,7 +388,12 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
         Command::new("mkfifo").arg(&fifo).status()?.success(),
         "mkfifo"
     );
-    let replies = [r#"{"command":"cat gate.fifo"}"#, r#"{"done":"recovered"}"#];
+    let replies = [
+        r#"{"command":"cat gate.fifo"}"#,
+        r#"{"command":"touch recovered.txt"}"#,
+        r#"{"finish":{"summary":"recovered","check":"touch recovered.txt","artifacts":["recovered.txt"],"state":["recovered"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"recovered","check":"touch recovered.txt","artifacts":["recovered.txt"],"state":["recovered"],"servers":["none"]}}"#,
+    ];
     mock_model::run(scripted(19, &replies), |mock| -> TestResult {
         let mut killed = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = killed.open(work.path())?;
@@ -420,12 +425,17 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
     })
 }
 
-/// One tenant's session: touches its own file and returns its report and the
-/// requests its gateway served.
 fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
     let name = format!("tenant{index}.txt");
     let command = format!(r#"{{"command":"touch {name}"}}"#);
-    let config = scripted(23, &[command.as_str(), r#"{"done":"ok"}"#]);
+    let config = scripted(
+        23,
+        &[
+            command.as_str(),
+            r#"{"finish":{"summary":"ok","check":"touch tenant0.txt","artifacts":["tenant0.txt"],"state":["ready"],"servers":["none"]}}"#,
+            r#"{"finish":{"summary":"ok","check":"touch tenant0.txt","artifacts":["tenant0.txt"],"state":["ready"],"servers":["none"]}}"#,
+        ],
+    );
     mock_model::run(config, |mock| {
         let mut acp = agent(state, mock, Some(SESSION_POLICY))?;
         let session = acp.open(work)?;
@@ -436,8 +446,6 @@ fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
     })
 }
 
-/// Two state directories run sessions at once: each report verifies only under
-/// its own key and each gateway sees only its own session.
 #[test]
 fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> TestResult {
     let (first_state, first_work) = fixture()?;
@@ -458,7 +466,7 @@ fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> Te
     };
     assert_eq!(
         (first_served, second_served),
-        (2, 2),
+        (3, 4),
         "each gateway saw its own session"
     );
     assert_ne!(
@@ -484,14 +492,16 @@ fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> Te
     Ok(())
 }
 
-/// One session in `work` whose first reply comes padded the way OpenRouter sends
-/// it through 9router (larry#128); returns the gateway's trace hash and the key it saw.
 fn padded_session(state: &Path, work: &Path) -> TestResult<(String, Option<String>)> {
     let config = Config {
         script: vec![Some(Fault::PaddedDone)],
         ..scripted(
             31,
-            &[r#"{"command":"touch padded.txt"}"#, r#"{"done":"ok"}"#],
+            &[
+                r#"{"command":"touch padded.txt"}"#,
+                r#"{"finish":{"summary":"ok","check":"touch padded.txt","artifacts":["padded.txt"],"state":["ready"],"servers":["none"]}}"#,
+                r#"{"finish":{"summary":"ok","check":"touch padded.txt","artifacts":["padded.txt"],"state":["ready"],"servers":["none"]}}"#,
+            ],
         )
     };
     mock_model::run(config, |mock| {
@@ -505,8 +515,6 @@ fn padded_session(state: &Path, work: &Path) -> TestResult<(String, Option<Strin
     })
 }
 
-/// A padded reply still runs, the operator's key reaches the gateway, and the same
-/// seed in the same directory gives the same gateway trace.
 #[test]
 fn a_padded_reply_runs_and_the_same_seed_replays_the_same_trace() -> TestResult {
     let (state, work) = fixture()?;
@@ -559,8 +567,6 @@ fn a_hostile_gateway_refusal_ends_the_session_with_a_clean_message() -> TestResu
     Ok(())
 }
 
-/// A cancel sent while the model is still answering ends the prompt `cancelled`
-/// and its reply never runs.
 #[test]
 fn a_cancel_while_the_model_answers_runs_no_command() -> TestResult {
     let (state, work) = fixture()?;
@@ -643,7 +649,8 @@ fn a_client_that_dies_mid_prompt_stops_the_session() -> TestResult {
     let replies = [
         r#"{"command":"head -c 1 gate.fifo"}"#,
         r#"{"command":"touch after.txt"}"#,
-        r#"{"done":"finished"}"#,
+        r#"{"finish":{"summary":"finished","check":"touch after.txt","artifacts":["after.txt"],"state":["finished"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"finished","check":"touch after.txt","artifacts":["after.txt"],"state":["finished"],"servers":["none"]}}"#,
     ];
     mock_model::run(scripted(53, &replies), |mock| -> TestResult {
         let env = operator(state.path(), mock, Some(SESSION_POLICY));
@@ -717,7 +724,8 @@ fn a_queued_prompt_does_not_clear_the_running_prompts_cancel() -> TestResult {
     let replies = [
         r#"{"command":"head -c 1 gate.fifo"}"#,
         r#"{"command":"touch after.txt"}"#,
-        r#"{"done":"A done"}"#,
+        r#"{"finish":{"summary":"A done","check":"touch after.txt","artifacts":["after.txt"],"state":["done"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"A done","check":"touch after.txt","artifacts":["after.txt"],"state":["done"],"servers":["none"]}}"#,
     ];
     mock_model::run(scripted(59, &replies), |mock| -> TestResult {
         let mut console = agent(state.path(), mock, Some(SESSION_POLICY))?;

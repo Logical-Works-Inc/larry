@@ -16,7 +16,9 @@ use super::pty::Journey;
 fn tui_journey_a_command_never_writes_the_persons_terminal() -> Journey {
     let replies = [
         r#"{"command":"if [ -e tty-trigger ]; then ( printf 'TTY-LEAK-7a1b' > /dev/tty ) 2>/dev/null || true; fi; printf 'ran-%s-7a\n' ok"}"#,
-        r#"{"done":"all finished"}"#,
+        r#"{"command":"test -f README"}"#,
+        r#"{"finish":{"summary":"all finished","check":"test -f README","artifacts":["README"],"state":["unchanged"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"all finished","check":"test -f README","artifacts":["README"],"state":["unchanged"],"servers":["none"]}}"#,
     ];
     let (state, mut work) = fixture()?;
     let mut screens: Vec<String> = Vec::new();
@@ -35,6 +37,8 @@ fn tui_journey_a_command_never_writes_the_persons_terminal() -> Journey {
                 ask(pty)?;
                 pty.send("y")?;
                 pty.wait_for("ran-ok-7a")?;
+                pty.wait_for("$ test -f README")?;
+                pty.send("y")?;
                 pty.wait_for("all finished")?;
                 pty.wait_for("verdict")?;
                 screens.push(pty.screen_text());
@@ -81,12 +85,16 @@ fn without_receipt_digest(screen: &str) -> String {
 fn tui_journey_a_command_never_opens_the_persons_terminal() -> Journey {
     let replies = [
         r#"{"command":": < /dev/tty"}"#,
-        r#"{"done":"all finished"}"#,
+        r#"{"command":"test -f README"}"#,
+        r#"{"finish":{"summary":"all finished","check":"test -f README","artifacts":["README"],"state":["unchanged"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"all finished","check":"test -f README","artifacts":["README"],"state":["unchanged"],"servers":["none"]}}"#,
     ];
     let ran = frame(scripted(67, &replies), |pty, _, _| {
         ask(pty)?;
         pty.send("y")?;
         pty.wait_for("/dev/tty:")?;
+        pty.wait_for("$ test -f README")?;
+        pty.send("y")?;
         pty.wait_for("all finished")
     })?;
     assert!(ran.status.success(), "exits 0: {}", ran.status);

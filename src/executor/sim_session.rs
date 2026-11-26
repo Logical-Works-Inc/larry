@@ -21,9 +21,9 @@ use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, clip, run_command};
+use super::super::session_reply::{Reply, ReplyFault, parse_reply};
 use super::{
-    ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
-    check, parse_reply,
+    ExecError, FinishRequest, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, SessionError, check,
 };
 use crate::json_at::At;
 use crate::sim_error::SimError;
@@ -69,15 +69,24 @@ fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
             Ok(Reply::Command(body)),
         ),
         1 => (
-            format!("{{\"done\":{}}}", quoted(&body)?),
-            Ok(Reply::Done(body)),
+            format!(
+                "{{\"finish\":{{\"summary\":{0},\"check\":\"true\",\"artifacts\":[\"artifact\"],\"state\":[\"clean\"],\"servers\":[\"none\"]}}}}",
+                quoted(&body)?
+            ),
+            Ok(Reply::Finish(FinishRequest {
+                summary: body,
+                check: String::from("true"),
+                artifacts: vec![String::from("artifact")],
+                state: vec![String::from("clean")],
+                servers: vec![String::from("none")],
+            })),
         ),
         2 => (
             format!("```json\n{{\"command\":{}}}\n```", quoted(&body)?),
             Ok(Reply::Command(body)),
         ),
         3 => (
-            format!("{{\"command\":{0},\"done\":{0}}}", quoted(&body)?),
+            format!("{{\"command\":{0},\"finish\":{0}}}", quoted(&body)?),
             Err(ReplyFault::Keys),
         ),
         4 => (
@@ -144,7 +153,7 @@ fn sim_reply_parser_matches_the_reference_for_every_seed() -> TestResult {
 /// unknown sole key is refused.
 #[test]
 fn an_oversized_or_keyless_reply_is_refused_before_anything_runs() {
-    let long = format!("{{\"done\":\"{}\"}}", "z".repeat(16_400));
+    let long = format!("{{\"finish\":\"{}\"}}", "z".repeat(16_400));
     assert_eq!(
         parse_reply(&long),
         Err(ReplyFault::TooLong),
@@ -153,8 +162,8 @@ fn an_oversized_or_keyless_reply_is_refused_before_anything_runs() {
     assert_eq!(parse_reply("{}"), Err(ReplyFault::Keys), "no key");
     assert_eq!(
         parse_reply("{\"done\":\"\"}"),
-        Ok(Reply::Done(String::new())),
-        "empty summary"
+        Err(ReplyFault::Keys),
+        "the legacy done token is not a typed finish"
     );
 }
 

@@ -10,20 +10,19 @@
 //! command runs in a confined copy of the folder (`super::island`), the model
 //! is told its directory is `.`, and the folder changes only when the person
 //! approves the diff the session ends with; the default policy suffices.
-//! Each reply is exactly one JSON object, `{"command": "<sh -c text>"}` or
-//! `{"done": "<summary>"}`; each command runs in its own process group under the
+//! Each reply is exactly one JSON object, `{"command": "<sh -c text>"}` or a
+//! typed `{"finish": ...}` request; each command runs in its own process group under the
 //! executor's timeout, tracked in the ledger so a kill -9 is reaped by the next
 //! start; the model sees the exit status and the first 4 KiB of each stream.
 //! Auto-compaction (`super::compact`, larry#235) keeps every request inside the
 //! model's window, so the length of the conversation never stops a session. The
-//! loop stops at the model's `done`, at 256 steps, at three refused replies in a
+//! loop stops at the second accepted `finish`, at 256 steps, at three refused replies in a
 //! row, at a model refusal, or at a cancellation checked before every model call
 //! and every command and polled while one runs: the person's cancel kills the
 //! running command's process group and the report counts it interrupted
 //! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
-use std::fmt;
 use std::path::Path;
 
 use lgwks_macros::Error;
@@ -33,7 +32,6 @@ use super::ExecError;
 use super::Ledger;
 use super::Report;
 use super::Settings;
-use super::author::unfenced;
 use super::backoff;
 use super::compact::{Answer, Conversation};
 use super::digest_hex;
@@ -42,8 +40,14 @@ use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::prepare;
 use super::run::{CommandResult, Place, run_command};
-use super::workspace::report_members;
+use super::session_gate::{
+    SessionIdentity, VerificationFault, checklist, has_fresh_check, invalidate_finish, kept_reply,
+    reached_refusal_limit,
+};
+use super::session_reply::{Reply, parse_reply};
 use crate::model::{Completion, ModelClient};
+
+pub(super) use super::session_gate::FinishRequest;
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
@@ -55,12 +59,10 @@ const MAX_REFUSED: usize = 3;
 pub(crate) const MAX_INSTRUCTION_BYTES: usize = 65_536;
 /// Largest model reply the session parses or keeps in the conversation, in bytes.
 const MAX_REPLY_BYTES: usize = 8192;
-/// Largest command or summary one reply may carry, in bytes.
-const MAX_COMMAND_BYTES: usize = 4096;
 /// Bytes of each output stream the model sees and the report keeps.
 pub(crate) const OBSERVED_BYTES: usize = 4096;
 /// The standing instruction of every session.
-const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below by running shell commands. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"done\": \"<one-line summary>\"} ends the task. Run one command per reply.";
+const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below by running shell commands. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"finish\":{\"summary\":\"<one-line summary>\",\"check\":\"<the exact passing check command>\",\"artifacts\":[\"<relative artifact path>\"],\"state\":[\"<state left behind>\"],\"servers\":[\"<server that must stay up>\"]}} requests the verification checklist. A first accepted finish returns the checklist; repeat the same finish to end the task. Run one command per reply.";
 
 /// Why a session was refused before anything ran.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -87,7 +89,7 @@ pub enum SessionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Stop {
-    /// The model said it was done.
+    /// The typed verification gate accepted the second finish.
     EndTurn,
     /// The session ran [`MAX_STEPS`] commands.
     MaxTurnRequests,
@@ -155,80 +157,6 @@ pub(crate) trait Observer {
     fn message(&mut self, text: &str);
     /// Whether the client has cancelled the session.
     fn cancelled(&self) -> bool;
-}
-
-/// One reply, parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Reply {
-    /// Run this command with `sh -c`.
-    Command(String),
-    /// The task is done; the summary for the person.
-    Done(String),
-}
-
-/// Why a reply was refused; the model is told and may try again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplyFault {
-    /// The reply is over [`MAX_REPLY_BYTES`].
-    TooLong,
-    /// The reply is not JSON; the parser's reason, so the model sees where it broke.
-    NotJson(String),
-    /// The reply is JSON but not an object.
-    NotAnObject,
-    /// The object does not hold exactly one key, `command` or `done`.
-    Keys,
-    /// The key's value is not a string.
-    NotAString,
-    /// The command is empty or blank.
-    EmptyCommand,
-    /// The command or summary is over 4 KiB.
-    FieldTooLong,
-    /// The command holds a NUL byte, which no shell argument can carry.
-    Nul,
-}
-
-impl fmt::Display for ReplyFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TooLong => write!(out, "the reply is over {MAX_REPLY_BYTES} bytes"),
-            Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
-            Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => out.write_str("the object must hold exactly one key, command or done"),
-            Self::NotAString => out.write_str("the value must be a string"),
-            Self::EmptyCommand => out.write_str("the command is empty"),
-            Self::FieldTooLong => write!(
-                out,
-                "the command or summary is over {MAX_COMMAND_BYTES} bytes"
-            ),
-            Self::Nul => out.write_str("the command holds a NUL byte"),
-        }
-    }
-}
-
-/// Parses one model reply: one surrounding code fence and outer whitespace are allowed.
-pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
-    if text.len() > MAX_REPLY_BYTES {
-        return Err(ReplyFault::TooLong);
-    }
-    let value: Value = json::from_str(unfenced(text).trim())
-        .map_err(|cause| ReplyFault::NotJson(cause.to_string()))?;
-    let object = value.as_object().ok_or(ReplyFault::NotAnObject)?;
-    let mut entries = object.iter();
-    let (Some((key, field)), None) = (entries.next(), entries.next()) else {
-        return Err(ReplyFault::Keys);
-    };
-    let text = field.as_str().ok_or(ReplyFault::NotAString)?;
-    if text.len() > MAX_COMMAND_BYTES {
-        return Err(ReplyFault::FieldTooLong);
-    }
-    let name: &str = key;
-    match name {
-        "command" if text.trim().is_empty() => Err(ReplyFault::EmptyCommand),
-        "command" if text.contains('\0') => Err(ReplyFault::Nul),
-        "command" => Ok(Reply::Command(text.to_owned())),
-        "done" => Ok(Reply::Done(text.to_owned())),
-        _ => Err(ReplyFault::Keys),
-    }
 }
 
 /// The status line the model is shown for one clipped command result.
@@ -350,6 +278,10 @@ pub(crate) fn run_session(
                 Some(ref isle) => isle.place(),
                 None => Place::Open(cwd),
             },
+            artifact_root: match island {
+                Some(ref isle) => isle.path(),
+                None => cwd,
+            },
             // The model is told its directory is `.` in a copy, so the request carries
             // no run id and no path of the person's.
             shown: match island {
@@ -359,6 +291,7 @@ pub(crate) fn run_session(
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
+        let done_stop = done.stop.clone();
         let mut outcome = Outcome::None;
         let mut diff = None;
         if let Some(ref isle) = island
@@ -367,35 +300,19 @@ pub(crate) fn run_session(
             diff = isle.diff()?;
             outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
         }
-        let mut body = json!({
-            "task_id": task_id,
-            "task_digest": task_digest,
-            "diff": null,
-            "results": done.records,
-            "denied": [],
-            "session": {
-                "stop": done.stop.name(),
-                "commands": done.records.len(),
-                "declined": done.declined,
-                "interrupted": done.interrupted,
-                "route": route.seal(),
-                "compaction": done.compaction,
-                "isolation": match island {
-                    Some(ref isle) => isle.describe(),
-                    None => json!({ "mode": isolation.name() }),
-                },
-                "handoff": outcome.name(),
+        let body = super::session_report::body(
+            &SessionIdentity {
+                task_id: &task_id,
+                task_digest: &task_digest,
             },
-        });
-        // An isolated session records the change it made, whole or cut (larry#206).
-        if island.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            for (name, member) in report_members(diff) {
-                object.insert(name.to_owned(), member);
-            }
-        }
-        stop = Some(done.stop);
+            done,
+            &route.seal(),
+            isolation,
+            island.as_ref(),
+            outcome,
+            diff,
+        );
+        stop = Some(done_stop);
         Ok(Report::sealed(body, &key))
     })?;
     let stop = match stop {
@@ -409,18 +326,22 @@ pub(crate) fn run_session(
     Ok(Ended { stop, report })
 }
 
+/// The two stable identities a session report carries.
+/// Builds the sealed session body after the typed finish gate has decided the stop.
 /// What one session's loop did.
-struct Steps {
+pub(super) struct Steps {
     /// Why it stopped.
-    stop: Stop,
+    pub(super) stop: Stop,
     /// Each command's record, in order.
-    records: Vec<Value>,
+    pub(super) records: Vec<Value>,
     /// What compaction did.
-    compaction: Value,
+    pub(super) compaction: Value,
     /// Commands the person declined; none of them ran.
-    declined: usize,
+    pub(super) declined: usize,
     /// Commands the person interrupted; each had its process group killed (larry#242).
-    interrupted: usize,
+    pub(super) interrupted: usize,
+    /// The check receipt and checklist metadata that authorized completion.
+    pub(super) verification: Option<Value>,
 }
 
 /// One session's loop state.
@@ -437,8 +358,22 @@ struct Turn<'a> {
     place: Place<'a>,
     /// The directory the model is told it works in.
     shown: String,
+    /// The real tree used to resolve the typed finish's artifact paths.
+    artifact_root: &'a Path,
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
+}
+
+/// One command's observed result and the facts the verification gate needs.
+struct CommandStep {
+    /// The bounded answer appended to the model conversation.
+    answer: Answer,
+    /// The full result sealed in the report.
+    record: Value,
+    /// Whether the command passed without timeout or interruption.
+    passed: bool,
+    /// Whether cancellation interrupted its process group.
+    interrupted: bool,
 }
 
 impl Turn<'_> {
@@ -452,6 +387,10 @@ impl Turn<'_> {
         let mut refused = 0_usize;
         let mut declined = 0_usize;
         let mut interrupted = 0_usize;
+        let mut last_command: Option<String> = None;
+        let mut last_passed: Option<bool> = None;
+        let mut first_finish: Option<FinishRequest> = None;
+        let mut verification = None;
         let stop = loop {
             if steps.len().saturating_add(declined) >= MAX_STEPS {
                 break Stop::MaxTurnRequests;
@@ -464,20 +403,35 @@ impl Turn<'_> {
                 break Stop::Cancelled;
             }
             let reply = completion.content();
-            // A reply past the bound is refused below; only its length enters the
-            // conversation, so it cannot grow the next request.
-            let kept = if reply.len() > MAX_REPLY_BYTES {
-                format!(
-                    "(a reply of {} bytes, over the bound, was dropped)",
-                    reply.len()
-                )
-            } else {
-                reply.to_owned()
-            };
+            let kept = kept_reply(reply, MAX_REPLY_BYTES);
             match parse_reply(reply) {
-                Ok(Reply::Done(summary)) => {
-                    self.observer.message(&summary);
-                    break Stop::EndTurn;
+                Ok(Reply::Finish(request)) => {
+                    match self.finish_reply(
+                        &request,
+                        last_command.as_deref(),
+                        last_passed == Some(true),
+                        &mut first_finish,
+                    ) {
+                        Ok(Some(receipt)) => {
+                            verification = Some(receipt);
+                            break Stop::EndTurn;
+                        }
+                        Ok(None) => {
+                            self.show_checklist(&mut conversation, kept, &request, &mut refused)
+                        }
+                        Err(reason) => {
+                            refused = refused.saturating_add(1);
+                            if reached_refusal_limit(refused) {
+                                break self.refuse(format!("finish: {reason}"));
+                            }
+                            conversation.push(
+                                kept,
+                                Answer::Refused {
+                                    fault: format!("finish: {reason}"),
+                                },
+                            );
+                        }
+                    }
                 }
                 Ok(Reply::Command(command)) => {
                     refused = 0;
@@ -496,40 +450,20 @@ impl Turn<'_> {
                     if self.observer.cancelled() {
                         break Stop::Cancelled;
                     }
-                    self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
-                    // The person's cancel is polled while the command runs, so Esc
-                    // ends it and its whole group, not only the next step (larry#242).
-                    let result = run_command(
-                        &argv,
-                        self.place,
-                        &self.settings.path,
-                        self.settings.timeout,
-                        self.ledger,
-                        self.task_id,
-                        &|| self.observer.cancelled(),
-                    )?
-                    .clipped(OBSERVED_BYTES);
-                    let answer = Answer::Observed {
-                        step,
-                        command,
-                        status: status(&result),
-                        output: Some(streams(&result)),
-                    };
-                    let was_interrupted = result.interrupted();
-                    let passed =
-                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
-                    self.observer.finished(step, &answer.text(), passed);
-                    conversation.push(kept, answer);
-                    steps.push(result.into_json());
-                    if was_interrupted {
+                    let result = self.command_step(step, &command)?;
+                    invalidate_finish(&mut first_finish);
+                    last_command = Some(command.clone());
+                    conversation.push(kept, result.answer);
+                    steps.push(result.record);
+                    last_passed = Some(result.passed);
+                    if result.interrupted {
                         interrupted = interrupted.saturating_add(1);
                         break Stop::Cancelled;
                     }
                 }
                 Err(fault) => {
                     refused = refused.saturating_add(1);
-                    if refused >= MAX_REFUSED {
+                    if reached_refusal_limit(refused) {
                         break self.refuse(format!(
                             "model: {MAX_REFUSED} replies in a row refused: {fault}"
                         ));
@@ -544,6 +478,138 @@ impl Turn<'_> {
             records: steps,
             compaction: conversation.json(),
             declined,
+            interrupted,
+            verification,
+        })
+    }
+
+    /// Checks the last fresh-shell result and every named artifact before completion.
+    fn verify_finish(
+        &self,
+        request: &FinishRequest,
+        last_command: Option<&str>,
+        last_passed: bool,
+    ) -> Result<Value, VerificationFault> {
+        if !has_fresh_check(last_command, last_passed, &request.check) {
+            return Err(VerificationFault::NoFreshCheck);
+        }
+        let mut artifacts = Vec::with_capacity(request.artifacts.len());
+        for path in &request.artifacts {
+            if !super::author::is_writable_path(path) {
+                return Err(VerificationFault::BadArtifactPath { path: path.clone() });
+            }
+            let target = self.artifact_root.join(path);
+            let metadata = std::fs::symlink_metadata(&target).map_err(|source| {
+                VerificationFault::MissingArtifact {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(VerificationFault::SymlinkArtifact { path: path.clone() });
+            }
+            artifacts.push(path.clone());
+        }
+        Ok(verification_receipt(
+            &request.check,
+            &artifacts,
+            &request.state,
+            &request.servers,
+        ))
+    }
+}
+
+/// The receipt is explicit about the shell boundary that produced the check.
+fn verification_receipt(
+    check: &str,
+    artifacts: &[String],
+    state: &[String],
+    servers: &[String],
+) -> Value {
+    json!({
+        "check": check,
+        "fresh_shell": true,
+        "artifacts": artifacts,
+        "state": state,
+        "servers": servers,
+    })
+}
+
+/// Whether one finish repeats the exact request that produced the checklist.
+fn same_finish(first_finish: Option<&FinishRequest>, request: &FinishRequest) -> bool {
+    first_finish == Some(request)
+}
+
+/// A command passes only with exit zero and no timeout or interruption.
+fn command_passed(exit_code: Option<i32>, timed_out: bool, interrupted: bool) -> bool {
+    exit_code == Some(0) && !timed_out && !interrupted
+}
+
+impl Turn<'_> {
+    /// Processes one typed finish request and returns a receipt only on its second acceptance.
+    fn finish_reply(
+        &mut self,
+        request: &FinishRequest,
+        last_command: Option<&str>,
+        last_passed: bool,
+        first_finish: &mut Option<FinishRequest>,
+    ) -> Result<Option<Value>, VerificationFault> {
+        let receipt = self.verify_finish(request, last_command, last_passed)?;
+        if same_finish(first_finish.as_ref(), request) {
+            self.observer.message(&request.summary);
+            return Ok(Some(receipt));
+        }
+        *first_finish = Some(request.clone());
+        self.observer.message(&checklist(request));
+        Ok(None)
+    }
+
+    /// Sends the checklist and clears the consecutive refusal count.
+    fn show_checklist(
+        &self,
+        conversation: &mut Conversation,
+        kept: String,
+        request: &FinishRequest,
+        refused: &mut usize,
+    ) {
+        conversation.push(
+            kept,
+            Answer::Refused {
+                fault: checklist(request),
+            },
+        );
+        *refused = 0;
+    }
+
+    /// Runs one model command in its fresh process group and records its receipt.
+    fn command_step(&mut self, step: usize, command: &str) -> Result<CommandStep, ExecError> {
+        self.observer.started(step, command);
+        let argv = [String::from("sh"), String::from("-c"), command.to_owned()];
+        // The person's cancel is polled while the command runs, so Esc ends it and its whole
+        // group, not only the next step (larry#242).
+        let result = run_command(
+            &argv,
+            self.place,
+            &self.settings.path,
+            self.settings.timeout,
+            self.ledger,
+            self.task_id,
+            &|| self.observer.cancelled(),
+        )?
+        .clipped(OBSERVED_BYTES);
+        let interrupted = result.interrupted();
+        let passed = command_passed(result.exit_code(), result.timed_out(), interrupted);
+        let answer = Answer::Observed {
+            step,
+            command: command.to_owned(),
+            status: status(&result),
+            output: Some(streams(&result)),
+        };
+        self.observer.finished(step, &answer.text(), passed);
+        Ok(CommandStep {
+            answer,
+            record: result.into_json(),
+            passed,
             interrupted,
         })
     }
@@ -573,6 +639,78 @@ impl Turn<'_> {
     fn refuse(&mut self, line: String) -> Stop {
         self.observer.message(&line);
         Stop::Refusal(line)
+    }
+}
+
+/// Keeps a bounded model reply in the compacted conversation.
+#[cfg(test)]
+mod verification_tests {
+    use super::super::session_reply::{ReplyFault, parse_reply};
+    use super::{
+        FinishRequest, command_passed, has_fresh_check, same_finish, verification_receipt,
+    };
+
+    #[test]
+    fn finish_refuses_without_fresh_passing_check() {
+        assert_eq!(
+            parse_reply(r#"{"done":"the task is complete"}"#),
+            Err(ReplyFault::Keys),
+            "the legacy model-written done token must not bypass verification"
+        );
+        assert!(
+            !has_fresh_check(Some("cargo test"), false, "cargo test"),
+            "a failed check has no receipt"
+        );
+        assert!(
+            !has_fresh_check(None, true, "cargo test"),
+            "a finish without a receipt is refused"
+        );
+        assert!(
+            !has_fresh_check(Some("cargo fmt"), true, "cargo test"),
+            "a different passing command is not the named check"
+        );
+    }
+
+    fn finish_request(summary: &str) -> FinishRequest {
+        FinishRequest {
+            summary: summary.to_owned(),
+            check: String::from("true"),
+            artifacts: vec![String::from("out")],
+            state: vec![String::from("clean")],
+            servers: vec![String::from("none")],
+        }
+    }
+
+    #[test]
+    fn repeated_finish_requires_the_identical_request() {
+        let first = finish_request("ready");
+        assert!(same_finish(Some(&first), &first));
+        assert!(!same_finish(None, &first));
+        assert!(!same_finish(Some(&finish_request("different")), &first));
+    }
+
+    #[test]
+    fn receipt_marks_the_check_as_fresh_shell_evidence() {
+        let receipt = verification_receipt(
+            "true",
+            &[String::from("out")],
+            &[String::from("clean")],
+            &[String::from("none")],
+        );
+        assert_eq!(
+            receipt
+                .get("fresh_shell")
+                .and_then(lgwks_std::json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn command_passes_only_for_a_clean_zero_exit() {
+        assert!(command_passed(Some(0), false, false));
+        assert!(!command_passed(Some(1), false, false));
+        assert!(!command_passed(Some(0), true, false));
+        assert!(!command_passed(Some(0), false, true));
     }
 }
 

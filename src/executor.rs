@@ -14,6 +14,12 @@ mod recovery;
 pub mod routes;
 mod run;
 mod session;
+/// Typed finish parsing and bounded verification values for terminal sessions.
+mod session_gate;
+/// Bounded model reply parsing for terminal sessions.
+mod session_reply;
+/// Session receipt assembly and report identity values.
+mod session_report;
 #[cfg(test)]
 mod sim_env;
 #[cfg(test)]
