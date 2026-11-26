@@ -41,7 +41,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `protocol` | E47 version and capability negotiation: the offer, its typed refusals |
 | `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
 | `fence` (private) | Dispatch-time freshness on one `lgwks_bot::broker` environment, and `effect_key`, the one key an intent derives (larry#76, ADR 0024) |
-| `owner` | The effect-owner trait; test doubles under `fixture` only |
+| `owner` | The effect-owner trait; each mutating call carries and re-reads the checked `cap::Auth`; test doubles under `fixture` only (ADR 0120) |
 | `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
 | `error` | Every refused runtime operation |
 | `runtime` | `TickReport`, stage 2 (admit, reserve, dispatch), `restore`; `runtime::settings` the `RuntimeSettings` every capacity, payload ceiling, skew bound, attempt bound, protocol range and lease, with their Cell 05 defaults and the one validation `Runtime::new` and `restore` apply (larry#212, ADR 0056) |
@@ -52,7 +52,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `runtime::ingress` | `submit_protocol`: negotiate, tenant check and bounded backoff before the queue (E47) |
 | `runtime::live` | Run and effect witnesses the journal does not carry |
 | `runtime::reconcile` | Stage 3 reconciliation and stage 4 cancellation |
-| `runtime::reach` | The one owner reach: the warrant, the `cap::Auth` proof, the handoff re-check, the call, the count (larry#76, #77) |
+| `runtime::reach` | The one owner reach: the warrant, the checked `cap::Auth` proof, the handoff re-check, owner proof read, call and count (larry#76, #77, #461) |
 | `runtime::retry` | The retry decision on `lgwks_bot::retry` over `fence::effect_key` (larry#78, ADR 0017) |
 | `runtime::writers` | Every journal writer and the run-state `advance` |
 
@@ -63,7 +63,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `lib` | The effect-free DEMO session state, `replace_file` (the whole-or-nothing write) and `diagnose` (one stderr line) |
 | `executor`, `executor::error` | `larry exec`: settings, the run of one task, its JSON report (ADR 0004); `ExecError`, its message and its source chain (ADR 0100); `process_env` the one environment snapshot every door reads, a non-UTF-8 variable refused by name and an unset `PATH` refused, simulated in `executor::sim_env` (larry#213, ADR 0107) |
 | `executor::identity` | The identities a run derives: the state directory's tenant and worker, its run, operation and command ids, and the run id itself, a fresh UUID version 7 or the idempotency key's (larry#182, ADR 0037) |
-| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; a retry answered from its evidence (ADR 0019, 0037); the admission lease starts at one live clock's reading, `lease_start`, simulated in `executor::gate::sim_clock` (larry#436) |
+| `executor::gate` | Every task as a displayed proposal on `larry_runtime`; `LARRY_POLICY`; the sealed refusal; the canonical owner boundary with resolved target identity, tenant check, owner-side `cap::Auth` read and one gated task body; a retry answered from its evidence (ADR 0019, 0037); the admission lease starts at one live clock's reading, `lease_start`, simulated in `executor::gate::sim_clock` (larry#436) |
 | `executor::recovery`, `executor::sim_*` | The task journals a killed executor left: their path, liveness by the journal's own lock, and the recovery that sets each aside as `<task>.recovered` or `<task>.refused` without reaching the world; the seeded simulations of the identity, the recovery, the report rows and the sweep: `executor::sim_ledger` the sealed-report rows and the live-group rows, `executor::sim_workspace` the workspace and origin sweeps (larry#75, larry#182 defect 3, larry#214, ADR 0023, ADR 0037) |
 | `executor::task`, `executor::task::confine` | The bounded task document, its optional `idempotency_key`, and its typed refusals; whether acceptance runs confined: a brief, or the MCP door's flag, because a remote peer drove the run (larry#324, ADR 0088) |
 | `executor::author` | The brief (goal, files) and the model step that writes each file before acceptance, every prompt on one byte-stable prefix per brief (ADR 0008, ADR 0043) |
@@ -112,8 +112,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 ## Invariants the module map carries
 
 - Only `runtime::reconcile` completes a cancellation, and only with no owned effect open (ADR 0001).
-- Only `runtime::writers` appends events, and every event folds the projection after it; commands enter by `Journal::accept_command`; `tick`, `runtime::reach` and `Runtime::admit` are the only syncs.
-- `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
+- Only `runtime::writers` appends events, and every event folds the projection after it; commands enter by `Journal::accept_command`; `tick`, `runtime::reach` and `Runtime::admit` are the only syncs. `runtime::live` witnesses are private to `runtime`; `restore` rebuilds them from the journal.
 - `model` retries only 429 and 5xx and never shortens a `Retry-After` (ADR 0003).
 - `executor::ledger` records a group's leader before the wait and removes it only once the group is gone, and opens and migrates `executor.db` on the store's own busy wait, with no lock of its own (ADR 0100).
 - Only `executor::receipt` derives `accepted`; sealing and verifying both call it (ADR 0006).

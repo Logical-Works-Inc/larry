@@ -27,6 +27,7 @@ use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend, replay_authorizations};
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
+use lgwks_bot::kernel::cap::Auth;
 use lgwks_bot::kernel::clock::Clock;
 
 /// Each simulation family exhausts this deterministic seed interval.
@@ -604,11 +605,19 @@ impl EffectOwner for ResolverOnly {
         resolved(0, false).map(Some)
     }
 
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        self.legacy_calls = self.legacy_calls.saturating_add(1);
-        EffectOutcome::Succeeded {
-            operation: intent.operation,
+    fn dispatch(
+        &mut self,
+        request: &EffectIntent,
+        credential: &Auth,
+        _observed_at: SystemTime,
+    ) -> std::result::Result<EffectOutcome, BindingError> {
+        if credential.is_expired() {
+            return Err(BindingError::Expired);
         }
+        self.legacy_calls = self.legacy_calls.saturating_add(1);
+        Ok(EffectOutcome::Succeeded {
+            operation: request.operation,
+        })
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {

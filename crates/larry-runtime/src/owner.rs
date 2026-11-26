@@ -5,16 +5,33 @@
 //! that responsibility — Moo for a workspace, Sentinel for egress, Nova for
 //! compute — through this trait, and the runtime records what it observes.
 //!
-//! The trait is deliberately synchronous and total: it returns an
-//! [`EffectOutcome`], not a `Result`. An owner that cannot say what happened
-//! reports [`EffectOutcome::Unknown`] rather than an error, because "we do not
-//! know" is a real, recordable state that drives reconciliation. An owner
-//! that fails to *reach* the endpoint is indistinguishable from one whose
-//! reply was lost, and the correct record for both is the same: unknown.
+//! The trait is deliberately synchronous. An owner that cannot say what
+//! happened returns [`EffectOutcome::Unknown`] rather than an error, because
+//! "we do not know" is a real, recordable state that drives reconciliation.
+//! Typed binding errors are reserved for refusals before an effect is reached,
+//! including a lapsed authority proof.
 
 use std::time::{Duration, SystemTime};
 
+use larry_contracts::binding::BindingError;
 use larry_contracts::effect::{EffectIntent, EffectOutcome};
+use lgwks_bot::error::KernelError;
+use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::Cap;
+
+/// Re-reads an owner-bound authority proof before any mutating effect.
+///
+/// The owner supplies the capabilities required by its concrete effect. A
+/// lapsed proof and an incomplete proof are distinct typed refusals so the
+/// runtime can record the exact boundary failure.
+pub fn validate_proof(proof: &Auth, required: &[Cap]) -> Result<(), BindingError> {
+    match proof.check(required) {
+        Ok(()) => Ok(()),
+        Err(KernelError::CredentialExpired { .. }) => Err(BindingError::Expired),
+        Err(KernelError::CapabilityDenied { .. }) => Err(BindingError::NoCoveringGrant),
+        Err(_) => Err(BindingError::NoCoveringGrant),
+    }
+}
 
 /// The owner boundary through which every external effect passes.
 pub trait EffectOwner {
@@ -45,13 +62,21 @@ pub trait EffectOwner {
     fn dispatch_bound(
         &mut self,
         _intent: &EffectIntent,
+        _proof: &Auth,
         _at: SystemTime,
     ) -> Result<EffectOutcome, larry_contracts::binding::BindingError> {
         Err(larry_contracts::binding::BindingError::UnsupportedOwner)
     }
 
-    /// Performs the effect for the first time.
-    fn dispatch(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome;
+    /// Performs the first effect reach after the owner accepts the checked proof.
+    fn dispatch(
+        &mut self,
+        intent: &EffectIntent,
+        proof: &Auth,
+        at: SystemTime,
+    ) -> Result<EffectOutcome, BindingError> {
+        self.dispatch_bound(intent, proof, at)
+    }
 
     /// Asks the endpoint what happened to an effect whose outcome is still
     /// unknown. Implementations must reuse `intent.operation` verbatim so a
@@ -87,7 +112,14 @@ pub mod fixture {
 
     use larry_contracts::ids::OperationId;
 
-    use super::{Duration, EffectIntent, EffectOutcome, EffectOwner, SystemTime};
+    use super::{
+        Auth, BindingError, Duration, EffectIntent, EffectOutcome, EffectOwner, SystemTime,
+    };
+
+    /// Reads the owner-bound credential before the fixture records a reach.
+    fn read_proof(proof: &Auth) -> Result<(), BindingError> {
+        super::validate_proof(proof, &[])
+    }
 
     /// An owner that returns scripted outcomes in order and records the
     /// operations it was asked about.
@@ -167,9 +199,15 @@ pub mod fixture {
             Ok(None)
         }
 
-        fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-            self.dispatched.push(intent.operation);
-            self.next(intent.operation)
+        fn dispatch_bound(
+            &mut self,
+            request: &EffectIntent,
+            credential: &Auth,
+            _observed_at: SystemTime,
+        ) -> Result<EffectOutcome, BindingError> {
+            read_proof(credential)?;
+            self.dispatched.push(request.operation);
+            Ok(self.next(request.operation))
         }
 
         fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
@@ -184,7 +222,17 @@ pub mod fixture {
 
     #[cfg(test)]
     mod tests {
-        use super::{EffectOutcome, OperationId, ScriptedOwner};
+        use std::time::{Duration, SystemTime};
+
+        use larry_contracts::authority::SecurityEpoch;
+        use larry_contracts::binding::BindingError;
+        use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
+        use larry_contracts::ids::{EffectId, OperationId, RunId, TenantId};
+        use lgwks_bot::kernel::cap::Cap;
+        use lgwks_bot::kernel::clock::Clock;
+        use lgwks_bot::kernel::gate::GrantSet;
+
+        use super::{EffectOwner, ScriptedOwner};
 
         // Source: specification D21/D43 and ADR-R04: an owner that cannot say
         // what happened reports unknown, so reconciliation stays open instead
@@ -209,6 +257,34 @@ pub mod fixture {
                 ScriptedOwner::new().next(first),
                 EffectOutcome::Unknown { operation } if operation == first
             ));
+        }
+
+        #[test]
+        fn a_lapsed_proof_is_refused_before_scripted_send() -> Result<(), Box<dyn std::error::Error>>
+        {
+            let clock = Clock::virtual_at(Duration::ZERO);
+            let proof = GrantSet::empty()
+                .grant_expiring(Cap::new("larry.test"), Duration::ZERO)
+                .issue_at(&[Cap::new("larry.test")], &clock)?;
+            let intent = EffectIntent::new(
+                EffectId::from_bytes([3; 16]),
+                OperationId::from_bytes([3; 16]),
+                RunId::from_bytes([3; 16]),
+                TenantId::from_bytes([3; 16]),
+                ReconciliationStrategy::Queryable,
+                SecurityEpoch::INITIAL,
+            );
+            let mut owner = ScriptedOwner::new();
+            assert_eq!(
+                owner.dispatch(&intent, &proof, SystemTime::UNIX_EPOCH),
+                Err(BindingError::Expired),
+                "the scripted owner refuses a proof lapsed at its own read"
+            );
+            assert!(
+                owner.dispatched.is_empty(),
+                "a refused proof is never recorded as sent"
+            );
+            Ok(())
         }
     }
 }

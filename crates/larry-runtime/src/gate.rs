@@ -121,6 +121,16 @@ impl Proof {
         auth.check(&caps)
             .map_err(|refusal| denial(&self.required, refusal))
     }
+
+    /// Returns the sealed proof after the runtime's capability check succeeds.
+    ///
+    /// The owner receives this same proof and performs its own expiry read at
+    /// the handoff, so a lease that lapses between the two reads cannot reach
+    /// an external effect (larry#461).
+    pub(crate) fn checked_auth(&self) -> Result<Auth, DenialReason> {
+        self.check()?;
+        self.auth.clone()
+    }
 }
 
 /// The recorded denial an estate refusal stands for: a deficit names the first

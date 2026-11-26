@@ -33,7 +33,7 @@ use larry_contracts::ids::{RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
-use larry_runtime::owner::EffectOwner;
+use larry_runtime::owner::{EffectOwner, validate_proof};
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
@@ -46,6 +46,7 @@ use super::Settings;
 use super::Task;
 use super::identity;
 use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
+use lgwks_bot::kernel::cap::Auth;
 
 /// The prefix every policy revision digest carries, so a revision computed here
 /// can never collide with a digest computed for another purpose.
@@ -54,8 +55,7 @@ const POLICY_REVISION_TAG: &[u8] = b"larry/executor/policy-revision/v1\0";
 /// The request each task costs against its one-run budget.
 const TASK_COST: u64 = 1;
 
-/// The schema version of the executor's own adapter contract, which a resolved
-/// effect records.
+/// Schema version recorded in each resolved executor effect.
 const ADAPTER_SCHEMA: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
@@ -68,11 +68,7 @@ const EXECUTOR_CAPABILITIES: [Scope; 5] = [
     Scope::ModelCommand,
 ];
 
-/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
-/// command (larry#93) is never in it: only an operator who isolates the commands
-/// outside Larry, as a Harbor task container does, names `model.command`. A terminal
-/// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
-/// needs no such scope and runs under this policy as it is.
+/// The default policy excludes unconstrained model commands (larry#93).
 const DEFAULT_POLICY: [Scope; 4] = [
     Scope::FileRead,
     Scope::FileWrite,
@@ -297,21 +293,16 @@ pub(super) fn lease_end(now: SystemTime, lease: Duration) -> Result<SystemTime, 
 
 /// The owner boundary the executor presents: the task body is the one external
 /// effect. `run` is the gated body, held until the bound reach runs it at most
-/// once; its outcome is the effect's outcome. The executor cannot be queried
-/// after an unbound dispatch, so both unbound dispatch and reconciliation
-/// report unknown — a fact the proposal's `RequiresHuman` strategy records as
-/// such rather than a success it never observed.
+/// once; its outcome is the effect's outcome.
 struct TaskOwner<'a, F>
 where
     F: FnOnce() -> Result<Report, ExecError>,
 {
     /// The repository path the task binds to.
-    repo: &'a std::path::Path,
+    repo: &'a Path,
     /// The tenant the run belongs to; one state directory is one tenant.
     tenant: TenantId,
-    /// The security generation the runtime's fence starts at: the epoch a
-    /// resolved effect names, read from the runtime's own settings rather than
-    /// a constant (larry#212).
+    /// The security generation the runtime's fence starts at.
     epoch: SecurityEpoch,
     /// The task document bytes the effect's payload binds to.
     task_bytes: &'a [u8],
@@ -327,9 +318,6 @@ where
 {
     fn resolve(&mut self, _intent: &EffectIntent) -> Result<Option<ResolvedEffect>, BindingError> {
         let raw = self.repo.as_os_str().as_encoded_bytes();
-        // The resolved link identity is the canonical repository path. A path
-        // that cannot be canonicalized binds to its raw bytes instead, which
-        // resolves identically on every call for a path that does not move.
         let canonical = match std::fs::canonicalize(self.repo) {
             Ok(path) => path.as_os_str().as_encoded_bytes().to_vec(),
             Err(_) => raw.to_vec(),
@@ -342,8 +330,6 @@ where
             self.task_bytes,
             b"larry.executor/v1",
         )?;
-        // The schema version of the executor's own adapter contract, and the
-        // generation the runtime's fence was built at.
         Ok(Some(ResolvedEffect::new(
             target,
             ADAPTER_SCHEMA,
@@ -354,10 +340,16 @@ where
     fn dispatch_bound(
         &mut self,
         intent: &EffectIntent,
+        proof: &Auth,
         _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
+        validate_proof(proof, &[])?;
+        if intent.tenant != self.tenant {
+            return Err(BindingError::Changed {
+                field: larry_contracts::binding::BindingField::Command,
+            });
+        }
         if self.slot.borrow().is_some() {
-            // The body ran once; a second reach never re-runs it.
             return Ok(EffectOutcome::Unknown {
                 operation: intent.operation,
             });
@@ -378,12 +370,6 @@ where
         };
         *self.slot.borrow_mut() = Some(finished);
         Ok(outcome)
-    }
-
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
