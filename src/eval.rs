@@ -21,8 +21,8 @@ use std::time::Instant;
 use lgwks_macros::Error;
 
 use crate::executor::{
-    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, SessionDoor,
-    Settings, Stop, Task, execute_eval, run_command, run_session,
+    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, RunHooks,
+    SessionDoor, Settings, Stop, Task, execute_eval, run_command, run_session,
 };
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
@@ -311,7 +311,7 @@ fn session_acceptance_passed(
             settings.timeout(),
             &ledger,
             &run,
-            &|| false,
+            RunHooks::new(&|| false, None),
         )
         .map_err(|cause| EvalError::Exec {
             id: task.id.clone(),

@@ -18,7 +18,7 @@ use super::{HOST_REFUSED, Island, Isolation, Outcome, POLICY_REFUSED};
 use crate::executor::confine::{ConfineError, Platform};
 use crate::executor::gate::{self, Subject, admit_and_run};
 use crate::executor::recovery::journal_path;
-use crate::executor::run::{CommandResult, run_command};
+use crate::executor::run::{CommandResult, RunHooks, run_command};
 use crate::executor::session::run_session;
 use crate::executor::sim_tree::{
     Origin, Scratch, Shape, files_beneath, origin, scratch, settings, tree_digest,
@@ -119,7 +119,7 @@ impl Rig {
             Duration::from_secs(60),
             &self.ledger,
             id,
-            &|| false,
+            RunHooks::new(&|| false, None),
         )
     }
 

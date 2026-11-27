@@ -39,7 +39,7 @@ use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::prepare;
-use super::run::{CommandResult, Place, run_command};
+use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
 use crate::model::{Completion, ModelClient, Usage};
 
@@ -146,6 +146,12 @@ pub(crate) trait Observer {
     /// The change in full, as a unified diff of at most 1 MiB, offered once just before
     /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
     fn diff(&mut self, _text: &str) {}
+    /// A nonblocking callback for live command output, when the frontend can paint it.
+    fn stream_callback(&mut self) -> Option<StreamCallback> {
+        None
+    }
+    /// Reports callback chunks dropped at the bounded event channel.
+    fn stream_dropped(&mut self) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
     /// An observer that records nothing leaves this alone.
     fn handed(&mut self, _line: &str, _applied: bool) {}
@@ -546,30 +552,7 @@ impl Turn<'_> {
                     if self.observer.cancelled() {
                         break Stop::Cancelled;
                     }
-                    self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
-                    // The person's cancel is polled while the command runs, so Esc
-                    // ends it and its whole group, not only the next step (larry#242).
-                    let result = run_command(
-                        &argv,
-                        self.place,
-                        &self.settings.path,
-                        self.settings.timeout,
-                        self.ledger,
-                        self.task_id,
-                        &|| self.observer.cancelled(),
-                    )?
-                    .clipped(OBSERVED_BYTES);
-                    let answer = Answer::Observed {
-                        step,
-                        command,
-                        status: status(&result),
-                        output: Some(streams(&result)),
-                    };
-                    let was_interrupted = result.interrupted();
-                    let passed =
-                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
-                    self.observer.finished(step, &answer.text(), passed);
+                    let (answer, was_interrupted, result) = self.run_step(step, command)?;
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
                     if was_interrupted {
@@ -597,6 +580,39 @@ impl Turn<'_> {
             declined,
             interrupted,
         })
+    }
+
+    /// Runs `command` as step `step` and observes it: live output streams while the
+    /// command runs (larry#252), and the person's cancel ends its whole group (larry#242).
+    fn run_step(
+        &mut self,
+        step: usize,
+        command: String,
+    ) -> Result<(Answer, bool, CommandResult), ExecError> {
+        self.observer.started(step, &command);
+        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let stream = self.observer.stream_callback();
+        let result = run_command(
+            &argv,
+            self.place,
+            &self.settings.path,
+            self.settings.timeout,
+            self.ledger,
+            self.task_id,
+            RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
+        );
+        self.observer.stream_dropped();
+        let result = result?.clipped(OBSERVED_BYTES);
+        let answer = Answer::Observed {
+            step,
+            command,
+            status: status(&result),
+            output: Some(streams(&result)),
+        };
+        let was_interrupted = result.interrupted();
+        let passed = result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
+        self.observer.finished(step, &answer.text(), passed);
+        Ok((answer, was_interrupted, result))
     }
 
     /// One completion over `conversation`, compacted first when it needs it and
