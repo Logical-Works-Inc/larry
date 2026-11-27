@@ -233,6 +233,74 @@ fn sim_only_reported_usage_debits_the_budget() -> TestResult {
     Ok(())
 }
 
+/// A gateway that omits `usage` never spends nothing: every unmetered reply
+/// settles at its reservation (the request size as tokens), so a 900-token
+/// budget refuses once the settled charge reaches it, and the refusal is the
+/// typed `BudgetExceeded` before any gateway byte (larry#204, CWE-770). A
+/// client settling `None` at zero would admit every call past the budget.
+#[test]
+fn sim_a_reply_without_usage_settles_at_its_reservation() -> TestResult {
+    mock_model::run(
+        Config {
+            omit_usage: true,
+            ..Config::seeded(4)
+        },
+        |handle| {
+            let table = with(
+                settings(&base(handle.addr())),
+                "LARRY_MODEL_TOKEN_BUDGET",
+                "900",
+            );
+            let shared = client(table)?;
+            let mut admitted = 0_u64;
+            let mut refused = false;
+            for _ in 0..200 {
+                match shared.complete(&[user("unmetered")]) {
+                    Ok(_) => admitted = admitted.saturating_add(1),
+                    Err(ModelError::BudgetExceeded { tokens, limit }) => {
+                        assert_eq!(limit, 900, "the refusal names the budget: {limit}");
+                        assert!(
+                            tokens >= 900,
+                            "the settled charge reached the budget: {tokens}"
+                        );
+                        refused = true;
+                        break;
+                    }
+                    Err(other) => {
+                        return Err(std::io::Error::other(format!(
+                            "an unmetered reply is served, not refused: {other:?}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            assert!(refused, "the settled reservations refuse past the budget");
+            assert!(
+                admitted >= 1,
+                "at least one unmetered call settles: {admitted}"
+            );
+            assert_eq!(
+                handle.served(),
+                admitted,
+                "every admitted call reached the mock exactly once"
+            );
+            let served_before = handle.served();
+            let again = shared.complete(&[user("unmetered")]);
+            assert!(
+                matches!(again, Err(ModelError::BudgetExceeded { .. })),
+                "past the settled budget the next call is refused: {again:?}"
+            );
+            assert_eq!(
+                handle.served(),
+                served_before,
+                "the refusal reaches no gateway"
+            );
+            Ok::<_, Box<dyn Error>>(())
+        },
+    )?;
+    Ok(())
+}
+
 /// One non-zero backoff is waited, then cancelled: the pause sees exactly the
 /// configured wait, answers it `false`, and the gateway's refusal is the
 /// answer after one served request. A client that slept on the wall or retried

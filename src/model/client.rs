@@ -241,7 +241,14 @@ impl ModelClient {
                     }
                 }
             }
-            None => (0, 0),
+            None => {
+                // A gateway that reports no usage spent the call anyway: many
+                // OpenAI-compatible proxies omit `usage`, and one that omits
+                // it on purpose would otherwise spend nothing (larry#204,
+                // CWE-770). Settle at the reservation (the request size as
+                // tokens, priced at the dearer route rate), never at zero.
+                (reserve_tokens, reserve_micros)
+            }
         };
         self.limiter.record(
             &self.tenant,

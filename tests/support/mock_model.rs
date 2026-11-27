@@ -111,6 +111,10 @@ pub(crate) struct Config {
     /// Reply content for request index `n` (larry#93: a terminal session's
     /// scripted commands); indexes past the end compose words from the seed.
     pub(crate) contents: Vec<String>,
+    /// When set, every reply carries no `usage` block, the way many
+    /// OpenAI-compatible proxies answer (larry#204): the client must settle
+    /// the call at its reservation, never at zero.
+    pub(crate) omit_usage: bool,
     /// When set, a request must carry exactly one `User-Agent` header with this
     /// value or it is refused with a 400 (larry#230).
     pub(crate) user_agent: Option<String>,
@@ -126,6 +130,7 @@ impl Config {
             script: Vec::new(),
             fault_per_mille: 0,
             contents: Vec::new(),
+            omit_usage: false,
             user_agent: None,
         }
     }
@@ -371,6 +376,11 @@ impl State {
         }
         let scripted = self.config.contents.get(usize::try_from(index)?);
         let good = completion(model, request, &mut rng, scripted)?;
+        let good = if self.config.omit_usage {
+            without_usage(&good)?
+        } else {
+            good
+        };
         apply(fault, good)
     }
 
@@ -456,6 +466,17 @@ fn apply(fault: Option<Fault>, good: Vec<u8>) -> Result<Planned, Failure> {
         ),
         Some(Fault::EmptyContent) => Planned::whole(200, Vec::new(), with_choice(&good, "", "")?),
     })
+}
+
+/// `good` with its `usage` block removed, the way proxies that never meter
+/// answer (larry#204). A `null` usage would parse the same way; the block is
+/// removed outright so the reply matches the unmetered shape byte for byte.
+fn without_usage(good: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mut reply = json::from_slice::<Value>(good)?;
+    if let Value::Object(ref mut map) = reply {
+        map.remove("usage");
+    }
+    Ok(json::to_vec(&reply)?)
 }
 
 /// `good` with its first choice's `member` set to `value`, or its message content set to

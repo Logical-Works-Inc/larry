@@ -41,7 +41,11 @@ usage beside the pending hold of its calls in flight: `before` adds the
 call's request size as pending tokens (and its price at the dearer route
 rate as pending micros) under the same lock that checks spent plus pending
 against both budgets, and `record` releases that hold and settles the usage
-the gateway reported, zero on a failed call. A check without the hold
+the gateway reported, zero on a failed call. A reply that reports no `usage`
+settles at the reservation (the request size as tokens, its price at the
+dearer route rate), never at zero: many OpenAI-compatible proxies omit
+`usage`, and settling zero would let an untrusted gateway spend nothing
+(larry#204, CWE-770). A check without the hold
 admitted every call in flight before any of them recorded, spending N times
 past the budget.
 
@@ -54,6 +58,7 @@ whether to retry.
 
 The unset backoff is zero, like the executor, which never waits for a retry:
 a wait it is asked for stops the retry at once, so the default asks for none.
+Unmetered gateways spend their reservation, so a budget still bounds them.
 
 The route's price table rides with it (migration 8, ADR 0127): revision 1 with
 no rates at `add`, `larry route price` setting micro-dollar rates and bumping
@@ -92,3 +97,6 @@ runs 100 and 1,000 threads on one tenant-route and admits exactly the
 budget's share, leaving the other tenant untouched. `sim_keyed_clients_replay_one_wait_sequence`
 drives two same-key clients through one scripted fault script and asserts
 equal waits inside the policy bound, different for a second tenant.
+`sim_a_reply_without_usage_settles_at_its_reservation` answers every
+completion with no `usage` on a 900-token budget and asserts the limiter
+refuses with `BudgetExceeded` once the settled charge reaches it.
