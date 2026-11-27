@@ -300,6 +300,15 @@ where
         })
     }
 
+    /// The bounded set of runs with a cancellation admitted but not reduced.
+    pub(super) fn cancel_pending_runs(&self) -> BTreeSet<RunId> {
+        self.admitted
+            .iter()
+            .filter(|admitted| admitted.command.content().kind() == CommandKind::Cancel)
+            .map(|admitted| admitted.run)
+            .collect()
+    }
+
     /// Holds a just-accepted ready command pending when it must wait, or when
     /// its run already has a command pending that it may not pass. Returns
     /// the command back when it may be reduced now.
