@@ -17,7 +17,7 @@ use super::{ExecError, Ledger, digest_hex, identity, state_dir};
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
 /// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
+const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
@@ -68,6 +68,8 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::KeyEnvOutsideNamespace
         | RouteError::KeyEnvNotThisTenants { .. }
         | RouteError::BadTemperature
+        | RouteError::BadKind
+        | RouteError::BadPrompt
         | RouteError::BadResidency
         | RouteError::BadRequestBytes
         | RouteError::BadDescribe => "",
@@ -128,6 +130,10 @@ struct Flags<'arg> {
     temperature: Option<&'arg str>,
     /// `--request-bytes`.
     request_bytes: Option<&'arg str>,
+    /// The provider kind: `openai-chat` unless `--kind` names another.
+    kind: Option<&'arg str>,
+    /// `--prompt`.
+    prompt: Option<&'arg str>,
     /// `--describe`.
     describe: Option<&'arg str>,
     /// `--default`.
@@ -153,6 +159,8 @@ fn parse_flags<'arg>(flags: &[&'arg str]) -> Result<Flags<'arg>, RouteCliError> 
             "--residency" => &mut parsed.residency,
             "--temperature" => &mut parsed.temperature,
             "--request-bytes" => &mut parsed.request_bytes,
+            "--kind" => &mut parsed.kind,
+            "--prompt" => &mut parsed.prompt,
             "--describe" => &mut parsed.describe,
             _ => return Err(RouteCliError::Usage("unknown flag")),
         };
@@ -226,20 +234,26 @@ fn add(
     out: &mut impl Write,
 ) -> Result<(), RouteCliError> {
     let parsed = parse_flags(flags)?;
-    // A route added without `--describe` has the empty description.
+    // A route added without `--describe` has the empty description, and one
+    // added without `--kind` is an OpenAI chat route.
     let mut describe = "";
     if let Some(text) = parsed.describe {
         describe = text;
     }
+    let kind = match parsed.kind {
+        Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
+        None => Kind::OpenAiChat,
+    };
     let route = Route::new(&Draft {
         id,
-        kind: Kind::OpenAiChat,
+        kind,
         base_url: required(parsed.url, "--url")?,
         model: required(parsed.model, "--model")?,
         key_env: required(parsed.key_env, "--key-env")?,
         temperature: number(parsed.temperature, "--temperature")?,
         request_bytes: number(parsed.request_bytes, "--request-bytes")?,
         residency: Some(required(parsed.residency, "--residency")?),
+        prompt: parsed.prompt,
         describe,
     })
     .map_err(RouteCliError::Route)?;
@@ -277,6 +291,7 @@ fn listed(route: &Route, table: &Table) -> Value {
         "temperature": route.temperature(),
         "request_bytes": route.request_bytes(),
         "residency": route.residency(),
+        "prompt_hash": route.prompt_hash(),
         "describe": route.describe(),
         "default": table.default_id() == Some(route.id()),
     })
@@ -315,10 +330,11 @@ fn list(
         say(
             out,
             &format_args!(
-                "{}\t{}\t{}\t{residency}{marker}",
+                "{}\t{}\t{}\t{residency}{marker}\t{}",
                 route.id(),
                 route.model(),
-                route.host()
+                route.host(),
+                route.kind().name(),
             ),
         )?;
     }
@@ -423,6 +439,12 @@ mod tests {
         let numbered = said(&RouteCliError::Route(RouteError::BadTemperature));
         assert!(numbered.starts_with("route temperature must"), "{numbered}");
         assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
+        let kind = said(&RouteCliError::Route(RouteError::BadKind));
+        assert!(kind.starts_with("route kind must be one of"), "{kind}");
+        assert_eq!(kind.matches("route").count(), 1, "{kind}");
+        let prompt = said(&RouteCliError::Route(RouteError::BadPrompt));
+        assert!(prompt.starts_with("route prompt must be"), "{prompt}");
+        assert_eq!(prompt.matches("route").count(), 1, "{prompt}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [

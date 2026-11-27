@@ -63,17 +63,11 @@ pub(crate) struct Ledger {
 impl Ledger {
     /// Opens, creating if needed, the ledger under the state directory.
     ///
-    /// Executors starting together on one state directory open the store at once:
-    /// `lgwks_deps::sqlite::open` sets its 60 s busy timeout before its first
-    /// statement and moves a fresh file to WAL under a blocking kernel lock
-    /// (logicalworks-crates#873), and `migrate` runs each step in one immediate
-    /// transaction (#872). Every wait is the store's busy handler, which sleeps, so
-    /// a waiter leaves the core to the holder (larry#398 removed the lock loop that
-    /// spun beside it).
-    ///
-    /// The store holds the receipt key, so it is created owner-only before SQLite
-    /// opens it (SQLite gives the write-ahead files the database's mode), and a
-    /// store left wider by an earlier release is narrowed on every open.
+    /// Executors starting together open the store at once on its own 60 s busy
+    /// wait (logicalworks-crates#872, #873; larry#398 removed the lock loop that
+    /// spun beside it). The store holds the receipt key, so it is created
+    /// owner-only before SQLite opens it, and a store left wider by an earlier
+    /// release is narrowed on every open.
     ///
     /// # Errors
     ///
@@ -92,7 +86,7 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            7,
+            8,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -101,6 +95,7 @@ impl Ledger {
                 ROUTE_SCHEMA,
                 policy::POLICY_SCHEMA,
                 policy::REPO_ROOT_SCHEMA,
+                routes::ROUTE_PROMPT_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;
