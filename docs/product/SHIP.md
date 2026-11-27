@@ -114,7 +114,7 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [x] #244 the artifact pane shows the task's diff, output and receipt (ADR 0047): PR #253, 13 pane sims (256 hostile seeds), journey at 120x32 (the pane opens at 108 columns) shows the diff before the folder changes.
 - [ ] #252 the pane streams a running command's output. Proof: a PTY journey shows a command's first line before its second exists.
 - [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
-- iOS and Android: #115 in section 4, after #90 and #247. #271 typed verification gate: ADR 0130, PR #pending, 1355 tests passed on Oracle; PR number is finalized at merge.
+- iOS and Android: #115 in section 4, after #90 and #247. #271 typed verification gate: ADR 0130, PR #472, 1355 tests passed on Oracle.
 
 ## Holds and open design
 - Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2. #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.

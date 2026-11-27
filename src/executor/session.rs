@@ -644,75 +644,8 @@ impl Turn<'_> {
 
 /// Keeps a bounded model reply in the compacted conversation.
 #[cfg(test)]
-mod verification_tests {
-    use super::super::session_reply::{ReplyFault, parse_reply};
-    use super::{
-        FinishRequest, command_passed, has_fresh_check, same_finish, verification_receipt,
-    };
-
-    #[test]
-    fn finish_refuses_without_fresh_passing_check() {
-        assert_eq!(
-            parse_reply(r#"{"done":"the task is complete"}"#),
-            Err(ReplyFault::Keys),
-            "the legacy model-written done token must not bypass verification"
-        );
-        assert!(
-            !has_fresh_check(Some("cargo test"), false, "cargo test"),
-            "a failed check has no receipt"
-        );
-        assert!(
-            !has_fresh_check(None, true, "cargo test"),
-            "a finish without a receipt is refused"
-        );
-        assert!(
-            !has_fresh_check(Some("cargo fmt"), true, "cargo test"),
-            "a different passing command is not the named check"
-        );
-    }
-
-    fn finish_request(summary: &str) -> FinishRequest {
-        FinishRequest {
-            summary: summary.to_owned(),
-            check: String::from("true"),
-            artifacts: vec![String::from("out")],
-            state: vec![String::from("clean")],
-            servers: vec![String::from("none")],
-        }
-    }
-
-    #[test]
-    fn repeated_finish_requires_the_identical_request() {
-        let first = finish_request("ready");
-        assert!(same_finish(Some(&first), &first));
-        assert!(!same_finish(None, &first));
-        assert!(!same_finish(Some(&finish_request("different")), &first));
-    }
-
-    #[test]
-    fn receipt_marks_the_check_as_fresh_shell_evidence() {
-        let receipt = verification_receipt(
-            "true",
-            &[String::from("out")],
-            &[String::from("clean")],
-            &[String::from("none")],
-        );
-        assert_eq!(
-            receipt
-                .get("fresh_shell")
-                .and_then(lgwks_std::json::Value::as_bool),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn command_passes_only_for_a_clean_zero_exit() {
-        assert!(command_passed(Some(0), false, false));
-        assert!(!command_passed(Some(1), false, false));
-        assert!(!command_passed(Some(0), true, false));
-        assert!(!command_passed(Some(0), false, true));
-    }
-}
+#[path = "session_verify.rs"]
+mod verification_tests;
 
 #[cfg(test)]
 #[path = "sim_session.rs"]

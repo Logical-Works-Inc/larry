@@ -42,7 +42,11 @@ the success claim depend on those observations.
 ## Proof
 
 `finish_refuses_without_fresh_passing_check` rejects the old token, a failed
-check and a different last command. The seeded reply parser continues to test
+check and a different last command.
+`sim_gate_handshake_refuses_an_edit_after_the_check_for_every_seed` drives the
+pure handshake over seeds: no receipt refused, an edit after the check refused,
+the repeated finish accepted with the receipt naming the check. The seeded
+reply parser continues to test
 bounded hostile replies. The PTY and ACP journeys remain the shipped binary
 proof paths; their acceptance cells must send the typed finish request.
 

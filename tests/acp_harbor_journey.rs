@@ -428,20 +428,23 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
 fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
     let name = format!("tenant{index}.txt");
     let command = format!(r#"{{"command":"touch {name}"}}"#);
-    let config = scripted(
-        23,
-        &[
-            command.as_str(),
-            r#"{"finish":{"summary":"ok","check":"touch tenant0.txt","artifacts":["tenant0.txt"],"state":["ready"],"servers":["none"]}}"#,
-            r#"{"finish":{"summary":"ok","check":"touch tenant0.txt","artifacts":["tenant0.txt"],"state":["ready"],"servers":["none"]}}"#,
-        ],
+    let finish = format!(
+        r#"{{"finish":{{"summary":"ok","check":"touch {name}","artifacts":["{name}"],"state":["ready"],"servers":["none"]}}}}"#
     );
+    let config = scripted(23, &[command.as_str(), finish.as_str(), finish.as_str()]);
     mock_model::run(config, |mock| {
         let mut acp = agent(state, mock, Some(SESSION_POLICY))?;
         let session = acp.open(work)?;
         let (_, reply) = acp.call(&prompt(2, &session, "touch"))?;
+        assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
         assert!(work.join(&name).exists(), "its own file");
         let report = reply.at("/result/_meta/larry/report")?.clone();
+        let expected = format!("touch {name}");
+        assert_eq!(
+            report.at("/verification/check")?.as_str(),
+            Some(expected.as_str()),
+            "the receipt names the check"
+        );
         Ok((report, mock.served()))
     })
 }
@@ -466,7 +469,7 @@ fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> Te
     };
     assert_eq!(
         (first_served, second_served),
-        (3, 4),
+        (3, 3),
         "each gateway saw its own session"
     );
     assert_ne!(
