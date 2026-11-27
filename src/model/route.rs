@@ -88,6 +88,8 @@ pub enum RouteError {
     },
     /// The temperature is not a number from 0 to 2.
     BadTemperature,
+    /// The kind is not one the client speaks.
+    BadKind,
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
     BadResidency,
     /// The request byte bound is outside 1024 bytes to 16 MiB.
@@ -147,6 +149,9 @@ impl fmt::Display for RouteError {
                 "route key-env {variable} is not this tenant's: it must start with {prefix}"
             ),
             Self::BadTemperature => out.write_str("route temperature must be a number from 0 to 2"),
+            Self::BadKind => out.write_str(
+                "route kind must be one of openai-chat, anthropic-messages, openai-responses",
+            ),
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
             ),
@@ -186,6 +191,7 @@ impl std::error::Error for RouteError {
             | Self::KeyEnvOutsideNamespace
             | Self::KeyEnvNotThisTenants { .. }
             | Self::BadTemperature
+            | Self::BadKind
             | Self::BadResidency
             | Self::BadRequestBytes
             | Self::BadDescribe
@@ -196,13 +202,18 @@ impl std::error::Error for RouteError {
     }
 }
 
-/// What speaks at the other end of a route. One kind exists today; #205 adds
-/// the others, and a new kind is one variant and one wire adapter.
+/// What speaks at the other end of a route. One variant per provider kind
+/// (larry#205, larry#539); the client's wire adapter for a new kind plugs in
+/// at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Kind {
     /// An OpenAI-compatible chat-completions endpoint.
     OpenAiChat,
+    /// The Anthropic Messages API (`x-api-key`, `anthropic-version`).
+    AnthropicMessages,
+    /// The OpenAI Responses API.
+    OpenAiResponses,
 }
 
 impl Kind {
@@ -210,6 +221,8 @@ impl Kind {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::OpenAiChat => "openai-chat",
+            Self::AnthropicMessages => "anthropic-messages",
+            Self::OpenAiResponses => "openai-responses",
         }
     }
 
@@ -217,6 +230,8 @@ impl Kind {
     pub(crate) fn parse(name: &str) -> Option<Kind> {
         match name {
             "openai-chat" => Some(Self::OpenAiChat),
+            "anthropic-messages" => Some(Self::AnthropicMessages),
+            "openai-responses" => Some(Self::OpenAiResponses),
             _ => None,
         }
     }
@@ -653,6 +668,24 @@ mod tests {
         let bare = built(|fields| fields.key_env = "LARRY_KEY_0123456789ABCDEF_")?;
         let refused = bare.key_env_refusal(TENANT);
         assert!(refused.is_some(), "the bare namespace names nothing");
+        Ok(())
+    }
+
+    /// Every named kind parses back and seals with its name (larry#205,
+    /// larry#539). An unknown kind parses to nothing.
+    #[test]
+    fn each_kind_parses_and_seals_with_its_name() -> Result<(), RouteError> {
+        for name in ["openai-chat", "anthropic-messages", "openai-responses"] {
+            let kind = Kind::parse(name).ok_or(RouteError::BadKind)?;
+            assert_eq!(kind.name(), name, "{name} round trips");
+            let route = built(|fields| fields.kind = kind)?;
+            let sealed = route.seal().to_string();
+            assert!(
+                sealed.contains(&format!("\"kind\":\"{name}\"")),
+                "{name} seals: {sealed}"
+            );
+        }
+        assert_eq!(Kind::parse("other"), None, "an unknown kind");
         Ok(())
     }
 }

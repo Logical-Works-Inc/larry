@@ -60,10 +60,13 @@ impl Route {
     pub(crate) fn describe(&self) -> &str {
         &self.describe
     }
-    /// What a sealed report says about the route, without a key or key variable.
+    /// What a sealed report says about the route: its id, kind, the model,
+    /// the gateway's host and port, and the residency. Never the URL's path,
+    /// a key or the name of the key's variable.
     pub(crate) fn seal(&self) -> Value {
         json!({
             "id": self.id,
+            "kind": self.kind.name(),
             "model": self.model,
             "host": self.host,
             "residency": self.residency,
