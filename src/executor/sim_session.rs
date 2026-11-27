@@ -21,10 +21,8 @@ use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, RunHooks, clip, run_command};
-use super::{
-    ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
-    check, parse_reply,
-};
+use super::reply::{Reply, ReplyFault, parse_reply};
+use super::{ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, SessionError, check};
 use crate::json_at::At;
 use crate::sim_error::SimError;
 use crate::sim_lanes::{self, LaneError};
