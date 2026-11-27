@@ -17,7 +17,8 @@ use lgwks_std::seeded::Seeded;
 use super::super::ExecError;
 use super::super::gate::{finish, policy, task_settings};
 use super::{
-    JOURNALS_DIR, RunLock, journal_live, journal_path, recover, recovered_evidence, run_held,
+    JOURNALS_DIR, RunLock, journal_live, journal_path, live_between, recover, recovered_evidence,
+    run_held,
 };
 
 /// What every simulation here returns.
@@ -334,6 +335,53 @@ fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult
             "seed {seed}: a held journal is never touched"
         );
         drop(held);
+    }
+    Ok(())
+}
+
+/// larry#460, the run that finishes as the sweep reads it: a run removes its journal, then its
+/// lock, and a probe that saw the journal before the run finished then found no lock and opened
+/// the journal, which made an empty one in the finished run's place, so the next start set it
+/// aside as `.recovered` evidence of a run that never died. For every seed the run finishes
+/// either before the probe or right after the probe's first read; the probe never makes a
+/// journal, and a recovery after it sets nothing aside.
+#[test]
+fn sim_a_run_finishing_as_the_sweep_probes_it_leaves_no_journal() -> TestResult {
+    let (scopes, capacity) = settings()?;
+    let state = scratch_directory()?;
+    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+    for seed in SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let id = format!("018f0000-0000-7000-8000-{:012x}", rng.below(1 << 40)?);
+        let path = journal_path(&state, &id);
+        let lock = RunLock::take(&state, &id)?.ok_or("a fresh run takes its lock")?;
+        let journal = Journal::open(&path, capacity)?;
+        // The run's own end, in the gate's order: the journal goes, then the lock.
+        let end = move || -> Result<(), ExecError> {
+            drop(journal);
+            std::fs::remove_file(&path).map_err(ExecError::Journals)?;
+            lock.release()
+        };
+        let early = rng.below(2)? == 0;
+        let live = if early {
+            end()?;
+            live_between(&state, &scopes, &id, || Ok(()))?
+        } else {
+            live_between(&state, &scopes, &id, end)?
+        };
+        assert_eq!(
+            live, !early,
+            "seed {seed:#x}: a run is live exactly while it held its lock at the probe"
+        );
+        assert!(
+            !journal_path(&state, &id).try_exists()?,
+            "seed {seed:#x}: the probe made no journal in a finished run's place"
+        );
+        assert_eq!(
+            recover(&state, &scopes)?.set_aside,
+            0,
+            "seed {seed:#x}: no run died, so nothing is set aside"
+        );
     }
     Ok(())
 }

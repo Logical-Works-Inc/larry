@@ -13,8 +13,8 @@ mod planned;
 
 pub(crate) use self::planned::Knobs;
 
-pub(super) use self::check::is_shell;
 use self::check::{check_acceptance, check_repo_and_base, owned_argvs};
+pub(super) use self::check::{is_base, is_shell};
 use super::MAX_TIMEOUT_MS;
 use super::author::Brief;
 use crate::model::is_route_id;
@@ -41,7 +41,7 @@ const MAX_REPO_BYTES: usize = 4096;
 const MAX_KEY_BYTES: usize = 256;
 
 /// Every key a task document may carry.
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 11] = [
     "repo",
     "base",
     "acceptance",
@@ -52,6 +52,7 @@ const KEYS: [&str; 10] = [
     "route",
     "shell",
     "timeout_ms",
+    "deadline_ms",
 ];
 
 /// One parsed `larry exec` task document.
@@ -81,6 +82,8 @@ pub struct Task {
     shell: Option<String>,
     /// The longest one command may run, in milliseconds, when the document names it.
     timeout_ms: Option<u64>,
+    /// The longest the whole task may run, in milliseconds, when the document names it.
+    deadline_ms: Option<u64>,
     /// The document bytes it was parsed from, kept to name the run.
     bytes: Vec<u8>,
 }
@@ -202,6 +205,7 @@ impl Task {
             confine_acceptance: false,
             shell: limits::shell_of(object)?,
             timeout_ms: limits::millis_of(object, "timeout_ms")?,
+            deadline_ms: limits::millis_of(object, "deadline_ms")?,
             bytes: bytes.to_vec(),
         })
     }

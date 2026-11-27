@@ -5,12 +5,12 @@
 //! the executor (larry#123): a fresh clone of the repository at `HEAD` (or the
 //! base the task names), the model writes each named file, each acceptance
 //! command runs under `sh -c` (or the shell the task names), within the timeout
-//! and deadline the task names (larry#439), and the sealed report comes back
-//! with its receipt. Only an accepted run is a success; a rejected run, a
-//! refusal and an unconfigured executor are typed tool errors, so no success is
-//! ever reported for work that did not pass.
+//! and deadline the task names and the tenant's ceilings admit (larry#439),
+//! and the sealed report comes back with its receipt. Only an accepted run is a
+//! success; a rejected run, a refusal and an unconfigured executor are typed
+//! tool errors, so no success is ever reported for work that did not pass.
 
-use crate::executor::{ExecError, Knobs, Report, Settings, Task, execute};
+use crate::executor::{ExecError, Knobs, MAX_TIMEOUT_MS, Report, Settings, Task, execute};
 use crate::model::{RouteError, is_route_id};
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
@@ -19,7 +19,7 @@ use std::path::{Component, Path};
 /// Name of the only tool.
 const SUBMIT_TASK: &str = "larry_submit_task";
 /// Arguments the tool accepts; anything else is refused.
-const ARGUMENTS: [&str; 8] = [
+const ARGUMENTS: [&str; 9] = [
     "goal",
     "repo",
     "files",
@@ -28,11 +28,10 @@ const ARGUMENTS: [&str; 8] = [
     "shell",
     "base",
     "timeout_ms",
+    "deadline_ms",
 ];
 /// Longest shell or base in bytes: the task document's bounds.
 const MAX_WORD_BYTES: usize = 256;
-/// Longest timeout or deadline in milliseconds: one day, the executor's bound.
-const MAX_MILLIS: u64 = 86_400_000;
 /// Longest route id in bytes: the route table's bound.
 const MAX_ROUTE_BYTES: usize = 64;
 /// Longest goal in bytes.
@@ -100,7 +99,7 @@ fn declared() -> Vec<Value> {
     vec![json!({
         "name": SUBMIT_TASK,
         "title": "Submit a task to Larry",
-        "description": "Hand Larry a typed task: a goal, the repository (a local path or git URL, cloned fresh at HEAD), the files the model may write and the shell acceptance commands that prove it. Larry has its model write each file, runs every command in the clone, and returns the diff, the command output and an ed25519 receipt that `larry verify` checks. An optional shell (default sh), base (default HEAD) and per-command timeout_ms are carried on the task the executor runs. Only an accepted run is a success; a rejected run is task_rejected, a refusal task_refused, a missing executor executor_not_connected.",
+        "description": "Hand Larry a typed task: a goal, the repository (a local path or git URL, cloned fresh at HEAD), the files the model may write and the shell acceptance commands that prove it. Larry has its model write each file, runs every command in the clone, and returns the diff, the command output and an ed25519 receipt that `larry verify` checks. An optional shell (default sh), base (default HEAD), per-command timeout_ms and whole-task deadline_ms are each bounded by the tenant's ceilings; past one is task_refused with nothing cloned. Only an accepted run is a success; a rejected run is task_rejected, a refusal task_refused, a missing executor executor_not_connected.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -121,7 +120,8 @@ fn declared() -> Vec<Value> {
                 "route": { "type": "string", "minLength": 1, "maxLength": MAX_ROUTE_BYTES },
                 "shell": { "type": "string", "minLength": 1, "maxLength": MAX_WORD_BYTES },
                 "base": { "type": "string", "minLength": 1, "maxLength": MAX_WORD_BYTES },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_MILLIS }
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS },
+                "deadline_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS }
             },
             "required": ["goal", "repo", "files", "acceptance"],
             "additionalProperties": false
@@ -203,7 +203,7 @@ fn tool_error(code: &str, message: &str) -> Value {
 enum TaskError {
     /// An argument outside the schema.
     #[error(
-        "unknown argument; allowed: goal, repo, files, acceptance, route, shell, base, timeout_ms"
+        "unknown argument; allowed: goal, repo, files, acceptance, route, shell, base, timeout_ms, deadline_ms"
     )]
     UnknownArgument,
     /// A required argument is absent.
@@ -300,6 +300,7 @@ fn validate_task(arguments: &Map) -> Result<Checked<'_>, TaskError> {
         shell: optional_text(arguments, "shell")?,
         base: optional_text(arguments, "base")?,
         timeout_ms: optional_millis(arguments, "timeout_ms")?,
+        deadline_ms: optional_millis(arguments, "deadline_ms")?,
     };
     Ok(Checked {
         goal,
@@ -320,13 +321,14 @@ fn optional_text<'a>(arguments: &'a Map, key: &'static str) -> Result<Option<&'a
     }
 }
 
-/// An optional whole number of milliseconds in `1..=`[`MAX_MILLIS`].
+/// An optional whole number of milliseconds in `1..=86_400_000`, the executor's own
+/// bound on any wait: [`MAX_TIMEOUT_MS`].
 fn optional_millis(arguments: &Map, key: &'static str) -> Result<Option<u64>, TaskError> {
     let Some(value) = arguments.get(key) else {
         return Ok(None);
     };
     match value.as_u64() {
-        Some(millis) if (1..=MAX_MILLIS).contains(&millis) => Ok(Some(millis)),
+        Some(millis) if (1..=MAX_TIMEOUT_MS).contains(&millis) => Ok(Some(millis)),
         _ => Err(TaskError::WrongType {
             key,
             form: "a whole number of milliseconds in 1..=86400000",
@@ -501,6 +503,11 @@ mod tests {
             json!({"goal": "g", "repo": "r", "acceptance": ["c"], "files": ["/etc/passwd"]}),
             json!({"goal": 7, "repo": "r", "files": ["f"], "acceptance": ["c"]}),
             json!({"goal": "g\u{0}", "repo": "r", "files": ["f"], "acceptance": ["c"]}),
+            // larry#439: a timeout or deadline outside one day, or a shell or base not text.
+            json!({"goal": "g", "repo": "r", "files": ["f"], "acceptance": ["c"], "timeout_ms": 0}),
+            json!({"goal": "g", "repo": "r", "files": ["f"], "acceptance": ["c"], "deadline_ms": 86_400_001}),
+            json!({"goal": "g", "repo": "r", "files": ["f"], "acceptance": ["c"], "shell": 7}),
+            json!({"goal": "g", "repo": "r", "files": ["f"], "acceptance": ["c"], "base": ""}),
         ];
         for case in &cases {
             assert_eq!(
