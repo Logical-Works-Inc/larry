@@ -110,7 +110,8 @@ fn run_where(
     use std::process::{Command, Stdio};
 
     let tenant = OsStr::from_bytes(tenant.as_bytes()).to_owned();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
         .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
@@ -119,8 +120,9 @@ fn run_where(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .current_dir(cwd)
-        .spawn()?;
+        .current_dir(cwd);
+    coverage::forward(&mut command);
+    let mut child = command.spawn()?;
     child
         .stdin
         .take()
