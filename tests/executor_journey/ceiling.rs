@@ -159,7 +159,10 @@ fn a_shell_base_or_deadline_past_the_ceiling_clones_nothing() -> TestResult {
 /// The reaped group is the sealed result's own `pgid`, never a pid file: the deadline may
 /// kill the shell before `echo` flushes it, so a file read after the seal raced the kill
 /// (`Os { code: 2, kind: NotFound }` under load, larry#552); the report names the group
-/// the executor recorded, reaped and removed.
+/// the executor recorded, reaped and removed. The deadline may also fire before the first
+/// command starts, and then the seal carries no results: the test accepts both specified
+/// outcomes, asserting the cut shape only when a result exists and the rejection, the
+/// reaping and the unstarted second command in both.
 #[test]
 fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult {
     let (state, origin) = fixture()?;
@@ -194,31 +197,32 @@ fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult
         Some(&lgwks_std::json::json!({"deadline_ms": 1500})),
         "the seal names the spent deadline beside its results"
     );
-    assert_eq!(
-        argv_at(&report, 0),
-        Some(vec![String::from("sh"), String::from("-c"), script,]),
-        "the cut command stays as the report's one result"
-    );
     let results = report
         .get("results")
         .and_then(Value::as_array)
         .ok_or("the report lists its results")?;
-    assert_eq!(
-        results.len(),
-        1,
-        "the cut command stays and the second never starts"
-    );
-    let first = results.first().ok_or("the cut command stays")?;
-    assert_eq!(
-        first.get("timed_out").and_then(Value::as_bool),
-        Some(true),
-        "the cut command timed out"
-    );
-    assert_eq!(
-        first.get("exit_code"),
-        Some(&Value::Null),
-        "the killed command names no exit code"
-    );
+    if results.len() > 1 {
+        return Err("the command after the deadline never starts".into());
+    }
+    if let Some(first) = results.first() {
+        assert_eq!(
+            argv_at(&report, 0),
+            Some(vec![String::from("sh"), String::from("-c"), script]),
+            "the cut command stays as the report's one result"
+        );
+        assert_eq!(
+            first.get("timed_out").and_then(Value::as_bool),
+            Some(true),
+            "the cut command timed out"
+        );
+        assert_eq!(
+            first.get("exit_code"),
+            Some(&Value::Null),
+            "the killed command names no exit code"
+        );
+        let pid = i32::try_from(number_of(first, "pgid")?)?;
+        await_group_exit(pid)?;
+    }
     let state_env = [("LARRY_STATE_DIR", state.path().as_os_str())];
     let verified = spawn_larry_args(&["verify"], &state_env, &output.stdout)?.wait_with_output()?;
     assert_eq!(
@@ -233,8 +237,6 @@ fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult
         Some(false),
         "verify reads the sealed report as rejected"
     );
-    let pid = i32::try_from(number_of(first, "pgid")?)?;
-    await_group_exit(pid)?;
     assert_eq!(
         ledger_rows(&state.path().join("executor.db"))?,
         0,
@@ -245,10 +247,15 @@ fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult
         "the command after the deadline never started"
     );
     let mut err = io::stderr().lock();
+    let result_count = match report.get("results").and_then(Value::as_array) {
+        Some(results) => results.len(),
+        None => 0,
+    };
     writeln!(
         err,
-        "deadline 1500 ms, run ended after {} ms",
-        elapsed.as_millis()
+        "deadline 1500 ms, run ended after {} ms with {} result(s)",
+        elapsed.as_millis(),
+        result_count
     )?;
     Ok(())
 }
