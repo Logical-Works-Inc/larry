@@ -32,7 +32,7 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-use run::{Place, run_command};
+pub(crate) use run::{Place, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -265,6 +265,16 @@ impl Settings {
     /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
     pub(crate) fn state_dir(&self) -> &std::path::Path {
         self.state_dir.as_path()
+    }
+
+    /// The `PATH` acceptance commands and git run under.
+    pub(crate) fn path_env(&self) -> &str {
+        self.path.as_str()
+    }
+
+    /// Longest an acceptance command may run before its group is killed.
+    pub(crate) const fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// The route a task naming `named` (or none) sends its model calls to: the
