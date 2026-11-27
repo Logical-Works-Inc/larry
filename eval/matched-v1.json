@@ -119,6 +119,7 @@
         "README.md": "# session path\n\nUse the `larry acp` session path to complete the task.\n"
       },
       "goal": "Use the larry acp session path to write session.txt with a non-empty result.",
+      "path": "session",
       "write": ["session.txt"],
       "acceptance": ["test -s session.txt"]
     },

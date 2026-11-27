@@ -294,6 +294,8 @@ pub(crate) enum Ending {
 pub(crate) struct Outcome {
     /// The task id.
     pub(crate) id: String,
+    /// The executor path that produced the result.
+    pub(crate) path: &'static str,
     /// How it ended.
     pub(crate) ending: Ending,
     /// Wall time, origin clone to seal, in microseconds.
@@ -372,6 +374,7 @@ pub(crate) fn card(set: &str, model: &str, prices: Prices, outcomes: &[Outcome])
         };
         results.push(json!({
             "id": outcome.id,
+            "path": outcome.path,
             "outcome": ending,
             "reason": reason,
             "micros": outcome.micros,

@@ -14,7 +14,7 @@ use lgwks_std::seeded::{DrawError, Seeded};
 use super::score::{
     Ending, Outcome, PriceFault, Prices, Scorecard, Spent, card, parse_price, percentile, usd,
 };
-use super::{EvalTask, Origin, finish_origin};
+use super::{EvalPath, EvalTask, Origin, finish_origin, session_commands_passed};
 use crate::sim_error::SimError;
 
 /// What every test returns.
@@ -224,6 +224,7 @@ fn sim_eval_costs_match_wide_arithmetic_and_cards_keep_their_invariants() -> Tes
             }
             outcomes.push(Outcome {
                 id: format!("t{index}"),
+                path: "command",
                 ending,
                 micros: rng.below(1 << 40)?,
                 tokens,
@@ -289,6 +290,7 @@ fn sim_a_stopped_card_keeps_every_field_and_says_it_is_partial() -> TestResult {
             };
             outcomes.push(Outcome {
                 id: format!("t{index}"),
+                path: "command",
                 ending,
                 micros: rng.below(1 << 30)?,
                 tokens: Some(plain(rng.below(1 << 20)?, rng.below(1 << 16)?)),
@@ -449,6 +451,7 @@ fn draw_outcomes(
         }
         outcomes.push(Outcome {
             id: format!("t{index}"),
+            path: "command",
             ending: Ending::Accepted,
             micros: 1,
             tokens,
@@ -597,6 +600,7 @@ fn a_partial_origin_removes_itself_when_creation_fails() -> TestResult {
             (String::from("a/b"), String::from("y")),
         ],
         goal: String::from("g"),
+        path: EvalPath::Command,
         write: Vec::new(),
         acceptance: Vec::new(),
     };
@@ -629,6 +633,7 @@ fn a_refused_origin_cleanup_keeps_the_arms_outcome() -> TestResult {
     };
     let outcome = Outcome {
         id: String::from("kept"),
+        path: "command",
         ending: Ending::Accepted,
         micros: 7,
         tokens: None,
@@ -660,4 +665,50 @@ fn check_silenced(seed: u64, prices: Prices, outcomes: &mut [Outcome]) {
         json!(!silenced),
         "seed {seed}: one outcome that did not report makes the card incomplete"
     );
+}
+
+/// A session result counts as passed only when every command ran clean: an empty
+/// run, a nonzero or missing exit, a timeout, an interruption or a missing flag
+/// each refuses the verdict, mirroring the session's own pass rule (larry#217).
+#[test]
+fn session_commands_passed_names_only_clean_runs() {
+    let clean = json!([{"exit_code": 0, "timed_out": false, "interrupted": false}]);
+    assert!(session_commands_passed(&clean), "a clean run passes");
+    let pair = json!([
+        {"exit_code": 0, "timed_out": false, "interrupted": false},
+        {"exit_code": 0, "timed_out": false, "interrupted": false},
+    ]);
+    assert!(session_commands_passed(&pair), "two clean commands pass");
+    for (name, results) in [
+        ("empty", json!([])),
+        (
+            "failed",
+            json!([{"exit_code": 1, "timed_out": false, "interrupted": false}]),
+        ),
+        (
+            "signalled",
+            json!([{"exit_code": null, "timed_out": false, "interrupted": false}]),
+        ),
+        (
+            "timed_out",
+            json!([{"exit_code": 0, "timed_out": true, "interrupted": false}]),
+        ),
+        (
+            "interrupted",
+            json!([{"exit_code": 0, "timed_out": false, "interrupted": true}]),
+        ),
+        ("unflagged", json!([{"exit_code": 0, "timed_out": false}])),
+        (
+            "second_fails",
+            json!([
+                {"exit_code": 0, "timed_out": false, "interrupted": false},
+                {"exit_code": 1, "timed_out": false, "interrupted": false},
+            ]),
+        ),
+    ] {
+        assert!(
+            !session_commands_passed(&results),
+            "a {name} run never passes"
+        );
+    }
 }
