@@ -17,15 +17,16 @@ use super::{ExecError, Ledger, digest_hex, identity, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
-/// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
-
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RouteCliError {
-    /// The arguments are not a `larry route` command.
-    #[error("route: {0}; {}", USAGE)]
+    /// The arguments are not a `larry route` command. The synopsis lives in
+    /// this one message (larry#543): the derive renders tuple placeholders
+    /// onto its extra arguments, so a `{USAGE}` tail would print twice.
+    #[error(
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+    )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
     #[error("route: every argument must be UTF-8 text")]
@@ -64,27 +65,15 @@ pub enum RouteCliError {
     Output(#[source] io::Error),
 }
 
-/// What a route refusal is prefixed with. A field refusal already opens with
-/// `route <field>`, so this door adds no second prefix (larry#228); every other
-/// refusal, a new variant included, gets the prefix by default, so none reaches
-/// the user bare (larry#295).
+/// What a route refusal is prefixed with: nothing when the refusal already
+/// opens with `route <field>`, else `route: `, so none reaches the user bare.
+/// The classification lives on the refusal itself
+/// ([`RouteError::opens_with_route`]), listed once with no wildcard.
 const fn route_prefix(cause: &RouteError) -> &'static str {
-    match *cause {
-        RouteError::BadId
-        | RouteError::ReservedId
-        | RouteError::BadUrl
-        | RouteError::BadModel
-        | RouteError::BadKeyEnv
-        | RouteError::KeyEnvOutsideNamespace
-        | RouteError::KeyEnvNotThisTenants { .. }
-        | RouteError::BadTemperature
-        | RouteError::BadKind
-        | RouteError::KindNotServed { .. }
-        | RouteError::BadResidency
-        | RouteError::BadRequestBytes
-        | RouteError::BadDescribe
-        | RouteError::BadPrice { .. } => "",
-        _ => "route: ",
+    if cause.opens_with_route() {
+        ""
+    } else {
+        "route: "
     }
 }
 
@@ -252,13 +241,6 @@ fn add(
         Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
         None => Kind::OpenAiChat,
     };
-    // Until PR #534's adapters land the wire speaks OpenAI chat only, so any
-    // other kind is refused before the store opens and nothing is stored (larry#539).
-    if !kind.is_served() {
-        return Err(RouteCliError::Route(RouteError::KindNotServed {
-            kind: kind.name().to_owned(),
-        }));
-    }
     let route = Route::new(&Draft {
         id,
         kind,
@@ -517,14 +499,6 @@ mod tests {
         let kind = said(&RouteCliError::Route(RouteError::BadKind));
         assert!(kind.starts_with("route kind must be one of"), "{kind}");
         assert_eq!(kind.matches("route").count(), 1, "{kind}");
-        let unserved = said(&RouteCliError::Route(RouteError::KindNotServed {
-            kind: String::from("anthropic-messages"),
-        }));
-        assert_eq!(
-            unserved, "route kind anthropic-messages has no adapter in this build",
-            "{unserved}"
-        );
-        assert_eq!(unserved.matches("route").count(), 1, "{unserved}");
         let priced = said(&RouteCliError::Route(RouteError::BadPrice {
             field: "input",
         }));

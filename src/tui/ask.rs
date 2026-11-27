@@ -1,8 +1,6 @@
 //! The question a session asks and the person answers (larry#325): its title, the answers in
 //! the order ←/→ walks them, the highlighted marker, and the crop that keeps the title and the
 //! first command row on screen while one counted marker row names the rows a long command lost.
-//! It also answers the question: keys in, the decision out, asked every time for the person's
-//! own folder.
 
 use super::app::{App, Effect, Key, Phase};
 use super::cells::Entry;

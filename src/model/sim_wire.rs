@@ -18,7 +18,7 @@ use super::{
     request_body,
 };
 use crate::model::{
-    MAX_MESSAGES, Message, ModelClient, ModelError, Role, Usage, WindowRefusal, sim_config,
+    Kind, MAX_MESSAGES, Message, ModelClient, ModelError, Role, Usage, WindowRefusal, sim_config,
 };
 
 /// What every test returns.
@@ -29,7 +29,7 @@ const SEEDS: u64 = 256;
 
 /// The usage a reply reports, or the failure that read it.
 fn reported(text: &str) -> Result<Option<Usage>, ModelError> {
-    Ok(parse_completion(text.as_bytes())?.usage())
+    Ok(parse_completion(Kind::OpenAiChat, text.as_bytes())?.usage())
 }
 
 /// The usage a reader must report for these counts.
@@ -125,7 +125,7 @@ fn cached_tokens_are_read_from_every_usage_shape_and_sse() -> TestResult {
         ),
         last
     );
-    let completion = parse_completion(stream.as_bytes())?;
+    let completion = parse_completion(Kind::OpenAiChat, stream.as_bytes())?;
     assert_eq!(
         completion.content(),
         "hello",
@@ -373,7 +373,7 @@ fn sim_usage_shapes_round_trip_for_every_seed() -> TestResult {
     for seed in 0..SEEDS {
         let drawn = draw(seed)?;
         let text = body(&drawn);
-        let completion = parse_completion(text.as_bytes())?;
+        let completion = parse_completion(Kind::OpenAiChat, text.as_bytes())?;
         assert_eq!(
             completion.content(),
             "hello",
@@ -414,7 +414,13 @@ fn sim_client_fits_exactly_at_its_byte_and_message_bounds() -> TestResult {
             Message::new(Role::System, "sys"),
             Message::new(Role::User, filler.as_str()),
         ];
-        let size = request_body(defaults.model(), defaults.temperature(), &sent).len();
+        let size = request_body(
+            Kind::OpenAiChat,
+            defaults.model(),
+            defaults.temperature(),
+            &sent,
+        )
+        .len();
         assert!(
             client(Some(size))?.fits(&sent),
             "seed {seed}: {size} bytes fit a {size} byte bound"
@@ -500,7 +506,7 @@ fn sim_every_finish_reason_in_every_framing_gets_the_reference_verdict() -> Test
         let (reason, done) = *REASONS.get(index).ok_or("a drawn reason")?;
         let framing = rng.below(3)?;
         let text = finish_body(reason, framing, "fn main() {}\n");
-        match (parse_completion(text.as_bytes()), done) {
+        match (parse_completion(Kind::OpenAiChat, text.as_bytes()), done) {
             (Ok(completion), true) => assert_eq!(
                 completion.content(),
                 "fn main() {}\n",
@@ -525,7 +531,10 @@ fn sim_every_finish_reason_in_every_framing_gets_the_reference_verdict() -> Test
     }
     for (reason, done) in REASONS {
         for framing in 0..3 {
-            let outcome = parse_completion(finish_body(reason, framing, "x").as_bytes());
+            let outcome = parse_completion(
+                Kind::OpenAiChat,
+                finish_body(reason, framing, "x").as_bytes(),
+            );
             assert_eq!(outcome.is_ok(), done, "{reason} in framing {framing}");
             if let Err(ModelError::Unfinished { reason: named }) = outcome {
                 assert!(
@@ -537,7 +546,7 @@ fn sim_every_finish_reason_in_every_framing_gets_the_reference_verdict() -> Test
     }
     let filtered = r#"{"choices":[{"message":{"content":null},"finish_reason":"content_filter"}]}"#;
     assert_eq!(
-        parse_completion(filtered.as_bytes()),
+        parse_completion(Kind::OpenAiChat, filtered.as_bytes()),
         Err(ModelError::Unfinished {
             reason: String::from("content_filter")
         }),
@@ -545,7 +554,7 @@ fn sim_every_finish_reason_in_every_framing_gets_the_reference_verdict() -> Test
     );
     let numbered = r#"{"choices":[{"message":{"content":"x"},"finish_reason":7}]}"#;
     assert_eq!(
-        parse_completion(numbered.as_bytes()),
+        parse_completion(Kind::OpenAiChat, numbered.as_bytes()),
         Err(ModelError::Malformed(
             "the reply's finish_reason is not text"
         ))
@@ -564,7 +573,7 @@ fn a_torn_stream_chunk_refuses_the_reply_by_its_line() {
     );
     assert!(
         matches!(
-            parse_completion(torn.as_bytes()),
+            parse_completion(Kind::OpenAiChat, torn.as_bytes()),
             Err(ModelError::StreamChunk { line: 3, .. })
         ),
         "the torn chunk on line 3 refuses the reply"

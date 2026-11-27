@@ -2,6 +2,7 @@
 //! and the model step that writes a brief's files before acceptance (larry#123).
 
 mod author;
+mod ceiling;
 mod compact;
 mod confine;
 mod error;
@@ -14,6 +15,7 @@ mod receipt;
 mod recovery;
 pub mod routes;
 mod run;
+mod seal;
 mod session;
 #[cfg(test)]
 mod sim_env;
@@ -33,12 +35,12 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-pub(crate) use run::{Place, run_command};
-pub(crate) use run::{RunHooks, StreamCallback};
-use workspace::{Workspace, report_members, sweep};
+pub(crate) use run::{Place, RunHooks, StreamCallback, run_command};
+use seal::{SealedRun, seal_run};
+use workspace::{Workspace, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
-use crate::model::{ModelClient, ModelConfig, Route};
+use crate::model::{ModelConfig, Route};
 pub use author::AuthorFault;
 pub use confine::ConfineError;
 #[cfg(test)]
@@ -63,7 +65,7 @@ const MODEL_COMMANDS_DENIED: &str =
 const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 
 /// Largest accepted command timeout, in milliseconds (one day).
-const MAX_TIMEOUT_MS: u64 = 86_400_000;
+pub(crate) const MAX_TIMEOUT_MS: u64 = 86_400_000;
 
 /// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
 fn read_by_larry(name: &str) -> bool {
@@ -239,8 +241,11 @@ type EnvReader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub struct Settings {
     /// Directory holding the ledger and the workspaces.
     state_dir: PathBuf,
-    /// Longest an acceptance command may run before its group is killed.
+    /// Longest an acceptance command may run before its group is killed, when its task
+    /// names no timeout of its own.
     timeout: Duration,
+    /// What this tenant lets a task name: its shell, base, timeout and deadline (larry#439).
+    ceilings: ceiling::Ceilings,
     /// The PATH the acceptance commands and git run under.
     path: String,
     /// The scopes the gate authorizes tasks against. Local settings read
@@ -261,6 +266,7 @@ impl fmt::Debug for Settings {
         out.debug_struct("Settings")
             .field("state_dir", &self.state_dir)
             .field("timeout", &self.timeout)
+            .field("ceilings", &self.ceilings)
             .field("path", &self.path)
             .field("policy", &self.policy)
             .finish_non_exhaustive()
@@ -291,13 +297,16 @@ impl Settings {
         local: bool,
     ) -> Result<Settings, ExecError> {
         let state_dir = state_dir(&read)?;
-        let timeout_ms = match read("LARRY_EXEC_TIMEOUT_MS") {
-            None => DEFAULT_TIMEOUT_MS,
+        let explicit = match read("LARRY_EXEC_TIMEOUT_MS") {
+            None => None,
             Some(value) => match value.parse::<u64>() {
-                Ok(milliseconds) if (1..=MAX_TIMEOUT_MS).contains(&milliseconds) => milliseconds,
+                Ok(milliseconds) if (1..=MAX_TIMEOUT_MS).contains(&milliseconds) => {
+                    Some(milliseconds)
+                }
                 _ => return Err(ExecError::BadTimeout { value }),
             },
         };
+        let (ceilings, timeout) = ceiling::Ceilings::from_env(&read, explicit, DEFAULT_TIMEOUT_MS)?;
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
         let policy = if local {
             gate::policy(&read)?
@@ -307,7 +316,8 @@ impl Settings {
         let fence_control = fence_control::read(&read)?;
         Ok(Settings {
             state_dir,
-            timeout: Duration::from_millis(timeout_ms),
+            timeout,
+            ceilings,
             path,
             policy,
             local,
@@ -384,7 +394,7 @@ impl Settings {
 /// clock: a retry that needs no wait goes ahead (`LARRY_MODEL_BACKOFF_MS=0`), and
 /// one that would wait stops, so the planner gets the typed refusal, with any
 /// `Retry-After`, at once and decides whether to resubmit.
-const fn backoff(wait: Duration) -> bool {
+pub(super) const fn backoff(wait: Duration) -> bool {
     wait.is_zero()
 }
 
@@ -395,6 +405,9 @@ const fn backoff(wait: Duration) -> bool {
 /// task runs only after the admission gate authorized it (larry#164): the task body is the
 /// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
+    // The tenant's ceilings decide first: a shell, base, timeout or deadline past one is
+    // refused before the ledger opens, so nothing is cloned and nothing runs (larry#439).
+    let limits = settings.ceilings.limits(task, settings.timeout)?;
     let (ledger, key) = prepare(settings)?;
     let repository = ledger.authorized_repo(
         &tenant_key(&settings.state_dir),
@@ -402,22 +415,26 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         task.repo(),
         settings.is_local(),
     )?;
-    execute_prepared(task, settings, &ledger, &key, &repository)
+    execute_prepared(task, settings, limits, &ledger, &key, &repository)
 }
 
 /// Runs an evaluator-owned origin. Public task execution refuses every state-directory path;
 /// this crate-private route is narrower still, accepting only a canonical origin beneath the
 /// evaluator's own `<state>/eval` directory.
 pub(crate) fn execute_eval(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
+    // The tenant's ceilings decide first, as on the public door: a shell, base, timeout or
+    // deadline past one is refused before the ledger opens (larry#439).
+    let limits = settings.ceilings.limits(task, settings.timeout)?;
     let (ledger, key) = prepare(settings)?;
     let repository = Ledger::authorized_eval_repo(settings.state_dir(), task.repo())?;
-    execute_prepared(task, settings, &ledger, &key, &repository)
+    execute_prepared(task, settings, limits, &ledger, &key, &repository)
 }
 
 /// Executes after the caller has supplied a repository authorized for this route.
 fn execute_prepared(
     task: &Task,
     settings: &Settings,
+    limits: ceiling::Limits,
     ledger: &Ledger,
     key: &lgwks_std::sign::SecretKey,
     repository: &std::path::Path,
@@ -454,15 +471,7 @@ fn execute_prepared(
         bytes: task.bytes(),
     };
     let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
-        run_task(
-            task,
-            repository,
-            settings,
-            &task_id,
-            &task_digest,
-            ledger,
-            key,
-        )
+        run_task(task, repository, settings, &task_id, limits, ledger, key)
     })?;
     if resumable && report.carries_a_seal() {
         ledger.keep_report(&task_id, &task_digest, report.bytes())?;
@@ -493,57 +502,27 @@ fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), 
     Ok((ledger, key))
 }
 
-/// What a task with a brief needs before anything is cloned: the route its model
-/// calls go to and a client built from it.
-struct ModelStep<'task> {
-    /// The route the task resolved to; the sealed report records it.
-    route: Route,
-    /// The brief the model writes files for.
-    brief: &'task author::Brief,
-    /// The client over `route`, holding the key read for this task alone.
-    client: ModelClient,
-}
-
-/// Resolves the task's route and builds its client, only when the task has a
-/// brief: a task with none never reaches a model, so its route is only checked
-/// when it names one, and a typo in a model setting fails nothing it does not use.
-/// An unknown name is refused here, before any byte leaves the host.
-fn model_step<'task>(
-    task: &'task Task,
-    settings: &Settings,
-    ledger: &Ledger,
-) -> Result<Option<ModelStep<'task>>, ExecError> {
-    let Some(brief) = task.brief() else {
-        if let Some(named) = task.route() {
-            settings.route(ledger, Some(named))?;
-        }
-        return Ok(None);
-    };
-    let route = settings.route(ledger, task.route())?;
-    // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
-    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    let client = ModelClient::new(settings.model_config(&route)?, clock, backoff);
-    Ok(Some(ModelStep {
-        route,
-        brief,
-        client,
-    }))
-}
-
 /// The task body the gate authorizes: clones the repository at the base, has
 /// the model write the brief's files when the task carries one, runs each
 /// acceptance command in order, and returns the report with the staged diff,
 /// sealed under the state directory's key. It runs at most once, inside the
-/// gate's bound owner reach.
+/// gate's bound owner reach. A deadline spent before the clone refuses typed;
+/// after it seals a rejected report keeping every result, the cut command's
+/// with `timed_out: true`, and the spent deadline beside the results (larry#439).
 fn run_task(
     task: &Task,
     repository: &std::path::Path,
     settings: &Settings,
     task_id: &str,
-    task_digest: &str,
+    limits: ceiling::Limits,
     ledger: &Ledger,
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Report, ExecError> {
+    // The digest names the same bytes admission checked, recomputed where the report seals them.
+    let task_digest = digest_hex(task.bytes());
+    // The one clock the deadline reads, anchored like every executor clock (larry#268).
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let deadline = ceiling::Deadline::start(&clock, limits);
     // A brief lets the model write the tree, so the command that runs next is model-chosen
     // code; it runs confined to the workspace. `larry_submit_task` confines too, because a
     // remote peer drives the run and no person watches a command (larry#324, ADR 0088).
@@ -553,7 +532,8 @@ fn run_task(
     if confined {
         confine::supported(confine::Platform::host()).map_err(ExecError::Confine)?;
     }
-    let step = model_step(task, settings, ledger)?;
+    let step = author::model_step(task, settings, ledger)?;
+    deadline.cap(limits.timeout)?;
     let workspace = Workspace::create(
         &settings.state_dir,
         repository,
@@ -561,9 +541,9 @@ fn run_task(
         task_id,
         &settings.path,
     )?;
-    let authored = match step {
+    let mut authored = match step {
         None => None,
-        Some(ModelStep {
+        Some(author::ModelStep {
             route,
             brief,
             client,
@@ -571,7 +551,7 @@ fn run_task(
             // The tenant's digest, the same text a route row is keyed by, names the
             // cache partition so no two tenants share a prompt prefix (larry#230).
             let partition = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
-            let mut records = author::author(brief, workspace.path(), &client, &partition)?;
+            let mut records = author::author(brief, workspace.path(), &client, &route, &partition)?;
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
                     object.insert(String::from("route"), route.seal());
@@ -597,19 +577,36 @@ fn run_task(
     } else {
         None
     };
+    let mut seal = |results: Vec<lgwks_std::json::Value>, deadline_ms: Option<u64>| {
+        seal_run(
+            SealedRun {
+                task_id,
+                task_digest: &task_digest,
+                results,
+                authored: authored.take(),
+                workspace: &workspace,
+                base: task.base(),
+                deadline_ms,
+            },
+            key,
+        )
+    };
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
-        // An acceptance command has no person watching it who could cancel it,
-        // so only the timeout ends it (larry#242). A task that names a shell runs
-        // each command under it as `<shell> -c <command>` (larry#439); a task that
-        // names a timeout runs under it, cut to the default when it names more.
-        let timeout = match task.timeout_ms() {
-            Some(millis) => Duration::from_millis(millis).min(settings.timeout),
-            None => settings.timeout,
-        };
+        // An acceptance command has no person watching it who could cancel it, so only its
+        // timeout or the task's deadline ends it (larry#242, larry#439).
         let place = match confine {
             Some(ref confine) => Place::Confined(confine),
             None => Place::Open(workspace.path()),
+        };
+        // A deadline spent before the next command starts seals what the run leaves: nothing
+        // later starts, and the report keeps every result so far.
+        let (timeout, capped) = match deadline.cap(limits.timeout) {
+            Ok(next) => next,
+            Err(ExecError::DeadlinePassed { .. }) => {
+                return seal(results, Some(limits.deadline_ms));
+            }
+            Err(other) => return Err(other),
         };
         let result = run_command(
             &task.argv_for(argv),
@@ -620,31 +617,15 @@ fn run_task(
             task_id,
             RunHooks::new(&|| false, None),
         )?;
+        // The group the deadline killed is already reaped: its result stays, the task ends
+        // sealed, and no later command starts.
+        let cut = deadline.after(capped, result.timed_out()).is_err();
         results.push(result.into_json());
-    }
-    let diff = workspace.diff(task.base())?;
-    let mut body = lgwks_std::json::json!({
-        "task_id": task_id,
-        "task_digest": task_digest,
-        "results": results,
-        "denied": [],
-    });
-    // The diff members name whether the diff is the whole change (larry#206).
-    if let Some(object) = body.as_object_mut() {
-        for (name, member) in report_members(diff) {
-            object.insert(name.to_owned(), member);
+        if cut {
+            return seal(results, Some(limits.deadline_ms));
         }
     }
-    // Only a briefed run names what the model wrote, so a plain run's report keeps its shape.
-    if let Some(records) = authored
-        && let Some(object) = body.as_object_mut()
-    {
-        object.insert(
-            String::from("authored"),
-            lgwks_std::json::Value::Array(records),
-        );
-    }
-    Ok(Report::sealed(body, key))
+    seal(results, None)
 }
 
 /// The BLAKE3 digest of `bytes`, as 64 hex characters.

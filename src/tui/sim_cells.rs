@@ -22,7 +22,7 @@ const PINNED_SEEDS: u64 = 96;
 /// (larry#252), then advanced once for the queue panel, the six slash commands and the
 /// working footer (larry#262): the heap assertions above, not this digest, carry the
 /// no-heap-text rule, so a paint feature moves this digest and names its issue here.
-const PINNED: &str = "ac840f7e8c01d25aa7d3225929d0015ada3bb1c26bb9ad9c129ec6f7cd880afa";
+const PINNED: &str = "4dad7f8efe0687ff76c6b809a44535105ea372989a4c96bb170d302a579dc1fb";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [

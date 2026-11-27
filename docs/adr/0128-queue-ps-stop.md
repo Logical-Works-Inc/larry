@@ -5,10 +5,10 @@ description: Why the frame queues eight turns and lists and stops background com
 resource: /docs/adr/0128-queue-ps-stop.md
 tags: [larry, adr, tui, frontend]
 generated: {by: opencode, at: 2026-11-27}
-verified: {by: opencode, method: lgwks-box Oracle nextest sims and PTY journeys, 2026-11-27}
+verified: {by: opencode, method: lgwks-box nextest sims and PTY journeys, 2026-11-27}
 status: accepted
 stale_after: 2027-05-27
-sources: [larry#262, larry#255, larry#252, larry#242, larry#241]
+sources: [larry#262, larry#255, larry#252, larry#242, larry#241, larry#555, larry#556]
 ---
 
 # ADR 0128: Queue a turn while a task runs, /ps and /stop for its commands
@@ -26,31 +26,41 @@ The frame owns a queue of eight turns and a job list of sixteen
 commands, both bounded and both painted, all in `tui::app`:
 
 - Enter while a session runs queues the text for the next turn; the
-  queue shows above the composer; the ninth is refused naming the
-  bound; each `Ended` starts the next queued turn in order.
+  queue shows above the composer, one numbered row per waiting turn;
+  the ninth is refused naming the bound; each `Ended` starts the next
+  queued turn in order; quitting clears the queue so no turn sends
+  after the person leaves (larry#555, shipped as PR #562).
+- While a session runs, slash commands still run and other text
+  queues; an unknown slash word is refused the same way as when idle.
+- The queued row and the running status row show only the turn's
+  first line through `sanitize_line`, which takes no flag so no dead
+  branch is left for a mutant to flip.
 - Every `Started` command is tracked per frame with its last five
   output lines; `/ps` lists them; `/stop` ends the running ones
   through the session's cancel path, the same one Esc uses, so the
-  process group dies (larry#242); with nothing running both only say so.
+  process group dies (larry#242, larry#556); with nothing running both
+  only say so.
 - `/quit` (and the second Ctrl+C) with running commands asks first,
   ends them, and quits when the session ends.
 
 ## Evidence
 
-Fourteen seeded sims in `src/tui/sim_queue.rs` (order, `/ps` lines,
-finish without a start, `/stop` interrupt, quit asks, the quit singular,
-the end marks done, the queue bound, the jobs bound, the output tail, the
-first line, queue numbering, the always answer) pass. Two PTY
-journeys in `tests/support/tui_queue.rs`, included by `tests/e2e_journey.rs`,
-drive the shipped binary: queued turns send in order (4 model calls), and
-`/stop` kills the whole group (the background pid is gone, 1 model call).
-Oracle nextest: 14 of 14 green.
+Seeded sims in `src/tui/sim_queue.rs` (order, `/ps` lines, finish
+without a start, `/stop` interrupt, quit asks, the quit singular,
+the end marks done, the queue bound, the jobs bound, the output
+tail, the first line, queue numbering, the pending queue, the always
+answer, `/stop` after a finish, `/ps` rows within bound, hostile
+output sanitized, the stop/finish race both ways) pass. Two PTY
+journeys in `tests/support/tui_queue.rs`, included by
+`tests/e2e_journey.rs`, drive the shipped binary: queued turns send
+in order (4 model calls), and `/stop` kills the whole group (the
+background pid is gone, 1 model call).
 
 ## Consequences
 
-The frame answers while busy: slash commands still run, text queues. A ninth
-turn is refused naming the bound, so no input is silently dropped. `/ps` costs
-one bounded list; `/stop` reuses the cancel path, so no second kill owner
-exists. Quitting with running commands takes two steps, so a stray key never
-strands work, and the queue clears on quit so no turn sends after the person
-leaves.
+The frame answers while busy: slash commands still run, text queues. A
+ninth turn is refused naming the bound, so no input is silently
+dropped. `/ps` costs one bounded list; `/stop` reuses the cancel path,
+so no second kill owner exists. Quitting with running commands takes
+two steps, so a stray key never strands work, and the queue clears on
+quit so no turn sends after the person leaves.

@@ -23,7 +23,6 @@
 //! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
-use std::fmt;
 use std::path::Path;
 
 use lgwks_macros::Error;
@@ -33,7 +32,6 @@ use super::ExecError;
 use super::Ledger;
 use super::Report;
 use super::Settings;
-use super::author::unfenced;
 use super::backoff;
 use super::compact::{Answer, Conversation};
 use super::digest_hex;
@@ -44,6 +42,13 @@ use super::prepare;
 use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
 use crate::model::{Completion, ModelClient, Usage};
+
+/// A terminal session's reply protocol: one JSON object per turn, parsed and
+/// refused with an exact reason the model can retry from (larry#545).
+#[path = "session_reply.rs"]
+pub(crate) mod reply;
+
+use reply::{Reply, parse_reply};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
@@ -168,80 +173,6 @@ pub(crate) trait Observer {
     /// leaves this alone, which never stops the session early.
     fn cancelled(&self) -> bool {
         false
-    }
-}
-
-/// One reply, parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Reply {
-    /// Run this command with `sh -c`.
-    Command(String),
-    /// The task is done; the summary for the person.
-    Done(String),
-}
-
-/// Why a reply was refused; the model is told and may try again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplyFault {
-    /// The reply is over [`MAX_REPLY_BYTES`].
-    TooLong,
-    /// The reply is not JSON; the parser's reason, so the model sees where it broke.
-    NotJson(String),
-    /// The reply is JSON but not an object.
-    NotAnObject,
-    /// The object does not hold exactly one key, `command` or `done`.
-    Keys,
-    /// The key's value is not a string.
-    NotAString,
-    /// The command is empty or blank.
-    EmptyCommand,
-    /// The command or summary is over 4 KiB.
-    FieldTooLong,
-    /// The command holds a NUL byte, which no shell argument can carry.
-    Nul,
-}
-
-impl fmt::Display for ReplyFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TooLong => write!(out, "the reply is over {MAX_REPLY_BYTES} bytes"),
-            Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
-            Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => out.write_str("the object must hold exactly one key, command or done"),
-            Self::NotAString => out.write_str("the value must be a string"),
-            Self::EmptyCommand => out.write_str("the command is empty"),
-            Self::FieldTooLong => write!(
-                out,
-                "the command or summary is over {MAX_COMMAND_BYTES} bytes"
-            ),
-            Self::Nul => out.write_str("the command holds a NUL byte"),
-        }
-    }
-}
-
-/// Parses one model reply: one surrounding code fence and outer whitespace are allowed.
-pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
-    if text.len() > MAX_REPLY_BYTES {
-        return Err(ReplyFault::TooLong);
-    }
-    let value: Value = json::from_str(unfenced(text).trim())
-        .map_err(|cause| ReplyFault::NotJson(cause.to_string()))?;
-    let object = value.as_object().ok_or(ReplyFault::NotAnObject)?;
-    let mut entries = object.iter();
-    let (Some((key, field)), None) = (entries.next(), entries.next()) else {
-        return Err(ReplyFault::Keys);
-    };
-    let text = field.as_str().ok_or(ReplyFault::NotAString)?;
-    if text.len() > MAX_COMMAND_BYTES {
-        return Err(ReplyFault::FieldTooLong);
-    }
-    let name: &str = key;
-    match name {
-        "command" if text.trim().is_empty() => Err(ReplyFault::EmptyCommand),
-        "command" if text.contains('\0') => Err(ReplyFault::Nul),
-        "command" => Ok(Reply::Command(text.to_owned())),
-        "done" => Ok(Reply::Done(text.to_owned())),
-        _ => Err(ReplyFault::Keys),
     }
 }
 

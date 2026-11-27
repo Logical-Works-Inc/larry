@@ -110,6 +110,17 @@ impl Pending {
         self.jobs.push_back(job);
     }
 
+    /// The most recent background command still running, if any: a `Finished`
+    /// that arrives while the frame is stopping names no command, so the
+    /// frame attributes the finish to the job it already tracks (larry#556).
+    pub(crate) fn running_command(&self) -> Option<String> {
+        self.jobs
+            .iter()
+            .rev()
+            .find(|job| job.state == JobState::Running)
+            .map(|job| job.command.clone())
+    }
+
     /// Records the end of the running background command: its last output lines and
     /// whether it exited 0. A finish with no running command still lists, so a pane
     /// that never saw its start keeps what the model was shown.

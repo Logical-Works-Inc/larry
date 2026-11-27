@@ -466,3 +466,161 @@ fn sim_queue_rows_number_in_order() {
         "the next waiter reads two: {painted:?}"
     );
 }
+
+/// Queued turns drain through the pending queue: pushing past the bound keeps
+/// the first eight and drops the ninth, oldest first.
+#[test]
+fn sim_pending_queue_holds_eight_oldest_first() {
+    let mut pending = Pending::new();
+    assert!(!pending.queue_full(), "an empty queue takes a turn");
+    for index in 0..8 {
+        pending.push_turn(format!("task{index}"));
+    }
+    assert!(pending.queue_full(), "eight turns fill the queue");
+    pending.push_turn(String::from("ninth"));
+    for index in 0..8 {
+        assert_eq!(
+            pending.pop_next(),
+            Some(format!("task{index}")),
+            "turn {index} waits in order"
+        );
+    }
+    assert_eq!(pending.pop_next(), None, "the ninth never queued");
+    pending.clear_queue();
+    assert!(!pending.queue_full(), "quitting clears the queue");
+}
+
+/// `/stop` of a job that already ended only says so: nothing runs, so no
+/// interrupt leaves the frame (larry#556).
+#[test]
+fn sim_stop_after_finish_says_idle() {
+    let mut app = fresh_app();
+    start_first(&mut app);
+    app.handle(Input::Worker(Event::Finished {
+        observation: String::from("exit status 0\nstdout:\nhello\nstderr:\n"),
+        passed: true,
+    }));
+    enter(&mut app, "/stop");
+    let listed = shown(&app);
+    assert!(
+        listed.contains("No background command is running."),
+        "an ended job leaves /stop idle: {listed:?}"
+    );
+}
+
+/// `/stop` then the job's own `Finished`: the stop races the exit, and the
+/// frame still ends quiet with the job listed as ended, never running
+/// (larry#556).
+#[test]
+fn sim_stop_race_with_finish_ends_quiet() {
+    let mut app = fresh_app();
+    start_first(&mut app);
+    enter(&mut app, "/stop");
+    let again = {
+        for character in "/stop".chars() {
+            app.handle(Input::Key(Key::Char(character)));
+        }
+        app.handle(Input::Key(Key::Enter))
+    };
+    assert!(
+        again.is_empty(),
+        "a second /stop sends no second interrupt: {again:?}"
+    );
+    app.handle(Input::Worker(Event::Finished {
+        observation: String::from("exit status 130\nstdout:\npartial\nstderr:\n"),
+        passed: false,
+    }));
+    let done = app.handle(Input::Worker(Event::Ended(Ended::Interrupted)));
+    assert!(done.is_empty(), "no queued turn starts after an interrupt");
+    enter(&mut app, "/ps");
+    let listed = shown(&app);
+    assert!(
+        listed.contains("ended $ sleep 30"),
+        "the raced job lists as ended: {listed:?}"
+    );
+    assert!(
+        listed.contains("partial"),
+        "the raced finish keeps its tail: {listed:?}"
+    );
+    assert!(
+        !listed.contains("running $"),
+        "no running row lists after the race: {listed:?}"
+    );
+}
+
+/// A finish before `/stop` leaves `/stop` idle too: the command ended on its
+/// own while the frame stayed working (larry#556).
+#[test]
+fn sim_finish_then_stop_says_idle() {
+    let mut app = fresh_app();
+    start_first(&mut app);
+    app.handle(Input::Worker(Event::Finished {
+        observation: String::from("exit status 0\nstdout:\n\nstderr:\n"),
+        passed: true,
+    }));
+    for character in "/stop".chars() {
+        app.handle(Input::Key(Key::Char(character)));
+    }
+    assert!(
+        app.handle(Input::Key(Key::Enter)).is_empty(),
+        "/stop after a finish stops nothing"
+    );
+    assert!(
+        shown(&app).contains("No background command is running."),
+        "the frame says so"
+    );
+}
+
+/// `/ps` past its row bound stays bounded: seventeen starts keep sixteen
+/// jobs, each with at most five lines, so the rows never grow past one
+/// header plus sixteen commands with their tails (larry#556).
+#[test]
+fn sim_ps_rows_stay_within_bound() {
+    let mut pending = Pending::new();
+    for index in 0..JOBS_BOUND + 1 {
+        pending.push_job(&format!("job-{index}"));
+        let output: Vec<String> = (0..OUTPUT_TAIL + 2)
+            .map(|line| format!("line-{line}"))
+            .collect();
+        pending.finish_job(&format!("job-{index}"), &output, true);
+    }
+    let rows = pending.ps_rows();
+    let cap = 1 + JOBS_BOUND * (1 + OUTPUT_TAIL);
+    assert!(
+        rows.len() <= cap,
+        "{} rows pass the bound of {cap}: {rows:?}",
+        rows.len()
+    );
+    let joined = rows.join("\n");
+    assert!(
+        !joined.contains("job-0"),
+        "the oldest drops past the bound: {joined:?}"
+    );
+    assert!(joined.contains("done $"), "kept jobs read done");
+}
+
+/// A job whose output holds escapes lists sanitized: no escape byte reaches
+/// the transcript, and the text stays readable (larry#556).
+#[test]
+fn sim_ps_sanitizes_hostile_output() {
+    let mut pending = Pending::new();
+    pending.push_job("sleep 30");
+    pending.finish_job(
+        "sleep 30",
+        &[
+            String::from("\u{1b}[31mred\u{1b}[0m"),
+            String::from("bell\u{7}here"),
+        ],
+        true,
+    );
+    let joined = pending.ps_rows().join("\n");
+    assert!(
+        !joined.contains('\u{1b}'),
+        "no escape byte lists: {joined:?}"
+    );
+    assert!(!joined.contains('\u{7}'), "no bell lists: {joined:?}");
+    assert!(
+        joined.contains("red") && joined.contains("bellhere"),
+        "the text stays readable: {joined:?}"
+    );
+}

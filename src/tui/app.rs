@@ -26,8 +26,7 @@ use super::layout::split;
 use super::pane::Pane;
 use super::pending::{Pending, QUEUE_BOUND, first_line};
 use super::style::{
-    Line, Span, Style, compact, ellipsize, hints, or_said, sanitize, sanitize_line, sanitize_shown,
-    text_width, wrap,
+    Line, Span, Style, ellipsize, sanitize, sanitize_line, sanitize_shown, text_width, wrap,
 };
 use super::worker::{Decision, Ended, Event};
 
@@ -137,11 +136,11 @@ pub(crate) struct App {
     /// The transcript, oldest first.
     pub(super) entries: VecDeque<Entry>,
     /// The text box.
-    composer: Composer,
+    pub(super) composer: Composer,
     /// Where the machine is.
     pub(super) phase: Phase,
     /// Turns queued while a session runs and the background commands it started (larry#262).
-    pending: Pending,
+    pub(super) pending: Pending,
     /// Lines `/status` prints.
     status: Vec<String>,
     /// When the running task started.
@@ -157,11 +156,11 @@ pub(crate) struct App {
     /// Whether the person said to stop asking for this run.
     pub(super) always: bool,
     /// Whether Ctrl+C asked to leave once the running session ends.
-    quitting: bool,
+    pub(super) quitting: bool,
     /// The session's last message, shown as its summary or its refusal.
     said: Option<String>,
     /// A one-line hint over the footer until the next key.
-    hint: Option<String>,
+    pub(super) hint: Option<String>,
     /// The artifact pane's state: the task's output, diff and receipt (larry#244).
     pane: Pane,
     /// Frames painted since the frame started (larry#325).
@@ -170,6 +169,47 @@ pub(crate) struct App {
     painted: Cell<Option<u64>>,
     /// Keys dropped because they were read before the question's frame was painted.
     early: usize,
+}
+
+/// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
+pub(crate) fn compact(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match (seconds.checked_div(60), seconds.checked_rem(60)) {
+        (Some(0) | None, _) => format!("{seconds}s"),
+        (Some(minutes), Some(rest)) if minutes < 60 => format!("{minutes}m {rest:02}s"),
+        (Some(minutes), _) => match (minutes.checked_div(60), minutes.checked_rem(60)) {
+            (Some(hours), Some(left)) => format!("{hours}h {left:02}m"),
+            _ => format!("{minutes}m"),
+        },
+    }
+}
+
+/// Footer hints joined by ` · ` to fit `width`; a hint that does not fit is
+/// dropped whole and `…` marks the cut (Codex `footer_hint.rs`).
+pub(crate) fn hints(items: &[&str], width: usize) -> Line {
+    let mut text = String::new();
+    for (index, item) in items.iter().enumerate() {
+        let sep = if index == 0 { "" } else { " · " };
+        let more = index.saturating_add(1) < items.len();
+        let next = text_width(&text)
+            .saturating_add(text_width(sep))
+            .saturating_add(text_width(item));
+        if next.saturating_add(if more { 2 } else { 0 }) > width {
+            text.push_str(if index == 0 { "…" } else { " …" });
+            break;
+        }
+        text.push_str(sep);
+        text.push_str(item);
+    }
+    vec![Span::new(text, Style::MUTED)]
+}
+
+/// `said`, or `fallback` when the session said nothing.
+fn or_said(said: Option<String>, fallback: &str) -> String {
+    match said {
+        Some(text) => text,
+        None => fallback.to_owned(),
+    }
 }
 
 impl App {
@@ -272,6 +312,8 @@ impl App {
             } => {
                 let command = if let Phase::Working(Some(ref command)) = self.phase {
                     command.clone()
+                } else if let Some(running) = self.pending.running_command() {
+                    running
                 } else {
                     String::from("(command)")
                 };
@@ -418,7 +460,7 @@ impl App {
     }
 
     /// Esc or Ctrl+C while a session runs.
-    fn interrupt(&mut self, key: Key) -> Vec<Effect> {
+    pub(super) fn interrupt(&mut self, key: Key) -> Vec<Effect> {
         match self.phase {
             Phase::Working(ref command) => {
                 self.phase = Phase::Stopping(command.is_some());
@@ -426,15 +468,7 @@ impl App {
             }
             Phase::Stopping(_) if key == Key::Interrupt => {
                 self.quitting = true;
-                let running = self.pending.running_jobs();
-                self.hint = if running > 0 {
-                    Some(format!(
-                        "{running} background command{} running. Larry quits when the session ends.",
-                        if running == 1 { "" } else { "s" }
-                    ))
-                } else {
-                    Some(String::from("Larry quits when the session ends."))
-                };
+                self.hint = Some(self.quit_hint());
                 Vec::new()
             }
             Phase::Idle | Phase::Asking(..) | Phase::Stopping(_) => Vec::new(),
@@ -463,22 +497,7 @@ impl App {
             }
             "/ps" => self.push(Entry::Info(self.pending.ps_rows())),
             "/stop" => return self.stop(),
-            _ => {
-                if self.phase != Phase::Idle && self.pending.running_jobs() > 0 {
-                    let running = self.pending.running_jobs();
-                    self.quitting = true;
-                    self.hint = Some(format!(
-                        "{running} background command{} running. Larry quits when the session ends; /stop ends them now.",
-                        if running == 1 { "" } else { "s" }
-                    ));
-                    if matches!(self.phase, Phase::Working(_)) {
-                        self.phase = Phase::Stopping(matches!(self.phase, Phase::Working(Some(_))));
-                        return vec![Effect::Interrupt];
-                    }
-                    return Vec::new();
-                }
-                return vec![Effect::Quit];
-            }
+            _ => return self.quit_or_leave(),
         }
         Vec::new()
     }
@@ -489,29 +508,6 @@ impl App {
             Style::WARN,
             format!("Unknown command {text}. Type / to see the commands."),
         ));
-    }
-
-    /// Names that no background command runs, over the footer until the next key.
-    fn no_running(&mut self) {
-        self.hint = Some(String::from("No background command is running."));
-    }
-
-    /// `/stop`: ends background commands by process group, through the session's
-    /// cancel path, the same one Esc uses (larry#242).
-    fn stop(&mut self) -> Vec<Effect> {
-        match self.phase {
-            Phase::Working(_) | Phase::Stopping(_) => {
-                if self.pending.running_jobs() == 0 {
-                    self.no_running();
-                    return Vec::new();
-                }
-                self.interrupt(Key::Esc)
-            }
-            Phase::Idle | Phase::Asking(..) => {
-                self.no_running();
-                Vec::new()
-            }
-        }
     }
 
     /// Enter on typed text: a task, a queued turn while a session runs, or a word
