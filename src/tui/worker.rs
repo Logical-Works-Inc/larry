@@ -22,7 +22,8 @@ use std::time::Duration;
 use lgwks_std::json::Value;
 
 use crate::executor::{
-    Approval, ExecError, Handoff, Isolation, Observer, Report, Settings, Stop, run_session,
+    Approval, ExecError, Handoff, Isolation, Observer, Report, SessionDoor, Settings, Stop,
+    run_session,
 };
 
 /// Events one session may have in flight to the frame.
@@ -277,7 +278,14 @@ impl Worker {
         always: bool,
     ) -> std::io::Result<Self> {
         Self::start(always, move |relay| {
-            match run_session(&instruction, &cwd, &settings, isolation, relay) {
+            match run_session(
+                &instruction,
+                &cwd,
+                &settings,
+                isolation,
+                relay,
+                SessionDoor::Tenant,
+            ) {
                 Ok(done) => {
                     relay.send(Event::Receipt(receipt_of(&done.report)));
                     Ok(done.stop)

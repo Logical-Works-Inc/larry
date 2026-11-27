@@ -55,6 +55,29 @@ pub(super) struct Admitted {
     display: Option<DisplayedEffect>,
 }
 
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_refuses_an_accepted_command_with_an_undecodable_payload() -> Result<(), RuntimeError>
+    {
+        let mut journal = Journal::new(4)?;
+        let command = Command::new(
+            larry_contracts::ids::CommandId::from_bytes([1; 16]),
+            TenantId::from_bytes([2; 16]),
+            Vec::new(),
+            larry_contracts::command::CommandContent::new(
+                CommandKind::Submit,
+                Box::from(&b"not json"[..]),
+            ),
+        )?;
+        journal.accept_command(command)?;
+        assert!(matches!(recover(&journal), Err(RuntimeError::Codec(_))));
+        Ok(())
+    }
+}
+
 impl Admitted {
     /// A pending entry for `command`, which targets `run`.
     pub(super) const fn new(
@@ -120,12 +143,10 @@ pub(super) fn recover(journal: &Journal) -> Result<VecDeque<Admitted>, RuntimeEr
             && !accepted.contains(&command.id())
         {
             // Admission and the tick both decode the proposal before the
-            // journal takes a command, so one that does not decode was never
-            // acknowledged here: a hand-built or altered file holds it, the
-            // consumer's digests expose it (E35), and nothing may reduce it.
-            let Ok(run) = target(command) else {
-                continue;
-            };
+            // journal takes a command. An accepted command whose payload no
+            // longer decodes is corrupt accepted history, not an absent
+            // command: restore refuses the journal with the codec cause.
+            let run = target(command)?;
             pending.push_back(Admitted {
                 run,
                 command: command.clone(),
@@ -298,6 +319,15 @@ where
         self.admitted.iter().any(|admitted| {
             admitted.run == run && admitted.command.content().kind() == CommandKind::Cancel
         })
+    }
+
+    /// The bounded set of runs with a cancellation admitted but not reduced.
+    pub(super) fn cancel_pending_runs(&self) -> BTreeSet<RunId> {
+        self.admitted
+            .iter()
+            .filter(|admitted| admitted.command.content().kind() == CommandKind::Cancel)
+            .map(|admitted| admitted.run)
+            .collect()
     }
 
     /// Holds a just-accepted ready command pending when it must wait, or when
@@ -580,6 +610,22 @@ where
             }
             .into());
         }
+        // One operation id names one effect of one tenant: the live table, the
+        // journal fold and the fence's revocation by name all key by it. A reuse
+        // is refused before its run moves, so no transition is journaled for an
+        // effect that never exists, and the refusal is recorded beside the
+        // durable acceptance so a restart reads it (larry#198, larry#371).
+        if self.live.contains_key(&proposal.operation()) {
+            self.record_command_refused(
+                command_id,
+                tenant,
+                run,
+                CommandRefusal::DuplicateOperation,
+            )?;
+            return Err(RuntimeError::DuplicateOperation {
+                operation: proposal.operation(),
+            });
+        }
         // Admissibility is decided from the runtime's own run table, never
         // inferred from the projection alone: recording the command already
         // created a run view, so a projection-based check would read `Draft`
@@ -600,11 +646,6 @@ where
             return Err(RuntimeError::EffectLimitReached {
                 run,
                 capacity: MAX_EFFECTS_PER_RUN,
-            });
-        }
-        if self.live.contains_key(&proposal.operation()) {
-            return Err(RuntimeError::DuplicateOperation {
-                operation: proposal.operation(),
             });
         }
         // A question bound to this effect is the only way past it: an
@@ -667,6 +708,7 @@ where
                 // Nothing has reached the owner yet: the reservation is
                 // durable, and the reach that follows is what sets this.
                 sent: false,
+                dispatched: None,
                 dispatches: 0,
                 reconciliations: 0,
                 dispatched_at_tick: self.tick_count,

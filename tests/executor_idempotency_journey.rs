@@ -236,6 +236,27 @@ fn a_task_without_a_key_runs_once_per_submission() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn executor_owner_reads_proof_tenant_before_running_task() -> TestResult {
+    // Source: OWASP ASVS 4.0.3 V4.2.1. The action boundary must enforce the
+    // authority checked at admission, and the owner must keep the task tenant
+    // attached to the effect it runs.
+    let (state, origin) = fixture()?;
+    let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
+    let output = run_exec(state.path(), &task, None)?;
+    let report = report_of(&output)?;
+    assert_eq!(
+        number_of(result_at(&report, 0)?, "exit_code")?,
+        0,
+        "the owner-bound executor journey runs the authorized task"
+    );
+    assert!(
+        flag_of(&report, "accepted")?,
+        "the owner-bound executor journey seals an accepted report"
+    );
+    Ok(())
+}
+
 /// The `acceptance` member of `document`, rendered back as text.
 fn acceptance_of(document: &str) -> Result<String, Box<dyn Error>> {
     let parsed: Value = json::from_str(document)?;
@@ -402,6 +423,12 @@ fn a_keyed_retry_after_a_recovery_fault_runs_nothing_and_keeps_the_journal() -> 
 
     // A journal whose bytes are refused is set aside, and still answers its keyed retry.
     let damaged_state = TempDir::new()?;
+    let damaged_state_text = damaged_state.path().to_string_lossy().into_owned();
+    larry_demo::executor::provision_tenant(
+        move |_| Some(damaged_state_text.clone()),
+        "file.read,file.write,process.spawn,model.invoke,model.command",
+        &[origin.path()],
+    )?;
     let damaged_count = scratch.path().join("damaged-runs");
     let damaged = killed_keyed_run(
         damaged_state.path(),

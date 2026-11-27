@@ -6,8 +6,9 @@ use std::time::SystemTime;
 
 use larry_contracts::effect::{EffectIntent, EffectOutcome};
 use larry_contracts::ids::RunId;
+use larry_contracts::replay::DenialReason;
 
-use super::{OwnerReach, Runtime, TickReport};
+use super::{OwnerReach, Runtime, TickItem, TickReport};
 use crate::error::RuntimeError;
 use crate::owner::EffectOwner;
 use crate::projection::{EffectPhase, ProjectionBackend};
@@ -82,13 +83,24 @@ where
                     }
                 };
                 // The proof the gate minted at admission must still hold at the
-                // call: a grant that lapsed since is not spent (larry#77).
-                if let Some(live) = self.live.get(&intent.operation)
-                    && let Err(reason) = live.proof.check()
-                {
-                    report.denied.push((intent.operation, reason));
-                    return Ok(None);
-                }
+                // call: a grant that lapsed since is not spent (larry#77). A reach
+                // with no live witness holds no proof at all, so it is refused
+                // rather than let through unchecked (larry#197).
+                let auth = match self.live.get(&intent.operation) {
+                    Some(live) => match live.proof.checked_auth() {
+                        Ok((auth, required)) => (auth, required),
+                        Err(reason) => {
+                            report.denied.push((intent.operation, reason));
+                            return Ok(None);
+                        }
+                    },
+                    None => {
+                        report
+                            .denied
+                            .push((intent.operation, DenialReason::AuthorityExpired));
+                        return Ok(None);
+                    }
+                };
                 self.validate_bound_reach(&intent, at)?;
                 // Group commit (larry#75): every fact recorded so far, the
                 // intent among them, is on disk before the owner can act on
@@ -103,6 +115,7 @@ where
                 let previous = self.live.get(&intent.operation).cloned();
                 if let Some(live) = self.live.get_mut(&intent.operation) {
                     live.dispatches = live.dispatches.saturating_add(1);
+                    live.dispatched = Some(key);
                     // The reach below is about to happen, so this effect may
                     // now have reached its owner. This is the only place the
                     // flag is set for a live effect, and it is set before the
@@ -111,30 +124,39 @@ where
                     // query about it is therefore evidence.
                     live.sent = true;
                 }
+                let (auth, required) = auth;
                 let outcome = if intent.binding().is_some() {
-                    match self.owner.dispatch_bound(&intent, at) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            // Typed owner refusal guarantees no attempted effect.
-                            // Restore the witness, including a previous successful reach.
-                            if let Some(previous) = previous {
-                                self.live.insert(intent.operation, previous);
-                            }
-                            return Err(error.into());
-                        }
-                    }
+                    self.owner.dispatch_bound(&intent, &auth, &required, at)
                 } else {
-                    self.owner.dispatch(&intent, at)
+                    self.owner.dispatch(&intent, &auth, &required, at)
+                };
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        // Typed owner refusal guarantees no attempted effect.
+                        // Restore the witness, including a previous successful reach.
+                        if let Some(previous) = previous {
+                            self.live.insert(intent.operation, previous);
+                        }
+                        return Err(error.into());
+                    }
                 };
                 // The reach happened without the authority source, so it
                 // spends one unit of offline authority; a typed owner refusal
                 // returned above and spent none (E65). Nothing can move the
                 // fence between the handoff and here, as this call holds the
                 // runtime exclusively, so a refusal would be a broker defect:
-                // it is reported, and the outcome of the reach that did happen
-                // is still recorded.
+                // it is reported apart from the fenced reaches, which never
+                // happened, and the outcome of the reach that did happen is still
+                // recorded (larry#197).
                 if let Err(refusal) = self.fence.spend(&warrant, &intent) {
-                    report.fenced.push((intent.operation, refusal));
+                    report.refused.push((
+                        TickItem::Effect(intent.operation),
+                        RuntimeError::Unspent {
+                            operation: intent.operation,
+                            refusal,
+                        },
+                    ));
                 }
                 Some(outcome)
             }

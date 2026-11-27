@@ -26,7 +26,11 @@ const MAX_SHELL_BYTES: usize = 256;
 
 /// Refuses a repository path or base the executor would hand to git unsafely.
 pub(super) fn check_repo_and_base(repo_text: &str, base_text: &str) -> Result<(), TaskError> {
-    if repo_text.is_empty() || repo_text.len() > MAX_REPO_BYTES || repo_text.contains('\0') {
+    if repo_text.is_empty()
+        || repo_text.len() > MAX_REPO_BYTES
+        || repo_text.contains('\0')
+        || !std::path::Path::new(repo_text).is_absolute()
+    {
         return Err(TaskError::BadRepo);
     }
     if !is_base(base_text) {
@@ -89,4 +93,26 @@ pub(super) fn check_acceptance(acceptance: &[Vec<String>]) -> Result<(), TaskErr
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_REPO_BYTES, check_repo_and_base};
+    use crate::executor::TaskError;
+
+    #[test]
+    fn every_repository_boundary_is_refused_before_route_validation() {
+        let too_long = format!("/{}", "r".repeat(MAX_REPO_BYTES));
+        for repo in [
+            String::new(),
+            too_long,
+            String::from("/tmp/a\0b"),
+            String::from("relative"),
+        ] {
+            assert!(
+                matches!(check_repo_and_base(&repo, "HEAD"), Err(TaskError::BadRepo)),
+                "repository boundary {repo:?}"
+            );
+        }
+    }
 }

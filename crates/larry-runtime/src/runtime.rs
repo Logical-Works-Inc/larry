@@ -62,7 +62,7 @@ pub use approval::{Answer, Decision, Question, QuestionError, Subject};
 pub use display::DisplayedEffect;
 use display::ReadyCommand;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use lgwks_bot::kernel::clock::Clock;
 
@@ -175,6 +175,7 @@ impl TickReport {
     pub fn fenced(&self) -> &[(OperationId, FenceRefusal)] {
         &self.fenced
     }
+
     /// One command's, effect's or run's typed refusal, in the order the tick
     /// refused them.
     ///
@@ -237,6 +238,10 @@ pub struct Runtime<P, O> {
     budgets: BTreeMap<TenantId, u64>,
     /// Tenant ownership of tracked runs.
     runs: BTreeMap<RunId, RunLive>,
+    /// Count of tracked runs per tenant for bounded-capacity admission.
+    run_counts: BTreeMap<TenantId, usize>,
+    /// Runs that requested cancellation and still need a completion check.
+    cancelling: BTreeSet<RunId>,
     /// Bounded effect witnesses in operation identity order.
     live: BTreeMap<OperationId, LiveEffect>,
     /// Monotonic logical tick number.
@@ -277,6 +282,8 @@ where
             settings,
             budgets: BTreeMap::new(),
             runs: BTreeMap::new(),
+            cancelling: BTreeSet::new(),
+            run_counts: BTreeMap::new(),
             live: BTreeMap::new(),
             tick_count: 0,
         })
@@ -318,6 +325,12 @@ where
     #[must_use]
     pub const fn journal(&self) -> &Journal {
         &self.journal
+    }
+
+    /// The authoritative journal for mutation. Reads extend the tenant
+    /// catch-up index to the head first; appends never hash it (larry#215).
+    pub(crate) fn journal_mut(&mut self) -> &mut Journal {
+        &mut self.journal
     }
 
     /// The current projection.
@@ -549,6 +562,35 @@ fn recorded_unknowns(journal: &Journal) -> Result<BTreeMap<OperationId, u8>, Run
     Ok(unknowns)
 }
 
+/// The runtime indexes rebuilt from a journal's projection.
+type RestoredRunTables = (
+    BTreeMap<RunId, RunLive>,
+    BTreeMap<TenantId, usize>,
+    BTreeSet<RunId>,
+);
+
+/// Rebuilds tracked-run, per-tenant-count and cancellation indexes from a fold.
+fn restored_run_tables<P: ProjectionBackend>(
+    projection: &P,
+) -> Result<RestoredRunTables, RuntimeError> {
+    let mut runs = BTreeMap::new();
+    let mut counts: BTreeMap<TenantId, usize> = BTreeMap::new();
+    for run in projection.run_ids() {
+        let tenant = projection
+            .run_tenant(run)
+            .ok_or(RuntimeError::RunNotTracked { run })?;
+        runs.insert(run, RunLive { tenant });
+        let count = counts.entry(tenant).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    let cancelling = runs
+        .keys()
+        .filter(|run| projection.run_state(**run) == Some(RunState::Cancelling))
+        .copied()
+        .collect();
+    Ok((runs, counts, cancelling))
+}
+
 /// Restores a runtime from a recorded journal, consulting no live state.
 ///
 /// The projection is rebuilt by folding, and the live effect table is
@@ -613,7 +655,6 @@ where
         RevocationFence::restored(epoch, bound)?
     };
 
-    let mut runs: BTreeMap<RunId, RunLive> = BTreeMap::new();
     let mut live: BTreeMap<OperationId, LiveEffect> = BTreeMap::new();
     // One counter per tenant (larry#208): every recorded intent's cost is spent
     // from the tenant its own event named, so a restart keeps each tenant's own
@@ -689,6 +730,9 @@ where
                 // alternative fails open, and the direction here is the same
                 // one the dispatch budget below already takes.
                 sent: true,
+                // The journal keeps no key; the retry rule reads the one this
+                // intent names at its recorded attempt (larry#197).
+                dispatched: None,
                 dispatches,
                 reconciliations,
                 // Zero, so a restored effect is reconcilable on the first tick
@@ -700,21 +744,7 @@ where
             },
         );
     }
-    for run in projection.run_ids() {
-        // The tenant comes from the run's own recorded events, never from a
-        // reserved intent. An intent's `tenant` is *declared* by the proposal
-        // that reserved it, and inferring a run's tenant from it would both
-        // re-attribute the run to a declaration and fail outright for a run
-        // whose recorded history reserved nothing — a denied submission, a
-        // steering command, or a cancellation that arrived before any work.
-        // Both are wrong for the same reason: recovery is a re-fold of what
-        // the runtime recorded (D04), not a reconstruction from what a
-        // submitter claimed (D42).
-        let tenant = projection
-            .run_tenant(run)
-            .ok_or(RuntimeError::RunNotTracked { run })?;
-        runs.insert(run, RunLive { tenant });
-    }
+    let (runs, run_counts, cancelling) = restored_run_tables(&projection)?;
 
     Ok(Runtime {
         journal,
@@ -728,6 +758,8 @@ where
         budgets,
         settings,
         runs,
+        run_counts,
+        cancelling,
         live,
         tick_count: 0,
     })

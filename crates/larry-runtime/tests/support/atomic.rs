@@ -2,13 +2,15 @@
 //! protocol ingress falsifiers. Nothing here reaches a network; the owner
 //! models an atomic effect boundary over deterministic seeded identity.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::SecurityEpoch;
 use larry_contracts::binding::{BindingError, BindingField, EffectTarget, ResolvedEffect};
 use larry_contracts::effect::{EffectIntent, EffectOutcome};
 use larry_contracts::ids::{OperationId, TenantId, WorkerId};
-use larry_runtime::owner::EffectOwner;
+use larry_runtime::owner::{EffectOwner, validate_proof};
+use lgwks_bot::kernel::cap::{Auth, Cap};
+use lgwks_bot::kernel::gate::GrantSet;
 
 /// Host-authenticated holder the display journeys share: the identity every
 /// grant names, without sharing the grants themselves across tenants.
@@ -103,35 +105,44 @@ impl EffectOwner for AtomicOwner {
 
     fn dispatch_bound(
         &mut self,
-        intent: &EffectIntent,
-        _at: SystemTime,
+        bound: &EffectIntent,
+        credential: &Auth,
+        required: &[Cap],
+        _observed_at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
+        validate_proof(credential, required)?;
         let current = self.observe()?;
-        intent
+        bound
             .binding()
             .ok_or(BindingError::MissingDisplay)?
             .resolved()
             .verify(&current)?;
         // The validated resolved value itself is executed, never a second lookup.
-        self.executed
-            .push((intent.tenant, intent.operation, current));
+        self.executed.push((bound.tenant, bound.operation, current));
         Ok(if self.lose_reply {
             EffectOutcome::Unknown {
-                operation: intent.operation,
+                operation: bound.operation,
             }
         } else {
             EffectOutcome::Succeeded {
-                operation: intent.operation,
+                operation: bound.operation,
             }
         })
     }
 
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
+    fn dispatch(
+        &mut self,
+        legacy: &EffectIntent,
+        credential: &Auth,
+        required: &[Cap],
+        _observed_at: SystemTime,
+    ) -> Result<EffectOutcome, BindingError> {
         // Any legacy dispatch is an observable test failure, not a fallback.
         self.observations = u64::MAX;
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
+        validate_proof(credential, required)?;
+        Ok(EffectOutcome::Unknown {
+            operation: legacy.operation,
+        })
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
@@ -139,11 +150,17 @@ impl EffectOwner for AtomicOwner {
             operation: intent.operation,
         }
     }
+
+    /// The boundary is keyed by operation id for good, so a resend of a lost
+    /// reply is the binding's to refuse, not the retry rule's (larry#197).
+    fn deduplication_window(&self, _intent: &EffectIntent) -> Option<Duration> {
+        Some(Duration::MAX)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomicOwner, holder, resolved, swapped_field};
+    use super::{AtomicOwner, GrantSet, holder, resolved, swapped_field};
     use larry_contracts::authority::{BudgetUnit, Scope, SecurityEpoch};
     use larry_contracts::binding::BindingError;
     use larry_contracts::effect::ReconciliationStrategy;
@@ -181,6 +198,7 @@ mod tests {
         );
         let intent = body.intent(TenantId::from_bytes([1; 16]), SecurityEpoch::INITIAL);
         let mut owner = AtomicOwner::new(5, 0);
+        let proof = GrantSet::empty().issue(&[])?;
         let at = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_secs(1_700_000_000))
             .ok_or("fixture instant overflow")?;
@@ -190,12 +208,17 @@ mod tests {
         );
         assert!(
             matches!(
-                owner.dispatch_bound(&intent, at),
+                owner.dispatch_bound(&intent, &proof, &[], at),
                 Err(BindingError::MissingDisplay)
             ),
             "an unbound intent is refused, never dispatched"
         );
         assert!(owner.executed().is_empty(), "nothing was executed");
+        assert_eq!(
+            owner.deduplication_window(&intent),
+            Some(Duration::MAX),
+            "the boundary deduplicates by operation id for good"
+        );
         Ok(())
     }
 }

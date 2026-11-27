@@ -21,19 +21,21 @@
 //! Source: The Rust Reference on paths, use declarations, modules and macros; the Cargo Book on
 //! workspaces; POSIX `mkstemp(3)`; CWE-377 (insecure temporary file) and CWE-59 (link following).
 
+mod follow;
+mod snapshot;
 mod syntax;
 mod uses;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lgwks_ast::{Language, MAX_SOURCE_BYTES, Parsed, try_parse};
+use lgwks_ast::MAX_SOURCE_BYTES;
 
 use super::error::GovernanceError;
 use super::read::{self, ReadFault};
-use syntax::{crate_root, follow_names, is_test_code, verdicts};
+use snapshot::Snapshot;
 
 /// The one guard of the crate's tests and the one of the integration tests: each empties its
 /// directory before use and removes it on drop, so the process id there names no leftover, and
@@ -49,7 +51,7 @@ const MAX_DEPTH: usize = 64;
 
 /// A source the rule reads: its path on disk, its root-relative name, and whether it inherits the
 /// test code of the file that followed it.
-type Source = (PathBuf, String, bool);
+pub(super) type Source = (PathBuf, String, bool);
 
 /// What reading one source file produced.
 enum SourceRead {
@@ -71,6 +73,8 @@ struct Scanned {
 pub(crate) struct Workspace {
     /// Every member's directory, relative to the root; "" is the root package.
     members: Vec<String>,
+    /// Parsed sources and their analyses, reusable while this snapshot lives.
+    snapshot: Snapshot,
 }
 
 impl Workspace {
@@ -95,6 +99,7 @@ impl Workspace {
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
                     members: Vec::new(),
+                    snapshot: Snapshot::default(),
                 });
             }
             Err(cause) => return Err(unreadable(cause)),
@@ -114,7 +119,10 @@ impl Workspace {
         }
         members.sort();
         members.dedup();
-        Ok(Self { members })
+        Ok(Self {
+            members,
+            snapshot: Snapshot::default(),
+        })
     }
 
     /// The member directories, relative to the root.
@@ -401,7 +409,7 @@ fn rule_errors_with(
             Some(lanes) => lanes.clamp(1, pending.len().max(1)),
             None => lane_count(pending.len()),
         };
-        for scanned in scan_all(&canonical_root, &pending, lanes, gated) {
+        for scanned in scan_all(&canonical_root, workspace, &pending, lanes, gated) {
             errors.extend(scanned.errors);
             queue.extend(scanned.follows);
         }
@@ -414,12 +422,25 @@ fn rule_errors_with(
 /// Scans every pending source on at most `lanes` scoped threads: one cursor hands each thread the
 /// next path, each answer lands at its path's index, and the answers are read back in path order,
 /// so the report never depends on which lane finished first.
-fn scan_all(canonical_root: &Path, pending: &[Source], lanes: usize, gated: bool) -> Vec<Scanned> {
+fn scan_all(
+    canonical_root: &Path,
+    workspace: &Workspace,
+    pending: &[Source],
+    lanes: usize,
+    gated: bool,
+) -> Vec<Scanned> {
     let lanes = lanes.clamp(1, pending.len().max(1));
     let mut scanned: Vec<Option<Scanned>> = pending.iter().map(|_| None).collect();
     if lanes == 1 {
         for (slot, source) in scanned.iter_mut().zip(pending) {
-            *slot = Some(scan(canonical_root, &source.0, &source.1, source.2, gated));
+            *slot = Some(scan(
+                canonical_root,
+                workspace,
+                &source.0,
+                &source.1,
+                source.2,
+                gated,
+            ));
         }
     } else {
         let cursor = AtomicUsize::new(0);
@@ -433,8 +454,14 @@ fn scan_all(canonical_root: &Path, pending: &[Source], lanes: usize, gated: bool
                             let Some(source) = pending.get(at) else {
                                 break;
                             };
-                            let answer =
-                                scan(canonical_root, &source.0, &source.1, source.2, gated);
+                            let answer = scan(
+                                canonical_root,
+                                workspace,
+                                &source.0,
+                                &source.1,
+                                source.2,
+                                gated,
+                            );
                             mine.push((at, answer));
                         }
                         mine
@@ -556,6 +583,7 @@ pub(super) fn entry_name(entry: &Path) -> Result<&str, EntryError> {
 /// (larry#415), and `false` runs both on every source, the reference the simulation compares to.
 fn scan(
     canonical_root: &Path,
+    workspace: &Workspace,
     path: &Path,
     relative: &str,
     inherited_test: bool,
@@ -585,37 +613,34 @@ fn scan(
         Ok(text) => text,
         Err(_) => return refused(GovernanceError::SourceNotUtf8 { relative: named() }),
     };
-    let tree: Parsed = match try_parse(text, Language::Rust) {
-        Ok(tree) => tree,
-        Err(cause) => {
-            return refused(GovernanceError::Source {
-                relative: named(),
-                cause,
-            });
-        }
-    };
+    let (verdict_possible, follow_possible) =
+        (!gated || may_refuse(text), !gated || may_follow(text));
     let mut scanned = Scanned {
         errors: Vec::new(),
         follows: Vec::new(),
     };
-    let (verdict_possible, follow_possible) =
-        (!gated || may_refuse(text), !gated || may_follow(text));
-    if !verdict_possible && !follow_possible {
-        return scanned;
-    }
-    let test_code = inherited_test || is_test_code(relative, &tree);
+    // The checked parse runs inside `analyzed` even when no pass can raise anything, so a
+    // syntax fault refuses whatever the text holds.
+    let (_, analysis) = match workspace
+        .snapshot
+        .analyzed(relative, &contents, text, gated)
+    {
+        Ok(found) => found,
+        Err(error) => return refused(error),
+    };
+    let test_code = inherited_test || analysis.test_code;
     if follow_possible {
-        scanned.follows = follows(
+        scanned.follows = follow::follows(
             canonical_root,
             path,
             relative,
-            &tree,
+            &analysis.follows,
             test_code,
             &mut scanned.errors,
         );
     }
     if test_code && verdict_possible {
-        scanned.errors.extend(verdicts(relative, text, &tree));
+        scanned.errors.extend(analysis.verdicts.iter().cloned());
     }
     scanned
 }
@@ -635,94 +660,6 @@ pub(super) fn may_refuse(text: &str) -> bool {
 /// Whether the follow pass can name a module over `text`: a `#[path` attribute or an `include!`.
 pub(super) fn may_follow(text: &str) -> bool {
     text.contains("#[path") || text.contains("include")
-}
-
-/// The `#[path = "..."]` and `include!("...")` sources `tree` names, resolved beside its file and
-/// kept inside the checked tree; an absolute path, a link, a missing file or a path outside the
-/// tree is a refusal naming the file that names it.
-fn follows(
-    canonical_root: &Path,
-    path: &Path,
-    relative: &str,
-    tree: &Parsed,
-    inherited_test: bool,
-    errors: &mut Vec<String>,
-) -> Vec<Source> {
-    let Some(base) = path.parent() else {
-        return Vec::new();
-    };
-    let mut follows = Vec::new();
-    for named in follow_names(tree) {
-        let name = named.name;
-        if name.starts_with('/') {
-            errors.push(format!(
-                "a followed module names an absolute path: {relative}: {name}"
-            ));
-            continue;
-        }
-        let mut rooted = base.to_path_buf();
-        if !named.inline.is_empty()
-            && !crate_root(relative)
-            && let Some(stem) = Path::new(relative).file_stem()
-            && let Some(stem) = stem.to_str()
-        {
-            rooted.push(stem);
-        }
-        for inline in &named.inline {
-            rooted.push(inline);
-        }
-        let target = settle(&rooted.join(&name));
-        let canonical = match resolve_follow(&target) {
-            Ok(canonical) => canonical,
-            Err(cause) => {
-                let what = if target.strip_prefix(canonical_root).is_ok() {
-                    "a followed module names no readable source"
-                } else {
-                    "a followed module leaves the checked tree"
-                };
-                errors.push(format!("{what}: {relative}: {name}: {cause}"));
-                continue;
-            }
-        };
-        let inner = match canonical.strip_prefix(canonical_root) {
-            Ok(inner) => inner,
-            Err(_) => {
-                errors.push(format!(
-                    "a followed module leaves the checked tree: {relative}: {name}"
-                ));
-                continue;
-            }
-        };
-        let inner = inner.to_string_lossy().into_owned();
-        follows.push((canonical, inner, inherited_test));
-    }
-    follows
-}
-
-/// `path` with `.` and `..` applied as text, as rustc roots a followed module (larry#311).
-fn settle(path: &Path) -> PathBuf {
-    let mut settled = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => {}
-            Component::ParentDir
-                if matches!(settled.components().next_back(), Some(Component::Normal(_))) =>
-            {
-                settled.pop();
-            }
-            _ => settled.push(part),
-        }
-    }
-    settled
-}
-
-/// Resolves a followed module's path: a symlink is never followed and a missing file is refused.
-fn resolve_follow(target: &Path) -> io::Result<PathBuf> {
-    let metadata = std::fs::symlink_metadata(target)?;
-    if metadata.file_type().is_symlink() {
-        return Err(io::Error::other("a symbolic link is never followed"));
-    }
-    std::fs::canonicalize(target)
 }
 
 /// Reads one source file within the reader's byte bound, through the governance reader that refuses

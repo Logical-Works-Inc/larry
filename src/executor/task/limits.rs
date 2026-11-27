@@ -28,8 +28,8 @@ impl Task {
     /// parameters, else `argv` itself.
     #[must_use]
     pub(crate) fn argv_for(&self, argv: &[String]) -> Vec<String> {
-        match self.shell {
-            Some(ref shell) => [&[shell.clone(), String::from("-c")], argv].concat(),
+        match self.shell_program() {
+            Some(shell) => [&[shell.to_owned(), String::from("-c")], argv].concat(),
             None => argv.to_vec(),
         }
     }
@@ -74,7 +74,8 @@ mod tests {
 
     /// A minimal task document with the raw JSON members `members` appended.
     fn document(members: &str) -> Vec<u8> {
-        format!(r#"{{"repo":"r","base":"HEAD","acceptance":[["c","a"]]{members}}}"#).into_bytes()
+        format!(r#"{{"repo":"/tmp/r","base":"HEAD","acceptance":[["c","a"]]{members}}}"#)
+            .into_bytes()
     }
 
     /// larry#439: for every seed a timeout or deadline inside 1..=86400000 reads back exactly,

@@ -19,7 +19,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// A task document naming `base`, with the raw JSON members `members` appended.
 fn task(base: &str, members: &str) -> Result<Task, TaskError> {
-    let document = format!(r#"{{"repo":"r","base":"{base}","acceptance":[["c"]]{members}}}"#);
+    let document = format!(r#"{{"repo":"/tmp/r","base":"{base}","acceptance":[["c"]]{members}}}"#);
     Task::parse(document.as_bytes())
 }
 

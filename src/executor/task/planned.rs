@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn a_planner_task_carries_its_knobs_or_the_defaults() -> Result<(), Box<dyn std::error::Error>>
     {
-        let plain = Task::shell("r", "g", &["f"], &["make test"])?;
+        let plain = Task::shell("/tmp/r", "g", &["f"], &["make test"])?;
         assert_eq!(plain.base(), "HEAD", "the default base");
         assert_eq!(plain.shell_program(), Some("sh"), "the default shell");
         let command = vec![String::from("make test")];
@@ -104,7 +104,7 @@ mod tests {
             timeout_ms: Some(30_000),
             deadline_ms: Some(90_000),
         };
-        let set = Task::shell_via("r", "g", &["f"], &["make test"], Some("local"), knobs)?;
+        let set = Task::shell_via("/tmp/r", "g", &["f"], &["make test"], Some("local"), knobs)?;
         assert_eq!(set.base(), "v1.2", "the planner's base");
         assert_eq!(set.argv_for(&command), ["bash", "-c", "make test"]);
         assert_eq!(set.timeout_ms(), Some(30_000), "the planner's timeout");

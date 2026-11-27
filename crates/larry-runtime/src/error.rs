@@ -203,6 +203,18 @@ pub enum RuntimeError {
     /// The dispatch fence refused a change or a read (larry#76).
     #[error("dispatch fence refused: {0}")]
     Fence(#[from] crate::fence::FenceError),
+    /// The owner was reached, then the broker refused to count the reach: a
+    /// broker defect (E65). Unlike a fenced reach the effect may have
+    /// happened, so its outcome is still recorded (larry#197).
+    #[error(
+        "operation {operation} reached its owner, then the broker refused its spend: {refusal}"
+    )]
+    Unspent {
+        /// The operation whose reach happened.
+        operation: OperationId,
+        /// The broker's refusal to count it.
+        refusal: crate::fence::FenceRefusal,
+    },
     /// Protocol negotiation or protocol-bound command ingress was refused.
     #[error("protocol ingress refused: {0}")]
     Protocol(#[from] crate::protocol::ProtocolError),
@@ -296,7 +308,8 @@ impl RuntimeError {
             | Self::EffectIdentity { .. }
             | Self::Protocol(_)
             | Self::Question(_)
-            | Self::Fence(_) => false,
+            | Self::Fence(_)
+            | Self::Unspent { .. } => false,
         }
     }
 

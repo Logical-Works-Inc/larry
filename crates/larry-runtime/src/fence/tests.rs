@@ -296,7 +296,7 @@ fn withdrawn_before_the_handoff(
     let key = effect_key(&intent, 1)?;
     let warrant = fence.authorize(key, &intent)?;
     withdraw(&mut fence)?;
-    assert_eq!(fence.revalidate(&warrant, &intent), Err(expected));
+    assert_eq!(fence.revalidate(&warrant, &intent), Err(expected.clone()));
     assert_eq!(fence.spend(&warrant, &intent), Err(expected));
     assert_eq!(
         fence.offline_spent()?,
@@ -339,13 +339,13 @@ fn an_epoch_the_fence_never_reached_is_never_issued_not_stale() -> Outcome {
 #[test]
 fn e71_epoch_exhaustion_refuses_rather_than_wrapping() -> Outcome {
     assert_eq!(
-        RevocationFence::new(SecurityEpoch::new(u64::MAX), 1).map(drop),
+        RevocationFence::new(SecurityEpoch::new(LAST_EPOCH), 1).map(drop),
         Err(FenceError::EpochExhausted),
-        "u64::MAX has no generation"
+        "LAST_EPOCH has no generation"
     );
-    let mut fence = RevocationFence::new(SecurityEpoch::new(u64::MAX - 1), 1)?;
+    let mut fence = RevocationFence::new(SecurityEpoch::new(LAST_EPOCH - 1), 1)?;
     assert_eq!(fence.advance_epoch(), Err(FenceError::EpochExhausted));
-    assert_eq!(fence.epoch()?, SecurityEpoch::new(u64::MAX - 1));
+    assert_eq!(fence.epoch()?, SecurityEpoch::new(LAST_EPOCH - 1));
     Ok(())
 }
 
@@ -354,7 +354,7 @@ fn a_report_past_the_last_epoch_closes_the_fence_for_good() -> Outcome {
     let mut fence = fence(4)?;
     let intent = admitted_at(operation(1), SecurityEpoch::INITIAL);
     assert_eq!(
-        fence.authenticate(SecurityEpoch::new(u64::MAX)),
+        fence.authenticate(SecurityEpoch::new(LAST_EPOCH)),
         Err(FenceError::EpochExhausted)
     );
     assert_eq!(check(&fence, &intent), Err(FenceRefusal::Closed));
@@ -400,19 +400,22 @@ fn revocations_saturate_at_the_broker_bound_and_the_epoch_still_fences() -> Outc
 
 #[test]
 fn neighbouring_top_epochs_never_share_a_key_generation() -> Outcome {
-    // The old mapping saturated, so epochs u64::MAX - 1 and u64::MAX keyed to
+    // The old mapping saturated, so epochs LAST_EPOCH - 1 and LAST_EPOCH keyed to
     // one generation and a reservation one epoch stale could pass the fence.
     let below = effect_key(
-        &admitted_at(operation(9), SecurityEpoch::new(u64::MAX - 2)),
+        &admitted_at(operation(9), SecurityEpoch::new(LAST_EPOCH - 2)),
         1,
     )?;
     let top = effect_key(
-        &admitted_at(operation(9), SecurityEpoch::new(u64::MAX - 1)),
+        &admitted_at(operation(9), SecurityEpoch::new(LAST_EPOCH - 1)),
         1,
     )?;
     assert_ne!(below.epoch(), top.epoch());
     assert!(matches!(
-        effect_key(&admitted_at(operation(9), SecurityEpoch::new(u64::MAX)), 1),
+        effect_key(
+            &admitted_at(operation(9), SecurityEpoch::new(LAST_EPOCH)),
+            1
+        ),
         Err(RuntimeError::EffectIdentity {
             field: "admission_epoch",
             ..

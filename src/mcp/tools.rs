@@ -10,7 +10,7 @@
 //! success; a rejected run, a refusal and an unconfigured executor are typed
 //! tool errors, so no success is ever reported for work that did not pass.
 
-use crate::executor::{ExecError, Knobs, Report, Settings, Task, execute};
+use crate::executor::{ExecError, Knobs, MAX_TIMEOUT_MS, Report, Settings, Task, execute};
 use crate::model::{RouteError, is_route_id};
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
@@ -32,8 +32,6 @@ const ARGUMENTS: [&str; 9] = [
 ];
 /// Longest shell or base in bytes: the task document's bounds.
 const MAX_WORD_BYTES: usize = 256;
-/// Longest timeout or deadline in milliseconds: one day, the executor's bound.
-const MAX_MILLIS: u64 = 86_400_000;
 /// Longest route id in bytes: the route table's bound.
 const MAX_ROUTE_BYTES: usize = 64;
 /// Longest goal in bytes.
@@ -66,7 +64,7 @@ impl Executor {
     pub(super) fn from_env(
         read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Executor {
-        match Settings::from_env(read) {
+        match Settings::remote_from_env(read) {
             Ok(settings) => Executor::Connected(Box::new(settings)),
             Err(error) => Executor::Absent(error),
         }
@@ -122,8 +120,8 @@ fn declared() -> Vec<Value> {
                 "route": { "type": "string", "minLength": 1, "maxLength": MAX_ROUTE_BYTES },
                 "shell": { "type": "string", "minLength": 1, "maxLength": MAX_WORD_BYTES },
                 "base": { "type": "string", "minLength": 1, "maxLength": MAX_WORD_BYTES },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_MILLIS },
-                "deadline_ms": { "type": "integer", "minimum": 1, "maximum": MAX_MILLIS }
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS },
+                "deadline_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS }
             },
             "required": ["goal", "repo", "files", "acceptance"],
             "additionalProperties": false
@@ -323,13 +321,14 @@ fn optional_text<'a>(arguments: &'a Map, key: &'static str) -> Result<Option<&'a
     }
 }
 
-/// An optional whole number of milliseconds in `1..=`[`MAX_MILLIS`].
+/// An optional whole number of milliseconds in `1..=86_400_000`, the executor's own
+/// bound on any wait: [`MAX_TIMEOUT_MS`].
 fn optional_millis(arguments: &Map, key: &'static str) -> Result<Option<u64>, TaskError> {
     let Some(value) = arguments.get(key) else {
         return Ok(None);
     };
     match value.as_u64() {
-        Some(millis) if (1..=MAX_MILLIS).contains(&millis) => Ok(Some(millis)),
+        Some(millis) if (1..=MAX_TIMEOUT_MS).contains(&millis) => Ok(Some(millis)),
         _ => Err(TaskError::WrongType {
             key,
             form: "a whole number of milliseconds in 1..=86400000",

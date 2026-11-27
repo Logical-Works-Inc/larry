@@ -121,6 +121,41 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
     Ok(())
 }
 
+/// A first-timer's bare `larry` in a folder its state never provisioned still
+/// reaches the approval prompt for the model's first command: the local door
+/// stays open until the first root row binds it, so no failure line appears
+/// first (larry#207).
+#[test]
+fn tui_journey_unprovisioned_local_reaches_the_first_approval() -> Journey {
+    let state = origin::TempDir::new()?;
+    let work = origin::TempDir::new()?;
+    std::fs::write(work.path().join("notes.txt"), "a first-timer's project\n")?;
+    let replies = [COMMAND, r#"{"done":"left it alone"}"#];
+    let ran = frame_in(
+        &state,
+        work,
+        scripted(7, &replies),
+        Box::new(|pty, mock, _| {
+            ask(pty)?;
+            pty.send("n")?;
+            pty.wait_for("left it alone")?;
+            let told = mock
+                .requests()
+                .get(1)
+                .is_some_and(|body| String::from_utf8_lossy(body).contains(DECLINED));
+            assert!(told, "the model is told the command was declined");
+            Ok(())
+        }),
+    )?;
+    assert!(
+        ran.status.success(),
+        "Ctrl+C on an empty box exits 0: {}",
+        ran.status
+    );
+    assert!(!wrote(&ran), "a declined command never runs");
+    Ok(())
+}
+
 /// A declined command never runs: `n` at the question, the model is told, the file never
 /// appears, and the model's next request carries the decline.
 #[test]
