@@ -28,7 +28,9 @@ pub(crate) use config::sim_config;
 pub use route::RouteError;
 #[cfg(test)]
 pub(crate) use route::tenant_namespace;
-pub(crate) use route::{Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve};
+pub(crate) use route::{
+    DEFAULT_PRICE_VERSION, Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve,
+};
 
 /// Most messages one completion request carries.
 pub(crate) const MAX_MESSAGES: usize = 256;

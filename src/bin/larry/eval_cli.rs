@@ -51,10 +51,11 @@ pub(super) enum EvalRun {
 pub(super) fn eval_once() -> Result<(), EvalRun> {
     let settings =
         Settings::from_env(process_env().map_err(EvalRun::Exec)?).map_err(EvalRun::Exec)?;
-    let prices = Prices::from_env(process_env().map_err(EvalRun::Exec)?).map_err(EvalRun::Price)?;
+    let prices = Prices::from_env(process_env().map_err(EvalRun::Exec)?);
     let bytes = read_stdin(SET_LIMIT).map_err(EvalRun::Exec)?;
     let stopped = match larry_demo::eval::run(&bytes, &settings, prices) {
         Ok(card) => return print_line(card.json()).map_err(EvalRun::Exec),
+        Err(EvalError::Price(price)) => return Err(EvalRun::Price(price)),
         Err(stopped) => stopped,
     };
     if let Some(card) = stopped.card()
