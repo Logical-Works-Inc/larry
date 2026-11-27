@@ -4,6 +4,23 @@ use super::island::{Island, Isolation, Outcome};
 use super::session::Steps;
 use super::session_gate::SessionIdentity;
 use super::workspace::report_members;
+use crate::model::Usage;
+
+/// The `authored` usage array of a sealed session report: one entry per model
+/// completion, so `larry eval` prices a session task like a brief (larry#217).
+fn authored_usage(usage: &[Option<Usage>]) -> Vec<Value> {
+    usage
+        .iter()
+        .map(|spent| {
+            json!({
+                "prompt_tokens": spent.map(|value| value.prompt_tokens),
+                "completion_tokens": spent.map(|value| value.completion_tokens),
+                "cached_tokens": spent.and_then(|value| value.cached_tokens),
+                "cache_write_tokens": spent.and_then(|value| value.cache_write_tokens),
+            })
+        })
+        .collect()
+}
 
 /// Builds the sealed session body after the typed finish gate has decided the stop.
 pub(super) fn body(
@@ -20,6 +37,7 @@ pub(super) fn body(
         "task_digest": identity.task_digest,
         "diff": null,
         "results": done.records,
+        "authored": authored_usage(&done.usage),
         "denied": [],
         "session": {
             "stop": done.stop.name(),

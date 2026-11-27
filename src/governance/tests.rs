@@ -251,6 +251,30 @@ fn a_pid_temp_path_in_test_code_is_refused_and_the_guard_passes()
 /// The number of live-tree checks the cost control runs.
 const CHECKS: usize = 100;
 
+/// The wall the cost control holds (larry#293): the checks finish in under 90 s.
+fn within_budget(elapsed: std::time::Duration) -> bool {
+    elapsed < std::time::Duration::from_secs(90)
+}
+
+/// The budget is exclusive: exactly 90 s is already over it, so `<` never becomes `<=`.
+#[test]
+fn the_governance_budget_refuses_exactly_ninety_seconds() {
+    let bound = std::time::Duration::from_secs(90);
+    let under = bound.checked_sub(std::time::Duration::from_nanos(1));
+    assert!(
+        under.is_some_and(within_budget),
+        "a nanosecond under is within"
+    );
+    assert!(
+        !within_budget(bound),
+        "exactly ninety seconds is over budget"
+    );
+    assert!(
+        !within_budget(bound + std::time::Duration::from_secs(1)),
+        "past the bound is over"
+    );
+}
+
 /// The rule reads every workspace member (larry#311): the live tree names the root package and its
 /// two crates, so `crates/*` is scanned and a member's test code cannot hide.
 #[test]
@@ -296,6 +320,54 @@ fn a_hundred_checks_of_the_tree_print_their_percentiles() -> Result<(), Box<dyn 
         nearest(99)
     );
     std::io::stderr().lock().write_all(line.as_bytes())?;
+    let elapsed = started.elapsed();
+    assert!(
+        within_budget(elapsed),
+        "the repeated governance checks exceeded the 90 second budget: {elapsed:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_cached_parse_is_invalidated_when_a_source_changes() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = Scratch::new("temp-path-parse-cache")?;
+    tree.write(
+        "Cargo.toml",
+        b"[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    tree.write("src/lib.rs", b"pub fn present() {}\n")?;
+    tree.write("tests/check.rs", b"fn check() {}\n")?;
+    let workspace = super::temp_paths::Workspace::read(tree.path())?;
+    assert!(
+        super::temp_paths::rule_errors(tree.path(), &workspace)?.is_empty(),
+        "the initial source passes"
+    );
+    tree.write(
+        "tests/check.rs",
+        b"fn check() { let base = std::env::temp_dir(); let _ = base.join(std::process::id().to_string()); }\n",
+    )?;
+    let errors = super::temp_paths::rule_errors(tree.path(), &workspace)?;
+    assert_eq!(
+        errors,
+        [String::from(
+            "a process id names a temp directory outside the guard: tests/check.rs:1"
+        )],
+        "a changed source is reparsed instead of using its old tree"
+    );
+    tree.write("tests/check.rs", b"fn check() {}\n")?;
+    assert!(
+        super::temp_paths::rule_errors(tree.path(), &workspace)?.is_empty(),
+        "a source fixed back to passing is re-analysed instead of keeping its refusal"
+    );
+    tree.write(
+        "tests/check.rs",
+        b"fn check() { let base = std::env::temp_dir(); let _ = base.join(std::process::id().to_string()); }\n",
+    )?;
+    assert_eq!(
+        super::temp_paths::rule_errors(tree.path(), &workspace)?,
+        errors,
+        "a source broken again is refused again, never passed from its old tree"
+    );
     Ok(())
 }
 

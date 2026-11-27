@@ -398,8 +398,5 @@ pub(crate) fn get(
 
 /// The probe body the shipped binary answers, built independently of it.
 pub(crate) fn probe_body() -> String {
-    format!(
-        "{{\"status\":\"ok\",\"service\":\"larry\",\"version\":\"{}\"}}",
-        env!("CARGO_PKG_VERSION")
-    )
+    String::from("{\"status\":\"ok\",\"service\":\"larry\"}")
 }

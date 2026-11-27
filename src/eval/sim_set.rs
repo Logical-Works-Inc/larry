@@ -220,6 +220,15 @@ fn sim_eval_fat_finger_sets_get_their_exact_error() -> TestResult {
                 "seed {seed}: mistake {index} gave {error}"
             );
         }
+        let unknown_path =
+            with_task(&set, |task| put(task, "path", json!("terminal"))).ok_or("task 0")?;
+        assert!(
+            matches!(
+                refusal(&unknown_path),
+                Some(SetError::UnknownPath { index: 0, .. })
+            ),
+            "seed {seed}: an unknown path is typed"
+        );
         let mut twins = set.clone();
         let first = task_mut(&mut twins, 0)
             .and_then(|task| task.get("id"))

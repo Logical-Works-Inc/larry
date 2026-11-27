@@ -50,7 +50,7 @@ impl Executor {
     pub(super) fn from_env(
         read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Executor {
-        match Settings::from_env(read) {
+        match Settings::remote_from_env(read) {
             Ok(settings) => Executor::Connected(Box::new(settings)),
             Err(error) => Executor::Absent(error),
         }

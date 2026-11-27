@@ -12,6 +12,9 @@
 //! gateway is scored as refusals while the arm keeps going; a kill -9 leaves
 //! nothing the next run does not collect; the shipped set runs end to end.
 
+#[path = "eval_journey/session.rs"]
+mod session;
+
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
@@ -111,6 +114,16 @@ fn check_card(seed: u64, arm: &Arm, scored: &Scored) -> TestResult {
         card["cost_complete"], true,
         "every completion reported usage"
     );
+    assert!(
+        card.get("peak_rss_kib").is_some(),
+        "the scorecard names peak RSS"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            card["peak_rss_kib"].as_u64().is_some(),
+            "Linux exposes peak RSS in KiB"
+        );
+    }
     let cache = [&card["cache_complete"], &card["cached_tokens"]];
     assert_eq!(cache, [&json!(false), &json!(0)], "seed {seed}: cache keys");
     let prompt = number(card, "prompt_tokens")?;
@@ -137,6 +150,72 @@ fn check_card(seed: u64, arm: &Arm, scored: &Scored) -> TestResult {
         card["cost_per_accepted_task_picousd"],
         json!(share.to_string()),
         "seed {seed}: a rejected task's spend counts against the accepted ones"
+    );
+    Ok(())
+}
+
+/// Replies for the shipped set, with the session task's edit, read-only check
+/// and finish pair in order.
+fn matched_session_config(files: usize, session_request: usize) -> TestResult<Config> {
+    let mut contents = vec![String::from("generated\n"); files.saturating_add(3)];
+    *contents
+        .get_mut(session_request)
+        .ok_or("session command reply")? =
+        String::from(r#"{"command":"printf 'session\n' > session.txt"}"#);
+    *contents
+        .get_mut(session_request.saturating_add(1))
+        .ok_or("session check reply")? = String::from(r#"{"command":"test -s session.txt"}"#);
+    *contents
+        .get_mut(session_request.saturating_add(2))
+        .ok_or("session first finish")? = String::from(
+        r#"{"finish":{"summary":"wrote session.txt","check":"test -s session.txt","artifacts":["session.txt"],"state":["ready"],"servers":["none"]}}"#,
+    );
+    *contents
+        .get_mut(session_request.saturating_add(3))
+        .ok_or("session second finish")? = String::from(
+        r#"{"finish":{"summary":"wrote session.txt","check":"test -s session.txt","artifacts":["session.txt"],"state":["ready"],"servers":["none"]}}"#,
+    );
+    Ok(Config {
+        contents,
+        ..Config::seeded(7)
+    })
+}
+
+/// Counts model requests that carry the session's command reply as their latest
+/// assistant message: the request sent right after the model ran the command,
+/// not the later ones that merely repeat it in their history.
+fn session_command_replies(handle: &Handle) -> usize {
+    handle
+        .requests()
+        .into_iter()
+        .filter_map(|body| json::from_slice::<Value>(&body).ok())
+        .filter(|request| {
+            request["messages"].as_array().is_some_and(|messages| {
+                messages
+                    .iter()
+                    .rfind(|message| message["role"] == "assistant")
+                    .is_some_and(|message| {
+                        message["content"].as_str().is_some_and(|content| {
+                            content.contains(r#"{"command":"printf 'session"#)
+                        })
+                    })
+            })
+        })
+        .count()
+}
+
+/// The shipped card's session result carries the real path and a successful outcome.
+fn assert_session_result(card: &Value) -> TestResult {
+    let result = card["results"]
+        .as_array()
+        .ok_or("results")?
+        .iter()
+        .find(|result| result["id"] == "session-path")
+        .ok_or("session result")?;
+    assert_eq!(result["path"], "session", "the result names its path");
+    assert_eq!(
+        result["outcome"], "accepted",
+        "the session command completed successfully"
     );
     Ok(())
 }
@@ -569,17 +648,57 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         .iter()
         .filter_map(|one| one["write"].as_array().map(Vec::len))
         .sum();
-    assert_eq!(ids.len(), 12, "the shipped set holds twelve tasks");
+    assert_eq!(ids.len(), 14, "the shipped set holds fourteen tasks");
+    assert!(
+        ids.iter().any(|id| *id == "session-path"),
+        "the set covers ACP"
+    );
+    assert!(
+        listed.iter().any(|task| {
+            task["id"] == "session-path"
+                && task["path"] == "session"
+                && task["goal"]
+                    .as_str()
+                    .is_some_and(|goal| goal.contains("larry acp"))
+        }),
+        "the ACP task names the shipped session path"
+    );
+    assert!(
+        ids.iter().any(|id| *id == "multi-file"),
+        "the set covers multiple files"
+    );
+    let session_index = listed
+        .iter()
+        .position(|task| task["id"] == "session-path")
+        .ok_or("session task")?;
+    let session_request = listed
+        .iter()
+        .take(session_index)
+        .filter_map(|task| task["write"].as_array().map(Vec::len))
+        .sum::<usize>();
+    let config = matched_session_config(files, session_request)?;
     let state = TempDir::new()?;
-    let ran = mock_model::run(Config::seeded(7), |handle: &Handle| {
-        let ran = score_arm(
-            &operator(&state, handle.addr(), &FLASH, "3"),
-            SHIPPED_SET.as_bytes(),
-        )?;
+    let ran = mock_model::run(config, |handle: &Handle| {
+        // The session task runs its model-chosen commands on the host, exactly as
+        // `larry acp` runs them, so this arm grants `model.command` the way a
+        // Harbor task container's operator does; brief tasks need only four scopes.
+        // The string repeats `support/acp_session.rs`'s SESSION_POLICY, which stays
+        // the canonical home; a drift fails the served-count assertion below.
+        let mut env = operator(&state, handle.addr(), &FLASH, "3");
+        env.push((
+            "LARRY_POLICY",
+            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
+        ));
+        let ran = score_arm(&env, SHIPPED_SET.as_bytes())?;
         assert_eq!(
             handle.served(),
-            u64::try_from(files)?,
-            "one completion per written file"
+            u64::try_from(files.saturating_add(3))?,
+            "one completion per written file plus the session edit, check and finish pair"
+        );
+        assert_eq!(
+            session_command_replies(handle),
+            1,
+            "the mock saw the session command reply"
         );
         Ok::<_, Box<dyn std::error::Error>>(ran)
     })?;
@@ -592,13 +711,14 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         .map(|done| &done["id"])
         .collect();
     assert_eq!(returned, ids, "every task, in the set's order");
+    assert_session_result(card)?;
     assert_eq!(
         number(card, "refused")?,
         0,
         "a clean gateway refuses nothing"
     );
     let sealed = number(card, "accepted")?.checked_add(number(card, "rejected")?);
-    assert_eq!(sealed, Some(12), "every task sealed");
+    assert_eq!(sealed, Some(14), "every task sealed");
     assert_eq!(
         card["cost_complete"], true,
         "every completion reported usage"

@@ -4,8 +4,9 @@
 //! the finish pair naming that check.
 
 use crate::journey::{ask, frame, scripted};
+use crate::origin::git_command;
 use crate::pty::Journey;
-use crate::{APPLIED, COMMAND, REVIEW};
+use crate::{APPLIED, CHECK_HELLO, COMMAND, FINISH_HELLO, REVIEW};
 
 #[test]
 fn tui_journey_requires_the_typed_verification_finish() -> Journey {
@@ -32,5 +33,64 @@ fn tui_journey_requires_the_typed_verification_finish() -> Journey {
         Ok(())
     })?;
     assert!(ran.status.success(), "the gated journey exits cleanly");
+    Ok(())
+}
+
+/// An approved change lands in the folder exactly as shown: the file is there with its bytes,
+/// and git sees that one untracked file and nothing else changed.
+#[test]
+fn tui_journey_apply_writes_the_diff_into_the_folder() -> Journey {
+    let replies = [COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO];
+    let ran = frame(scripted(43, &replies), |pty, _, work| {
+        ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for("$ grep -q hello hello.txt")?;
+        pty.send("y")?;
+        pty.wait_for(REVIEW)?;
+        pty.wait_for("hello.txt  new  +1 -0")?;
+        assert!(!work.join("hello.txt").exists());
+        pty.send("y")?;
+        pty.wait_for(APPLIED)?;
+        pty.wait_for("wrote hello.txt")
+    })?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    assert_eq!(
+        std::fs::read_to_string(ran.work.path().join("hello.txt"))?,
+        "hello\n"
+    );
+    let status = git_command(ran.work.path())
+        .args(["status", "--porcelain"])
+        .output()?;
+    assert_eq!(String::from_utf8(status.stdout)?, "?? hello.txt\n");
+    Ok(())
+}
+
+/// The artifact pane beside the chat (larry#244; the PTY is 120 columns, past the 108 that
+/// open it): while the question about the change is asked the pane already shows its file list
+/// and hunk, before the folder holds the file; once the person applies it the sealed report's
+/// receipt takes the pane, and Tab goes back to the command's output.
+#[test]
+fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
+    let replies = [COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO];
+    let ran = frame(scripted(44, &replies), |pty, _, work| {
+        ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for("$ grep -q hello hello.txt")?;
+        pty.send("y")?;
+        pty.wait_for(REVIEW)?;
+        pty.wait_for("  hello.txt  +1 -0")?;
+        pty.wait_for("+hello")?;
+        assert!(
+            !work.join("hello.txt").exists(),
+            "shown before the folder changes"
+        );
+        pty.send("y")?;
+        pty.wait_for(APPLIED)?;
+        pty.wait_for("commands  2 run, 0 declined, 0 interrupted")?;
+        pty.wait_for("digest    ")?;
+        pty.send("\t")?;
+        pty.wait_for("$ printf")
+    })?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
     Ok(())
 }

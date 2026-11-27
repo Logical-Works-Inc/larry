@@ -19,7 +19,7 @@ use crate::executor::confine::{ConfineError, Platform};
 use crate::executor::gate::{self, Subject, admit_and_run};
 use crate::executor::recovery::journal_path;
 use crate::executor::run::{CommandResult, run_command};
-use crate::executor::session::run_session;
+use crate::executor::session_run::run_session;
 use crate::executor::sim_tree::{
     Origin, Scratch, Shape, files_beneath, origin, scratch, settings, tree_digest,
 };
@@ -64,12 +64,6 @@ impl Scripted {
 impl Observer for Scripted {
     fn approve(&mut self, _step: usize, _command: &str) -> Approval {
         Approval::Run
-    }
-    fn started(&mut self, _step: usize, _command: &str) {}
-    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
-    fn message(&mut self, _text: &str) {}
-    fn cancelled(&self) -> bool {
-        false
     }
     fn review(&mut self, summary: &[String]) -> Handoff {
         self.reviewed.push(summary.to_vec());
@@ -510,6 +504,7 @@ fn sim_island_refused_confinement_starts_nothing() -> TestResult {
         &rig.settings,
         isolation,
         &mut observer,
+        crate::executor::SessionDoor::Tenant,
     );
     assert!(matches!(
         ended,

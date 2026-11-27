@@ -25,7 +25,26 @@ const MAX_ACCEPTANCE: usize = 16;
 /// Every key a set may carry.
 const SET_KEYS: [&str; 2] = ["name", "tasks"];
 /// Every key a task may carry.
-const TASK_KEYS: [&str; 5] = ["id", "files", "goal", "write", "acceptance"];
+const TASK_KEYS: [&str; 6] = ["id", "files", "goal", "path", "write", "acceptance"];
+
+/// The executor path a matched task drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvalPath {
+    /// The brief author writes files, then the acceptance commands run.
+    Command,
+    /// The terminal session model chooses commands and Larry runs them.
+    Session,
+}
+
+impl EvalPath {
+    /// The stable path name recorded on a scorecard result.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Session => "session",
+        }
+    }
+}
 
 /// One task of a set, checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +55,8 @@ pub(crate) struct EvalTask {
     pub(crate) files: Vec<(String, String)>,
     /// The goal the model is given.
     pub(crate) goal: String,
+    /// The executor path, defaulting to the brief command path.
+    pub(crate) path: EvalPath,
     /// The files the model writes.
     pub(crate) write: Vec<String>,
     /// The shell acceptance commands, each run as `sh -c`.
@@ -158,6 +179,14 @@ pub enum SetError {
         #[source]
         cause: TaskError,
     },
+    /// Task `index` names no executor path Larry knows.
+    #[error("task {index} path {path:?} is unknown; use \"command\" or \"session\"")]
+    UnknownPath {
+        /// The task.
+        index: usize,
+        /// The path supplied by the set.
+        path: String,
+    },
 }
 
 /// Where a refusal is: one task of the set, or the set itself.
@@ -275,6 +304,25 @@ fn eval_task(value: &Value, index: usize) -> Result<EvalTask, SetError> {
             index: Some(index),
             key: "goal",
         })?;
+    let path = match object.get("path") {
+        None => EvalPath::Command,
+        Some(value) => match value.as_str() {
+            Some("command") => EvalPath::Command,
+            Some("session") => EvalPath::Session,
+            Some(path) => {
+                return Err(SetError::UnknownPath {
+                    index,
+                    path: path.to_owned(),
+                });
+            }
+            None => {
+                return Err(SetError::WrongType {
+                    index: Some(index),
+                    key: "path",
+                });
+            }
+        },
+    };
     let files = seed_files(object, index)?;
     let write = strings(object, "write", index)?;
     let acceptance = strings(object, "acceptance", index)?;
@@ -288,10 +336,15 @@ fn eval_task(value: &Value, index: usize) -> Result<EvalTask, SetError> {
         id: id.to_owned(),
         files,
         goal: goal.to_owned(),
+        path,
         write,
         acceptance,
     };
-    task.task(".")
+    // The set parser validates task shape before an eval arm creates its real
+    // absolute origin. A host temp path keeps this validation on the same
+    // absolute-repository contract without authorizing or touching a directory.
+    let validation_repo = std::env::temp_dir().to_string_lossy().into_owned();
+    task.task(&validation_repo)
         .map_err(|cause| SetError::Task { index, cause })?;
     Ok(task)
 }

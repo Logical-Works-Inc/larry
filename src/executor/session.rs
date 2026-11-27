@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lgwks_macros::Error;
-use lgwks_std::json::{self, Value, json};
+use lgwks_std::json::{Value, json};
 #[cfg(test)]
 use lgwks_std::seeded::Seeded;
 
@@ -36,21 +36,14 @@ use super::ExecError;
 use super::Ledger;
 use super::Report;
 use super::Settings;
-use super::backoff;
 use super::compact::{Answer, Conversation};
-use super::digest_hex;
-use super::gate::{self, Subject};
-use super::identity::fresh_id;
-use super::island::{Island, Isolation, Outcome};
-use super::prepare;
 use super::run::{CommandResult, Place, run_command};
 use super::session_gate::{
-    CheckProof, Fingerprint, FingerprintFault, SessionIdentity, VerificationFault, checklist,
-    fingerprint_tree, first_change, has_fresh_check, invalidate_finish, kept_reply,
-    reached_refusal_limit,
+    CheckProof, Fingerprint, FingerprintFault, VerificationFault, checklist, fingerprint_tree,
+    first_change, has_fresh_check, invalidate_finish, kept_reply, reached_refusal_limit,
 };
 use super::session_reply::{Reply, parse_reply};
-use crate::model::{Completion, ModelClient};
+use crate::model::{Completion, ModelClient, Usage};
 
 pub(super) use super::session_gate::FinishRequest;
 
@@ -149,19 +142,27 @@ pub(crate) trait Observer {
     /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
     fn diff(&mut self, _text: &str) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
-    fn handed(&mut self, line: &str, applied: bool);
+    /// An observer that records nothing leaves this alone.
+    fn handed(&mut self, _line: &str, _applied: bool) {}
     /// The model asks to run `command` as step `step`; nothing runs unless this
     /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
     /// inside the operator's isolated container under the same gate and runs it.
+    /// No default: every observer says aloud whether a command may run (larry#239).
     fn approve(&mut self, step: usize, command: &str) -> Approval;
-    /// Step `step` is about to run `command`.
-    fn started(&mut self, step: usize, command: &str);
+    /// Step `step` is about to run `command`. An observer that records nothing
+    /// leaves this alone.
+    fn started(&mut self, _step: usize, _command: &str) {}
     /// Step `step` ended; `observation` is what the model is shown, `passed` its exit 0.
-    fn finished(&mut self, step: usize, observation: &str, passed: bool);
+    /// An observer that records nothing leaves this alone.
+    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
     /// A message for the person: the model's summary or the reason the session stopped.
-    fn message(&mut self, text: &str);
-    /// Whether the client has cancelled the session.
-    fn cancelled(&self) -> bool;
+    /// An observer with nobody to tell leaves this alone.
+    fn message(&mut self, _text: &str) {}
+    /// Whether the client has cancelled the session. An observer nobody can stop
+    /// leaves this alone, which never stops the session early.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// The status line the model is shown for one clipped command result.
@@ -216,132 +217,14 @@ pub(crate) struct Ended {
     pub(crate) report: Report,
 }
 
-/// The one denial line of a report the gate sealed without running anything.
-fn denial(report: &Report) -> String {
-    let first = report
-        .json()
-        .get("denied")
-        .and_then(lgwks_std::json::Value::as_array)
-        .and_then(|lines| lines.first())
-        .and_then(lgwks_std::json::Value::as_str);
-    match first {
-        Some(line) => line.to_owned(),
-        None => String::from("gate: the session was denied"),
-    }
-}
-
-/// Runs a terminal session on `instruction` in `cwd`, reporting through `observer`.
-/// A refusal by the gate seals a report that ran nothing; a fault outside the
-/// session's doing (the ledger, a process group) is a typed error.
-pub(crate) fn run_session(
-    instruction: &str,
-    cwd: &Path,
-    settings: &Settings,
-    isolation: Isolation,
-    observer: &mut dyn Observer,
-) -> Result<Ended, ExecError> {
-    check(instruction, cwd).map_err(ExecError::Session)?;
-    // A host that cannot confine refuses here, before the ledger, the model or a copy.
-    isolation.check()?;
-    let (ledger, key) = prepare(settings)?;
-    let route = settings.route(&ledger, None)?;
-    let config = settings.model_config(&route)?;
-    let document = json::to_vec(&json!({
-        "session": {
-            "cwd": cwd.to_string_lossy(),
-            "instruction": instruction,
-            "isolation": isolation.name(),
-        }
-    }))
-    .map_err(|cause| ExecError::Gate(cause.into()))?;
-    let task_id = fresh_id()?;
-    let task_digest = digest_hex(&document);
-    let mut stop = None;
-    let subject = Subject {
-        required: isolation.required(),
-        path: cwd,
-        bytes: &document,
-    };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
-        // The retry budget's timeline, built before the copy so a host whose clock refuses
-        // copies nothing (larry#436).
-        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-        // Opened inside the gate: a denied session copies nothing.
-        let island = match isolation {
-            Isolation::Host => None,
-            Isolation::Workspace(platform) => {
-                Some(Island::open(platform, settings, &task_id, cwd)?)
-            }
-        };
-        let client = ModelClient::new(config, clock, backoff);
-        let mut turn = Turn {
-            client: &client,
-            settings,
-            ledger: &ledger,
-            task_id: &task_id,
-            place: match island {
-                Some(ref isle) => isle.place(),
-                None => Place::Open(cwd),
-            },
-            artifact_root: match island {
-                Some(ref isle) => isle.path(),
-                None => cwd,
-            },
-            // A check must change nothing: the proof starts empty and each command
-            // replaces it with its own before and after fingerprints.
-            last_proof: None,
-            // The model is told its directory is `.` in a copy, so the request carries
-            // no run id and no path of the person's.
-            shown: match island {
-                Some(_) => String::from("."),
-                None => cwd.display().to_string(),
-            },
-            observer: &mut *observer,
-        };
-        let done = turn.run(instruction)?;
-        let done_stop = done.stop.clone();
-        let mut outcome = Outcome::None;
-        let mut diff = None;
-        if let Some(ref isle) = island
-            && done.stop == Stop::EndTurn
-        {
-            diff = isle.diff()?;
-            outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
-        }
-        let body = super::session_report::body(
-            &SessionIdentity {
-                task_id: &task_id,
-                task_digest: &task_digest,
-            },
-            done,
-            &route.seal(),
-            isolation,
-            island.as_ref(),
-            outcome,
-            diff,
-        );
-        stop = Some(done_stop);
-        Ok(Report::sealed(body, &key))
-    })?;
-    let stop = match stop {
-        Some(stop) => stop,
-        None => {
-            let line = denial(&report);
-            observer.message(&line);
-            Stop::Refusal(line)
-        }
-    };
-    Ok(Ended { stop, report })
-}
-
-/// The two stable identities a session report carries.
-/// Builds the sealed session body after the typed finish gate has decided the stop.
 /// What one session's loop did.
 pub(super) struct Steps {
     /// Why it stopped.
     pub(super) stop: Stop,
     /// Each command's record, in order.
     pub(super) records: Vec<Value>,
+    /// Usage reported by each model completion, in order.
+    pub(super) usage: Vec<Option<Usage>>,
     /// What compaction did.
     pub(super) compaction: Value,
     /// Commands the person declined; none of them ran.
@@ -353,26 +236,26 @@ pub(super) struct Steps {
 }
 
 /// One session's loop state.
-struct Turn<'a> {
+pub(super) struct Turn<'a> {
     /// The model gateway.
-    client: &'a ModelClient,
+    pub(super) client: &'a ModelClient,
     /// The executor's settings: the PATH and the command timeout.
-    settings: &'a Settings,
+    pub(super) settings: &'a Settings,
     /// The ledger every command group is recorded in.
-    ledger: &'a Ledger,
+    pub(super) ledger: &'a Ledger,
     /// The run's identity.
-    task_id: &'a str,
+    pub(super) task_id: &'a str,
     /// Where every command runs: the directory itself, or its confined copy.
-    place: Place<'a>,
+    pub(super) place: Place<'a>,
     /// The directory the model is told it works in.
-    shown: String,
+    pub(super) shown: String,
     /// The real tree used to resolve the typed finish's artifact paths.
-    artifact_root: &'a Path,
+    pub(super) artifact_root: &'a Path,
     /// What the last command proved about the session tree: clean, mutated at a
     /// path, or refused to fingerprint. `None` before the first command runs.
-    last_proof: Option<CheckProof>,
+    pub(super) last_proof: Option<CheckProof>,
     /// Who hears the session's progress.
-    observer: &'a mut dyn Observer,
+    pub(super) observer: &'a mut dyn Observer,
 }
 
 /// What one `command` reply asked of the session loop.
@@ -415,10 +298,11 @@ impl Turn<'_> {
     /// Asks, runs and observes until a stop, and returns it with each command's
     /// record, what compaction did and how many commands the person declined
     /// or interrupted.
-    fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
+    pub(super) fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
         let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
+        let mut usage = Vec::new();
         let mut refused = 0_usize;
         let mut declined = 0_usize;
         let mut interrupted = 0_usize;
@@ -434,6 +318,7 @@ impl Turn<'_> {
                 Ok(completion) => completion,
                 Err(stop) => break stop,
             };
+            usage.push(completion.usage());
             if self.observer.cancelled() {
                 break Stop::Cancelled;
             }
@@ -457,16 +342,11 @@ impl Turn<'_> {
                             self.show_checklist(&mut conversation, kept, &request, &mut refused)
                         }
                         Err(reason) => {
-                            refused = refused.saturating_add(1);
-                            if reached_refusal_limit(refused) {
-                                break self.refuse(format!("finish: {reason}"));
+                            if let Some(stop) =
+                                self.refuse_finish(&mut conversation, kept, &mut refused, &reason)
+                            {
+                                break stop;
                             }
-                            conversation.push(
-                                kept,
-                                Answer::Refused {
-                                    fault: format!("finish: {reason}"),
-                                },
-                            );
                         }
                     }
                 }
@@ -509,6 +389,7 @@ impl Turn<'_> {
         Ok(Steps {
             stop,
             records: steps,
+            usage,
             compaction: conversation.json(),
             declined,
             interrupted,
@@ -632,6 +513,28 @@ impl Turn<'_> {
             },
         );
         *refused = 0;
+    }
+
+    /// Counts one refused finish toward the budget: the session ends once three
+    /// in a row are refused, else the model is told why and may try again.
+    fn refuse_finish(
+        &mut self,
+        conversation: &mut Conversation,
+        kept: String,
+        refused: &mut usize,
+        reason: &VerificationFault,
+    ) -> Option<Stop> {
+        *refused = refused.saturating_add(1);
+        if reached_refusal_limit(*refused) {
+            return Some(self.refuse(format!("finish: {reason}")));
+        }
+        conversation.push(
+            kept,
+            Answer::Refused {
+                fault: format!("finish: {reason}"),
+            },
+        );
+        None
     }
 
     /// Asks the person about one model command and runs it when approved: the
