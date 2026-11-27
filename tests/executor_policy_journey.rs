@@ -126,6 +126,39 @@ fn serve_provision_persists_the_remote_root_before_an_exec() -> TestResult {
     Ok(())
 }
 
+/// Tenant A's door never reaches tenant B's repository: two state directories
+/// each provisioned with their own origin root, and A's exec naming B's origin
+/// is refused RepoNotAllowed naming the fix, while each tenant still runs its
+/// own origin (larry#207).
+#[test]
+fn tenant_a_naming_tenant_b_repo_is_refused() -> TestResult {
+    let (state_a, origin_a) = fixture()?;
+    let (state_b, origin_b) = fixture()?;
+    let foreign = task_json(origin_b.path());
+    let refused = run_exec(state_a.path(), &foreign)?;
+    assert_refused(&refused, "not in the tenant allowlist");
+    assert!(
+        stderr_of(&refused).contains("larry serve provision"),
+        "the refusal names the fix: {}",
+        stderr_of(&refused)
+    );
+    let own_a = run_exec(state_a.path(), &task_json(origin_a.path()))?;
+    assert_eq!(
+        own_a.status.code(),
+        Some(0),
+        "tenant A still runs its own origin: {}",
+        stderr_of(&own_a)
+    );
+    let own_b = run_exec(state_b.path(), &task_json(origin_b.path()))?;
+    assert_eq!(
+        own_b.status.code(),
+        Some(0),
+        "tenant B still runs its own origin: {}",
+        stderr_of(&own_b)
+    );
+    Ok(())
+}
+
 /// A local `larry exec` in a state with no provisioned root runs any absolute
 /// repository outside the state directory; once `larry serve provision` stores
 /// its first root, the same task outside that root is refused and told how to

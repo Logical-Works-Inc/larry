@@ -85,3 +85,5 @@ drives the binary: an unprovisioned local exec runs, then one provisioned root
 binds it and the same task is refused naming `larry serve provision`.
 `tui_journey_unprovisioned_local_reaches_the_first_approval` drives bare
 `larry` with no provision to the approval prompt for its first command.
+`tenant_a_naming_tenant_b_repo_is_refused` proves two provisioned tenants keep
+their own roots through the binary: A's exec naming B's origin is refused.
