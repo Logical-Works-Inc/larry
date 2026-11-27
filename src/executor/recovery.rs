@@ -31,7 +31,8 @@ use lgwks_bot::kernel::cap::Auth;
 use lgwks_bot::kernel::journal::JournalError;
 
 use super::ExecError;
-use super::gate::{lease_start, task_settings, with_expiry};
+use super::env::{task_settings, with_expiry};
+use super::gate::lease_start;
 
 /// The directory under the state directory that holds the task journals.
 pub(super) const JOURNALS_DIR: &str = "journals";

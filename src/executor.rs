@@ -4,6 +4,7 @@
 mod author;
 mod compact;
 mod confine;
+mod env;
 mod error;
 mod gate;
 mod identity;
@@ -209,6 +210,18 @@ impl Report {
 /// model, not before, so a key rotated between two tasks is the next task's.
 type EnvReader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// One operator-controlled fence action applied after durable admission and
+/// before the executor's owner reach.
+#[derive(Clone, Copy)]
+pub(crate) enum FenceControl {
+    /// Withdraw the operation of the task being admitted.
+    Revoke,
+    /// Move the fence to its next security epoch.
+    Advance,
+    /// Re-authenticate at the authority source's reported epoch.
+    Authenticate(larry_contracts::authority::SecurityEpoch),
+}
+
 /// Settings the executor reads from its environment.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -223,6 +236,8 @@ pub struct Settings {
     policy: BTreeSet<Scope>,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
+    /// Optional host authority action for the next admitted task.
+    pub(crate) fence_control: Option<FenceControl>,
 }
 
 impl fmt::Debug for Settings {
@@ -252,13 +267,15 @@ impl Settings {
             },
         };
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
-        let policy = gate::policy(&read)?;
+        let policy = env::policy(&read)?;
+        let fence_control = env::fence_control(&read)?;
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
             read: Arc::new(read),
+            fence_control,
         })
     }
 

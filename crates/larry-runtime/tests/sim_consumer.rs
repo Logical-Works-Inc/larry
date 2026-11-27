@@ -52,7 +52,7 @@ fn publish(
 }
 
 /// Drains every page for `scope` and returns the total record count.
-fn drain(runtime: &TestRuntime, scope: u8) -> Result<usize, Box<dyn std::error::Error>> {
+fn drain(runtime: &mut TestRuntime, scope: u8) -> Result<usize, Box<dyn std::error::Error>> {
     let limits = ConsumerLimits::new(10, MAX_PAGE_BYTES, 16, 128)?;
     let mut consumer = runtime.subscribe(tenant(scope), None, limits)?;
     let mut total: usize = 0;
@@ -76,7 +76,7 @@ fn sim_consumer_sees_every_published_fact() -> Outcome {
         )?;
         publish(&mut runtime, 1, 1)?;
         publish(&mut runtime, 2, 1)?;
-        let seen = drain(&runtime, 1)?;
+        let seen = drain(&mut runtime, 1)?;
         assert_eq!(seen, runtime.journal().len(), "subscriber sees every fact");
         Ok((seen, runtime.journal().len()))
     })
@@ -93,12 +93,15 @@ fn sim_consumer_tenants_observe_disjoint_histories() -> Outcome {
         publish(&mut runtime, 3, 1)?;
         publish(&mut runtime, 4, 2)?;
         assert_eq!(
-            drain(&runtime, 1)?,
-            drain(&runtime, 2)?,
+            drain(&mut runtime, 1)?,
+            drain(&mut runtime, 2)?,
             "symmetric publishes page alike"
         );
-        assert!(drain(&runtime, 1)? > 0, "each tenant sees its own facts");
-        Ok((drain(&runtime, 1)?, runtime.journal().len()))
+        assert!(
+            drain(&mut runtime, 1)? > 0,
+            "each tenant sees its own facts"
+        );
+        Ok((drain(&mut runtime, 1)?, runtime.journal().len()))
     })
 }
 
@@ -133,11 +136,11 @@ fn sim_consumer_origin_replays_same_facts() -> Outcome {
             reader(ScriptedOwner::scripted([succeeded(operation(6))]), 100)?;
         publish(&mut runtime, 6, 1)?;
         assert_eq!(
-            drain(&runtime, 1)?,
-            drain(&runtime, 1)?,
+            drain(&mut runtime, 1)?,
+            drain(&mut runtime, 1)?,
             "origin replays the same facts"
         );
-        Ok((drain(&runtime, 1)?, runtime.journal().len()))
+        Ok((drain(&mut runtime, 1)?, runtime.journal().len()))
     })
 }
 
@@ -200,13 +203,13 @@ fn sim_consumer_new_publish_shows_only_new() -> Outcome {
 #[test]
 fn sim_consumer_empty_journal_pages_empty() -> Outcome {
     replay(36_u64..42, |_| -> Sim<usize> {
-        let runtime: TestRuntime = reader(ScriptedOwner::new(), 100)?;
-        tenant_one_pages_empty(&runtime, "empty history")
+        let mut runtime: TestRuntime = reader(ScriptedOwner::new(), 100)?;
+        tenant_one_pages_empty(&mut runtime, "empty history")
     })
 }
 
 /// Pages tenant 1 once and asserts it sees nothing and is caught up.
-fn tenant_one_pages_empty(runtime: &TestRuntime, why: &str) -> Sim<usize> {
+fn tenant_one_pages_empty(runtime: &mut TestRuntime, why: &str) -> Sim<usize> {
     let limits = ConsumerLimits::new(10, MAX_PAGE_BYTES, 16, 128)?;
     let mut consumer = runtime.subscribe(tenant(1), None, limits)?;
     let page = runtime.consumer_page(tenant(1), &mut consumer)?;
@@ -236,7 +239,7 @@ fn sim_consumer_checkpoint_survives_restore() -> Outcome {
             "first page takes two"
         );
         let saved = consumer.cursor();
-        let restored = reopen(runtime.into_journal(), 100)?;
+        let mut restored = reopen(runtime.into_journal(), 100)?;
         let mut resumed = restored.subscribe(tenant(1), Some(saved), limits)?;
         let mut total: usize = 2;
         for _ in 0..=restored.journal().len() {
@@ -293,7 +296,7 @@ fn sim_consumer_quiet_tenant_pages_empty() -> Outcome {
         let mut runtime: TestRuntime =
             reader(ScriptedOwner::scripted([succeeded(operation(13))]), 100)?;
         publish(&mut runtime, 13, 2)?;
-        tenant_one_pages_empty(&runtime, "quiet tenant")
+        tenant_one_pages_empty(&mut runtime, "quiet tenant")
     })
 }
 
@@ -320,7 +323,7 @@ fn sim_consumer_hundred_tenants_isolated() -> Outcome {
         runtime.tick()?;
         for identity in 20_u8..120 {
             assert!(
-                drain(&runtime, identity)? > 0,
+                drain(&mut runtime, identity)? > 0,
                 "tenant {identity} sees its own facts"
             );
         }
@@ -343,11 +346,11 @@ fn sim_consumer_duplicate_submit_never_duplicates_records() -> Outcome {
             "resubmit dedupes"
         );
         assert_eq!(
-            drain(&runtime, 1)?,
+            drain(&mut runtime, 1)?,
             runtime.journal().len(),
             "no duplicate records"
         );
-        Ok((drain(&runtime, 1)?, runtime.journal().len()))
+        Ok((drain(&mut runtime, 1)?, runtime.journal().len()))
     })
 }
 
@@ -421,13 +424,13 @@ fn sim_consumer_seeded_tenants_drain_disjoint() -> Outcome {
         runtime.offer(right, &second_body)?;
         runtime.tick()?;
         assert_eq!(
-            drain(&runtime, left)?,
-            drain(&runtime, right)?,
+            drain(&mut runtime, left)?,
+            drain(&mut runtime, right)?,
             "symmetric publishes page alike"
         );
         Ok((
-            drain(&runtime, left)?,
-            drain(&runtime, right)?,
+            drain(&mut runtime, left)?,
+            drain(&mut runtime, right)?,
             runtime.journal().len(),
         ))
     })
@@ -454,11 +457,11 @@ fn sim_consumer_cancel_facts_are_observable() -> Outcome {
             "cancel receipts nothing"
         );
         assert_eq!(
-            drain(&runtime, 1)?,
+            drain(&mut runtime, 1)?,
             runtime.journal().len(),
             "cancel facts are observable"
         );
-        Ok((drain(&runtime, 1)?, runtime.journal().len()))
+        Ok((drain(&mut runtime, 1)?, runtime.journal().len()))
     })
 }
 
@@ -477,11 +480,11 @@ fn sim_consumer_reconciling_facts_are_observable() -> Outcome {
             larry_contracts::state::RunState::Reconciling,
         )?;
         assert_eq!(
-            drain(&runtime, 1)?,
+            drain(&mut runtime, 1)?,
             runtime.journal().len(),
             "open facts are observable"
         );
-        Ok((drain(&runtime, 1)?, runtime.journal().len()))
+        Ok((drain(&mut runtime, 1)?, runtime.journal().len()))
     })
 }
 
@@ -504,7 +507,7 @@ fn sim_consumer_cross_tenant_resync_refused() -> Outcome {
             "cross-tenant resync refused"
         );
         runtime.resync_consumer(tenant(1), &mut consumer)?;
-        assert!(drain(&runtime, 1)? > 0, "own resync still works");
+        assert!(drain(&mut runtime, 1)? > 0, "own resync still works");
         Ok(runtime.journal().len())
     })
 }
@@ -537,11 +540,11 @@ fn sim_consumer_submit_overflow_resyncs() -> Outcome {
         assert_eq!(consumer.cursor(), before, "overflow consumes nothing");
         runtime.resync_consumer(tenant(1), &mut consumer)?;
         assert_eq!(
-            drain(&runtime, 1)?,
+            drain(&mut runtime, 1)?,
             runtime.journal().len(),
             "resync observes every fact"
         );
-        drain(&runtime, 1)
+        drain(&mut runtime, 1)
     })
 }
 
@@ -555,8 +558,8 @@ fn sim_consumer_identical_publishes_page_identically() -> Outcome {
         )?;
         publish(&mut runtime, 25, 1)?;
         publish(&mut runtime, 26, 2)?;
-        let one = drain(&runtime, 1)?;
-        let two = drain(&runtime, 2)?;
+        let one = drain(&mut runtime, 1)?;
+        let two = drain(&mut runtime, 2)?;
         let (first_one, first_two) = (
             (one, runtime.journal().len()),
             (two, runtime.journal().len()),
@@ -574,7 +577,7 @@ fn sim_consumer_reads_never_mutate_journal() -> Outcome {
             reader(ScriptedOwner::scripted([succeeded(operation(27))]), 100)?;
         publish(&mut runtime, 27, 1)?;
         let before = runtime.journal().len();
-        assert_eq!(drain(&runtime, 1)?, before, "every fact paged");
+        assert_eq!(drain(&mut runtime, 1)?, before, "every fact paged");
         assert_eq!(runtime.journal().len(), before, "reads mutate nothing");
         Ok((before, runtime.journal().len()))
     })

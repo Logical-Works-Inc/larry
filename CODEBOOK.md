@@ -42,7 +42,7 @@ Rules live in `INVARIANTS.md` with their tests; decisions in `docs/adr/`. Each m
 | `gate` | Admission and the `cap::Auth` proof every mutating reach presents (larry#77, ADR 0018) |
 | `fence` (private) | Dispatch-time freshness on one `lgwks_bot::broker` environment, and `effect_key`, the one key an intent derives (larry#76, ADR 0024) |
 | `owner` | The effect-owner trait; each mutating call carries and re-reads the checked `cap::Auth`; test doubles under `fixture` only (ADR 0120) |
-| `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35) |
+| `consumer` | Bounded, tenant-scoped journal catch-up with explicit resync (E35), explicitly unshipped until `larry serve` owns a durable runtime journal route; the index extends on read, never on append (ADR 0121) |
 | `error` | Every refused runtime operation |
 | `runtime` | `TickReport`, stage 2 (admit, reserve, dispatch), indexed cancellation and per-tenant run counts, `restore`; `runtime::settings` the `RuntimeSettings` every capacity, payload ceiling, skew bound, attempt bound, protocol range and lease, with their Cell 05 defaults and the one validation `Runtime::new` and `restore` apply (larry#212, ADR 0056, larry#216) |
 | `runtime::instant` | The tick's one pinned instant and the live clock's epoch anchor (`live_clock`): `lgwks_bot::clock` read as time since the Unix epoch (larry#74, #182) |

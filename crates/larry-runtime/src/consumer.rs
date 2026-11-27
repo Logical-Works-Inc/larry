@@ -219,24 +219,43 @@ struct IndexedEntry {
 }
 
 /// Disposable tenant lookup, never used by admission or authorization.
+/// Descriptors extend on read, never on append: the hot append path pays no
+/// hash per fact, and the first read after new facts pays for exactly those
+/// facts, once (larry#215, ADR 0121).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConsumerIndex {
     /// One descriptor per retained fact, grouped by tenant in insertion order.
     tenants: BTreeMap<TenantId, Vec<IndexedEntry>>,
+    /// Journal entries already covered by descriptors.
+    indexed: usize,
 }
 
 impl ConsumerIndex {
     /// Rebuilds solely from authoritative entries after journal reopen.
     pub(crate) fn rebuild(entries: &[JournalEntry]) -> Self {
         let mut index = Self::default();
-        for (offset, entry) in entries.iter().enumerate() {
-            index.record(entry, offset);
-        }
+        index.sync_to(entries);
         index
     }
 
-    /// Adds one descriptor only after the journal has accepted an append.
-    pub(crate) fn record(&mut self, entry: &JournalEntry, offset: usize) {
+    /// Journal entries already carrying descriptors; white-box tests only.
+    #[cfg(test)]
+    pub(crate) fn indexed_len(&self) -> usize {
+        self.indexed
+    }
+
+    /// Extends coverage to `entries.len()`, hashing only facts appended
+    /// since the last sync.
+    pub(crate) fn sync_to(&mut self, entries: &[JournalEntry]) {
+        for entry in entries.iter().skip(self.indexed) {
+            let offset = self.indexed;
+            self.record(entry, offset);
+            self.indexed = offset.saturating_add(1);
+        }
+    }
+
+    /// Adds one descriptor for an entry the sync has not covered yet.
+    fn record(&mut self, entry: &JournalEntry, offset: usize) {
         let tenant = entry_tenant(entry);
         let entries = self.tenants.entry(tenant).or_default();
         // A tenant's first fact chains from its explicit origin prefix.
@@ -398,11 +417,13 @@ where
 {
     /// Captures the tenant's live watermark before history is read. `None`
     /// explicitly starts full replay; a supplied checkpoint resumes after it.
+    /// The tenant index extends to the journal head first, so appends never
+    /// pay for descriptors no read consumes (larry#215, ADR 0121).
     ///
     /// # Errors
     /// Refuses cross-tenant and stale checkpoints with [`CursorError`].
     pub fn subscribe(
-        &self,
+        &mut self,
         tenant: TenantId,
         cursor: Option<ConsumerCursor>,
         limits: ConsumerLimits,
@@ -412,6 +433,7 @@ where
             Some(cursor) => cursor,
             None => origin(tenant),
         };
+        self.journal_mut().sync_consumer_index();
         let entries = validate(self.journal(), tenant, &cursor)?;
         Ok(Consumer {
             cursor,
@@ -427,10 +449,11 @@ where
     /// # Errors
     /// Refuses foreign scope or history that no longer contains the checkpoint.
     pub fn resync_consumer(
-        &self,
+        &mut self,
         tenant: TenantId,
         consumer: &mut Consumer,
     ) -> Result<(), CursorError> {
+        self.journal_mut().sync_consumer_index();
         let entries = validate(self.journal(), tenant, &consumer.cursor)?;
         consumer.live_after = head(tenant, entries);
         consumer.disconnected = false;
@@ -442,15 +465,18 @@ where
     /// A page's immutable borrow linearizes it with respect to publishing.
     /// Persist the resulting cursor only after application; retry from the old
     /// saved cursor on interruption. No journal fact is ever evicted here.
+    /// The index extends to the head before the page is cut, so the page
+    /// never misses an append the journal already holds (larry#215).
     ///
     /// # Errors
     /// Returns typed scope/staleness refusals, sticky `ResyncRequired` on live
     /// window overflow, or `EntryTooLarge` without advancing past that entry.
     pub fn consumer_page(
-        &self,
+        &mut self,
         tenant: TenantId,
         consumer: &mut Consumer,
     ) -> Result<ConsumerPage<'_>, CursorError> {
+        self.journal_mut().sync_consumer_index();
         let journal = self.journal();
         let entries = validate(journal, tenant, &consumer.cursor)?;
         validate(journal, tenant, &consumer.live_after)?;
@@ -501,5 +527,47 @@ where
             consumer.live_after = cursor;
         }
         Ok(page)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use larry_contracts::command::{Command, CommandContent, CommandKind};
+    use larry_contracts::ids::CommandId;
+
+    use super::*;
+
+    /// Appends hash nothing: the tenant index extends on read, so the hot
+    /// append path pays no BLAKE3 per fact (larry#215, ADR 0121).
+    #[test]
+    fn appends_leave_the_tenant_index_cold_until_a_read() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut journal = Journal::new(8)?;
+        for n in 1..=3_u128 {
+            journal.accept_command(Command::new(
+                CommandId::from_bytes(n.to_be_bytes()),
+                TenantId::from_bytes([7; 16]),
+                Vec::new(),
+                CommandContent::new(CommandKind::Steer, Box::from(&b"fact"[..])),
+            )?)?;
+        }
+        assert_eq!(
+            journal.consumer_index.indexed_len(),
+            0,
+            "appends hash nothing"
+        );
+        journal.sync_consumer_index();
+        assert_eq!(
+            journal.consumer_index.indexed_len(),
+            3,
+            "a read covers every appended fact"
+        );
+        journal.sync_consumer_index();
+        assert_eq!(
+            journal.consumer_index.indexed_len(),
+            3,
+            "a second read hashes nothing new"
+        );
+        Ok(())
     }
 }
