@@ -7,8 +7,9 @@
 use std::error::Error;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Child, Output};
+use std::process::{Child, Command, Output};
 
+use crate::coverage::forward;
 use crate::larry_cli::{spawn_larry_args, stderr_of};
 use crate::mock_model::Handle;
 use crate::origin::TempDir;
@@ -25,14 +26,16 @@ pub(crate) fn larry_route(
     env: &[(&str, &OsStr)],
     args: &[&str],
 ) -> Result<Output, Box<dyn Error>> {
-    Ok(std::process::Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
         .arg("route")
         .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .env("LARRY_STATE_DIR", state)
-        .envs(env.iter().copied())
-        .output()?)
+        .envs(env.iter().copied());
+    forward(&mut command);
+    Ok(command.output()?)
 }
 
 /// The host and port a mock listens on, as a sealed report names it.

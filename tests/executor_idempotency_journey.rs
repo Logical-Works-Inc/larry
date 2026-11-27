@@ -14,6 +14,8 @@
 //! answers from without running that command again. Each child runs with a
 //! cleared environment.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;

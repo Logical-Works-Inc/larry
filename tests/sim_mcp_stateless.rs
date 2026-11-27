@@ -9,6 +9,8 @@
 //! same seed must give the same reply bytes. Every test drives the binary
 //! through its public interface; nothing here calls server code.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;

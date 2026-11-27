@@ -11,6 +11,9 @@ mod rng;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -36,11 +39,10 @@ fn larry(args: &[&std::ffi::OsStr]) -> Check<Output> {
         let name = pair.0.to_string_lossy();
         name.starts_with("NEXTEST_") || name.starts_with("LGWKS_MUTANT")
     });
-    Ok(Command::new(env!("CARGO_BIN_EXE_larry"))
-        .args(args)
-        .env_clear()
-        .envs(runner)
-        .output()?)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command.args(args).env_clear().envs(runner);
+    coverage::forward(&mut command);
+    Ok(command.output()?)
 }
 
 /// A symbolic link at `at` naming `target`, on each platform's own call.
