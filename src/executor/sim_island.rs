@@ -17,6 +17,8 @@ use lgwks_std::seeded::Seeded;
 use super::{HOST_REFUSED, Island, Isolation, Outcome, POLICY_REFUSED};
 use crate::executor::confine::{ConfineError, Platform};
 use crate::executor::gate::{self, Subject, admit_and_run};
+use crate::executor::prepared::prepare;
+use crate::executor::receipt::Seal;
 use crate::executor::recovery::journal_path;
 use crate::executor::run::{CommandResult, RunHooks, run_command};
 use crate::executor::session::run_session;
@@ -24,7 +26,7 @@ use crate::executor::sim_tree::{
     Origin, Scratch, Shape, files_beneath, origin, scratch, settings, tree_digest,
 };
 use crate::executor::workspace::{ApplyFault, Diff, DiffSink};
-use crate::executor::{Approval, ExecError, Handoff, Ledger, Observer, Settings, prepare};
+use crate::executor::{Approval, ExecError, Handoff, Ledger, Observer, Settings};
 use crate::json_at::At;
 use crate::sim_error::SimError;
 
@@ -591,7 +593,11 @@ fn sim_island_git_commit_in_workspace_still_shows_change() -> TestResult {
 #[test]
 fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResult {
     let rig = Rig::new("kill", 8, Shape::Git)?;
-    let (_ledger, key) = prepare(&rig.settings)?;
+    let prepared = prepare(&rig.settings)?;
+    let seal = Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    };
     let id = "kill-between";
     let subject = |path| Subject {
         required: gate::isolated_scopes(),
@@ -603,7 +609,8 @@ fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResul
         &rig.settings,
         id,
         "digest",
-        &key,
+        prepared.tenant,
+        seal,
         || {
             let (island, diff) = match changed(&rig, id, "printf z > added.txt") {
                 Ok(pair) => pair,
@@ -634,12 +641,17 @@ fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResul
     );
     let after = rig.digest()?;
     let mut ran = false;
+    let seal_again = Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    };
     let again = admit_and_run(
         subject(&rig.origin.dir),
         &rig.settings,
         id,
         "digest",
-        &key,
+        prepared.tenant,
+        seal_again,
         || {
             ran = true;
             Err(ExecError::StateDirUnset)
