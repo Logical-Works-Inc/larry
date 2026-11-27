@@ -315,6 +315,7 @@ pub(crate) fn run_session(
         &super::tenant_key(settings.state_dir()),
         settings.state_dir(),
         cwd,
+        settings.is_local(),
     )?;
     let cwd = repository.as_path();
     let route = settings.route(&ledger, None)?;

@@ -429,36 +429,46 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         stale.join("hello.txt").exists(),
         "the old leftover is present"
     );
-    let root = crate::executor::sim_tree::scratch("tui-worker")?;
-    let settings = unreachable_model(&root)?;
+    let state = crate::executor::sim_tree::scratch("tui-worker-state")?;
+    let work = crate::executor::sim_tree::scratch("tui-worker-work")?;
+    let settings = unreachable_model(&state)?;
     let mut worker = super::worker::Worker::spawn(
         String::from("write hello.txt"),
-        root.to_path_buf(),
+        work.to_path_buf(),
         settings.clone(),
         Isolation::Host,
         false,
     )?;
     let seen = every_event(&mut worker).ok_or("the session sent no event inside its bound")?;
-    let Some(&Event::Ended(Ended::Failed(ref message))) = seen.last() else {
-        return Err(format!("expected a typed policy failure, got {seen:?}").into());
+    assert_eq!(seen.last(), Some(&Event::Ended(Ended::Refused)), "{seen:?}");
+    // The sealed refusal reaches the frame as a receipt: not accepted, nothing ran.
+    let Some(before_end) = seen.iter().rev().nth(1) else {
+        return Err("no event before the end".into());
     };
-    assert!(message.contains("inside the state directory"), "{message}");
-    assert!(
-        !seen.iter().any(|event| matches!(*event, Event::Receipt(_))),
-        "a path refusal has no sealed run receipt: {seen:?}"
+    let Event::Receipt(ref receipt) = *before_end else {
+        return Err(format!("expected a receipt before the end, got {before_end:?}").into());
+    };
+    assert!(!receipt.accepted, "{receipt:?}");
+    assert_eq!(
+        (
+            receipt.commands,
+            receipt.handoff.as_str(),
+            receipt.digest.len()
+        ),
+        (0, "none", 12)
     );
     assert!(
         !seen.iter().any(|event| matches!(*event, Event::Ask(_))),
         "{seen:?}"
     );
     assert!(
-        !root.join("hello.txt").exists(),
+        !work.join("hello.txt").exists(),
         "a refused session runs nothing"
     );
     // A worker dropped before its session reports is cancelled and joined, not leaked.
     let early = super::worker::Worker::spawn(
         String::from("x"),
-        root.to_path_buf(),
+        work.to_path_buf(),
         settings,
         Isolation::Host,
         true,

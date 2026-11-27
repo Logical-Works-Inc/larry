@@ -86,8 +86,10 @@ pub enum ExecError {
         /// The canonical repository path.
         repo: PathBuf,
     },
-    /// The repository is not below one of this tenant's durable roots.
-    #[error("exec repository is not in the tenant allowlist: {}", repo.display())]
+    /// The repository is not below one of this tenant's durable roots. A remote
+    /// door denies when the tenant holds no root row; a local door denies once
+    /// its first root row binds it. Provision a root to allow it.
+    #[error("exec repository is not in the tenant allowlist: {}; run `larry serve provision <root>` to allow it", repo.display())]
     RepoNotAllowed {
         /// The canonical repository path.
         repo: PathBuf,

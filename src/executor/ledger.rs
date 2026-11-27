@@ -591,17 +591,21 @@ mod tests {
         assert_eq!(ledger.tenant_policy("tenant")?, policy);
         assert!(
             ledger
-                .authorized_repo("tenant", &state, &repository)
+                .authorized_repo("tenant", &state, &repository, false)
                 .is_ok()
         );
         assert!(matches!(
-            ledger.authorized_repo("tenant", &state, &state.join("ws")),
+            ledger.authorized_repo("tenant", &state, &state.join("ws"), false),
             Err(crate::executor::ExecError::RepoPath { .. })
         ));
         drop(ledger);
         let reopened = Ledger::open(&state)?;
         assert_eq!(reopened.tenant_policy("tenant")?, policy);
-        assert!(reopened.authorized_repo("tenant", &state, &root).is_ok());
+        assert!(
+            reopened
+                .authorized_repo("tenant", &state, &root, false)
+                .is_ok()
+        );
         Ok(())
     }
 

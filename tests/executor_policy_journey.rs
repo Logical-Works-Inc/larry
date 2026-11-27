@@ -27,7 +27,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> TestResult {
     }
 }
 
-fn fixture() -> TestResult<(TempDir, TempDir)> {
+fn unprovisioned() -> TestResult<(TempDir, TempDir)> {
     let state = TempDir::new()?;
     let origin = TempDir::new()?;
     std::fs::write(origin.path().join("README"), "origin\n")?;
@@ -39,6 +39,11 @@ fn fixture() -> TestResult<(TempDir, TempDir)> {
     )?;
     git(origin.path(), &["add", "README"])?;
     git(origin.path(), &["commit", "--quiet", "-m", "init"])?;
+    Ok((state, origin))
+}
+
+fn fixture() -> TestResult<(TempDir, TempDir)> {
+    let (state, origin) = unprovisioned()?;
     larry_demo::executor::provision_tenant(
         |_| Some(state.path().to_string_lossy().into_owned()),
         "file.read,file.write,process.spawn,model.invoke,model.command",
@@ -118,5 +123,47 @@ fn serve_provision_persists_the_remote_root_before_an_exec() -> TestResult {
     let task = task_json(origin.path());
     let run = run_exec(state.path(), &task)?;
     assert_eq!(run.status.code(), Some(0), "the provisioned task succeeds");
+    Ok(())
+}
+
+/// A local `larry exec` in a state with no provisioned root runs any absolute
+/// repository outside the state directory; once `larry serve provision` stores
+/// its first root, the same task outside that root is refused and told how to
+/// allow it (larry#207).
+#[test]
+fn a_local_exec_in_an_unprovisioned_state_runs_and_a_provisioned_root_binds_it() -> TestResult {
+    let (state, origin) = unprovisioned()?;
+    let task = task_json(origin.path());
+    let first = run_exec(state.path(), &task)?;
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "an unprovisioned local exec runs: {}",
+        stderr_of(&first)
+    );
+    let other = TempDir::new()?;
+    let policy = std::ffi::OsStr::new("file.read,file.write,process.spawn,model.invoke");
+    let provided = other.path().to_string_lossy().into_owned();
+    let output = spawn_larry_args(
+        &["serve", "provision", &provided],
+        &[
+            ("LARRY_STATE_DIR", state.path().as_os_str()),
+            ("LARRY_POLICY", policy),
+        ],
+        b"",
+    )?
+    .wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "serve provision failed: {}",
+        stderr_of(&output)
+    );
+    let second = run_exec(state.path(), &task)?;
+    assert_refused(&second, "not in the tenant allowlist");
+    assert!(
+        stderr_of(&second).contains("larry serve provision"),
+        "the refusal names the fix: {}",
+        stderr_of(&second)
+    );
     Ok(())
 }

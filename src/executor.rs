@@ -241,6 +241,10 @@ pub struct Settings {
     /// The scopes the gate authorizes tasks against. Local settings read
     /// `LARRY_POLICY`; remote settings read the tenant ledger.
     policy: BTreeSet<Scope>,
+    /// Whether this door is local (`larry exec`, bare `larry`): with no
+    /// provisioned root row it allows any absolute path outside the state
+    /// directory, while a remote door denies. Set once in `from_env_mode`.
+    local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
 }
@@ -298,8 +302,14 @@ impl Settings {
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
+            local,
             read: Arc::new(read),
         })
+    }
+
+    /// Whether this door is local: remote doors deny a tenant with no root row.
+    pub(crate) const fn is_local(&self) -> bool {
+        self.local
     }
 
     /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
@@ -371,6 +381,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         &tenant_key(&settings.state_dir),
         &settings.state_dir,
         task.repo(),
+        settings.is_local(),
     )?;
     execute_prepared(task, settings, &ledger, &key, &repository)
 }
