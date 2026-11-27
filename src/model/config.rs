@@ -20,14 +20,14 @@ const URL_VARIABLE: &str = "LARRY_MODEL_URL";
 const MODEL_VARIABLE: &str = "LARRY_MODEL";
 /// The variable the environment route reads its key from: the route's `key_env`.
 const KEY_VARIABLE: &str = "LARRY_MODEL_KEY";
+/// The variable the environment route reads its provider kind from; unset means OpenAI chat.
+const KIND_VARIABLE: &str = "LARRY_MODEL_KIND";
 /// The variable the environment route reads its sampling temperature from.
 const TEMPERATURE_VARIABLE: &str = "LARRY_MODEL_TEMPERATURE";
 /// The variable the environment route reads its residency from; unset means undeclared.
 const RESIDENCY_VARIABLE: &str = "LARRY_MODEL_RESIDENCY";
 /// What the environment route says about itself in a listing.
 const ENV_DESCRIBE: &str = "declared by the LARRY_MODEL_* environment";
-/// The sampling temperature of a route that pins none.
-const DEFAULT_TEMPERATURE: f64 = 0.0;
 /// The per-request bound in milliseconds: one whole exchange, body included.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Attempts per completion, first try included.
@@ -42,14 +42,16 @@ const MAX_ATTEMPTS: u32 = 16;
 /// Everything one [`super::ModelClient`] needs, fixed at construction.
 #[derive(Clone)]
 pub struct ModelConfig {
-    /// Base URL of the OpenAI-compatible gateway, without a trailing slash.
+    /// Which provider wire the client speaks.
+    kind: Kind,
+    /// Base URL of the gateway, without a trailing slash.
     base_url: String,
     /// Bearer credential for the gateway. Never logged, printed or shown by `Debug`.
     api_key: String,
     /// The model name sent on every request.
     model: String,
-    /// The sampling temperature sent on every request.
-    temperature: f64,
+    /// The sampling temperature sent on a request, when the route pins one.
+    temperature: Option<f64>,
     /// The bound on one request body, in bytes.
     request_bytes: usize,
     /// The bound on one whole request, body included.
@@ -93,9 +95,23 @@ fn temperature_from(read: &impl Fn(&str) -> Option<String>) -> Result<Option<f64
     }
 }
 
+/// The kind `LARRY_MODEL_KIND` names, OpenAI chat when it is unset.
+///
+/// # Errors
+///
+/// [`ModelError::BadRoute`] naming an unknown kind.
+fn kind_from(read: &impl Fn(&str) -> Option<String>) -> Result<Kind, ModelError> {
+    match read(KIND_VARIABLE) {
+        Some(name) => {
+            Kind::parse(name.trim()).ok_or(ModelError::BadRoute(crate::model::RouteError::BadKind))
+        }
+        None => Ok(Kind::OpenAiChat),
+    }
+}
 /// The route the operator's environment declares: `LARRY_MODEL_URL`,
 /// `LARRY_MODEL` and `LARRY_MODEL_KEY` all set and not empty. Any of the three
 /// missing means the environment declares no route, and `None` is the answer.
+/// `LARRY_MODEL_KIND` names the provider kind, OpenAI chat when unset.
 ///
 /// # Errors
 ///
@@ -115,7 +131,7 @@ pub(crate) fn env_route(
     let residency = present(read, RESIDENCY_VARIABLE);
     let draft = Draft {
         id: ENV_ROUTE,
-        kind: Kind::OpenAiChat,
+        kind: kind_from(read)?,
         base_url: &url,
         model: &model,
         key_env: KEY_VARIABLE,
@@ -135,6 +151,7 @@ impl ModelConfig {
     /// test.
     ///
     /// `LARRY_MODEL_KEY`, `LARRY_MODEL_URL` and `LARRY_MODEL` are required.
+    /// `LARRY_MODEL_KIND` names the provider kind (OpenAI chat when unset),
     /// `LARRY_MODEL_TEMPERATURE`, `LARRY_MODEL_TIMEOUT_MS`,
     /// `LARRY_MODEL_ATTEMPTS` (1 to 16), `LARRY_MODEL_BACKOFF_MS` and
     /// `LARRY_MODEL_DEADLINE_MS` fall back to their defaults.
@@ -176,10 +193,6 @@ impl ModelConfig {
         let api_key = present(read, route.key_env()).ok_or_else(|| ModelError::KeyUnset {
             variable: route.key_env().to_owned(),
         })?;
-        let temperature = match route.temperature() {
-            Some(pinned) => pinned,
-            None => DEFAULT_TEMPERATURE,
-        };
         let timeout = whole(read, "LARRY_MODEL_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)?;
         let attempts: u32 = whole(read, "LARRY_MODEL_ATTEMPTS", DEFAULT_ATTEMPTS)?;
         if !(1..=MAX_ATTEMPTS).contains(&attempts) {
@@ -188,10 +201,11 @@ impl ModelConfig {
         let backoff = whole(read, "LARRY_MODEL_BACKOFF_MS", DEFAULT_BACKOFF_MS)?;
         let deadline = whole(read, "LARRY_MODEL_DEADLINE_MS", DEFAULT_DEADLINE_MS)?;
         Ok(Self {
+            kind: route.kind(),
             base_url: route.base_url().to_owned(),
             api_key,
             model: route.model().to_owned(),
-            temperature,
+            temperature: route.temperature(),
             request_bytes: route.request_bytes(),
             timeout: Duration::from_millis(timeout),
             retry: RetryPolicy::new(
@@ -200,6 +214,11 @@ impl ModelConfig {
                 Duration::from_millis(deadline),
             ),
         })
+    }
+
+    /// Which provider wire the client speaks.
+    pub(super) const fn kind(&self) -> Kind {
+        self.kind
     }
 
     /// The gateway base URL.
@@ -217,8 +236,10 @@ impl ModelConfig {
         &self.model
     }
 
-    /// The sampling temperature.
-    pub(super) const fn temperature(&self) -> f64 {
+    /// The sampling temperature, when the route pins one. A route that pins
+    /// none sends no temperature member: a model that rejects the field would
+    /// answer with a 4xx, which is terminal (larry#205).
+    pub(super) const fn temperature(&self) -> Option<f64> {
         self.temperature
     }
 
@@ -242,6 +263,7 @@ impl fmt::Debug for ModelConfig {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         out.debug_struct("ModelConfig")
             .field("base_url", &self.base_url)
+            .field("kind", &self.kind.name())
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("temperature", &self.temperature)
