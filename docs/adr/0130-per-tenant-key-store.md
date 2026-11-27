@@ -19,7 +19,7 @@ a new tenant, and a rotation re-keyed every tenant at once.
 
 ## Decision
 
-Migration 9 adds `dir_tenant` and `receipt_keys(tenant, key_id)`, carrying the
+Migration 10 adds `dir_tenant` and `receipt_keys(tenant, key_id)`, carrying the
 old global key as id 1 under the empty placeholder. `Ledger::open` draws the
 default once, rekeys legacy rows onto it, and backfills the placeholder.
 

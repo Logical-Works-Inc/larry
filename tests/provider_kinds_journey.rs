@@ -2,16 +2,16 @@
 //! task through a mock of each provider kind (OpenAI chat, Anthropic Messages,
 //! OpenAI Responses). Each receipt names its kind and maps the kind's usage to
 //! the one usage shape; a route with no temperature sends no temperature
-//! member.
+//! member; a route's prompt template is sealed by its hash, never its text.
 //!
 //! Source: the Anthropic Messages API (`x-api-key`, `anthropic-version`,
 //! `max_tokens`, `system`, `stop_reason`), the OpenAI Responses API (`input`,
 //! `output`, `status`), RFC 6750 section 2.1 (the bearer key travels only in
 //! the `Authorization` header), POSIX exit status. Requirement proved: one
-//! adapter per kind maps path, auth, body and usage; temperature is per route;
-//! structured kinds answer the file inside one JSON object. Every run drives
-//! the shipped binary with a cleared environment against the seeded mock
-//! endpoint, so no test makes a paid model call.
+//! adapter per kind maps path, auth, body and usage; temperature and template
+//! are per route; structured kinds answer the file inside one JSON object.
+//! Every run drives the shipped binary with a cleared environment against the
+//! seeded mock endpoint, so no test makes a paid model call.
 
 #[path = "support/http_wire.rs"]
 mod http_wire;
@@ -38,6 +38,7 @@ use std::ffi::OsStr;
 use std::process::Output;
 
 use larry_cli::stderr_of;
+use lgwks_std::hash::Hasher;
 use lgwks_std::json::{self, Value};
 use mock_model::{Config, Fault};
 use route_journey::{
@@ -56,11 +57,12 @@ fn exec(state: &TempDir, task: &str) -> Result<Output, Box<dyn Error>> {
 }
 
 /// Stores the journey's route `main` pointing at `mock`: the `model-k` model in
-/// `CA` over `kind`, with `temperature` when given.
+/// `CA` over `kind`, with `prompt` and `temperature` when given.
 fn add_main_route(
     state: &TempDir,
     mock: &mock_model::Handle,
     kind: Option<&str>,
+    prompt: Option<&str>,
     temperature: Option<&str>,
 ) -> TestResult {
     let key_env = route_key::key_env(state.path(), "K")?;
@@ -74,6 +76,7 @@ fn add_main_route(
             key_env: &key_env,
             residency: "CA",
             kind,
+            prompt,
             temperature,
         },
     )
@@ -85,7 +88,7 @@ fn add_main_route(
 fn through_kind(kind: &str, seed: u64) -> TestResult {
     let (state, origin) = fixture()?;
     mock_model::run(Config::seeded(seed), |mock| -> TestResult {
-        add_main_route(&state, mock, Some(kind), None)?;
+        add_main_route(&state, mock, Some(kind), None, None)?;
         let output = exec(&state, &briefed_task(&origin, None, None)?)?;
         let report = report_of(&output)?;
         assert!(flag_of(&report, "accepted")?, "{}", stderr_of(&output));
@@ -98,6 +101,11 @@ fn through_kind(kind: &str, seed: u64) -> TestResult {
             route.at("/kind")?.as_str(),
             Some(kind),
             "the receipt names its kind"
+        );
+        assert_eq!(
+            route.at("/prompt_hash")?,
+            &Value::Null,
+            "no template seals as null"
         );
         let prompt_tokens = report
             .at("/authored/0/prompt_tokens")?
@@ -162,7 +170,7 @@ fn a_route_without_temperature_sends_no_temperature_member() -> TestResult {
     ] {
         let (state, origin) = fixture()?;
         mock_model::run(Config::seeded(seed), |mock| -> TestResult {
-            add_main_route(&state, mock, Some(kind), None)?;
+            add_main_route(&state, mock, Some(kind), None, None)?;
             let output = exec(&state, &briefed_task(&origin, None, None)?)?;
             assert!(flag_of(&report_of(&output)?, "accepted")?);
             let bodies = mock.requests();
@@ -178,9 +186,54 @@ fn a_route_without_temperature_sends_no_temperature_member() -> TestResult {
     Ok(())
 }
 
-/// `route add` refuses an unknown kind, naming the field, and stores nothing.
+/// The BLAKE3 hex of `template`.
+fn template_hash(template: &str) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(template.as_bytes());
+    hasher.finalize().to_hex()
+}
+
+/// A route's prompt template rides before the system turn and only its hash
+/// is sealed: `route resolve` and the receipt name the same hash, and neither
+/// carries the template's text.
 #[test]
-fn a_route_add_with_an_unknown_kind_is_refused() -> TestResult {
+fn a_prompt_template_is_sealed_by_its_hash() -> TestResult {
+    let (state, origin) = fixture()?;
+    mock_model::run(Config::seeded(41), |mock| -> TestResult {
+        add_main_route(&state, mock, Some("openai-chat"), Some("stay brief"), None)?;
+        let resolved = larry_route(state.path(), &[], &["resolve"])?;
+        assert!(resolved.status.success(), "{}", stderr_of(&resolved));
+        let seal: Value = json::from_slice(&resolved.stdout)?;
+        let want = template_hash("stay brief");
+        assert_eq!(
+            seal.at("/prompt_hash")?.as_str(),
+            Some(want.as_str()),
+            "resolve seals the hash"
+        );
+        assert!(
+            !String::from_utf8_lossy(&resolved.stdout).contains("stay brief"),
+            "resolve never prints the template"
+        );
+        let output = exec(&state, &briefed_task(&origin, None, None)?)?;
+        let report = report_of(&output)?;
+        assert!(flag_of(&report, "accepted")?, "{}", stderr_of(&output));
+        assert_eq!(
+            report.at("/authored/0/route/prompt_hash")?.as_str(),
+            Some(want.as_str()),
+            "the receipt seals the same hash"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("stay brief"),
+            "the report never carries the template"
+        );
+        Ok(())
+    })
+}
+
+/// `route add` refuses an unknown kind and a hostile template, naming the
+/// field, and stores nothing.
+#[test]
+fn a_route_add_with_an_unknown_kind_or_hostile_prompt_is_refused() -> TestResult {
     let state = TempDir::new()?;
     let key_env = route_key::key_env(state.path(), "K")?;
     let secret: &OsStr = OsStr::new("operator-secret-bytes");
@@ -208,6 +261,34 @@ fn a_route_add_with_an_unknown_kind_is_refused() -> TestResult {
         "the refusal names the kind: {}",
         stderr_of(&refused)
     );
+    let hostile = larry_route(
+        state.path(),
+        &[(&key_env, secret)],
+        &[
+            "add",
+            "x",
+            "--url",
+            "http://gateway.test:1/v1",
+            "--model",
+            "m",
+            "--key-env",
+            &key_env,
+            "--residency",
+            "CA",
+            "--prompt",
+            "bad\u{1}byte",
+        ],
+    )?;
+    assert_eq!(
+        hostile.status.code(),
+        Some(1),
+        "a hostile template is refused"
+    );
+    assert!(
+        stderr_of(&hostile).contains("route prompt must be"),
+        "the refusal names the prompt: {}",
+        stderr_of(&hostile)
+    );
     let listed = larry_route(state.path(), &[], &["list"])?;
     assert!(
         listed.stdout.is_empty(),
@@ -218,8 +299,9 @@ fn a_route_add_with_an_unknown_kind_is_refused() -> TestResult {
 }
 
 /// A gateway fault on a new kind is typed, served once and never retried: a
-/// padded, hostile, cut or empty reply fails the task naming why. Catches an
-/// adapter that retries a terminal fault or loses the reply's shape.
+/// delayed reply the test releases is accepted, while a padded, hostile, cut
+/// or empty reply fails the task naming why. Catches an adapter that retries
+/// a terminal fault or loses the reply's shape.
 #[test]
 fn a_gateway_fault_on_a_new_kind_is_typed_and_served_once() -> TestResult {
     let cases: &[(&str, Fault, &str, u64)] = &[
@@ -272,7 +354,7 @@ fn run_scripted<Out>(
         ..Config::seeded(seed)
     };
     mock_model::run(config, |mock| -> Result<Out, Box<dyn Error>> {
-        add_main_route(state, mock, Some(kind), None)?;
+        add_main_route(state, mock, Some(kind), None, None)?;
         body(state, origin, mock)
     })
 }

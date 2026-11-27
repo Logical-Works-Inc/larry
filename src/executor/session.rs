@@ -40,7 +40,7 @@ use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
-use crate::model::{Completion, ModelClient, Usage};
+use crate::model::{Completion, ModelClient, Route, Usage};
 
 /// A terminal session's reply protocol: one JSON object per turn, parsed and
 /// refused with an exact reason the model can retry from (larry#545).
@@ -301,6 +301,25 @@ pub(crate) fn run_session(
     )
 }
 
+/// The system prompt a turn sends: the route's template, when it names one,
+/// rides before the standing instruction, so a tenant's session prompts carry
+/// its route's words (larry#205).
+fn session_system(route: &Route) -> String {
+    match route.prompt() {
+        Some(template) => format!("{template}\n{SYSTEM}"),
+        None => String::from(SYSTEM),
+    }
+}
+
+/// The seal a session's report carries: the selected tenant's active key, so
+/// a remote caller verifies under the tenant that ran it (larry#211).
+fn session_seal(prepared: &super::prepared::Prepared) -> super::Seal<'_> {
+    super::Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    }
+}
+
 /// Runs the session in an already authorized directory: the route, the model,
 /// the gated proposal and the sealed report.
 fn run_session_prepared(
@@ -323,16 +342,14 @@ fn run_session_prepared(
         path: cwd,
         bytes: &document,
     };
+    let seal = session_seal(prepared);
     let report = gate::admit_and_run(
         subject,
         settings,
         &task_id,
         &task_digest,
         prepared.tenant,
-        super::Seal {
-            id: prepared.seal_id,
-            key: &prepared.seal_key,
-        },
+        seal,
         || {
             // The retry budget's timeline, built before the copy so a host whose clock refuses
             // copies nothing (larry#436).
@@ -345,6 +362,7 @@ fn run_session_prepared(
                 }
             };
             let client = ModelClient::new(config, clock, backoff);
+            let system = session_system(&route);
             let mut turn = Turn {
                 client: &client,
                 settings,
@@ -360,6 +378,7 @@ fn run_session_prepared(
                     Some(_) => String::from("."),
                     None => cwd.display().to_string(),
                 },
+                system,
                 observer: &mut *observer,
             };
             let done = turn.run(instruction)?;
@@ -495,6 +514,8 @@ struct Turn<'a> {
     place: Place<'a>,
     /// The directory the model is told it works in.
     shown: String,
+    /// The system turn: the route's template when it names one, then the standing instruction.
+    system: String,
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
 }
@@ -505,7 +526,7 @@ impl Turn<'_> {
     /// or interrupted.
     fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
         let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
-        let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
+        let mut conversation = Conversation::new(&self.system, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut usage = Vec::new();
         let mut refused = 0_usize;

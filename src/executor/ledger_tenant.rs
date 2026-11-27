@@ -32,7 +32,7 @@ use crate::executor::identity::{legacy_tenant_of, named_tenant};
 /// their tenant columns land in part C. Every statement runs once: the version
 /// gate repeats nothing, and a crash rolls the whole step back for the next
 /// open to replay.
-pub(super) const STEP_NINE: &str = "CREATE TABLE IF NOT EXISTS dir_tenant(id INTEGER PRIMARY KEY CHECK (id = 1), \
+pub(super) const STEP_TEN: &str = "CREATE TABLE IF NOT EXISTS dir_tenant(id INTEGER PRIMARY KEY CHECK (id = 1), \
     tenant TEXT NOT NULL CHECK (length(tenant) = 32)); \
     CREATE TABLE IF NOT EXISTS receipt_keys(tenant TEXT NOT NULL, \
     key_id INTEGER NOT NULL CHECK (key_id >= 1), seed BLOB NOT NULL CHECK (length(seed) = 32), \

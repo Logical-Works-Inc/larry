@@ -79,6 +79,8 @@ pub(crate) struct NewRoute<'a> {
     pub residency: &'a str,
     /// The provider kind: `openai-chat` unless set.
     pub kind: Option<&'a str>,
+    /// The prompt template, when set.
+    pub prompt: Option<&'a str>,
     /// The pinned temperature, when set.
     pub temperature: Option<&'a str>,
 }
@@ -100,6 +102,9 @@ pub(crate) fn add_route(state: &TempDir, route: &NewRoute<'_>) -> TestResult {
     ];
     if let Some(kind) = route.kind {
         args.extend(["--kind", kind]);
+    }
+    if let Some(template) = route.prompt {
+        args.extend(["--prompt", template]);
     }
     if let Some(degrees) = route.temperature {
         args.extend(["--temperature", degrees]);

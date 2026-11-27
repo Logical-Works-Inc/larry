@@ -607,3 +607,24 @@ fn a_namespaced_context_code_is_an_overflow() {
     };
     assert!(bare.is_context_overflow(), "a plain code still reads");
 }
+
+/// larry#205: one adapter per provider kind. Each kind's name parses back to
+/// it, and a route that pins no temperature sends no `temperature` member: a
+/// model that rejects the field answers every request with a 4xx, which is
+/// terminal. Catches a client that knows only the OpenAI chat shape and a body
+/// that always carries the field.
+#[test]
+fn sim_each_kind_sends_its_body_shape_and_temperature_rule() -> TestResult {
+    for name in ["openai-chat", "anthropic-messages", "openai-responses"] {
+        let kind = crate::model::Kind::parse(name).ok_or("a kind parses")?;
+        assert_eq!(kind.name(), name, "{name} round trips");
+    }
+    let unpinned = client(None)?;
+    let body = unpinned.encode(&[Message::new(Role::User, "probe")]);
+    let text = String::from_utf8(body.body().to_vec())?;
+    assert!(
+        !text.contains("temperature"),
+        "a route with no temperature sends none: {text}"
+    );
+    Ok(())
+}

@@ -614,8 +614,8 @@ impl Handle {
         locked(&self.state.ledger).bodies.clone()
     }
 
-    /// The `Authorization` header of each recorded request, aligned with
-    /// [`Self::requests`].
+    /// The credential header of each recorded request, aligned with
+    /// [`Self::requests`]: the `Authorization` value, else the `x-api-key`.
     pub(crate) fn authorizations(&self) -> Vec<Option<String>> {
         locked(&self.state.ledger).authorizations.clone()
     }

@@ -82,12 +82,13 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         // The steps are positional: the migrator runs the statements past the
         // file's version in order, so a shipped step never moves. Main's price
-        // step claimed 8 first (larry#204); the tenant key step appends as 9
+        // step claimed 8 first (larry#204) and its route-prompts step 9
+        // (larry#205, #534); the tenant key step appends as 10
         // (larry#211 part B). Reports and live groups keep their shape here;
         // their tenant columns land in part C.
         lgwks_deps::sqlite::migrate(
             &conn,
-            9,
+            10,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -97,7 +98,8 @@ impl Ledger {
                 policy::POLICY_SCHEMA,
                 policy::REPO_ROOT_SCHEMA,
                 routes::PRICE_SCHEMA,
-                tenant::STEP_NINE,
+                routes::ROUTE_PROMPT_SCHEMA,
+                tenant::STEP_TEN,
             ],
         )
         .map_err(ExecError::Ledger)?;
