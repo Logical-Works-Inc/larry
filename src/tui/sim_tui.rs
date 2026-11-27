@@ -440,13 +440,22 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         false,
     )?;
     let seen = every_event(&mut worker).ok_or("the session sent no event inside its bound")?;
-    let Some(&Event::Ended(Ended::Failed(ref message))) = seen.last() else {
-        return Err(format!("expected a typed policy failure, got {seen:?}").into());
+    assert_eq!(seen.last(), Some(&Event::Ended(Ended::Refused)), "{seen:?}");
+    // The sealed refusal reaches the frame as a receipt: not accepted, nothing ran.
+    let Some(before_end) = seen.iter().rev().nth(1) else {
+        return Err("no event before the end".into());
     };
-    assert!(message.contains("inside the state directory"), "{message}");
-    assert!(
-        !seen.iter().any(|event| matches!(*event, Event::Receipt(_))),
-        "a path refusal has no sealed run receipt: {seen:?}"
+    let Event::Receipt(ref receipt) = *before_end else {
+        return Err(format!("expected a receipt before the end, got {before_end:?}").into());
+    };
+    assert!(!receipt.accepted, "{receipt:?}");
+    assert_eq!(
+        (
+            receipt.commands,
+            receipt.handoff.as_str(),
+            receipt.digest.len()
+        ),
+        (0, "none", 12)
     );
     assert!(
         !seen.iter().any(|event| matches!(*event, Event::Ask(_))),
