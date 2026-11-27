@@ -30,6 +30,9 @@ mod route_key;
 #[path = "support/sealed_report.rs"]
 mod sealed_report;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;

@@ -13,6 +13,8 @@
 //! Every run drives the shipped binary with a cleared environment against the
 //! seeded mock endpoint, so no test makes a paid model call.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/json_at.rs"]

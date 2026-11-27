@@ -24,6 +24,9 @@ mod temp_dir;
 use json_at::At;
 use temp_dir::TempDir;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 /// Failures propagate instead of panicking.
 type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -68,6 +71,7 @@ fn entries(dir: &Path) -> Journey<Vec<String>> {
 fn driver(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_larry-demo"));
     command.args(args).current_dir(dir).env_clear();
+    coverage::forward(&mut command);
     command
 }
 

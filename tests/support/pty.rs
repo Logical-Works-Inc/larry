@@ -21,6 +21,8 @@ pub(crate) type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 #[path = "deadline.rs"]
 pub(crate) mod deadline;
 
+use crate::coverage::forward as forward_profile;
+
 /// The directories the tool lookup searches, in the order it prefers them: the places `sh`,
 /// `git`, `script`, `stty`, `cp` and `sleep` live on macOS, Linux, Homebrew and NixOS. The host's
 /// PATH and shell configuration are never read (larry#269, larry#296).
@@ -345,6 +347,7 @@ impl<'scope> Pty<'scope> {
         for &(name, ref value) in env {
             command.env(name, value);
         }
+        forward_profile(&mut command);
         let mut child = command
             .env("TERM", "xterm-256color")
             .stdin(Stdio::piped())
