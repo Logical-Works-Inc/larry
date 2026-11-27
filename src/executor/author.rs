@@ -8,6 +8,7 @@
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
@@ -16,7 +17,7 @@ use crate::model::{
     Completion, Kind, Message, ModelClient, ModelError, Role, Route, structured_content,
 };
 
-use super::{ExecError, Ledger, Settings, Task, TaskError, backoff};
+use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex, identity};
 
 /// Longest goal, in bytes.
 const MAX_GOAL_BYTES: usize = 8192;
@@ -428,7 +429,18 @@ pub(super) fn model_step<'task>(
     let route = settings.route(ledger, task.route())?;
     // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    let client = ModelClient::new(settings.model_config(&route)?, clock, backoff);
+    // The client shares the executor's tenant-route limiter, so the budgets
+    // bind every brief task (larry#204): the tenant is the state directory's,
+    // the route the one this task resolved to.
+    let tenant = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+    let client = ModelClient::with_limiter(
+        settings.model_config(&route)?,
+        clock,
+        Arc::clone(&settings.limiter),
+        tenant,
+        route.id(),
+        backoff,
+    );
     Ok(Some(ModelStep {
         route,
         brief,

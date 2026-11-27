@@ -83,6 +83,19 @@ pub(crate) fn completion(
     Ok(json::to_vec(&reply)?)
 }
 
+/// `good` with its top-level `usage` block removed, the way proxies that never
+/// meter answer (larry#204): every provider shape carries its counts under one
+/// `usage` object, so the strip is the same on all three paths. A `null`
+/// usage would parse the same way; the block is removed outright so the reply
+/// matches the unmetered shape byte for byte.
+pub(crate) fn without_usage(good: &[u8]) -> Result<Vec<u8>, Failure> {
+    let mut reply = json::from_slice::<Value>(good)?;
+    if let Value::Object(ref mut map) = reply {
+        map.remove("usage");
+    }
+    Ok(json::to_vec(&reply)?)
+}
+
 /// `good` (a reply for `path`) with the finish marker or the content set to
 /// `value`: the chat shape's first choice, the Messages shape's `stop_reason`
 /// or first text block, the Responses shape's `status` or first output text.
