@@ -340,7 +340,11 @@ fn eval_task(value: &Value, index: usize) -> Result<EvalTask, SetError> {
         write,
         acceptance,
     };
-    task.task(".")
+    // The set parser validates task shape before an eval arm creates its real
+    // absolute origin. A host temp path keeps this validation on the same
+    // absolute-repository contract without authorizing or touching a directory.
+    let validation_repo = std::env::temp_dir().to_string_lossy().into_owned();
+    task.task(&validation_repo)
         .map_err(|cause| SetError::Task { index, cause })?;
     Ok(task)
 }

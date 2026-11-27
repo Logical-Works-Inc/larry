@@ -142,19 +142,27 @@ pub(crate) trait Observer {
     /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
     fn diff(&mut self, _text: &str) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
-    fn handed(&mut self, line: &str, applied: bool);
+    /// An observer that records nothing leaves this alone.
+    fn handed(&mut self, _line: &str, _applied: bool) {}
     /// The model asks to run `command` as step `step`; nothing runs unless this
     /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
     /// inside the operator's isolated container under the same gate and runs it.
+    /// No default: every observer says aloud whether a command may run (larry#239).
     fn approve(&mut self, step: usize, command: &str) -> Approval;
-    /// Step `step` is about to run `command`.
-    fn started(&mut self, step: usize, command: &str);
+    /// Step `step` is about to run `command`. An observer that records nothing
+    /// leaves this alone.
+    fn started(&mut self, _step: usize, _command: &str) {}
     /// Step `step` ended; `observation` is what the model is shown, `passed` its exit 0.
-    fn finished(&mut self, step: usize, observation: &str, passed: bool);
+    /// An observer that records nothing leaves this alone.
+    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
     /// A message for the person: the model's summary or the reason the session stopped.
-    fn message(&mut self, text: &str);
-    /// Whether the client has cancelled the session.
-    fn cancelled(&self) -> bool;
+    /// An observer with nobody to tell leaves this alone.
+    fn message(&mut self, _text: &str) {}
+    /// Whether the client has cancelled the session. An observer nobody can stop
+    /// leaves this alone, which never stops the session early.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// One reply, parsed.
@@ -313,6 +321,16 @@ fn denial(report: &Report) -> String {
     }
 }
 
+/// Which authorization a terminal session runs under: the tenant door or the
+/// narrower evaluator route beneath `<state>/eval` (larry#207).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionDoor {
+    /// A person's door: the tenant allowlist, open until its first root row.
+    Tenant,
+    /// An evaluator-owned origin: only beneath `<state>/eval`.
+    Eval,
+}
+
 /// Runs a terminal session on `instruction` in `cwd`, reporting through `observer`.
 /// A refusal by the gate seals a report that ran nothing; a fault outside the
 /// session's doing (the ledger, a process group) is a typed error.
@@ -322,12 +340,44 @@ pub(crate) fn run_session(
     settings: &Settings,
     isolation: Isolation,
     observer: &mut dyn Observer,
+    door: SessionDoor,
 ) -> Result<Ended, ExecError> {
     check(instruction, cwd).map_err(ExecError::Session)?;
     // A host that cannot confine refuses here, before the ledger, the model or a copy.
     isolation.check()?;
     let (ledger, key) = prepare(settings)?;
-    let route = settings.route(&ledger, None)?;
+    let repository = match door {
+        SessionDoor::Tenant => ledger.authorized_repo(
+            &super::tenant_key(settings.state_dir()),
+            settings.state_dir(),
+            cwd,
+            settings.is_local(),
+        )?,
+        SessionDoor::Eval => Ledger::authorized_eval_repo(settings.state_dir(), cwd)?,
+    };
+    run_session_prepared(
+        instruction,
+        &repository,
+        settings,
+        isolation,
+        observer,
+        &ledger,
+        &key,
+    )
+}
+
+/// Runs the session in an already authorized directory: the route, the model,
+/// the gated proposal and the sealed report.
+fn run_session_prepared(
+    instruction: &str,
+    cwd: &Path,
+    settings: &Settings,
+    isolation: Isolation,
+    observer: &mut dyn Observer,
+    ledger: &Ledger,
+    key: &lgwks_std::sign::SecretKey,
+) -> Result<Ended, ExecError> {
+    let route = settings.route(ledger, None)?;
     let config = settings.model_config(&route)?;
     let document = json::to_vec(&json!({
         "session": {
@@ -345,7 +395,7 @@ pub(crate) fn run_session(
         path: cwd,
         bytes: &document,
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
+    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
         // The retry budget's timeline, built before the copy so a host whose clock refuses
         // copies nothing (larry#436).
         let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
@@ -360,7 +410,7 @@ pub(crate) fn run_session(
         let mut turn = Turn {
             client: &client,
             settings,
-            ledger: &ledger,
+            ledger,
             task_id: &task_id,
             place: match island {
                 Some(ref isle) => isle.place(),
@@ -414,7 +464,7 @@ pub(crate) fn run_session(
             }
         }
         stop = Some(done.stop);
-        Ok(Report::sealed(body, &key))
+        Ok(Report::sealed(body, key))
     })?;
     let stop = match stop {
         Some(stop) => stop,
@@ -425,6 +475,53 @@ pub(crate) fn run_session(
         }
     };
     Ok(Ended { stop, report })
+}
+
+#[cfg(test)]
+mod issue207_tests {
+    use super::{Approval, Isolation, Observer, run_session};
+    use crate::executor::gate;
+    use crate::executor::sim_tree::scratch;
+    use crate::executor::{Ledger, Settings, tenant_key};
+
+    /// An observer that must never be reached by a refusal before model setup.
+    struct QuietObserver;
+
+    impl Observer for QuietObserver {
+        fn approve(&mut self, _step: usize, _command: &str) -> Approval {
+            Approval::Decline
+        }
+    }
+
+    /// A remote ACP session must refuse an unallowlisted cwd before route or model resolution.
+    #[test]
+    fn sim_session_refuses_an_unallowlisted_cwd_before_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch("issue207-session-state")?;
+        let work = scratch("issue207-session-work")?;
+        let policy = gate::session_scopes();
+        Ledger::open(&state)?.set_tenant_policy(&tenant_key(&state), &policy)?;
+        let state_text = state.to_string_lossy().into_owned();
+        let path = std::env::var("PATH")?;
+        let settings = Settings::remote_from_env(move |name| match name {
+            "LARRY_STATE_DIR" => Some(state_text.clone()),
+            "PATH" => Some(path.clone()),
+            _ => None,
+        })?;
+        let mut observer = QuietObserver;
+        assert!(matches!(
+            run_session(
+                "read this repository",
+                &work,
+                &settings,
+                Isolation::Host,
+                &mut observer,
+                super::super::SessionDoor::Tenant,
+            ),
+            Err(super::super::ExecError::RepoNotAllowed { .. })
+        ));
+        Ok(())
+    }
 }
 
 /// What one session's loop did.

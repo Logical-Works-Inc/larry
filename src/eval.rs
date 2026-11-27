@@ -20,8 +20,8 @@ use std::time::Instant;
 use lgwks_macros::Error;
 
 use crate::executor::{
-    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, Settings, Stop,
-    Task, execute, run_command, run_session,
+    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, SessionDoor,
+    Settings, Stop, Task, execute_eval, run_command, run_session,
 };
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
@@ -275,20 +275,8 @@ fn finish_origin(origin: Origin, ran: Result<Outcome, EvalError>) -> Result<Outc
 struct EvalObserver;
 
 impl Observer for EvalObserver {
-    fn handed(&mut self, _line: &str, _applied: bool) {}
-
     fn approve(&mut self, _step: usize, _command: &str) -> Approval {
         Approval::Run
-    }
-
-    fn started(&mut self, _step: usize, _command: &str) {}
-
-    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
-
-    fn message(&mut self, _text: &str) {}
-
-    fn cancelled(&self) -> bool {
-        false
     }
 }
 
@@ -334,7 +322,7 @@ fn command_outcome(
     document: &Task,
     settings: &Settings,
 ) -> Result<(Ending, Option<Spent>), EvalError> {
-    match execute(document, settings) {
+    match execute_eval(document, settings) {
         Ok(report) => {
             let ending = if report.accepted() {
                 Ending::Accepted
@@ -370,6 +358,7 @@ fn session_outcome(
         settings,
         Isolation::Host,
         &mut observer,
+        SessionDoor::Eval,
     ) {
         Ok(ended) => {
             let ending = match ended.stop {
