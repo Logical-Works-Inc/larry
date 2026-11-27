@@ -160,23 +160,36 @@ fn check_card(seed: u64, arm: &Arm, scored: &Scored) -> TestResult {
     Ok(())
 }
 
-/// Replies for the shipped set, with the session task's command and summary in order.
+/// Replies for the shipped set, with the session task's edit, read-only check
+/// and finish pair in order.
 fn matched_session_config(files: usize, session_request: usize) -> TestResult<Config> {
-    let mut contents = vec![String::from("generated\n"); files.saturating_add(1)];
+    let mut contents = vec![String::from("generated\n"); files.saturating_add(3)];
     *contents
         .get_mut(session_request)
         .ok_or("session command reply")? =
         String::from(r#"{"command":"printf 'session\n' > session.txt"}"#);
     *contents
         .get_mut(session_request.saturating_add(1))
-        .ok_or("session done reply")? = String::from(r#"{"done":"wrote session.txt"}"#);
+        .ok_or("session check reply")? = String::from(r#"{"command":"test -s session.txt"}"#);
+    *contents
+        .get_mut(session_request.saturating_add(2))
+        .ok_or("session first finish")? = String::from(
+        r#"{"finish":{"summary":"wrote session.txt","check":"test -s session.txt","artifacts":["session.txt"],"state":["ready"],"servers":["none"]}}"#,
+    );
+    *contents
+        .get_mut(session_request.saturating_add(3))
+        .ok_or("session second finish")? = String::from(
+        r#"{"finish":{"summary":"wrote session.txt","check":"test -s session.txt","artifacts":["session.txt"],"state":["ready"],"servers":["none"]}}"#,
+    );
     Ok(Config {
         contents,
         ..Config::seeded(7)
     })
 }
 
-/// Counts model requests that carry the session's command reply as an assistant message.
+/// Counts model requests that carry the session's command reply as their latest
+/// assistant message: the request sent right after the model ran the command,
+/// not the later ones that merely repeat it in their history.
 fn session_command_replies(handle: &Handle) -> usize {
     handle
         .requests()
@@ -184,12 +197,14 @@ fn session_command_replies(handle: &Handle) -> usize {
         .filter_map(|body| json::from_slice::<Value>(&body).ok())
         .filter(|request| {
             request["messages"].as_array().is_some_and(|messages| {
-                messages.iter().any(|message| {
-                    message["role"] == "assistant"
-                        && message["content"].as_str().is_some_and(|content| {
+                messages
+                    .iter()
+                    .rfind(|message| message["role"] == "assistant")
+                    .is_some_and(|message| {
+                        message["content"].as_str().is_some_and(|content| {
                             content.contains(r#"{"command":"printf 'session"#)
                         })
-                })
+                    })
             })
         })
         .count()
@@ -683,8 +698,8 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
         let ran = score_arm(&env, SHIPPED_SET.as_bytes())?;
         assert_eq!(
             handle.served(),
-            u64::try_from(files.saturating_add(1))?,
-            "one completion per written file plus the session done reply"
+            u64::try_from(files.saturating_add(3))?,
+            "one completion per written file plus the session edit, check and finish pair"
         );
         assert_eq!(
             session_command_replies(handle),

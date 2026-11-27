@@ -26,13 +26,13 @@ fn session_set(name: &str, acceptance: &str) -> String {
     .to_string()
 }
 
-/// Runs `set` against the mock, whose session first runs `command_reply` then
-/// reports done, and returns the run. The session works on the host exactly as
-/// `larry acp` runs it, so the arm grants `model.command` the way a Harbor task
-/// container's operator does.
-fn run_session_task(state: &TempDir, set: &str, command_reply: &str) -> TestResult<Ran> {
+/// Runs `set` against the mock, whose session runs its edit, then a read-only
+/// check, then the typed finish pair, and returns the run. The session works on
+/// the host exactly as `larry acp` runs it, so the arm grants `model.command`
+/// the way a Harbor task container's operator does.
+fn run_session_task(state: &TempDir, set: &str, replies: &[&str]) -> TestResult<Ran> {
     let config = Config {
-        contents: vec![command_reply.to_owned(), String::from(r#"{"done":"ok"}"#)],
+        contents: replies.iter().map(|reply| (*reply).to_owned()).collect(),
         ..Config::seeded(7)
     };
     crate::mock_model::run(config, |handle: &Handle| {
@@ -42,7 +42,11 @@ fn run_session_task(state: &TempDir, set: &str, command_reply: &str) -> TestResu
             OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
         ));
         let ran = score_arm(&env, set.as_bytes())?;
-        assert_eq!(handle.served(), 2, "the command reply and the done reply");
+        assert_eq!(
+            handle.served(),
+            4,
+            "the edit, the read-only check and the finish pair"
+        );
         Ok::<_, Box<dyn std::error::Error>>(ran)
     })
 }
@@ -61,24 +65,37 @@ fn check_session_result(ran: &Ran, outcome: &str) -> TestResult {
     Ok(())
 }
 
+/// Runs one session-task set through the mock and checks its card: the result
+/// names the session path with `outcome`, every origin is removed, and the run
+/// prints its card.
+fn check_session_case(name: &str, acceptance: &str, replies: &[&str], outcome: &str) -> TestResult {
+    let state = TempDir::new()?;
+    let set = session_set(name, acceptance);
+    let ran = run_session_task(&state, &set, replies)?;
+    assert_eq!(ran.code, Some(0), "a run prints its card: {}", ran.stderr);
+    check_session_result(&ran, outcome)?;
+    assert_eq!(origins_left(&state)?, 0, "every origin removed");
+    Ok(())
+}
+
 /// scored-by-acceptance (larry#217): a session task whose commands all exit 0 but
 /// whose acceptance fails is rejected, and its card result names its path. Catches
 /// a scorer that accepts a session for its commands alone without running the set's
 /// verifier.
 #[test]
 fn a_session_task_whose_commands_pass_but_miss_the_acceptance_is_rejected() -> TestResult {
-    let state = TempDir::new()?;
-    let set = session_set("missed", "test -s session.txt");
-    let ran = run_session_task(&state, &set, r#"{"command":"true"}"#)?;
-    assert_eq!(
-        ran.code,
-        Some(0),
-        "a rejection still prints its card: {}",
-        ran.stderr
-    );
-    check_session_result(&ran, "rejected")?;
-    assert_eq!(origins_left(&state)?, 0, "every origin removed");
-    Ok(())
+    let finish = r#"{"finish":{"summary":"ready for review","check":"true","artifacts":["README.md"],"state":["ready"],"servers":["none"]}}"#;
+    check_session_case(
+        "missed",
+        "test -s session.txt",
+        &[
+            r#"{"command":"true"}"#,
+            r#"{"command":"true"}"#,
+            finish,
+            finish,
+        ],
+        "rejected",
+    )
 }
 
 /// scored-by-acceptance (larry#217): a session task whose commands pass and whose
@@ -87,17 +104,16 @@ fn a_session_task_whose_commands_pass_but_miss_the_acceptance_is_rejected() -> T
 /// observed as rejected instead.
 #[test]
 fn a_session_task_whose_commands_and_acceptance_pass_is_accepted() -> TestResult {
-    let state = TempDir::new()?;
-    let set = session_set("kept", "sleep 2 && test -s session.txt");
-    let command = r#"{"command":"printf 'session\n' > session.txt"}"#;
-    let ran = run_session_task(&state, &set, command)?;
-    assert_eq!(
-        ran.code,
-        Some(0),
-        "an acceptance prints its card: {}",
-        ran.stderr
-    );
-    check_session_result(&ran, "accepted")?;
-    assert_eq!(origins_left(&state)?, 0, "every origin removed");
-    Ok(())
+    let finish = r#"{"finish":{"summary":"wrote session.txt","check":"test -s session.txt","artifacts":["session.txt"],"state":["ready"],"servers":["none"]}}"#;
+    check_session_case(
+        "kept",
+        "sleep 2 && test -s session.txt",
+        &[
+            r#"{"command":"printf 'session\n' > session.txt"}"#,
+            r#"{"command":"test -s session.txt"}"#,
+            finish,
+            finish,
+        ],
+        "accepted",
+    )
 }

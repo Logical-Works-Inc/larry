@@ -17,6 +17,15 @@ pub mod routes;
 mod run;
 mod seal;
 mod session;
+/// Typed finish parsing and bounded verification values for terminal sessions.
+pub(crate) mod session_gate;
+/// Bounded model reply parsing for terminal sessions.
+mod session_reply;
+/// Session receipt assembly and report identity values.
+mod session_report;
+/// Runs a terminal session end to end: the authorization door, the admission,
+/// the island copy, the turn loop and the sealed report.
+mod session_run;
 #[cfg(test)]
 mod sim_env;
 #[cfg(test)]
@@ -50,9 +59,8 @@ pub(crate) use island::Isolation;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use session::SessionError;
-pub(crate) use session::{
-    Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, SessionDoor, Stop, run_session,
-};
+pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop};
+pub(crate) use session_run::{SessionDoor, run_session};
 pub(crate) use task::Knobs;
 pub use task::{Task, TaskError};
 
