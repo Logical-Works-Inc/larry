@@ -5,6 +5,7 @@ mod author;
 mod compact;
 mod confine;
 mod error;
+pub(super) mod fence_control;
 mod gate;
 mod identity;
 mod island;
@@ -148,6 +149,8 @@ pub struct Settings {
     local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
+    /// Optional host authority action for the next admitted task.
+    pub(crate) fence_control: Option<fence_control::FenceControl>,
 }
 
 impl fmt::Debug for Settings {
@@ -206,6 +209,7 @@ impl Settings {
         } else {
             store.tenant_policy(&tenant_text)?
         };
+        let fence_control = fence_control::read(&read)?;
         Ok(Settings {
             state_dir,
             tenant,
@@ -215,6 +219,7 @@ impl Settings {
             policy,
             local,
             read: Arc::new(read),
+            fence_control,
         })
     }
 

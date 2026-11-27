@@ -43,6 +43,14 @@ pub enum ExecError {
         /// The name that was refused.
         value: String,
     },
+    /// `LARRY_FENCE_CONTROL` is not one typed host action.
+    #[error("exec LARRY_FENCE_CONTROL is invalid: {value}: {cause}")]
+    BadFenceControl {
+        /// The refused control value.
+        value: String,
+        /// The parser's typed cause.
+        cause: String,
+    },
     /// The sqlite ledger could not be opened or migrated.
     #[error("exec ledger: {0}")]
     Ledger(#[source] lgwks_deps::sqlite::SqliteError),
