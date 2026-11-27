@@ -16,9 +16,9 @@ fn section<'a>(manifest: &'a str, name: &str) -> Result<&'a str, Box<dyn Error>>
         .0)
 }
 
-/// The suite-safe main profile keeps workspace code at opt-level one and dependencies at two.
+/// The chosen profile keeps workspace and dependency code at opt-level one and build scripts at zero.
 #[test]
-fn dev_profile_optimizes_workspace_hot_path_only() -> TestResult {
+fn dev_profile_uses_candidate_b_profile() -> TestResult {
     let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))?;
     let dev = section(&manifest, "[profile.dev]")?;
     assert!(
@@ -29,8 +29,8 @@ fn dev_profile_optimizes_workspace_hot_path_only() -> TestResult {
     assert!(
         dependencies
             .lines()
-            .any(|line| line.trim() == "opt-level = 2"),
-        "the dependency profile must use opt-level 2: {dependencies}"
+            .any(|line| line.trim() == "opt-level = 1"),
+        "the dependency profile must use opt-level 1: {dependencies}"
     );
     for line in manifest.lines() {
         if let Some(package) = line.strip_prefix("[profile.dev.package.\"") {
@@ -43,9 +43,12 @@ fn dev_profile_optimizes_workspace_hot_path_only() -> TestResult {
             );
         }
     }
+    let build_override = section(&manifest, "[profile.dev.build-override]")?;
     assert!(
-        !manifest.contains("[profile.dev.build-override]"),
-        "the suite-safe main profile must keep Cargo's build-script defaults"
+        build_override
+            .lines()
+            .any(|line| line.trim() == "opt-level = 0"),
+        "the build-script profile must use opt-level 0: {build_override}"
     );
     Ok(())
 }
