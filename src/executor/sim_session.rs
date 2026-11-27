@@ -20,7 +20,7 @@ use lgwks_macros::Error;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, clip, run_command};
+use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, Track, clip, run_command};
 use super::{
     ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
     check, parse_reply,
@@ -410,8 +410,11 @@ fn drive(
                     Place::Open(work),
                     path_env,
                     COMMAND_TIMEOUT,
-                    &ledger,
-                    &task_id,
+                    Track {
+                        ledger: &ledger,
+                        tenant: "sim",
+                        task_id: &task_id,
+                    },
                     &|| cancel.load(Ordering::Acquire),
                 )
             };
@@ -537,8 +540,11 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
             Place::Open(&work),
             &path_env,
             SHORT_TIMEOUT,
-            &ledger,
-            "sim-timeout",
+            Track {
+                ledger: &ledger,
+                tenant: "sim",
+                task_id: "sim-timeout",
+            },
             &|| false,
         );
         let listed = ledger.live_tasks();
@@ -622,8 +628,11 @@ fn panic_inside_run(seed: u64) -> Result<(), CancelSimError> {
                 Place::Open(&work),
                 &path_env,
                 COMMAND_TIMEOUT,
-                &ledger,
-                "sim-panic",
+                Track {
+                    ledger: &ledger,
+                    tenant: "sim",
+                    task_id: "sim-panic",
+                },
                 &|| {
                     let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
                     assert!(

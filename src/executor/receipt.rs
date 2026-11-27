@@ -31,6 +31,10 @@ const ACCEPTED: &str = "accepted";
 /// The report member that says the diff is not the whole change (larry#206).
 const DIFF_TRUNCATED: &str = "diff_truncated";
 
+/// The report member that says which key id sealed the report (larry#211): a
+/// rotated key verifies old receipts by id and seals new ones under the new id.
+pub(crate) const KEY_ID: &str = "kid";
+
 /// Largest report `verify` reads, in bytes (256 MiB). A report holds at most 16
 /// commands with 1 MiB of stdout and 1 MiB of stderr each, plus a 1 MiB diff:
 /// 33 MiB of text. JSON spends at most six bytes on one control byte, so the
@@ -77,6 +81,9 @@ pub enum ReceiptError {
     /// The receipt named no signature.
     #[error("receipt names no signature")]
     MissingSignature,
+    /// The receipt's key id is not a positive integer.
+    #[error("receipt key id is not a positive integer")]
+    BadKeyId,
     /// The signature was not 128 hex characters.
     #[error("receipt signature is not 128 hex characters: {0}")]
     SignatureNotHex(#[source] lgwks_std::hex::DecodeError),
@@ -158,7 +165,7 @@ fn passed(result: &Value) -> bool {
 /// Returns the sealed report and the verdict. A body that is not an object
 /// gets no receipt and is never accepted.
 #[must_use]
-pub(crate) fn seal(mut body: Value, key: &SecretKey) -> (Value, bool) {
+pub(crate) fn seal(mut body: Value, key: &SecretKey, key_id: i64) -> (Value, bool) {
     let accepted = acceptance(&body);
     let Some(object) = body.as_object_mut() else {
         return (body, false);
@@ -168,12 +175,29 @@ pub(crate) fn seal(mut body: Value, key: &SecretKey) -> (Value, bool) {
     let receipt = json::json!({
         "alg": ALGORITHM,
         "key": lgwks_std::hex::encode(key.public_key().to_bytes()),
+        "kid": key_id,
         "signature": lgwks_std::hex::encode(signature.to_bytes()),
     });
     if let Some(sealed) = body.as_object_mut() {
         sealed.insert(RECEIPT.to_owned(), receipt);
     }
     (body, accepted)
+}
+
+/// The key id a sealed report names: what `seal` wrote as `kid`, or 1 for a
+/// report sealed before key ids existed. Refuses a mistyped member rather than
+/// guessing which key sealed it.
+pub(crate) fn key_id_of(body: &Value) -> Result<i64, ReceiptError> {
+    let Some(receipt) = body.get(RECEIPT) else {
+        return Err(ReceiptError::MissingReceipt);
+    };
+    match receipt.get(KEY_ID) {
+        None => Ok(1),
+        Some(member) => member
+            .as_i64()
+            .filter(|id| *id >= 1)
+            .ok_or(ReceiptError::BadKeyId),
+    }
 }
 
 /// Parses a public key from its 64 hex characters.
@@ -239,6 +263,109 @@ pub fn verify(bytes: &[u8], trusted: &PublicKey) -> Result<Verdict, ReceiptError
         .ok_or(ReceiptError::Inconsistent)?
         .to_owned();
     Ok(Verdict { accepted, task_id })
+}
+
+/// What a run seals under: the tenant's active receipt key id and secret.
+#[derive(Clone, Copy)]
+pub(crate) struct Seal<'seal> {
+    /// The key id the receipt names.
+    pub(crate) id: i64,
+    /// The secret that seals.
+    pub(crate) key: &'seal SecretKey,
+}
+
+/// One sealed run report and the verdict its receipt carries.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Report {
+    /// The report with its `accepted` verdict and `receipt`.
+    json: Value,
+    /// Whether the run was accepted.
+    accepted: bool,
+    /// The sealed report exactly as it was printed, so a retry answers with the
+    /// bytes the ledger recorded rather than a re-rendering of them.
+    bytes: Vec<u8>,
+}
+
+impl Report {
+    /// The sealed report, as printed.
+    #[must_use]
+    pub const fn json(&self) -> &Value {
+        &self.json
+    }
+
+    /// The sealed report's exact bytes, the value the ledger keeps.
+    #[must_use]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    /// Whether the run was accepted: no denial, a diff, every command passed.
+    #[must_use]
+    pub const fn accepted(&self) -> bool {
+        self.accepted
+    }
+
+    /// Whether this report carries a seal at all: one the gate could not make
+    /// durable is never a record a retry may answer from (larry#182).
+    #[must_use]
+    pub(crate) fn carries_a_seal(&self) -> bool {
+        self.json.get(RECEIPT).is_some()
+    }
+
+    /// Seals a report body under `key` as key id `key_id`.
+    pub(crate) fn sealed(body: Value, key: &SecretKey, key_id: i64) -> Report {
+        let (json, accepted) = seal(body, key, key_id);
+        let bytes = json.to_string().into_bytes();
+        Report {
+            json,
+            accepted,
+            bytes,
+        }
+    }
+
+    /// The report a ledger recorded, re-derived rather than trusted: its seal is
+    /// checked under this state directory's key and its verdict re-derived, so a
+    /// retry never answers with a record this state directory did not seal
+    /// (larry#182 defect 3).
+    ///
+    /// # Errors
+    ///
+    /// `ExecError::Receipt` when the recorded bytes are not a report this
+    /// directory's key seals.
+    pub(crate) fn parse(bytes: &[u8], key: &SecretKey) -> Result<Report, super::ExecError> {
+        let verdict = verify(bytes, &key.public_key()).map_err(super::ExecError::Receipt)?;
+        let json = json::from_slice(bytes)
+            .map_err(|cause| super::ExecError::Receipt(ReceiptError::Malformed(cause)))?;
+        Ok(Report {
+            json,
+            accepted: verdict.accepted(),
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// The report the ledger recorded for `tenant`, verified under the exact
+    /// key id its receipt names, so a retry answers from the row its own run
+    /// sealed and never from another tenant's (larry#211).
+    ///
+    /// # Errors
+    ///
+    /// `ExecError::Receipt` when the bytes are not a report,
+    /// `ExecError::NoReceiptKey` when the named key id is gone, and
+    /// `ExecError::Sql` when the lookup fails.
+    pub(crate) fn parse_for(
+        ledger: &super::Ledger,
+        tenant: &str,
+        bytes: &[u8],
+    ) -> Result<Report, super::ExecError> {
+        let body = json::from_slice::<Value>(bytes)
+            .map_err(|cause| super::ExecError::Receipt(ReceiptError::Malformed(cause)))?;
+        let key_id = key_id_of(&body).map_err(super::ExecError::Receipt)?;
+        let key = ledger
+            .receipt_secret(tenant, key_id)?
+            .ok_or(super::ExecError::NoReceiptKey)?;
+        Self::parse(bytes, &key)
+    }
 }
 
 #[cfg(test)]

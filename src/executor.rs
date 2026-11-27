@@ -9,6 +9,7 @@ mod gate;
 mod identity;
 mod island;
 mod ledger;
+mod prepared;
 mod receipt;
 mod recovery;
 pub mod routes;
@@ -30,9 +31,11 @@ use std::time::Duration;
 
 pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
+use larry_contracts::ids::TenantId;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-use run::{Place, run_command};
+use prepared::{Prepared, live_budget, prepare};
+use run::{Place, Track, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -43,8 +46,9 @@ pub use confine::ConfineError;
 pub(crate) use confine::Platform;
 pub use error::ExecError;
 pub(crate) use island::Isolation;
+pub(crate) use receipt::Seal;
 use receipt::parse_public_key;
-pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
+pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Report, Verdict, verify};
 pub use session::SessionError;
 pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop, run_session};
 pub use task::{Task, TaskError};
@@ -115,15 +119,27 @@ pub(crate) fn state_ledger(read: &impl Fn(&str) -> Option<String>) -> Result<Led
     Ledger::open(&state_dir(read)?)
 }
 
-/// The public half of the state directory's receipt key, created on first use.
+/// The public half of the selected tenant's active receipt key, read-only: a
+/// tenant with no key yet is refused, and no seed is ever drawn here.
+/// `larry key` and `larry verify` on an empty state directory refuse without
+/// creating the store or minting a secret (larry#211).
 pub fn state_public_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, ExecError> {
     let directory = state_dir(&read)?;
-    Ok(Ledger::open(&directory)?.signing_key()?.public_key())
+    if !directory.join("executor.db").exists() {
+        return Err(ExecError::NoStore);
+    }
+    let ledger = Ledger::open(&directory)?;
+    let (_, tenant) = ledger.selected_tenant(&directory, &read)?;
+    ledger
+        .active_receipt_key(&tenant)?
+        .map(|(_, public)| public)
+        .ok_or(ExecError::NoReceiptKey)
 }
 
 /// Provisions the tenant-owned executor ledger before a local or remote door runs.
 /// The policy text uses the same comma-separated scope names as `LARRY_POLICY`;
-/// roots are canonicalized and bounded by the ledger owner.
+/// roots are canonicalized and bounded by the ledger owner. The tenant is the
+/// selected one: `LARRY_TENANT` when it names one, else the store's default.
 pub fn provision_tenant(
     read: impl Fn(&str) -> Option<String>,
     policy_text: &str,
@@ -131,7 +147,7 @@ pub fn provision_tenant(
 ) -> Result<(), ExecError> {
     let state = state_dir(&read)?;
     let ledger = Ledger::open(&state)?;
-    let tenant = tenant_key(&state);
+    let (_, tenant) = ledger.selected_tenant(&state, &read)?;
     let policy = gate::policy_names(Some(policy_text))?;
     ledger.set_tenant_policy(&tenant, &policy)?;
     for root in roots {
@@ -149,78 +165,49 @@ pub fn trusted_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, E
     }
 }
 
-/// One sealed run report and the verdict its receipt carries.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct Report {
-    /// The report with its `accepted` verdict and `receipt`.
-    json: lgwks_std::json::Value,
-    /// Whether the run was accepted.
-    accepted: bool,
-    /// The sealed report exactly as it was printed, so a retry answers with the
-    /// bytes the ledger recorded rather than a re-rendering of them.
-    bytes: Vec<u8>,
+/// Verifies a sealed report against the selected tenant's keys in the state
+/// directory: the receipt's key id selects the key, so a rotated tenant
+/// verifies old receipts by id and new ones under the new id, while another
+/// tenant's receipt is refused as untrusted (larry#211).
+///
+/// # Errors
+///
+/// [`ExecError::NoStore`] when the store is absent, [`ExecError::NoReceiptKey`]
+/// when the named key id is gone, and [`ExecError::Receipt`] when the report
+/// is not a report this tenant sealed.
+pub fn verify_state_report(
+    read: impl Fn(&str) -> Option<String>,
+    bytes: &[u8],
+) -> Result<Verdict, ExecError> {
+    let directory = state_dir(&read)?;
+    if !directory.join("executor.db").exists() {
+        return Err(ExecError::NoStore);
+    }
+    let ledger = Ledger::open(&directory)?;
+    let (_, tenant) = ledger.selected_tenant(&directory, &read)?;
+    let body = lgwks_std::json::from_slice::<lgwks_std::json::Value>(bytes)
+        .map_err(|cause| ExecError::Receipt(ReceiptError::Malformed(cause)))?;
+    let key_id = receipt::key_id_of(&body).map_err(ExecError::Receipt)?;
+    let keys = ledger.receipt_public_keys(&tenant)?;
+    let trusted = keys
+        .iter()
+        .find(|entry| entry.0 == key_id)
+        .map(|entry| &entry.1)
+        .ok_or(ExecError::NoReceiptKey)?;
+    verify(bytes, trusted).map_err(ExecError::Receipt)
 }
 
-impl Report {
-    /// The sealed report, as printed.
-    #[must_use]
-    pub const fn json(&self) -> &lgwks_std::json::Value {
-        &self.json
-    }
-
-    /// The sealed report's exact bytes, the value the ledger keeps.
-    #[must_use]
-    pub(crate) fn bytes(&self) -> &[u8] {
-        self.bytes.as_slice()
-    }
-
-    /// Whether the run was accepted: no denial, a diff, every command passed.
-    #[must_use]
-    pub const fn accepted(&self) -> bool {
-        self.accepted
-    }
-
-    /// Whether this report carries a seal at all: one the gate could not make
-    /// durable is never a record a retry may answer from (larry#182).
-    #[must_use]
-    pub(crate) fn carries_a_seal(&self) -> bool {
-        self.json.get(receipt::RECEIPT).is_some()
-    }
-
-    /// Seals a report body under `key`.
-    fn sealed(body: lgwks_std::json::Value, key: &lgwks_std::sign::SecretKey) -> Report {
-        let (json, accepted) = receipt::seal(body, key);
-        let bytes = json.to_string().into_bytes();
-        Report {
-            json,
-            accepted,
-            bytes,
-        }
-    }
-
-    /// The report a ledger recorded, re-derived rather than trusted: its seal is
-    /// checked under this state directory's key and its verdict re-derived, so a
-    /// retry never answers with a record this state directory did not seal
-    /// (larry#182 defect 3).
-    ///
-    /// # Errors
-    ///
-    /// [`ExecError::Receipt`] when the recorded bytes are not a report this
-    /// directory's key seals.
-    pub(crate) fn parse(
-        bytes: &[u8],
-        key: &lgwks_std::sign::SecretKey,
-    ) -> Result<Report, ExecError> {
-        let verdict = receipt::verify(bytes, &key.public_key()).map_err(ExecError::Receipt)?;
-        let json = lgwks_std::json::from_slice(bytes)
-            .map_err(|cause| ExecError::Receipt(ReceiptError::Malformed(cause)))?;
-        Ok(Report {
-            json,
-            accepted: verdict.accepted(),
-            bytes: bytes.to_vec(),
-        })
-    }
+/// Rotates the selected tenant's receipt key: appends the next key id and
+/// returns it with the new public key. Old ids stay verifiable up to the kept
+/// history; sealing moves to the new id at once (larry#211).
+pub fn rotate_receipt_key(
+    read: impl Fn(&str) -> Option<String>,
+) -> Result<(i64, PublicKey), ExecError> {
+    let directory = state_dir(&read)?;
+    let ledger = Ledger::open(&directory)?;
+    let (_, tenant) = ledger.selected_tenant(&directory, &read)?;
+    let (id, secret) = ledger.rotate_receipt_key(&tenant)?;
+    Ok((id, secret.public_key()))
 }
 
 /// Reads one environment variable: the process environment in the binary, a
@@ -234,6 +221,11 @@ type EnvReader = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub struct Settings {
     /// Directory holding the ledger and the workspaces.
     state_dir: PathBuf,
+    /// The tenant this run executes as: `LARRY_TENANT` when it names one, else
+    /// the store's default (larry#211).
+    tenant: TenantId,
+    /// The hex text every ledger row of this tenant carries.
+    tenant_text: String,
     /// Longest an acceptance command may run before its group is killed.
     timeout: Duration,
     /// The PATH the acceptance commands and git run under.
@@ -274,7 +266,9 @@ impl Settings {
         Self::from_env_mode(read, false)
     }
 
-    /// Reads the common settings and selects the policy owner for the door.
+    /// Reads the common settings and selects the policy owner for the door. The
+    /// tenant is selected first, so the remote policy read names the same
+    /// tenant the run executes as (larry#211).
     fn from_env_mode(
         read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
         local: bool,
@@ -288,13 +282,21 @@ impl Settings {
             },
         };
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
+        let store = Ledger::open(&state_dir)?;
+        let (tenant, tenant_text) = store.selected_tenant(&state_dir, &read)?;
+        // One spelling for every downstream path: a relative or symlinked state
+        // directory canonicalizes here, once, so workspaces, journals and git
+        // never see two spellings of one directory (larry#211).
+        let state_dir = std::fs::canonicalize(&state_dir).map_err(ExecError::StateDir)?;
         let policy = if local {
             gate::policy(&read)?
         } else {
-            Ledger::open(&state_dir)?.tenant_policy(&tenant_key(&state_dir))?
+            store.tenant_policy(&tenant_text)?
         };
         Ok(Settings {
             state_dir,
+            tenant,
+            tenant_text,
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
@@ -307,11 +309,21 @@ impl Settings {
         self.state_dir.as_path()
     }
 
+    /// The tenant this run executes as.
+    pub(crate) fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// The hex text every ledger row of this tenant carries.
+    pub(crate) fn tenant_text(&self) -> &str {
+        self.tenant_text.as_str()
+    }
+
     /// Refreshes the remote door's policy from the durable tenant ledger. The process may
     /// stay open while an operator provisions or withdraws a tenant, so a cached snapshot
     /// must not outlive the prompt that uses it.
     pub(crate) fn refresh_remote_policy(&mut self) -> Result<(), ExecError> {
-        self.policy = Ledger::open(&self.state_dir)?.tenant_policy(&tenant_key(&self.state_dir))?;
+        self.policy = Ledger::open(&self.state_dir)?.tenant_policy(&self.tenant_text)?;
         Ok(())
     }
 
@@ -361,25 +373,25 @@ const fn backoff(wait: Duration) -> bool {
 
 /// Runs a task: clones its repository at the base, has the model write the brief's files
 /// when the task carries one, runs each acceptance command in order, and returns the report
-/// with the staged diff, sealed under the state directory's key. A task asking for model
+/// with the staged diff, sealed under the tenant's key. A task asking for model
 /// commands is denied: nothing runs, and its sealed report is never accepted. Every other
 /// task runs only after the admission gate authorized it (larry#164): the task body is the
 /// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
-    let (ledger, key) = prepare(settings)?;
-    let repository = ledger.authorized_repo(
-        &tenant_key(&settings.state_dir),
+    let prepared = prepare(settings)?;
+    let repository = prepared.ledger.authorized_repo(
+        prepared.tenant_text.as_str(),
         &settings.state_dir,
         task.repo(),
     )?;
-    execute_prepared(task, settings, &ledger, &key, &repository)
+    execute_prepared(task, settings, &prepared, &repository)
 }
 
 /// Runs an evaluator-owned origin. Public task execution refuses every state-directory path;
 /// this crate-private route is narrower still, accepting only a canonical origin beneath the
 /// evaluator's own `<state>/eval` directory.
 pub(crate) fn execute_eval(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
-    let (ledger, key) = prepare(settings)?;
+    let prepared = prepare(settings)?;
     let repository = std::fs::canonicalize(task.repo()).map_err(|cause| ExecError::RepoPath {
         repo: task.repo().to_path_buf(),
         cause,
@@ -389,26 +401,31 @@ pub(crate) fn execute_eval(task: &Task, settings: &Settings) -> Result<Report, E
     if !repository.starts_with(eval_root) {
         return Err(ExecError::RepoInsideState { repo: repository });
     }
-    execute_prepared(task, settings, &ledger, &key, &repository)
+    execute_prepared(task, settings, &prepared, &repository)
 }
 
 /// Executes after the caller has supplied a repository authorized for this route.
 fn execute_prepared(
     task: &Task,
     settings: &Settings,
-    ledger: &Ledger,
-    key: &lgwks_std::sign::SecretKey,
+    prepared: &Prepared,
     repository: &std::path::Path,
 ) -> Result<Report, ExecError> {
-    let task_id = identity::run_id(task, &settings.state_dir)?;
+    let ledger = &prepared.ledger;
+    let tenant = prepared.tenant_text.as_str();
+    let seal = Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    };
+    let task_id = identity::run_id(task, &prepared.tenant)?;
     let task_digest = digest_hex(task.bytes());
     // A task that names an idempotency key is the client's statement that a retry
     // of it is the same request, so a retry whose record the ledger already holds
     // is answered from that record and the body never runs a second time
     // (larry#182 defect 3).
     let resumable = task.idempotency_key().is_some();
-    if resumable && let Some(earlier) = ledger.report(&task_id, MAX_REPORT_BYTES)? {
-        return Report::parse(&earlier, key);
+    if resumable && let Some(earlier) = ledger.report(tenant, &task_id, MAX_REPORT_BYTES)? {
+        return Report::parse_for(ledger, tenant, &earlier);
     }
     if task.has_model_commands() {
         let report = Report::sealed(
@@ -419,10 +436,17 @@ fn execute_prepared(
                 "results": [],
                 "denied": [MODEL_COMMANDS_DENIED],
             }),
-            key,
+            seal.key,
+            seal.id,
         );
         if resumable {
-            ledger.keep_report(&task_id, &task_digest, report.bytes())?;
+            ledger.keep_report(
+                tenant,
+                &task_id,
+                &task_digest,
+                report.bytes(),
+                &live_budget()?,
+            )?;
         }
         return Ok(report);
     }
@@ -431,44 +455,35 @@ fn execute_prepared(
         path: repository,
         bytes: task.bytes(),
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
-        run_task(
-            task,
-            repository,
-            settings,
+    let report = gate::admit_and_run(
+        subject,
+        settings,
+        &task_id,
+        &task_digest,
+        prepared.tenant,
+        seal,
+        || {
+            run_task(
+                task,
+                repository,
+                settings,
+                &task_id,
+                &task_digest,
+                prepared,
+                seal,
+            )
+        },
+    )?;
+    if resumable && report.carries_a_seal() {
+        ledger.keep_report(
+            tenant,
             &task_id,
             &task_digest,
-            ledger,
-            key,
-        )
-    })?;
-    if resumable && report.carries_a_seal() {
-        ledger.keep_report(&task_id, &task_digest, report.bytes())?;
+            report.bytes(),
+            &live_budget()?,
+        )?;
     }
     Ok(report)
-}
-
-/// What every run does first: opens the ledger and its receipt key, reaps the process
-/// groups a killed executor left, sweeps dead workspaces, and settles every journal a
-/// killed executor left before anything new runs (larry#75). A run is live while a
-/// process holds its journal's lock, so no sweep and no recovery reaps a concurrent
-/// run's evidence, and neither asks for a process id (larry#182 defect 3).
-fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), ExecError> {
-    let ledger = Ledger::open(&settings.state_dir)?;
-    let key = ledger.signing_key()?;
-    // The one clock the reap's group waits read, built the way the gate builds its own, so a
-    // host whose clock reads before the epoch refuses with nothing reaped (larry#268, larry#308).
-    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    let state = settings.state_dir.as_path();
-    ledger.reap(&clock, |task| recovery::run_held(state, task))?;
-    let policy = &settings.policy;
-    for fault in sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
-        recovery::journal_live(state, policy, task)
-    })? {
-        fault.report();
-    }
-    recovery::recover(&settings.state_dir, &settings.policy)?;
-    Ok((ledger, key))
 }
 
 /// What a task with a brief needs before anything is cloned: the route its model
@@ -511,7 +526,7 @@ fn model_step<'task>(
 /// The task body the gate authorizes: clones the repository at the base, has
 /// the model write the brief's files when the task carries one, runs each
 /// acceptance command in order, and returns the report with the staged diff,
-/// sealed under the state directory's key. It runs at most once, inside the
+/// sealed under the tenant's key. It runs at most once, inside the
 /// gate's bound owner reach.
 fn run_task(
     task: &Task,
@@ -519,8 +534,8 @@ fn run_task(
     settings: &Settings,
     task_id: &str,
     task_digest: &str,
-    ledger: &Ledger,
-    key: &lgwks_std::sign::SecretKey,
+    prepared: &Prepared,
+    seal: Seal<'_>,
 ) -> Result<Report, ExecError> {
     // A brief lets the model write the tree, so the command that runs next is model-chosen
     // code; it runs confined to the workspace. `larry_submit_task` confines too, because a
@@ -531,7 +546,7 @@ fn run_task(
     if confined {
         confine::supported(confine::Platform::host()).map_err(ExecError::Confine)?;
     }
-    let step = model_step(task, settings, ledger)?;
+    let step = model_step(task, settings, &prepared.ledger)?;
     let workspace = Workspace::create(
         &settings.state_dir,
         repository,
@@ -548,7 +563,7 @@ fn run_task(
         }) => {
             // The tenant's digest, the same text a route row is keyed by, names the
             // cache partition so no two tenants share a prompt prefix (larry#230).
-            let partition = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+            let partition = digest_hex(settings.tenant().as_bytes());
             let mut records = author::author(brief, workspace.path(), &client, &partition)?;
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
@@ -588,8 +603,11 @@ fn run_task(
             place,
             &settings.path,
             settings.timeout,
-            ledger,
-            task_id,
+            Track {
+                ledger: &prepared.ledger,
+                tenant: prepared.tenant_text.as_str(),
+                task_id,
+            },
             &|| false,
         )?;
         results.push(result.into_json());
@@ -616,7 +634,7 @@ fn run_task(
             lgwks_std::json::Value::Array(records),
         );
     }
-    Ok(Report::sealed(body, key))
+    Ok(Report::sealed(body, seal.key, seal.id))
 }
 
 /// The BLAKE3 digest of `bytes`, as 64 hex characters.
@@ -624,11 +642,6 @@ fn digest_hex(bytes: &[u8]) -> String {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
     hasher.finalize().to_hex()
-}
-
-/// The stable text key shared by the executor's tenant-owned ledger tables.
-fn tenant_key(state: &std::path::Path) -> String {
-    digest_hex(identity::tenant_of(state).as_bytes())
 }
 
 #[cfg(test)]
@@ -640,7 +653,7 @@ mod issue207_tests {
     use lgwks_std::json::json;
 
     use super::sim_tree::{Origin, Shape, origin, scratch, settings};
-    use super::{Ledger, Settings, Task, execute, tenant_key};
+    use super::{Ledger, Settings, Task, execute};
 
     fn task(repo: &Path) -> Result<Task, Box<dyn std::error::Error>> {
         let document = json!({
@@ -703,13 +716,14 @@ mod issue207_tests {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let ledger_a = Ledger::open(&state_a)?;
-        ledger_a.set_tenant_policy(&tenant_key(&state_a), &allowed)?;
+        ledger_a.set_tenant_policy(local.tenant_text(), &allowed)?;
+        let remote_b = remote_settings(&state_b)?;
         let ledger_b = Ledger::open(&state_b)?;
-        ledger_b.set_tenant_repo_root(&tenant_key(&state_b), &root)?;
-        ledger_b.set_tenant_policy(&tenant_key(&state_b), &BTreeSet::new())?;
+        ledger_b.set_tenant_repo_root(remote_b.tenant_text(), &root)?;
+        ledger_b.set_tenant_policy(remote_b.tenant_text(), &BTreeSet::new())?;
         let same = task(&repository)?;
         let first = execute(&same, &remote_settings(&state_a)?)?;
-        let second = execute(&same, &remote_settings(&state_b)?)?;
+        let second = execute(&same, &remote_b)?;
         assert!(first.accepted(), "the allowed tenant runs the task");
         assert!(!second.accepted(), "the denied tenant runs nothing");
         Ok(())

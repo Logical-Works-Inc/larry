@@ -41,7 +41,7 @@ use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::prepare;
-use super::run::{CommandResult, Place, run_command};
+use super::run::{CommandResult, Place, Track, run_command};
 use super::workspace::report_members;
 use crate::model::{Completion, ModelClient};
 
@@ -297,6 +297,104 @@ fn denial(report: &Report) -> String {
     }
 }
 
+/// What a session's gate body runs with, bundled so the body is one call: every
+/// input the turn needs, the tree it may change and who hears it.
+struct SessionRun<'a> {
+    /// The person's instruction.
+    instruction: &'a str,
+    /// The directory the session works in.
+    cwd: &'a Path,
+    /// The executor's settings.
+    settings: &'a Settings,
+    /// Whether commands run on the host or in a confined copy.
+    isolation: Isolation,
+    /// The model configuration for this task's route.
+    config: crate::model::ModelConfig,
+    /// The route the model calls go to, named in the sealed report.
+    route: &'a crate::model::Route,
+    /// The run's identity.
+    task_id: &'a str,
+    /// The task document's digest.
+    task_digest: &'a str,
+    /// The store every command group is recorded in.
+    ledger: &'a Ledger,
+    /// Who hears the session's progress.
+    observer: &'a mut dyn Observer,
+}
+
+/// Runs one session's turn and builds its report body: the loop runs, the
+/// isolated change (when the person approved one) is read back, and the body
+/// names every command as the model saw it. Opened inside the gate, so a
+/// denied session copies nothing.
+fn run_session_body(run: SessionRun<'_>) -> Result<(Value, Stop), ExecError> {
+    // The retry budget's timeline, built before the copy so a host whose clock refuses
+    // copies nothing (larry#436).
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let island = match run.isolation {
+        Isolation::Host => None,
+        Isolation::Workspace(platform) => {
+            Some(Island::open(platform, run.settings, run.task_id, run.cwd)?)
+        }
+    };
+    let client = ModelClient::new(run.config, clock, backoff);
+    let mut turn = Turn {
+        client: &client,
+        settings: run.settings,
+        ledger: run.ledger,
+        task_id: run.task_id,
+        place: match island {
+            Some(ref isle) => isle.place(),
+            None => Place::Open(run.cwd),
+        },
+        // The model is told its directory is `.` in a copy, so the request carries
+        // no run id and no path of the person's.
+        shown: match island {
+            Some(_) => String::from("."),
+            None => run.cwd.display().to_string(),
+        },
+        observer: run.observer,
+    };
+    let done = turn.run(run.instruction)?;
+    let mut outcome = Outcome::None;
+    let mut diff = None;
+    if let Some(ref isle) = island
+        && done.stop == Stop::EndTurn
+    {
+        diff = isle.diff()?;
+        outcome = isle.hand_off(run.cwd, diff.as_ref(), turn.observer);
+    }
+    let isolation = run.isolation;
+    let mut body = json!({
+        "task_id": run.task_id,
+        "task_digest": run.task_digest,
+        "diff": null,
+        "results": done.records,
+        "denied": [],
+        "session": {
+            "stop": done.stop.name(),
+            "commands": done.records.len(),
+            "declined": done.declined,
+            "interrupted": done.interrupted,
+            "route": run.route.seal(),
+            "compaction": done.compaction,
+            "isolation": match island {
+                Some(ref isle) => isle.describe(),
+                None => json!({ "mode": isolation.name() }),
+            },
+            "handoff": outcome.name(),
+        },
+    });
+    // An isolated session records the change it made, whole or cut (larry#206).
+    if island.is_some()
+        && let Some(object) = body.as_object_mut()
+    {
+        for (name, member) in report_members(diff) {
+            object.insert(name.to_owned(), member);
+        }
+    }
+    Ok((body, done.stop))
+}
+
 /// Runs a terminal session on `instruction` in `cwd`, reporting through `observer`.
 /// A refusal by the gate seals a report that ran nothing; a fault outside the
 /// session's doing (the ledger, a process group) is a typed error.
@@ -310,14 +408,15 @@ pub(crate) fn run_session(
     check(instruction, cwd).map_err(ExecError::Session)?;
     // A host that cannot confine refuses here, before the ledger, the model or a copy.
     isolation.check()?;
-    let (ledger, key) = prepare(settings)?;
-    let repository = ledger.authorized_repo(
-        &super::tenant_key(settings.state_dir()),
-        settings.state_dir(),
-        cwd,
-    )?;
+    let prepared = prepare(settings)?;
+    let ledger = &prepared.ledger;
+    let seal = super::Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    };
+    let repository = ledger.authorized_repo(settings.tenant_text(), settings.state_dir(), cwd)?;
     let cwd = repository.as_path();
-    let route = settings.route(&ledger, None)?;
+    let route = settings.route(ledger, None)?;
     let config = settings.model_config(&route)?;
     let document = json::to_vec(&json!({
         "session": {
@@ -335,75 +434,30 @@ pub(crate) fn run_session(
         path: cwd,
         bytes: &document,
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
-        // The retry budget's timeline, built before the copy so a host whose clock refuses
-        // copies nothing (larry#436).
-        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-        // Opened inside the gate: a denied session copies nothing.
-        let island = match isolation {
-            Isolation::Host => None,
-            Isolation::Workspace(platform) => {
-                Some(Island::open(platform, settings, &task_id, cwd)?)
-            }
-        };
-        let client = ModelClient::new(config, clock, backoff);
-        let mut turn = Turn {
-            client: &client,
-            settings,
-            ledger: &ledger,
-            task_id: &task_id,
-            place: match island {
-                Some(ref isle) => isle.place(),
-                None => Place::Open(cwd),
-            },
-            // The model is told its directory is `.` in a copy, so the request carries
-            // no run id and no path of the person's.
-            shown: match island {
-                Some(_) => String::from("."),
-                None => cwd.display().to_string(),
-            },
-            observer: &mut *observer,
-        };
-        let done = turn.run(instruction)?;
-        let mut outcome = Outcome::None;
-        let mut diff = None;
-        if let Some(ref isle) = island
-            && done.stop == Stop::EndTurn
-        {
-            diff = isle.diff()?;
-            outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
-        }
-        let mut body = json!({
-            "task_id": task_id,
-            "task_digest": task_digest,
-            "diff": null,
-            "results": done.records,
-            "denied": [],
-            "session": {
-                "stop": done.stop.name(),
-                "commands": done.records.len(),
-                "declined": done.declined,
-                "interrupted": done.interrupted,
-                "route": route.seal(),
-                "compaction": done.compaction,
-                "isolation": match island {
-                    Some(ref isle) => isle.describe(),
-                    None => json!({ "mode": isolation.name() }),
-                },
-                "handoff": outcome.name(),
-            },
-        });
-        // An isolated session records the change it made, whole or cut (larry#206).
-        if island.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            for (name, member) in report_members(diff) {
-                object.insert(name.to_owned(), member);
-            }
-        }
-        stop = Some(done.stop);
-        Ok(Report::sealed(body, &key))
-    })?;
+    let report = gate::admit_and_run(
+        subject,
+        settings,
+        &task_id,
+        &task_digest,
+        settings.tenant(),
+        seal,
+        || {
+            let (body, ended) = run_session_body(SessionRun {
+                instruction,
+                cwd,
+                settings,
+                isolation,
+                config,
+                route: &route,
+                task_id: &task_id,
+                task_digest: &task_digest,
+                ledger,
+                observer: &mut *observer,
+            })?;
+            stop = Some(ended);
+            Ok(Report::sealed(body, seal.key, seal.id))
+        },
+    )?;
     let stop = match stop {
         Some(stop) => stop,
         None => {
@@ -420,7 +474,7 @@ mod issue207_tests {
     use super::{Approval, Isolation, Observer, run_session};
     use crate::executor::gate;
     use crate::executor::sim_tree::scratch;
-    use crate::executor::{Ledger, Settings, tenant_key};
+    use crate::executor::{Ledger, Settings};
 
     /// An observer that must never be reached by a refusal before model setup.
     struct QuietObserver;
@@ -450,7 +504,6 @@ mod issue207_tests {
         let state = scratch("issue207-session-state")?;
         let work = scratch("issue207-session-work")?;
         let policy = gate::session_scopes();
-        Ledger::open(&state)?.set_tenant_policy(&tenant_key(&state), &policy)?;
         let state_text = state.to_string_lossy().into_owned();
         let path = std::env::var("PATH")?;
         let settings = Settings::remote_from_env(move |name| match name {
@@ -458,6 +511,7 @@ mod issue207_tests {
             "PATH" => Some(path.clone()),
             _ => None,
         })?;
+        Ledger::open(&state)?.set_tenant_policy(settings.tenant_text(), &policy)?;
         let mut observer = QuietObserver;
         assert!(matches!(
             run_session(
@@ -569,8 +623,11 @@ impl Turn<'_> {
                         self.place,
                         &self.settings.path,
                         self.settings.timeout,
-                        self.ledger,
-                        self.task_id,
+                        Track {
+                            ledger: self.ledger,
+                            tenant: self.settings.tenant_text(),
+                            task_id: self.task_id,
+                        },
                         &|| self.observer.cancelled(),
                     )?
                     .clipped(OBSERVED_BYTES);

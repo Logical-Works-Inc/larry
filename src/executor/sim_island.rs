@@ -18,7 +18,7 @@ use super::{HOST_REFUSED, Island, Isolation, Outcome, POLICY_REFUSED};
 use crate::executor::confine::{ConfineError, Platform};
 use crate::executor::gate::{self, Subject, admit_and_run};
 use crate::executor::recovery::journal_path;
-use crate::executor::run::{CommandResult, run_command};
+use crate::executor::run::{CommandResult, Track, run_command};
 use crate::executor::session::run_session;
 use crate::executor::sim_tree::{
     Origin, Scratch, Shape, files_beneath, origin, scratch, settings, tree_digest,
@@ -123,8 +123,11 @@ impl Rig {
             island.place(),
             &self.settings.path,
             Duration::from_secs(60),
-            &self.ledger,
-            id,
+            Track {
+                ledger: &self.ledger,
+                tenant: self.settings.tenant_text(),
+                task_id: id,
+            },
             &|| false,
         )
     }
@@ -596,7 +599,11 @@ fn sim_island_git_commit_in_workspace_still_shows_change() -> TestResult {
 #[test]
 fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResult {
     let rig = Rig::new("kill", 8, Shape::Git)?;
-    let (_ledger, key) = prepare(&rig.settings)?;
+    let prepared = prepare(&rig.settings)?;
+    let seal = crate::executor::Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    };
     let id = "kill-between";
     let subject = |path| Subject {
         required: gate::isolated_scopes(),
@@ -608,7 +615,8 @@ fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResul
         &rig.settings,
         id,
         "digest",
-        &key,
+        rig.settings.tenant(),
+        seal,
         || {
             let (island, diff) = match changed(&rig, id, "printf z > added.txt") {
                 Ok(pair) => pair,
@@ -644,7 +652,8 @@ fn sim_kill_between_apply_and_seal_never_applies_the_change_again() -> TestResul
         &rig.settings,
         id,
         "digest",
-        &key,
+        rig.settings.tenant(),
+        seal,
         || {
             ran = true;
             Err(ExecError::StateDirUnset)

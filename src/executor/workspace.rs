@@ -120,6 +120,16 @@ impl Workspace {
     ) -> Result<Workspace, ExecError> {
         let root = state.join("ws").join(task_id);
         std::fs::create_dir_all(&root).map_err(ExecError::Workspace)?;
+        // The tree a model-chosen command runs in is owner-only throughout, like
+        // the state tree itself (larry#211).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for entry in [state.join("ws"), root.clone()] {
+                std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o700))
+                    .map_err(ExecError::Workspace)?;
+            }
+        }
         // Built before any git call: a failed clone or checkout still leaves a directory to remove.
         let workspace = Workspace {
             tree: root.join("tree"),
@@ -709,42 +719,5 @@ mod sim;
 
 /// Unit tests of the origin lock (larry#214).
 #[cfg(test)]
-mod tests {
-    use super::{hold_origin, origin_held, sweep_origins};
-
-    /// A pid no live process holds: the largest positive `i32` less one.
-    const DEAD_PID: i32 = 2_147_483_646;
-
-    /// An origin whose pid is dead but whose lock a live eval holds is kept, and removed
-    /// with its lock file once the lock is released (larry#214).
-    #[test]
-    fn an_eval_origin_is_live_while_its_lock_is_held() -> Result<(), Box<dyn std::error::Error>> {
-        let state = crate::executor::sim_tree::scratch("larry-origin-lock")?;
-        let eval = state.join("eval");
-        let name = format!("origin-{DEAD_PID}-0");
-        let origin = eval.join(&name);
-        std::fs::create_dir_all(&origin)?;
-        let held = hold_origin(&eval, &name)?;
-        assert!(
-            origin_held(&eval, &name)?,
-            "a held lock reads as live, whatever pid the name carries"
-        );
-        sweep_origins(&state)?;
-        assert!(
-            origin.is_dir(),
-            "the sweep keeps an origin whose lock is held"
-        );
-        drop(held);
-        assert!(!origin_held(&eval, &name)?, "a released lock reads as dead");
-        sweep_origins(&state)?;
-        assert!(
-            !origin.exists(),
-            "the sweep removes an origin once its lock is released"
-        );
-        assert!(
-            !eval.join(format!("{name}.lock")).exists(),
-            "the sweep removes the stale lock file"
-        );
-        Ok(())
-    }
-}
+#[path = "workspace_tests.rs"]
+mod tests;

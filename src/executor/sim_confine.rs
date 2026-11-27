@@ -18,7 +18,7 @@ use super::{
     read_roots_below, supported, supported_with, text,
 };
 use crate::executor::Ledger;
-use crate::executor::run::{Place, run_command};
+use crate::executor::run::{Place, Track, run_command};
 use crate::executor::sim_tree::{Scratch, path_env, scratch, tree_digest};
 use crate::json_at::At;
 use crate::sim_error::SimError;
@@ -680,8 +680,11 @@ fn bench_confine_overhead_is_measured_against_the_unconfined_spawn() -> TestResu
                 place,
                 &path,
                 Duration::from_secs(30),
-                &ledger,
-                &format!("bench-{sample}"),
+                Track {
+                    ledger: &ledger,
+                    tenant: "bench",
+                    task_id: &format!("bench-{sample}"),
+                },
                 &|| false,
             )?;
             assert_eq!(result.exit_code(), Some(0), "a sample did not run");

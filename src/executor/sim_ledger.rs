@@ -22,6 +22,16 @@ use lgwks_std::seeded::Seeded;
 use super::super::ExecError;
 use super::super::run::await_gone;
 use super::Ledger;
+use super::reports::ReportBudget;
+
+/// The tenant every row here is filed under: two directories are still two
+/// tenants, and the column is the second bound beside them (larry#211).
+const TENANT: &str = "sim";
+
+/// Bounds no test can fill: a megabyte, hundreds of rows, an hour of age.
+fn budget() -> ReportBudget {
+    ReportBudget::test(1_048_576, 512, 3_600, 1_700_000_000)
+}
 
 /// A pid no live process holds: the largest positive `i32` less one.
 const DEAD_PID: i32 = 2_147_483_646;
@@ -85,23 +95,23 @@ fn sim_a_report_roundtrips_at_every_seeded_bound() -> TestResult {
             let length = seeded.index(65)?;
             let report = drawn_report(&mut seeded, length)?;
             let id = format!("run-{seed}-{round}");
-            ledger.keep_report(&id, "digest", &report)?;
+            ledger.keep_report(TENANT, &id, "digest", &report, &budget())?;
             assert_eq!(
-                ledger.report(&id, length)?,
+                ledger.report(TENANT, &id, length)?,
                 Some(report),
                 "seed {seed} round {round}: a report reads whole at its own bound"
             );
             if length > 0 {
                 assert!(
                     matches!(
-                        ledger.report(&id, length.saturating_sub(1)),
+                        ledger.report(TENANT, &id, length.saturating_sub(1)),
                         Err(ExecError::Receipt(_))
                     ),
                     "seed {seed} round {round}: one byte under the bound is refused"
                 );
             }
             assert_eq!(
-                ledger.report(&format!("absent-{id}"), length)?,
+                ledger.report(TENANT, &format!("absent-{id}"), length)?,
                 None,
                 "seed {seed} round {round}: an id with no record reads as none"
             );
@@ -124,14 +134,14 @@ fn sim_two_runs_never_share_a_recorded_report_for_every_seed() -> TestResult {
             let length = seeded.index(24)?;
             let report = drawn_report(&mut seeded, length)?;
             let id = format!("neighbour-{seed}-{index}");
-            ledger.keep_report(&id, "digest", &report)?;
+            ledger.keep_report(TENANT, &id, "digest", &report, &budget())?;
             written.push((id, report));
         }
         for entry in &written {
             let id = &entry.0;
             let report = &entry.1;
             assert_eq!(
-                ledger.report(id, report.len())?,
+                ledger.report(TENANT, id, report.len())?,
                 Some(report.clone()),
                 "seed {seed}: {id} reads back its own report"
             );
@@ -139,9 +149,9 @@ fn sim_two_runs_never_share_a_recorded_report_for_every_seed() -> TestResult {
         let first = written.first().ok_or("a run was recorded")?;
         let first_id = &first.0;
         let first_report = &first.1;
-        ledger.keep_report(first_id, "digest", b"a second claim")?;
+        ledger.keep_report(TENANT, first_id, "digest", b"a second claim", &budget())?;
         assert_eq!(
-            ledger.report(first_id, first_report.len())?,
+            ledger.report(TENANT, first_id, first_report.len())?,
             Some(first_report.clone()),
             "seed {seed}: the first record under one id is the run"
         );
@@ -160,8 +170,8 @@ fn sim_a_refusal_past_the_bound_names_the_recorded_length() -> TestResult {
         let length = 1_usize.saturating_add(seeded.index(48)?);
         let report = drawn_report(&mut seeded, length)?;
         let id = format!("bound-{seed}");
-        ledger.keep_report(&id, "digest", &report)?;
-        match ledger.report(&id, length.saturating_sub(1)) {
+        ledger.keep_report(TENANT, &id, "digest", &report, &budget())?;
+        match ledger.report(TENANT, &id, length.saturating_sub(1)) {
             Err(ExecError::Receipt(super::super::ReceiptError::TooLarge { len })) => {
                 assert_eq!(
                     len, length,
@@ -195,7 +205,7 @@ fn sim_a_report_survives_a_reopen_for_every_seed() -> TestResult {
                 let length = seeded.index(32)?;
                 let report = drawn_report(&mut seeded, length)?;
                 let id = format!("restart-{seed}-{index}");
-                ledger.keep_report(&id, "digest", &report)?;
+                ledger.keep_report(TENANT, &id, "digest", &report, &budget())?;
                 written.push((id, report));
             }
         }
@@ -204,7 +214,7 @@ fn sim_a_report_survives_a_reopen_for_every_seed() -> TestResult {
             let id = &entry.0;
             let report = &entry.1;
             assert_eq!(
-                reopened.report(id, report.len())?,
+                reopened.report(TENANT, id, report.len())?,
                 Some(report.clone()),
                 "seed {seed}: {id} survives a reopen"
             );
@@ -345,6 +355,7 @@ fn racing_trace(seed: u64) -> Result<String, GroupSimError> {
         for index in 0..rows {
             let pid = DEAD_PID.saturating_sub(i32::try_from(index)?);
             ledger.insert(
+                TENANT,
                 &format!("racer-{index}"),
                 &ProcessIdentity::new(pid, DEAD_START)?,
             )?;
@@ -416,6 +427,7 @@ fn two_tenant_trace(seed: u64) -> Result<String, GroupSimError> {
         for index in 0..rows {
             let pid = DEAD_PID.saturating_sub(i32::try_from(index)?);
             ledger.insert(
+                TENANT,
                 &format!("tenant-a-{index}"),
                 &ProcessIdentity::new(pid, DEAD_START)?,
             )?;
@@ -426,6 +438,7 @@ fn two_tenant_trace(seed: u64) -> Result<String, GroupSimError> {
         for index in 0..b_rows {
             let pid = DEAD_PID.saturating_sub(i32::try_from(index.saturating_add(rows))?);
             ledger.insert(
+                TENANT,
                 &format!("tenant-b-{index}"),
                 &ProcessIdentity::new(pid, DEAD_START)?,
             )?;
@@ -492,8 +505,12 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
     let stranger_pid = i32::try_from(stranger.id())?;
     let ledger = Ledger::open(&directory)?;
     let owned_identity = identify_process(owned_pid)?.ok_or(GroupSimError::GroupDown)?;
-    ledger.insert("owned", &owned_identity)?;
-    ledger.insert("stranger", &ProcessIdentity::new(stranger_pid, DEAD_START)?)?;
+    ledger.insert(TENANT, "owned", &owned_identity)?;
+    ledger.insert(
+        TENANT,
+        "stranger",
+        &ProcessIdentity::new(stranger_pid, DEAD_START)?,
+    )?;
     // Damaged rows, one of each kind: a damaged start token, pid zero, a pid past i32, and a
     // start token past the length bound. Each has its own pid, so no two collide on the key.
     let long = "x".repeat(200);
@@ -506,8 +523,8 @@ fn saboteur_trace(seed: u64) -> Result<String, GroupSimError> {
     ];
     for &(pid, started) in damaged_rows.iter().take(damage) {
         ledger.conn.execute(
-            "INSERT INTO live_groups (task_id, pid, started) VALUES (?1, ?2, ?3)",
-            lgwks_deps::storefront::rusqlite::params!["damaged", pid, started],
+            "INSERT INTO live_groups (tenant, task_id, pid, started) VALUES (?1, ?2, ?3, ?4)",
+            lgwks_deps::storefront::rusqlite::params![TENANT, "damaged", pid, started],
         )?;
     }
     let clock = Clock::virtual_at(Duration::ZERO);
@@ -583,7 +600,7 @@ fn sim_a_ledger_write_on_a_busy_store_waits_without_spinning() -> TestResult {
     holder.execute_batch("BEGIN IMMEDIATE")?;
     ledger.conn.busy_timeout(BUSY_WAIT)?;
     let before = thread_cpu()?;
-    let refused = ledger.keep_report("busy-run", "digest", b"report");
+    let refused = ledger.keep_report(TENANT, "busy-run", "digest", b"report", &budget());
     let spent = thread_cpu()?.saturating_sub(before);
     holder.execute_batch("ROLLBACK")?;
     assert!(
@@ -594,9 +611,9 @@ fn sim_a_ledger_write_on_a_busy_store_waits_without_spinning() -> TestResult {
         spent.saturating_mul(20) < BUSY_WAIT,
         "the waiting write spent {spent:?} of CPU over a {BUSY_WAIT:?} wait"
     );
-    ledger.keep_report("busy-run", "digest", b"report")?;
+    ledger.keep_report(TENANT, "busy-run", "digest", b"report", &budget())?;
     assert_eq!(
-        ledger.report("busy-run", 6)?,
+        ledger.report(TENANT, "busy-run", 6)?,
         Some(b"report".to_vec()),
         "the write lands once the holder lets go"
     );

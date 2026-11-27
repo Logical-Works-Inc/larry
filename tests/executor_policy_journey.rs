@@ -40,7 +40,7 @@ fn fixture() -> TestResult<(TempDir, TempDir)> {
     git(origin.path(), &["add", "README"])?;
     git(origin.path(), &["commit", "--quiet", "-m", "init"])?;
     larry_demo::executor::provision_tenant(
-        |_| Some(state.path().to_string_lossy().into_owned()),
+        |name| (name == "LARRY_STATE_DIR").then(|| state.path().to_string_lossy().into_owned()),
         "file.read,file.write,process.spawn,model.invoke,model.command",
         &[origin.path()],
     )?;
