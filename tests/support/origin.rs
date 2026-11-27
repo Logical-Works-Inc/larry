@@ -139,7 +139,7 @@ fn origin_repo_with(make: &dyn Fn(&Path) -> Command, dir: &Path) -> Result<(), B
 }
 
 /// Stages everything in `dir` and commits it as `message`, through [`git_command`].
-pub(super) fn commit_all(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
+pub(crate) fn commit_all(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
     commit_all_with(&git_command, dir, message)
 }
 

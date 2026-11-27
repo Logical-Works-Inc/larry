@@ -12,11 +12,8 @@ pub(crate) fn instant(secs: u64) -> SystemTime {
         // below names the fixture if a platform ever cannot represent one.
         None => SystemTime::UNIX_EPOCH,
     };
-    assert_eq!(
-        instant
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|error| error.to_string()),
-        Ok(duration),
+    assert!(
+        matches!(instant.duration_since(SystemTime::UNIX_EPOCH), Ok(since) if since == duration),
         "fixture instant must be representable"
     );
     instant

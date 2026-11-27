@@ -16,6 +16,8 @@ use std::process::{Child, Command, Output, Stdio};
 mod stdin_feed;
 use stdin_feed::feed_stdin;
 
+use crate::coverage::forward;
+
 /// What every journey returns.
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -103,9 +105,9 @@ pub(super) fn spawn_arm(env: &[(&'static str, OsString)], timed: bool) -> TestRe
         .envs(env.iter().map(|entry| (entry.0, entry.1.as_os_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    Ok(child)
+        .stderr(Stdio::piped());
+    forward(&mut *child);
+    Ok(child.spawn()?)
 }
 
 /// What one `larry eval` printed.

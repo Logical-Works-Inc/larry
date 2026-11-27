@@ -10,6 +10,8 @@
 //! server emits is valid for its era. One seed drives each run; the same seed
 //! must give the same reply bytes.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;

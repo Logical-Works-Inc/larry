@@ -3,6 +3,8 @@
 //! own receipts, a rotated key verifies old receipts by key id and seals new
 //! ones under the new id, and moving the directory keeps every tenant id.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/origin.rs"]

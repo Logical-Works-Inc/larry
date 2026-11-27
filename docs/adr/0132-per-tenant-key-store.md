@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0130: per-tenant receipt key store, stored tenant, key ids"
+title: "ADR 0132: per-tenant receipt key store, stored tenant, key ids"
 description: "One receipt key per tenant with key ids, a stored default tenant and named selection."
-resource: /docs/adr/0130-per-tenant-key-store.md
+resource: /docs/adr/0132-per-tenant-key-store.md
 tags: [larry, adr, executor, tenant, receipt]
 generated: {by: opencode, at: 2026-11-27}
 verified: {by: opencode, method: lgwks-box cargo nextest run, 2026-11-27}

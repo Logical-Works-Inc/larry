@@ -13,46 +13,37 @@
 //! Every run drives the shipped binary with a cleared environment against the
 //! seeded mock endpoint, so no test makes a paid model call.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
-#[path = "support/json_at.rs"]
-mod json_at;
-use json_at::At;
 
-#[path = "support/larry_cli.rs"]
-mod larry_cli;
-#[path = "support/mock_model.rs"]
-mod mock_model;
-#[path = "support/origin.rs"]
-mod origin;
-use origin::{TempDir, fixture};
 #[path = "support/route_journey.rs"]
 mod route_journey;
-#[path = "support/route_key.rs"]
-mod route_key;
-#[path = "support/sealed_report.rs"]
-mod sealed_report;
 
 use std::error::Error;
 use std::ffi::OsStr;
 use std::process::Output;
 
-use larry_cli::stderr_of;
 use lgwks_std::hash::Hasher;
 use lgwks_std::json::{self, Value};
-use mock_model::{Config, Fault};
+use route_journey::json_at::At;
+use route_journey::larry_cli::stderr_of;
+use route_journey::mock_model::{Config, Fault, Handle, run};
+use route_journey::origin::{TempDir, fixture};
+use route_journey::route_key::key_env;
+use route_journey::sealed_report::{denial_lines, flag_of, report_of};
 use route_journey::{
     NewRoute, TestResult, add_route, briefed_task, exec_with_key, host_of, larry_route,
     start_with_key,
 };
-use sealed_report::{flag_of, report_of};
 
 /// The key the journey's routes name, in the child's environment.
 const KEY: &str = "secret-k";
 
 /// `exec_with_key` over `task` under `state` with the journey's key.
 fn exec(state: &TempDir, task: &str) -> Result<Output, Box<dyn Error>> {
-    let variable = route_key::key_env(state.path(), "K")?;
+    let variable = key_env(state.path(), "K")?;
     exec_with_key(state.path(), &variable, OsStr::new(KEY), task, &[])
 }
 
@@ -60,12 +51,12 @@ fn exec(state: &TempDir, task: &str) -> Result<Output, Box<dyn Error>> {
 /// `CA` over `kind`, with `prompt` and `temperature` when given.
 fn add_main_route(
     state: &TempDir,
-    mock: &mock_model::Handle,
+    mock: &Handle,
     kind: Option<&str>,
     prompt: Option<&str>,
     temperature: Option<&str>,
 ) -> TestResult {
-    let key_env = route_key::key_env(state.path(), "K")?;
+    let key_env = key_env(state.path(), "K")?;
     let url = format!("http://{}/v1", host_of(mock));
     add_route(
         state,
@@ -87,15 +78,12 @@ fn add_main_route(
 /// request carried the kind's credential scheme.
 fn through_kind(kind: &str, seed: u64) -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(seed), |mock| -> TestResult {
+    run(Config::seeded(seed), |mock| -> TestResult {
         add_main_route(&state, mock, Some(kind), None, None)?;
         let output = exec(&state, &briefed_task(&origin, None, None)?)?;
         let report = report_of(&output)?;
         assert!(flag_of(&report, "accepted")?, "{}", stderr_of(&output));
-        assert!(
-            sealed_report::denial_lines(&report)?.is_empty(),
-            "no denial was sealed"
-        );
+        assert!(denial_lines(&report)?.is_empty(), "no denial was sealed");
         let route = report.at("/authored/0/route")?;
         assert_eq!(
             route.at("/kind")?.as_str(),
@@ -169,7 +157,7 @@ fn a_route_without_temperature_sends_no_temperature_member() -> TestResult {
         ("openai-responses", 33_u64),
     ] {
         let (state, origin) = fixture()?;
-        mock_model::run(Config::seeded(seed), |mock| -> TestResult {
+        run(Config::seeded(seed), |mock| -> TestResult {
             add_main_route(&state, mock, Some(kind), None, None)?;
             let output = exec(&state, &briefed_task(&origin, None, None)?)?;
             assert!(flag_of(&report_of(&output)?, "accepted")?);
@@ -199,7 +187,7 @@ fn template_hash(template: &str) -> String {
 #[test]
 fn a_prompt_template_is_sealed_by_its_hash() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(41), |mock| -> TestResult {
+    run(Config::seeded(41), |mock| -> TestResult {
         add_main_route(&state, mock, Some("openai-chat"), Some("stay brief"), None)?;
         let resolved = larry_route(state.path(), &[], &["resolve"])?;
         assert!(resolved.status.success(), "{}", stderr_of(&resolved));
@@ -235,7 +223,7 @@ fn a_prompt_template_is_sealed_by_its_hash() -> TestResult {
 #[test]
 fn a_route_add_with_an_unknown_kind_or_hostile_prompt_is_refused() -> TestResult {
     let state = TempDir::new()?;
-    let key_env = route_key::key_env(state.path(), "K")?;
+    let key_env = key_env(state.path(), "K")?;
     let secret: &OsStr = OsStr::new("operator-secret-bytes");
     let refused = larry_route(
         state.path(),
@@ -347,13 +335,13 @@ fn run_scripted<Out>(
     kind: &str,
     fault: Fault,
     seed: u64,
-    body: impl FnOnce(&TempDir, &TempDir, &mock_model::Handle) -> Result<Out, Box<dyn Error>>,
+    body: impl FnOnce(&TempDir, &TempDir, &Handle) -> Result<Out, Box<dyn Error>>,
 ) -> Result<Out, Box<dyn Error>> {
     let config = Config {
         script: vec![Some(fault)],
         ..Config::seeded(seed)
     };
-    mock_model::run(config, |mock| -> Result<Out, Box<dyn Error>> {
+    run(config, |mock| -> Result<Out, Box<dyn Error>> {
         add_main_route(state, mock, Some(kind), None, None)?;
         body(state, origin, mock)
     })
@@ -374,7 +362,7 @@ fn a_delayed_reply_on_a_new_kind_is_released_and_replays() -> TestResult {
             Fault::Delay,
             61,
             |state, origin, mock| {
-                let variable = route_key::key_env(state.path(), "K")?;
+                let variable = key_env(state.path(), "K")?;
                 let child = start_with_key(
                     state.path(),
                     &variable,

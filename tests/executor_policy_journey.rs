@@ -1,5 +1,7 @@
 //! The shipped executor's repository-policy journey.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/temp_dir.rs"]
@@ -13,13 +15,14 @@ use temp_dir::TempDir;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> TestResult {
-    let status = Command::new("git")
-        .args(args)
+    let mut git = Command::new("git");
+    git.args(args)
         .current_dir(dir)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .status()?;
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    coverage::forward(&mut git);
+    let status = git.status()?;
     if status.success() {
         Ok(())
     } else {

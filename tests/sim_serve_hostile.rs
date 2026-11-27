@@ -5,6 +5,8 @@
 //! on one tenant beside another. Each sim's reference is the rule the ADR states,
 //! written here rather than read from the binary.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/serve_cli.rs"]
 mod serve_cli;
 
