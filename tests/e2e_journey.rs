@@ -23,14 +23,14 @@ mod terminal_cases;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use journey::{ASK, QUIT, READY, Ran, ask, frame, frame_in, operator, scripted, working};
 use mock_model::{Config, Fault};
 use origin::{fixture, git_command};
-use pty::deadline::await_event;
+use pty::deadline::{FifoRelease, await_event};
 use pty::{Journey, Pty};
 
 /// The idle window the probe watches.
@@ -80,6 +80,59 @@ fn wrote(ran: &Ran) -> bool {
     ran.work.path().join("hello.txt").exists()
 }
 
+/// The frame exited 0, or the failure names `what`.
+fn assert_exited(status: &ExitStatus, what: &str) {
+    assert!(status.success(), "{what}: {status}");
+}
+
+/// The mock gateway answering `replies` with `fault` first.
+fn faulted(seed: u64, fault: Fault, replies: &[&str]) -> Config {
+    Config {
+        script: vec![Some(fault)],
+        ..scripted(seed, replies)
+    }
+}
+
+/// Every `tree` copy under the live workspace trees.
+fn tree_copies(workspaces: &Path) -> Vec<PathBuf> {
+    let trees = std::fs::read_dir(workspaces)
+        .into_iter()
+        .flatten()
+        .flatten();
+    trees.map(|entry| entry.path().join("tree")).collect()
+}
+
+/// The first `name` present under any live workspace tree, inside one deadline (larry#268).
+fn await_tree_file(workspaces: &Path, name: &str, what: &str) -> Journey<PathBuf> {
+    await_event(what, || {
+        Ok(tree_copies(workspaces)
+            .into_iter()
+            .map(|tree| tree.join(name))
+            .find(|path| path.exists()))
+    })
+}
+
+/// The first non-empty trimmed text of `name` (empty reads flaked on Linux, PR #251).
+fn await_tree_text(workspaces: &Path, name: &str, what: &str) -> Journey<String> {
+    await_event(what, || {
+        Ok(tree_copies(workspaces)
+            .into_iter()
+            .filter_map(|tree| std::fs::read_to_string(tree.join(name)).ok())
+            .map(|text| text.trim().to_owned())
+            .find(|text| !text.is_empty()))
+    })
+}
+
+/// Asserts `pid` names no live process: the `role` died with its group, not alone.
+fn assert_group_gone(pid: &str, role: &str) -> Journey {
+    let probe = Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()?;
+    assert!(!probe.success(), "{role} {pid} outlived its group");
+    Ok(())
+}
+
 /// The journey: a task typed into the frame, the model's command shown and approved with `y`,
 /// the file written in the working directory, the model's summary painted, Ctrl+C exits 0.
 #[test]
@@ -104,11 +157,7 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
         assert_eq!(mock.served(), 2, "the command, then the summary");
         Ok(())
     })?;
-    assert!(
-        ran.status.success(),
-        "Ctrl+C on an empty box exits 0: {}",
-        ran.status
-    );
+    assert_exited(&ran.status, "Ctrl+C on an empty box exits 0");
     assert_eq!(
         std::fs::read_to_string(ran.work.path().join("hello.txt"))?,
         "hello\n"
@@ -150,29 +199,28 @@ fn sim_session_declined_command_never_runs() -> Journey {
 /// the frame shows it in the box, and the next request tells the model the command was declined.
 #[test]
 fn tui_journey_a_key_typed_before_the_question_never_runs_the_command() -> Journey {
-    let config = Config {
-        script: vec![Some(Fault::Delay)],
-        ..scripted(53, &[COMMAND, r#"{"done":"left it alone"}"#])
-    };
-    let ran = frame(config, |pty, mock, _| {
-        working(pty)?;
-        // The box takes "zzy" while the model is held, so its `y` answers no question.
-        pty.send("zzy")?;
-        pty.wait_for("zzy")?;
-        mock.release_delayed();
-        pty.wait_for(ASK)?;
-        pty.send("\r")?;
-        pty.wait_for("left it alone")?;
-        let told = mock
-            .requests()
-            .get(1)
-            .is_some_and(|body| String::from_utf8_lossy(body).contains(DECLINED));
-        assert!(told, "the model is told the command was declined");
-        pty.send(CLEAR)?;
-        pty.wait_for(READY)?;
-        Ok(())
-    })?;
-    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    let ran = frame(
+        faulted(53, Fault::Delay, &[COMMAND, r#"{"done":"left it alone"}"#]),
+        |pty, mock, _| {
+            working(pty)?;
+            // The box takes "zzy" while the model is held, so its `y` answers no question.
+            pty.send("zzy")?;
+            pty.wait_for("zzy")?;
+            mock.release_delayed();
+            pty.wait_for(ASK)?;
+            pty.send("\r")?;
+            pty.wait_for("left it alone")?;
+            let told = mock
+                .requests()
+                .get(1)
+                .is_some_and(|body| String::from_utf8_lossy(body).contains(DECLINED));
+            assert!(told, "the model is told the command was declined");
+            pty.send(CLEAR)?;
+            pty.wait_for(READY)?;
+            Ok(())
+        },
+    )?;
+    assert_exited(&ran.status, "exits 0");
     assert!(!wrote(&ran), "a key typed before the question ran it");
     Ok(())
 }
@@ -182,22 +230,17 @@ fn tui_journey_a_key_typed_before_the_question_never_runs_the_command() -> Journ
 /// escape or a bell, nothing runs, and the operator's key went as its bearer token.
 #[test]
 fn sim_tui_gateway_refusal_shows_typed_notice() -> Journey {
-    let config = Config {
-        script: vec![Some(Fault::HostileRefusal { status: 401 })],
-        ..scripted(5, &[COMMAND])
-    };
-    let ran = frame(config, |pty, mock, _| {
-        working(pty)?;
-        pty.wait_for("expired")?;
-        let first = mock.authorizations().into_iter().next().flatten();
-        assert_eq!(first.as_deref(), Some("Bearer tui-key"), "the route's key");
-        Ok(())
-    })?;
-    assert!(
-        ran.status.success(),
-        "a refusal leaves the frame usable: {}",
-        ran.status
-    );
+    let ran = frame(
+        faulted(5, Fault::HostileRefusal { status: 401 }, &[COMMAND]),
+        |pty, mock, _| {
+            working(pty)?;
+            pty.wait_for("expired")?;
+            let first = mock.authorizations().into_iter().next().flatten();
+            assert_eq!(first.as_deref(), Some("Bearer tui-key"), "the route's key");
+            Ok(())
+        },
+    )?;
+    assert_exited(&ran.status, "a refusal leaves the frame usable");
     assert!(
         !ran.wire.contains("\x1b[31m"),
         "the gateway's colour never reaches the wire"
@@ -219,19 +262,11 @@ fn sim_tui_cut_or_empty_reply_runs_nothing() -> Journey {
         (Fault::Finish { reason: "length" }, "finish_reason"),
         (Fault::EmptyContent, "refused"),
     ] {
-        let config = Config {
-            script: vec![Some(fault)],
-            ..scripted(6, &[COMMAND])
-        };
-        let ran = frame(config, |pty, _, _| {
+        let ran = frame(faulted(6, fault, &[COMMAND]), |pty, _, _| {
             working(pty)?;
             pty.wait_for(notice)
         })?;
-        assert!(
-            ran.status.success(),
-            "{fault:?}: the frame stays usable: {}",
-            ran.status
-        );
+        assert_exited(&ran.status, &format!("{fault:?}: the frame stays usable"));
         assert!(!wrote(&ran), "{fault:?}: an unfinished reply runs nothing");
     }
     Ok(())
@@ -241,74 +276,43 @@ fn sim_tui_cut_or_empty_reply_runs_nothing() -> Journey {
 /// arrives is never run, the frame says so, and Ctrl+C exits 0 with the worker joined.
 #[test]
 fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
-    let config = Config {
-        script: vec![Some(Fault::Delay)],
-        ..scripted(9, &[COMMAND])
-    };
-    let ran = frame(config, |pty, mock, _| {
+    let ran = frame(faulted(9, Fault::Delay, &[COMMAND]), |pty, mock, _| {
         working(pty)?;
         pty.send("\x1b")?;
         pty.wait_for("Stopping")?;
         mock.release_delayed();
         pty.wait_for("Interrupted")
     })?;
-    assert!(
-        ran.status.success(),
-        "the worker is joined and the frame exits 0: {}",
-        ran.status
-    );
+    assert_exited(&ran.status, "the worker is joined and the frame exits 0");
     assert!(!wrote(&ran), "an interrupted reply never runs");
     Ok(())
 }
 
-/// Esc ends a running command, not only the next step (larry#242): the mock model asks for a
-/// command with a background member, the person approves it, Esc kills the whole group, the
-/// frame says Interrupted, the background pid is gone, and Ctrl+C exits 0. The whole path is
-/// printed as `esc_to_interrupted_ms`; it is MEASURED, never a pass condition, because a host
-/// with every core busy moves it (larry#268).
+/// Esc ends a running command, not only the next step (larry#242): the model asks for a command
+/// with a background member, the person approves it, Esc kills the whole group, the frame says
+/// Interrupted, the background pid is gone, and Ctrl+C exits 0 with `esc_to_interrupted_ms`
+/// MEASURED, never a pass condition, on a busy host (larry#268).
 #[test]
 fn tui_journey_esc_kills_running_command() -> Journey {
     let replies = [r#"{"command":"sleep 30 & echo $! > bg.pid; sleep 30"}"#];
     let (state, work) = fixture()?;
     let workspaces = state.path().join("ws");
-    let config = scripted(31, &replies);
     let ran = frame_in(
         &state,
         work,
-        config,
+        scripted(31, &replies),
         Box::new(|pty, mock, _| {
             ask(pty)?;
             pty.send("y")?;
             pty.wait_for("esc to interrupt")?;
-            // Esc is pressed only once the background member is up, so its death is the group's,
-            // not a race with the shell's own start. The command runs in the session's copy.
-            // The shell creates bg.pid before `echo` writes into it, so the wait is for the file
-            // to hold the pid, not only to exist (an empty read flaked on Linux, PR #251). The
-            // copy goes with the interrupted session, so the pid is read before Esc, and a pid
-            // that never appears fails the wait inside one deadline (larry#268).
-            let pid = await_event("the background member wrote bg.pid", || {
-                Ok(std::fs::read_dir(&workspaces)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|entry| entry.path().join("tree").join("bg.pid"))
-                    .filter_map(|path| std::fs::read_to_string(path).ok())
-                    .map(|text| text.trim().to_owned())
-                    .find(|text| !text.is_empty()))
-            })?;
+            // Esc only after the background member is up, so its death is the group's; the pid
+            // is read from the session's copy before Esc (a missing pid fails in one deadline).
+            let pid = await_tree_text(&workspaces, "bg.pid", "the member wrote bg.pid")?;
             let pressed = Instant::now();
             pty.send("\x1b")?;
             pty.wait_for("Interrupted")?;
             let esc_to_interrupted = pressed.elapsed();
-            assert!(!pid.is_empty(), "bg.pid holds the background pid");
-            let probe = Command::new("kill")
-                .args(["-0", &pid])
-                .stderr(Stdio::null())
-                .status()?;
-            assert!(
-                !probe.success(),
-                "the background member {pid} died with its group"
-            );
+            assert_group_gone(&pid, "the background member")?;
             assert_eq!(mock.served(), 1, "no second model call after the interrupt");
             let mut figure = String::new();
             writeln!(
@@ -320,11 +324,7 @@ fn tui_journey_esc_kills_running_command() -> Journey {
             Ok(())
         }),
     )?;
-    assert!(
-        ran.status.success(),
-        "Ctrl+C on an empty box exits 0: {}",
-        ran.status
-    );
+    assert_exited(&ran.status, "Ctrl+C on an empty box exits 0");
     Ok(())
 }
 
@@ -336,14 +336,14 @@ fn sim_tui_same_seed_same_trace_hash_through_the_binary() -> Journey {
     let mut hashes = Vec::new();
     let (state, mut work) = fixture()?;
     for _ in 0..2 {
-        let config = Config {
-            script: vec![Some(Fault::PaddedDone)],
-            ..scripted(21, &[COMMAND, r#"{"done":"wrote hello.txt"}"#])
-        };
         let ran = frame_in(
             &state,
             work,
-            config,
+            faulted(
+                21,
+                Fault::PaddedDone,
+                &[COMMAND, r#"{"done":"wrote hello.txt"}"#],
+            ),
             Box::new(|pty, mock, _| {
                 ask(pty)?;
                 pty.send("y")?;
@@ -480,6 +480,67 @@ fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
     Ok(())
 }
 
+/// A running command's first line reaches the artifact pane before its FIFO is released;
+/// the second line cannot be a buffered completion artifact then.
+#[test]
+fn tui_journey_pane_streams_first_line_before_fifo_release() -> Journey {
+    let replies = [
+        r#"{"command":"mkfifo stream.fifo; printf '\\146\\151\\162\\163\\164\\n'; cat stream.fifo; printf '\\163\\145\\143\\157\\156\\144\\n'; rm stream.fifo"}"#,
+        r#"{"done":"stream finished"}"#,
+    ];
+    let (state, work) = fixture()?;
+    let workspaces = state.path().join("ws");
+    let ran = frame_in(
+        &state,
+        work,
+        scripted(252, &replies),
+        Box::new(|pty, _, _| {
+            let mut fifo_guard = FifoRelease::arm(workspaces.clone());
+            ask(pty)?;
+            pty.send("y")?;
+            pty.wait_for("first")?;
+            let fifo = await_tree_file(&workspaces, "stream.fifo", "the stream FIFO exists")?;
+            fifo_guard.release(&fifo)?;
+            pty.wait_for("second")?;
+            pty.wait_for("stream finished")
+        }),
+    )?;
+    assert!(ran.status.success(), "the streamed journey exits 0");
+    Ok(())
+}
+
+/// A terminal signal ends Larry mid-command; its shell and background member die with it.
+#[test]
+fn tui_journey_sigterm_kills_running_command_group() -> Journey {
+    let replies = [r#"{"command":"echo $$ > shell.pid; sleep 30 & echo $! > bg.pid; sleep 30"}"#];
+    let (state, work) = fixture()?;
+    let workspaces = state.path().join("ws");
+    let mut background_pid = String::new();
+    let (status, _) = mock_model::run(scripted(253, &replies), |mock| -> Journey<_> {
+        std::thread::scope(|owner| {
+            let mut pty = Pty::open(owner, work.path(), &operator(state.path(), mock))?;
+            ask(&mut pty)?;
+            pty.send("y")?;
+            pty.wait_for("esc to interrupt")?;
+            background_pid = await_tree_text(&workspaces, "bg.pid", "the member wrote bg.pid")?;
+            let terminal_pid = pty.pid()?;
+            let terminated = Command::new("kill")
+                .args(["-TERM", &terminal_pid])
+                .status()?;
+            assert!(terminated.success(), "SIGTERM reached Larry {terminal_pid}");
+            pty.finish()
+        })
+    })?;
+    assert!(status.success(), "SIGTERM ends Larry cleanly");
+    await_event("the command child to leave with Larry", || {
+        let alive = Command::new("kill")
+            .args(["-0", &background_pid])
+            .stderr(Stdio::null())
+            .status()?;
+        Ok((!alive.success()).then_some(()))
+    })
+}
+
 /// Files in the bulk folders of the overhead measurement, and their size in bytes.
 const BULK_FILES: usize = 600;
 /// Bytes of each bulk file.
@@ -528,11 +589,7 @@ fn tui_journey_probe_reports_isolation_overhead_against_a_plain_copy() -> Journe
                 pty.wait_for("left it alone")
             }),
         )?;
-        assert!(
-            ran.status.success(),
-            "round {round}: exits 0: {}",
-            ran.status
-        );
+        assert_exited(&ran.status, &format!("round {round}: exits 0"));
     }
     isolated.sort();
     plain.sort();
@@ -568,15 +625,8 @@ fn tui_journey_kill9_then_fresh_start_restores() -> Journey {
             let killed = Command::new("kill").args(["-9", &pid]).status()?;
             assert!(killed.success(), "kill -9 {pid} was delivered");
             let (status, _) = pty.finish()?;
-            assert!(
-                !status.success(),
-                "a killed binary does not report success: {status}"
-            );
-            let probe = Command::new("kill")
-                .args(["-0", &pid])
-                .stderr(Stdio::null())
-                .status()?;
-            assert!(!probe.success(), "the killed binary {pid} was reaped");
+            assert!(!status.success(), "kill -9 left a success: {status}");
+            assert_group_gone(&pid, "the killed binary")?;
             assert!(
                 !work.path().join("hello.txt").exists(),
                 "a killed ask runs nothing"
@@ -584,10 +634,9 @@ fn tui_journey_kill9_then_fresh_start_restores() -> Journey {
             let mut fresh = Pty::open(owner, work.path(), &env)?;
             fresh.wait_for(READY)?;
             fresh.send(QUIT)?;
-            let (status, _) = fresh.finish()?;
-            assert!(
-                status.success(),
-                "a fresh terminal starts clean and quits 0: {status}"
+            assert_exited(
+                &fresh.finish()?.0,
+                "a fresh terminal starts clean and quits 0",
             );
             Ok(())
         })
@@ -607,18 +656,14 @@ fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
                 let mut first = Pty::open(owner, work_a.path(), &operator(state_a.path(), mock_a))?;
                 let mut second =
                     Pty::open(owner, work_b.path(), &operator(state_b.path(), mock_b))?;
-                ask(&mut first)?;
-                ask(&mut second)?;
-                first.send("y")?;
-                second.send("y")?;
-                first.wait_for(REVIEW)?;
-                second.wait_for(REVIEW)?;
-                first.send("y")?;
-                second.send("y")?;
-                first.wait_for("wrote hello.txt")?;
-                second.wait_for("wrote hello.txt")?;
-                first.send(QUIT)?;
-                second.send(QUIT)?;
+                for term in [&mut first, &mut second] {
+                    ask(term)?;
+                    term.send("y")?;
+                    term.wait_for(REVIEW)?;
+                    term.send("y")?;
+                    term.wait_for("wrote hello.txt")?;
+                    term.send(QUIT)?;
+                }
                 assert!(first.finish()?.0.success() && second.finish()?.0.success());
                 assert_eq!(
                     (mock_a.served(), mock_b.served()),
@@ -650,8 +695,10 @@ fn nearest_rank(sorted: &[Duration], rank: usize) -> Journey<f64> {
         .saturating_mul(rank)
         .div_ceil(100)
         .saturating_sub(1);
-    let value = sorted.get(position).ok_or("no samples")?;
-    Ok(value.as_secs_f64() * 1000.0)
+    Ok(sorted
+        .get(position)
+        .ok_or("no samples")
+        .map(|sample| sample.as_secs_f64() * 1000.0)?)
 }
 
 /// First paint, key-to-paint p50/p95/p99 over typed text, an idle window that writes nothing,
@@ -687,11 +734,9 @@ fn tui_journey_probe_reports_p50_p95_p99_and_rss() -> Journey {
         pty.send(QUIT)?;
         let (status, _) = pty.finish()?;
         let quit_ms = quit.elapsed().as_secs_f64() * 1000.0;
-        assert!(status.success(), "Ctrl+C exits 0: {status}");
-        // `idle_output_bytes` below is a MEASURED figure, never a pass condition: a frame a
-        // loaded host paints late can land inside the window (larry#268).
-        // `sim_tui_unchanged_frame_writes_nothing` proves deterministically that a repaint of an
-        // unchanged frame writes nothing.
+        assert_exited(&status, "Ctrl+C exits 0");
+        // `idle_output_bytes` below is MEASURED, never a pass condition (larry#268), and
+        // `sim_tui_unchanged_frame_writes_nothing` proves the deterministic repaint case.
         let figures = format!(
             "{{\"scope\":\"debug binary, 120x32 PTY, no model route\",\"os\":\"{}\",\
              \"first_paint_ms\":{first_paint:.1},\"input_samples\":{ROUND_TRIPS},\
