@@ -25,9 +25,10 @@ tenant. A compiled-in default also sent a prompt somewhere nobody chose whenever
 
 ## Decision
 
-- A route is a row in the state directory's store, keyed by tenant and id: provider kind (`openai-chat`
-  today), base URL, the NAME of the `LARRY_KEY_*` variable that holds the key, model id, optional
-  temperature, a request byte bound (1 KiB to 16 MiB, default 1 MiB), a residency (ISO 3166-1 alpha-2) and
+- A route is a row in the state directory's store, keyed by tenant and id: provider kind (`openai-chat`,
+  `anthropic-messages` or `openai-responses`, larry#205, ADR 0119), base URL, the NAME of the `LARRY_KEY_*` variable that holds the key, model id, optional
+  temperature, a request byte bound (1 KiB to 16 MiB, default 1 MiB), a residency (ISO 3166-1 alpha-2), an
+  optional prompt template (at most 8 KiB, sealed by hash) and
   a description of at most 1 KiB. The key is read from its variable only when a task reaches the model,
   and is never stored, logged or put in an error or a report.
 - A stored route may name only `LARRY_KEY_` and at least one more byte (`KeyEnvOutsideNamespace`
@@ -41,8 +42,9 @@ tenant. A compiled-in default also sent a prompt somewhere nobody chose whenever
   else `NoRoute`. A name no route has is `Unknown` and never falls through to the default.
 - The model settings are parsed only when a task reaches a model, so a typo in a knob fails no task with no
   brief.
-- Each sealed model record and session names the route id, the model, the gateway's host and port and the
-  residency (`null` when undeclared), never a URL path or a key. `larry verify` covers them.
+- Each sealed model record and session names the route id, the kind, the model, the gateway's host and
+  port, the residency (`null` when undeclared) and the prompt template's hash (`null` when the route names
+  none), never a URL path, a template, a key or the name of the key's variable. `larry verify` covers them.
 - `larry route add|list|remove|default|resolve` manages the table; the task document and
   `larry_submit_task` take an optional `route`.
 

@@ -152,6 +152,7 @@ pub(crate) fn env_route(
         temperature: temperature_from(read)?,
         request_bytes: None,
         residency: residency.as_deref(),
+        prompt: None,
         describe: ENV_DESCRIBE,
     };
     Route::environment(&draft)
@@ -348,6 +349,7 @@ pub(crate) fn sim_config(bound: Option<usize>) -> Result<ModelConfig, ModelError
         temperature: None,
         request_bytes: bound,
         residency: None,
+        prompt: None,
         describe: "a route the simulation never sends on",
     })
     .map_err(ModelError::BadRoute)?;

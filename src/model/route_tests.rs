@@ -20,6 +20,7 @@ pub(super) fn accepted() -> Draft<'static> {
         temperature: Some(0.5),
         request_bytes: Some(2048),
         residency: Some("CA"),
+        prompt: None,
         describe: "cheap drafts\nsecond line",
     }
 }
@@ -242,6 +243,7 @@ fn the_refusal_set_is_closed_with_no_dead_variant() {
         ),
         (RouteError::BadTemperature, true),
         (RouteError::BadKind, true),
+        (RouteError::BadPrompt, true),
         (RouteError::BadResidency, true),
         (RouteError::BadRequestBytes, true),
         (RouteError::BadDescribe, true),
@@ -295,7 +297,57 @@ fn each_kind_parses_and_seals_with_its_name() -> Result<(), RouteError> {
             sealed.contains(&format!("\"kind\":\"{name}\"")),
             "{name} seals: {sealed}"
         );
+        assert!(
+            sealed.contains("\"prompt_hash\":null"),
+            "no template seals as null: {sealed}"
+        );
     }
     assert_eq!(Kind::parse("other"), None, "an unknown kind");
+    Ok(())
+}
+
+/// The prompt template is checked at its boundary and sealed by its hash, never
+/// its text: a template past 8 KiB or with a control byte is refused, and the
+/// seal names the BLAKE3 hash the stored template re-derives (larry#205).
+#[test]
+fn a_prompt_template_is_checked_and_sealed_by_its_hash() -> Result<(), RouteError> {
+    let long = "p".repeat(8193);
+    assert_eq!(
+        built(|fields| fields.prompt = Some(&long)),
+        Err(RouteError::BadPrompt),
+        "8193 bytes"
+    );
+    let top = "p".repeat(8192);
+    assert!(
+        built(|fields| fields.prompt = Some(&top)).is_ok(),
+        "8192 bytes"
+    );
+    assert_eq!(
+        built(|fields| fields.prompt = Some("bad\u{1}byte")),
+        Err(RouteError::BadPrompt),
+        "a control byte"
+    );
+    let templated = built(|fields| fields.prompt = Some("be terse"))?;
+    assert_eq!(
+        templated.prompt(),
+        Some("be terse"),
+        "the template reads back"
+    );
+    let hash = templated.prompt_hash().ok_or(RouteError::BadPrompt)?;
+    assert_eq!(hash.len(), 64, "the hash is 64 hex characters");
+    assert_eq!(
+        templated.prompt_hash(),
+        Some(hash.clone()),
+        "the hash is stable"
+    );
+    let sealed = templated.seal().to_string();
+    assert!(
+        sealed.contains(&format!("\"prompt_hash\":\"{hash}\"")),
+        "the hash seals: {sealed}"
+    );
+    assert!(
+        !sealed.contains("be terse"),
+        "the template's text never seals: {sealed}"
+    );
     Ok(())
 }

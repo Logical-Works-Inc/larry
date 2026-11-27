@@ -148,10 +148,11 @@ struct Source<'brief> {
 ///
 /// Every file is read before any is written, so all the brief's prompts show the
 /// files as they were, and each prompt of the brief begins with the same bytes
-/// (larry#230): the kind's instruction, then the tenant's partition, then the
-/// shared context. A provider's prefix cache reads the context once and every
-/// later file's prompt hits it. `partition` names the tenant, so no two tenants
-/// share a prefix. The snapshot holds at most 64 files of 256 KiB; past
+/// (larry#230): the route's template when it names one, then the kind's
+/// instruction, then the tenant's partition, then the shared context. A provider's
+/// prefix cache reads the context once and every later file's prompt hits it.
+/// `partition` names the tenant, so no two tenants share a prefix. The snapshot
+/// holds at most 64 files of 256 KiB; past
 /// [`MAX_CONTEXT_BYTES`] of context, or when any request carrying it would pass
 /// the route's request bound, each prompt carries only its own file.
 pub(crate) fn author(
@@ -222,17 +223,20 @@ pub(crate) fn author(
     Ok(authored)
 }
 
-/// The system turn: the standing instruction for the kind, then the tenant's
-/// partition, so two tenants' prompts differ from the first byte after the
-/// instruction and a provider's prefix cache never serves one tenant's context
-/// to another.
+/// The system turn: the route's template when it names one, then the standing
+/// instruction for the kind, then the tenant's partition, so two tenants'
+/// prompts differ from the first byte after the instruction and a provider's
+/// prefix cache never serves one tenant's context to another.
 fn system_line(route: &Route, partition: &str) -> String {
     let instruction = if route.kind().structured() {
         SYSTEM_STRUCTURED
     } else {
         SYSTEM
     };
-    format!("{instruction}\nCache partition: {partition}")
+    match route.prompt() {
+        Some(template) => format!("{template}\n{instruction}\nCache partition: {partition}"),
+        None => format!("{instruction}\nCache partition: {partition}"),
+    }
 }
 
 /// The context every prompt of one brief begins with: the brief's files as they

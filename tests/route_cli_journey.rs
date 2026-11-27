@@ -93,6 +93,7 @@ impl<'tenant> Tenant<'tenant> {
                 key_env: &key_env,
                 residency: self.residency,
                 kind: None,
+                prompt: None,
                 temperature: None,
             },
         )
@@ -140,6 +141,7 @@ impl<'tenant> Tenant<'tenant> {
             "model": self.model,
             "host": route_journey::host_of(self.mock),
             "residency": self.residency,
+            "prompt_hash": null,
         })
     }
 
