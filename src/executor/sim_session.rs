@@ -20,7 +20,7 @@ use lgwks_macros::Error;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, clip, run_command};
+use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, RunHooks, clip, run_command};
 use super::{
     ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
     check, parse_reply,
@@ -412,7 +412,7 @@ fn drive(
                     COMMAND_TIMEOUT,
                     &ledger,
                     &task_id,
-                    &|| cancel.load(Ordering::Acquire),
+                    RunHooks::new(&|| cancel.load(Ordering::Acquire), None),
                 )
             };
             finished.store(true, Ordering::Release);
@@ -539,7 +539,7 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
             SHORT_TIMEOUT,
             &ledger,
             "sim-timeout",
-            &|| false,
+            RunHooks::new(&|| false, None),
         );
         let listed = ledger.live_tasks();
         let (state_path, work_path) = (state.to_path_buf(), work.to_path_buf());
@@ -624,14 +624,17 @@ fn panic_inside_run(seed: u64) -> Result<(), CancelSimError> {
                 COMMAND_TIMEOUT,
                 &ledger,
                 "sim-panic",
-                &|| {
-                    let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-                    assert!(
-                        poll > fails_at,
-                        "seed {seed}: the injected fault inside run_command"
-                    );
-                    false
-                },
+                RunHooks::new(
+                    &|| {
+                        let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+                        assert!(
+                            poll > fails_at,
+                            "seed {seed}: the injected fault inside run_command"
+                        );
+                        false
+                    },
+                    None,
+                ),
             )
         };
         // Only a run that never reached its cancel poll gets here: end the watcher, then say

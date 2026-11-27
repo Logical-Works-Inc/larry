@@ -12,7 +12,9 @@
 use std::error::Error;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -21,6 +23,79 @@ use std::time::{Duration, Instant};
 /// the pace of a working one. The gates run every journey binary at once, so a child's
 /// clone and its first command can wait seconds for a core.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(30);
+
+/// A FIFO release armed over the journey's workspaces (larry#252). The streamed
+/// command's first line is proved before its FIFO is released, so the release sits on
+/// the happy path; every other exit (a failed wait, a refused assertion) drops this
+/// guard, which best-effort opens any `stream.fifo` still present so the `cat` holding
+/// the command sees its writer, then EOF, and never orphans the command past the test.
+pub(crate) struct FifoRelease {
+    /// Every live workspace tree is joined under here.
+    workspaces: PathBuf,
+    /// Whether [`FifoRelease::release`] already ran; a spent guard drops silently.
+    done: bool,
+}
+
+impl FifoRelease {
+    /// Arms the guard over `workspaces`; nothing is opened yet.
+    pub(crate) fn arm(workspaces: PathBuf) -> Self {
+        Self {
+            workspaces,
+            done: false,
+        }
+    }
+
+    /// Releases `fifo` now and disarms the guard; the drop after success is a no-op.
+    pub(crate) fn release(&mut self, fifo: &Path) -> io::Result<()> {
+        release_fifo(fifo)?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for FifoRelease {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        for fifo in find_fifos(&self.workspaces) {
+            if let Err(cause) = release_fifo(&fifo) {
+                STUCK.fetch_add(1, Ordering::Relaxed);
+                let mut errors = io::stderr().lock();
+                let said = writeln!(
+                    errors,
+                    "{{\"fifo\":\"release-refused\",\"entry\":\"{}\",\"refused\":\"{cause}\"}}",
+                    fifo.display()
+                );
+                if said.is_err() {
+                    STUCK.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// Pipes the drop release could not end, counted so a stuck pipe is never silent.
+static STUCK: AtomicU64 = AtomicU64::new(0);
+
+/// Every `stream.fifo` still present under `workspaces`, one per live workspace tree.
+fn find_fifos(workspaces: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(workspaces)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("tree").join("stream.fifo"))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// Opens `fifo` read-write and closes it at once: the blocked reader's open completes,
+/// then EOF ends it, so the command holding it can finish.
+fn release_fifo(fifo: &Path) -> io::Result<()> {
+    let handle = File::options().read(true).write(true).open(fifo)?;
+    drop(handle);
+    Ok(())
+}
 
 /// A pid no live process holds: the largest positive `i32` less one, so the group it names
 /// is already gone.
@@ -206,5 +281,46 @@ fn a_wait_whose_reads_keep_failing_names_the_last_cause() -> Result<(), Box<dyn 
         message.contains("did not happen within") && message.contains("database is locked"),
         "the failure names the wait, its bound and the last refusal: {message}"
     );
+    Ok(())
+}
+
+/// A FIFO guard releases a still present pipe when it drops and disarms after an
+/// explicit release, and a missing pipe is a typed refusal: a failed journey never leaves
+/// the `cat` holding its command (larry#252).
+#[test]
+fn a_fifo_guard_releases_on_drop_and_disarms_after_release() -> Result<(), Box<dyn Error>> {
+    let root = std::env::temp_dir().join("larry-fifo-guard");
+    std::fs::remove_dir_all(&root).or_else(|cause| match cause.kind() {
+        io::ErrorKind::NotFound => Ok(()),
+        _ => Err(cause),
+    })?;
+    let tree = root.join("probe").join("tree");
+    std::fs::create_dir_all(&tree)?;
+    let fifo = tree.join("stream.fifo");
+    std::fs::write(&fifo, b"")?;
+    {
+        let _guard = FifoRelease::arm(root.join("probe"));
+    }
+    assert!(
+        fifo.exists(),
+        "a drop release ends the pipe's reader, never removes the pipe"
+    );
+    assert_eq!(
+        STUCK.load(Ordering::Acquire),
+        0,
+        "a present pipe releases, nothing sticks"
+    );
+    {
+        let mut guard = FifoRelease::arm(root.join("probe"));
+        guard.release(&fifo)?;
+        assert!(
+            guard.release(&tree.join("absent")).is_err(),
+            "a missing pipe is refused, not released"
+        );
+    }
+    std::fs::remove_dir_all(&root).or_else(|cause| match cause.kind() {
+        io::ErrorKind::NotFound => Ok(()),
+        _ => Err(cause),
+    })?;
     Ok(())
 }
