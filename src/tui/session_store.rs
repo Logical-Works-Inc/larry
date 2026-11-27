@@ -1,4 +1,4 @@
-//! The terminal session's memory and its rows (larry#256, ADR 0130): the
+//! The terminal session's memory and its rows (larry#256, ADR 0133): the
 //! transcript the frame shows ([`Transcript`], bounded and snapshot as JSON)
 //! and the driver-owned [`SessionStore`] that holds it in the state database's
 //! `tui_sessions` table after every turn. The frame (`tui::app`) stays I/O-free:

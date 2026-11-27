@@ -1,4 +1,4 @@
-//! Seeded simulations of the TUI session store (larry#256, ADR 0130): the
+//! Seeded simulations of the TUI session store (larry#256, ADR 0133): the
 //! ledger rows behind `/resume`, `/fork`, `/rename`, `/new`, `/export` and
 //! `/recap`, the snapshot round trip and the ten-thousand-row listing with its
 //! measured p50/p95/p99 and peak RSS. One seed drives every entry; no clock,

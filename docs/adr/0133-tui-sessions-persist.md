@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0130: TUI sessions persist in the state database"
+title: "ADR 0133: TUI sessions persist in the state database"
 description: "Each terminal session is a row in executor.db with /resume, /fork, /rename, /new, /export and /recap."
-resource: /docs/adr/0130-tui-sessions-persist.md
+resource: /docs/adr/0133-tui-sessions-persist.md
 tags: [larry, adr, tui, executor, ledger]
 generated: {by: opencode, at: 2026-11-27}
 verified: {by: opencode, method: lgwks-box cargo nextest run --locked, 2026-11-27}

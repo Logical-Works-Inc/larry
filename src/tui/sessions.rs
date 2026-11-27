@@ -1,4 +1,4 @@
-//! TUI sessions that survive a restart (larry#256, ADR 0130): each terminal
+//! TUI sessions that survive a restart (larry#256, ADR 0133): each terminal
 //! session is one row in the state database the executor already owns
 //! (`executor.db`, never a stray file), holding its name, folder, model and the
 //! whole transcript plus every receipt digest seen. `/resume` lists the rows for
