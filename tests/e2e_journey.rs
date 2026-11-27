@@ -14,6 +14,8 @@ mod journey;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "e2e_journey/pane.rs"]
+mod pane;
 #[path = "support/ps.rs"]
 mod ps;
 #[path = "support/pty.rs"]
@@ -102,16 +104,6 @@ fn tree_copies(workspaces: &Path) -> Vec<PathBuf> {
     trees.map(|entry| entry.path().join("tree")).collect()
 }
 
-/// The first `name` present under any live workspace tree, inside one deadline (larry#268).
-fn await_tree_file(workspaces: &Path, name: &str, what: &str) -> Journey<PathBuf> {
-    await_event(what, || {
-        Ok(tree_copies(workspaces)
-            .into_iter()
-            .map(|tree| tree.join(name))
-            .find(|path| path.exists()))
-    })
-}
-
 /// The first non-empty trimmed text of `name` (empty reads flaked on Linux, PR #251).
 fn await_tree_text(workspaces: &Path, name: &str, what: &str) -> Journey<String> {
     await_event(what, || {
@@ -167,6 +159,41 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
         ran.wire.contains("\x1b[?1049l"),
         "the main screen is restored"
     );
+    Ok(())
+}
+
+/// A first-timer's bare `larry` in a folder its state never provisioned still
+/// reaches the approval prompt for the model's first command: the local door
+/// stays open until the first root row binds it, so no failure line appears
+/// first (larry#207).
+#[test]
+fn tui_journey_unprovisioned_local_reaches_the_first_approval() -> Journey {
+    let state = origin::TempDir::new()?;
+    let work = origin::TempDir::new()?;
+    std::fs::write(work.path().join("notes.txt"), "a first-timer's project\n")?;
+    let replies = [COMMAND, r#"{"done":"left it alone"}"#];
+    let ran = frame_in(
+        &state,
+        work,
+        scripted(7, &replies),
+        Box::new(|pty, mock, _| {
+            ask(pty)?;
+            pty.send("n")?;
+            pty.wait_for("left it alone")?;
+            let told = mock
+                .requests()
+                .get(1)
+                .is_some_and(|body| String::from_utf8_lossy(body).contains(DECLINED));
+            assert!(told, "the model is told the command was declined");
+            Ok(())
+        }),
+    )?;
+    assert!(
+        ran.status.success(),
+        "Ctrl+C on an empty box exits 0: {}",
+        ran.status
+    );
+    assert!(!wrote(&ran), "a declined command never runs");
     Ok(())
 }
 
@@ -449,63 +476,6 @@ fn the_terminal_gets_the_fixed_path_not_the_host() -> Journey {
         pty.wait_for("read the path")
     })?;
     assert!(ran.status.success(), "Ctrl+C exits 0: {}", ran.status);
-    Ok(())
-}
-
-/// The artifact pane beside the chat (larry#244; the PTY is 120 columns, past the 108 that
-/// open it): while the question about the change is asked the pane already shows its file list
-/// and hunk, before the folder holds the file; once the person applies it the sealed report's
-/// receipt takes the pane, and Tab goes back to the command's output.
-#[test]
-fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
-    let replies = [COMMAND, r#"{"done":"wrote hello.txt"}"#];
-    let ran = frame(scripted(44, &replies), |pty, _, work| {
-        ask(pty)?;
-        pty.send("y")?;
-        pty.wait_for(REVIEW)?;
-        pty.wait_for("  hello.txt  +1 -0")?;
-        pty.wait_for("+hello")?;
-        assert!(
-            !work.join("hello.txt").exists(),
-            "shown before the folder changes"
-        );
-        pty.send("y")?;
-        pty.wait_for(APPLIED)?;
-        pty.wait_for("commands  1 run, 0 declined, 0 interrupted")?;
-        pty.wait_for("digest    ")?;
-        pty.send("\t")?;
-        pty.wait_for("$ printf")
-    })?;
-    assert!(ran.status.success(), "exits 0: {}", ran.status);
-    Ok(())
-}
-
-/// A running command's first line reaches the artifact pane before its FIFO is released;
-/// the second line cannot be a buffered completion artifact then.
-#[test]
-fn tui_journey_pane_streams_first_line_before_fifo_release() -> Journey {
-    let replies = [
-        r#"{"command":"mkfifo stream.fifo; printf '\\146\\151\\162\\163\\164\\n'; cat stream.fifo; printf '\\163\\145\\143\\157\\156\\144\\n'; rm stream.fifo"}"#,
-        r#"{"done":"stream finished"}"#,
-    ];
-    let (state, work) = fixture()?;
-    let workspaces = state.path().join("ws");
-    let ran = frame_in(
-        &state,
-        work,
-        scripted(252, &replies),
-        Box::new(|pty, _, _| {
-            let mut fifo_guard = FifoRelease::arm(workspaces.clone());
-            ask(pty)?;
-            pty.send("y")?;
-            pty.wait_for("first")?;
-            let fifo = await_tree_file(&workspaces, "stream.fifo", "the stream FIFO exists")?;
-            fifo_guard.release(&fifo)?;
-            pty.wait_for("second")?;
-            pty.wait_for("stream finished")
-        }),
-    )?;
-    assert!(ran.status.success(), "the streamed journey exits 0");
     Ok(())
 }
 
