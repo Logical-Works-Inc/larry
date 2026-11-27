@@ -199,6 +199,29 @@ pub enum ExecError {
     /// The receipt key row is missing right after its insert.
     #[error("exec receipt key row is missing after its insert")]
     KeyMissing,
+    /// No receipt key is stored for this tenant: no run sealed one yet, and a
+    /// read-only lookup never mints one (larry#211).
+    #[error("exec receipt key is missing for this tenant; seal a run or rotate one in first")]
+    NoReceiptKey,
+    /// The receipt store itself is absent: `larry key` and `larry verify` on an
+    /// empty state directory create nothing and mint nothing (larry#211).
+    #[error("exec state store is missing; run a task in LARRY_STATE_DIR first")]
+    NoStore,
+    /// The stored tenant id is not 32 hex characters.
+    #[error("exec stored tenant id is not 32 hex characters: {0}")]
+    BadTenantId(#[source] lgwks_std::hex::DecodeError),
+    /// `LARRY_TENANT` names a tenant the edge would refuse (larry#211).
+    #[error(
+        "exec LARRY_TENANT is not a tenant name (1 to 64 ascii letters, digits, _ or -): {value}"
+    )]
+    BadTenant {
+        /// The name that was refused.
+        value: String,
+    },
+    /// A clock reading does not fit the store's integer: fail closed, never
+    /// wrapped or saturated (larry#211).
+    #[error("exec integer out of range: {0}")]
+    Range(#[from] std::num::TryFromIntError),
     /// The stored receipt key seed is not 32 bytes.
     #[error("exec receipt key seed is not 32 bytes: {0}")]
     KeySeedLength(#[source] std::array::TryFromSliceError),

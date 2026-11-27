@@ -97,6 +97,7 @@ fn sealed_report() -> Result<Report, Box<dyn std::error::Error>> {
             "denied": ["gate: no covering grant"],
         }),
         &key,
+        1,
     );
     Ok(Report::parse(sealed.to_string().as_bytes(), &key)?)
 }

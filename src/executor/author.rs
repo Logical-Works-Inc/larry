@@ -18,7 +18,7 @@ use crate::model::{
 };
 
 use super::routes::task_select;
-use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex, identity};
+use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex};
 
 /// Longest goal, in bytes.
 const MAX_GOAL_BYTES: usize = 8192;
@@ -449,9 +449,9 @@ pub(super) fn model_step<'task>(
     // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     // The client shares the executor's tenant-route limiter, so the budgets
-    // bind every brief task (larry#204): the tenant is the state directory's,
-    // the route the one this task resolved to.
-    let tenant = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+    // bind every brief task (larry#204): the tenant is the task's selected
+    // tenant, the route the one this task resolved to.
+    let tenant = digest_hex(settings.tenant_text().as_bytes());
     let client = ModelClient::with_limiter(
         settings.model_config(&route)?,
         clock,

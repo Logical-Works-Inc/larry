@@ -14,7 +14,7 @@ use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 use super::task::Task;
-use super::{ExecError, Ledger, Settings, digest_hex, identity, state_dir};
+use super::{ExecError, Ledger, Settings, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{
     Draft, Kind, Policy, Route, RouteError, Selection, Table, env_route, is_route_id, query_of,
@@ -92,9 +92,14 @@ fn from_exec(error: ExecError) -> RouteCliError {
     }
 }
 
-/// The tenant a state directory is, as the text every route row is keyed by.
-fn tenant_text(state: &Path) -> String {
-    digest_hex(identity::tenant_of(state).as_bytes())
+/// The tenant the caller selected, as the text every route row is keyed by:
+/// `LARRY_TENANT` when it names one, else the store's default (larry#211).
+fn tenant_text(
+    ledger: &Ledger,
+    state: &Path,
+    read: &impl Fn(&str) -> Option<String>,
+) -> Result<String, ExecError> {
+    ledger.selected_tenant(state, read).map(|(_, text)| text)
 }
 
 /// The route a task naming `named` (or none) sends its model calls to under the
@@ -112,7 +117,7 @@ pub(super) fn resolve_for(
     named: Option<&str>,
     read: &impl Fn(&str) -> Option<String>,
 ) -> Result<Route, ExecError> {
-    let tenant = tenant_text(state);
+    let tenant = tenant_text(ledger, state, read)?;
     let table = ledger.routes(&tenant)?;
     let environment = if table.lookup(named).is_some() {
         None
@@ -207,7 +212,7 @@ pub(super) fn select_for(
     query: Option<&str>,
     read: &impl Fn(&str) -> Option<String>,
 ) -> Result<Selection, ExecError> {
-    let tenant = tenant_text(state);
+    let tenant = tenant_text(ledger, state, read)?;
     let table = ledger.routes(&tenant)?;
     let environment = if table.lookup(named).is_some() {
         None
@@ -384,7 +389,8 @@ fn id_arg(id: &str) -> Result<&str, RouteCliError> {
 fn open(read: &impl Fn(&str) -> Option<String>) -> Result<(Ledger, String), RouteCliError> {
     let state = state_dir(read).map_err(from_exec)?;
     let ledger = Ledger::open(&state).map_err(from_exec)?;
-    Ok((ledger, tenant_text(&state)))
+    let tenant = tenant_text(&ledger, &state, read).map_err(from_exec)?;
+    Ok((ledger, tenant))
 }
 
 /// `larry route add <id> ...`: checks every field, refuses a key variable that
@@ -423,11 +429,11 @@ fn add(
     // The binding is checked before the store opens, so a refused add writes
     // nothing (larry#328).
     let state = state_dir(read).map_err(from_exec)?;
-    let tenant = tenant_text(&state);
+    let ledger = Ledger::open(&state).map_err(from_exec)?;
+    let tenant = tenant_text(&ledger, &state, read).map_err(from_exec)?;
     if let Some(refusal) = route.key_env_refusal(&tenant) {
         return Err(RouteCliError::Route(refusal));
     }
-    let ledger = Ledger::open(&state).map_err(from_exec)?;
     ledger
         .put_route(&tenant, &route, parsed.make_default)
         .map_err(from_exec)?;
@@ -725,11 +731,11 @@ mod tests {
     fn a_saved_route_prints_its_key_variable() -> Result<(), Box<dyn std::error::Error>> {
         let state = crate::executor::sim_tree::scratch("larry-route-add")?;
         let dir = state.to_string_lossy().into_owned();
-        let key_env = format!(
-            "{}MAIN",
-            crate::model::tenant_namespace(&super::tenant_text(&state))
-        );
+        let ledger = super::Ledger::open(&state)?;
         let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
+        let tenant = super::tenant_text(&ledger, &state, &read)
+            .map_err(|error| format!("tenant: {error}"))?;
+        let key_env = format!("{}MAIN", crate::model::tenant_namespace(&tenant));
         let mut args = vec!["add", "main", "--url", "https://gateway.test:1/v1"];
         args.extend(["--model", "m", "--key-env", key_env.as_str()]);
         args.extend(["--residency", "CA"]);

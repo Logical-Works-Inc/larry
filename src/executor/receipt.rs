@@ -36,6 +36,10 @@ const DIFF_TRUNCATED: &str = "diff_truncated";
 /// accepted, because commands already ran that no verdict watched.
 const DEADLINE_PASSED: &str = "deadline_passed";
 
+/// The report member that says which key id sealed the report (larry#211): a
+/// rotated key verifies old receipts by id and seals new ones under the new id.
+pub(crate) const KEY_ID: &str = "kid";
+
 /// Largest report `verify` reads, in bytes (256 MiB). A report holds at most 16
 /// commands with 1 MiB of stdout and 1 MiB of stderr each, plus a 1 MiB diff:
 /// 33 MiB of text. JSON spends at most six bytes on one control byte, so the
@@ -82,6 +86,9 @@ pub enum ReceiptError {
     /// The receipt named no signature.
     #[error("receipt names no signature")]
     MissingSignature,
+    /// The receipt's key id is not a positive integer.
+    #[error("receipt key id is not a positive integer")]
+    BadKeyId,
     /// The signature was not 128 hex characters.
     #[error("receipt signature is not 128 hex characters: {0}")]
     SignatureNotHex(#[source] lgwks_std::hex::DecodeError),
@@ -166,7 +173,7 @@ fn passed(result: &Value) -> bool {
 /// Returns the sealed report and the verdict. A body that is not an object
 /// gets no receipt and is never accepted.
 #[must_use]
-pub(crate) fn seal(mut body: Value, key: &SecretKey) -> (Value, bool) {
+pub(crate) fn seal(mut body: Value, key: &SecretKey, key_id: i64) -> (Value, bool) {
     let accepted = acceptance(&body);
     let Some(object) = body.as_object_mut() else {
         return (body, false);
@@ -176,12 +183,38 @@ pub(crate) fn seal(mut body: Value, key: &SecretKey) -> (Value, bool) {
     let receipt = json::json!({
         "alg": ALGORITHM,
         "key": lgwks_std::hex::encode(key.public_key().to_bytes()),
+        "kid": key_id,
         "signature": lgwks_std::hex::encode(signature.to_bytes()),
     });
     if let Some(sealed) = body.as_object_mut() {
         sealed.insert(RECEIPT.to_owned(), receipt);
     }
     (body, accepted)
+}
+
+/// The key id a sealed report names: what `seal` writes as `kid`, or 1 for a
+/// report sealed before key ids existed. Refuses a mistyped member rather than
+/// guessing which key sealed it.
+pub(crate) fn key_id_of(body: &Value) -> Result<i64, ReceiptError> {
+    let Some(receipt) = body.get(RECEIPT) else {
+        return Err(ReceiptError::MissingReceipt);
+    };
+    match receipt.get(KEY_ID) {
+        None => Ok(1),
+        Some(member) => member
+            .as_i64()
+            .filter(|id| *id >= 1)
+            .ok_or(ReceiptError::BadKeyId),
+    }
+}
+
+/// What a run seals under: the tenant's active receipt key id and secret.
+#[derive(Clone, Copy)]
+pub(crate) struct Seal<'seal> {
+    /// The key id the receipt names.
+    pub(crate) id: i64,
+    /// The secret that seals.
+    pub(crate) key: &'seal SecretKey,
 }
 
 /// Parses a public key from its 64 hex characters.

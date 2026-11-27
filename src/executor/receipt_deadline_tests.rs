@@ -70,7 +70,7 @@ fn a_forged_accepted_claim_beside_a_spent_deadline_is_inconsistent() -> TestResu
         DEADLINE_PASSED,
         json::json!({"deadline_ms": 1_500}),
     )?;
-    let (sealed, accepted) = seal(spent, &signer);
+    let (sealed, accepted) = seal(spent, &signer, 1);
     assert!(
         !accepted,
         "a report whose deadline spent is never accepted, even over a passing command"
