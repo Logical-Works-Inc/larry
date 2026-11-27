@@ -17,15 +17,16 @@ use super::{ExecError, Ledger, digest_hex, identity, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
-/// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
-
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RouteCliError {
-    /// The arguments are not a `larry route` command.
-    #[error("route: {0}; {}", USAGE)]
+    /// The arguments are not a `larry route` command. The synopsis lives in
+    /// this one message (larry#543): the derive renders tuple placeholders
+    /// onto its extra arguments, so a `{USAGE}` tail would print twice.
+    #[error(
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+    )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
     #[error("route: every argument must be UTF-8 text")]
