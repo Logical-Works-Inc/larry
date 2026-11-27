@@ -18,7 +18,7 @@ use super::{
     file_text, fitting_context, prefix_label, reply_file, shared_context, system_line, user_turn,
 };
 use crate::executor::{ExecError, TaskError};
-use crate::model::{Message, ModelClient, ModelError, Role, sim_config};
+use crate::model::{Draft, Kind, Message, ModelClient, ModelError, Role, Route, sim_config};
 use crate::sim_error::SimError;
 
 /// What every test returns.
@@ -30,6 +30,21 @@ const SEEDS: u64 = 64;
 /// The seeds the prompt-prefix simulations run (larry#230).
 const CACHE_SEEDS: u64 = 256;
 
+/// A route the prompt-prefix simulations share: an OpenAI chat route, so the
+/// system line is the standing instruction and the partition.
+fn openai_route() -> Result<Route, crate::model::RouteError> {
+    Route::new(&Draft {
+        id: "sim",
+        kind: Kind::OpenAiChat,
+        base_url: "http://127.0.0.1:9/v1",
+        model: "sim-model",
+        key_env: "LARRY_KEY_SIM",
+        temperature: None,
+        request_bytes: None,
+        residency: None,
+        describe: "a route the simulation never sends on",
+    })
+}
 /// The document `{goal, files}` as a map.
 fn document(goal: &Value, files: &Value) -> Map {
     let mut map = Map::new();
@@ -413,7 +428,8 @@ fn sim_two_tenants_never_share_a_prompt_prefix() -> TestResult {
         };
         let first = hex_partition(&mut rng, lead)?;
         let second = hex_partition(&mut rng, other)?;
-        let (one, two) = (system_line(&first), system_line(&second));
+        let route = openai_route()?;
+        let (one, two) = (system_line(&route, &first), system_line(&route, &second));
         assert_ne!(one, two, "seed {seed}: two tenants, two system lines");
         let (head_one, head_two) = (one.strip_prefix(SYSTEM), two.strip_prefix(SYSTEM));
         assert_eq!(
@@ -430,7 +446,7 @@ fn sim_two_tenants_never_share_a_prompt_prefix() -> TestResult {
             "seed {seed}: the second begins with the instruction"
         );
         assert_eq!(
-            system_line(&first),
+            system_line(&route, &first),
             one,
             "seed {seed}: one partition twice is identical"
         );
@@ -555,10 +571,11 @@ fn sim_a_context_past_the_request_bound_falls_back_to_one_file() -> TestResult {
     let default_route = bounded_client(None)?;
     let wide_route = bounded_client(Some(16_777_216))?;
     let narrow_route = bounded_client(Some(1024))?;
+    let template_route = openai_route()?;
     let paths = ["a/escaped.txt", "b/plain.txt"];
     for seed in 0..SEEDS {
         let mut rng = Seeded::from_seed(seed);
-        let system = system_line(&format!("{seed:064x}"));
+        let system = system_line(&template_route, &format!("{seed:064x}"));
         let count = usize::try_from(rng.below(80_001)?.saturating_add(180_000))?;
         let escaped = "\u{1}".repeat(count);
         let views = [
@@ -623,12 +640,15 @@ fn sim_an_empty_reply_is_never_written_as_the_file() -> TestResult {
         let pad = " \t\n".repeat(usize::try_from(rng.below(4)?)?);
         for empty in [String::new(), pad.clone(), format!("```\n{pad}```")] {
             assert!(
-                matches!(reply_file(&empty), Err(AuthorFault::EmptyReply)),
+                matches!(
+                    reply_file(Kind::OpenAiChat, &empty),
+                    Err(AuthorFault::EmptyReply)
+                ),
                 "seed {seed}: {empty:?} is refused"
             );
         }
         assert_eq!(
-            reply_file(&format!("{pad}x"))?,
+            reply_file(Kind::OpenAiChat, &format!("{pad}x"))?,
             format!("{pad}x\n"),
             "seed {seed}: one visible character is a file"
         );

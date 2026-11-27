@@ -252,13 +252,6 @@ fn add(
         Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
         None => Kind::OpenAiChat,
     };
-    // Until PR #534's adapters land the wire speaks OpenAI chat only, so any
-    // other kind is refused before the store opens and nothing is stored (larry#539).
-    if !kind.is_served() {
-        return Err(RouteCliError::Route(RouteError::KindNotServed {
-            kind: kind.name().to_owned(),
-        }));
-    }
     let route = Route::new(&Draft {
         id,
         kind,

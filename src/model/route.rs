@@ -232,7 +232,7 @@ impl std::error::Error for RouteError {
 
 /// What speaks at the other end of a route. One variant per provider kind
 /// (larry#205, larry#539); the client's wire adapter for a new kind plugs in
-/// at the call site.
+/// at the call site. Every named kind is served (larry#546).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Kind {
@@ -254,12 +254,6 @@ impl Kind {
         }
     }
 
-    /// Whether the wire in this build speaks this kind: OpenAI chat only until
-    /// PR #534's adapters land (larry#539).
-    pub(crate) const fn is_served(self) -> bool {
-        matches!(self, Self::OpenAiChat)
-    }
-
     /// The kind a stored name means, `None` for a name no kind has.
     pub(crate) fn parse(name: &str) -> Option<Kind> {
         match name {
@@ -267,6 +261,25 @@ impl Kind {
             "anthropic-messages" => Some(Self::AnthropicMessages),
             "openai-responses" => Some(Self::OpenAiResponses),
             _ => None,
+        }
+    }
+
+    /// Whether the kind's file replies are structured JSON (`{"content": ...}`)
+    /// rather than bare text: the Responses and Messages APIs answer in their
+    /// own envelopes, so the brief asks for the file inside one object.
+    pub(crate) const fn structured(self) -> bool {
+        match self {
+            Self::OpenAiChat => false,
+            Self::AnthropicMessages | Self::OpenAiResponses => true,
+        }
+    }
+
+    /// The request path the kind speaks, appended to the route's base URL.
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::OpenAiChat => "/chat/completions",
+            Self::AnthropicMessages => "/messages",
+            Self::OpenAiResponses => "/responses",
         }
     }
 }
@@ -540,35 +553,18 @@ pub(crate) fn resolve(
 ) -> Result<Route, RouteError> {
     let Some(route) = table.lookup(named) else {
         return match (named, environment) {
-            (Some(id), Some(route)) if id == ENV_ROUTE => served(route),
+            (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
             (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
-            (None, Some(route)) => served(route),
+            (None, Some(route)) => Ok(route),
             (None, None) => Err(RouteError::NoRoute),
         };
     };
-    if !route.kind().is_served() {
-        return Err(RouteError::KindNotServed {
-            kind: route.kind().name().to_owned(),
-        });
-    }
     if let Some(refusal) = route.transport_refusal() {
         return Err(refusal);
     }
     match route.key_env_refusal(tenant) {
         None => Ok(route.clone()),
         Some(refusal) => Err(refusal),
-    }
-}
-
-/// The environment route a task falls back to, refused when its kind has no
-/// adapter in this build (larry#539).
-fn served(route: Route) -> Result<Route, RouteError> {
-    if route.kind().is_served() {
-        Ok(route)
-    } else {
-        Err(RouteError::KindNotServed {
-            kind: route.kind().name().to_owned(),
-        })
     }
 }
 

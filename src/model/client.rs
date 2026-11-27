@@ -7,12 +7,16 @@ use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::http::{self, BodyPolicy, Error as HttpError, FailureKind, Options, RedirectPolicy};
 
 use super::config::ModelConfig;
+use super::route::Kind;
 use super::wire;
 use super::{Completion, MAX_MESSAGES, MAX_REPLY_BYTES, Message, ModelError};
 
 /// The `User-Agent` every request names itself with (larry#230): a gateway that
 /// meters or routes by client sees Larry and its version, not the HTTP library's.
 const USER_AGENT: &str = concat!("larry/", env!("CARGO_PKG_VERSION"));
+/// The Anthropic API version every Messages request names (larry#205): the API
+/// refuses a request without one.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// One encoded completion request: its body and how many messages it carries.
 /// Only [`ModelClient::encode`] builds one, and [`ModelClient::send`] checks its
@@ -110,7 +114,12 @@ impl ModelClient {
     /// bytes it would send and then sends exactly those (larry#235).
     pub(crate) fn encode(&self, messages: &[Message]) -> Request {
         Request {
-            body: wire::request_body(self.config.model(), self.config.temperature(), messages),
+            body: wire::request_body(
+                self.config.kind(),
+                self.config.model(),
+                self.config.temperature(),
+                messages,
+            ),
             messages: messages.len(),
         }
     }
@@ -182,7 +191,8 @@ impl ModelClient {
     fn attempt(&self, body: &[u8]) -> Result<Completion, ModelError> {
         // `timeout` bounds each phase; `deadline` bounds the whole exchange, so a
         // gateway trickling bytes cannot hold one attempt past the configured bound.
-        let options = Options::default()
+        let kind = self.config.kind();
+        let mut options = Options::default()
             .timeout(self.config.timeout())
             .deadline(self.config.timeout())
             .max_body_bytes(MAX_REPLY_BYTES)
@@ -192,9 +202,18 @@ impl ModelClient {
             .redirect_policy(RedirectPolicy::NoFollow)
             // `Options` already sends a `User-Agent` of its own; the setter replaces it,
             // where a `header` would add a second one.
-            .user_agent(USER_AGENT)
-            .header("Authorization", format!("Bearer {}", self.config.api_key()));
-        let url = format!("{}/chat/completions", self.config.base_url());
+            .user_agent(USER_AGENT);
+        match kind {
+            Kind::OpenAiChat | Kind::OpenAiResponses => {
+                options =
+                    options.header("Authorization", format!("Bearer {}", self.config.api_key()));
+            }
+            Kind::AnthropicMessages => {
+                options = options.header("x-api-key", self.config.api_key().to_owned());
+                options = options.header("anthropic-version", ANTHROPIC_VERSION);
+            }
+        }
+        let url = format!("{}{}", self.config.base_url(), kind.path());
         let response =
             http::post_with(&url, "application/json", body, &options).map_err(map_transport)?;
         if !(200..300).contains(&response.status()) {
@@ -209,7 +228,7 @@ impl ModelClient {
                 response.body(),
             ));
         }
-        wire::parse_completion(response.body())
+        wire::parse_completion(kind, response.body())
     }
 }
 
