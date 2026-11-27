@@ -344,6 +344,12 @@ fn run_session_prepared(
             }
         };
         let client = ModelClient::new(config, clock, backoff);
+        // The route's template rides before the standing instruction, so a
+        // tenant's session prompts carry its route's words (larry#205).
+        let system = match route.prompt() {
+            Some(template) => format!("{template}\n{SYSTEM}"),
+            None => String::from(SYSTEM),
+        };
         let mut turn = Turn {
             client: &client,
             settings,
@@ -359,6 +365,7 @@ fn run_session_prepared(
                 Some(_) => String::from("."),
                 None => cwd.display().to_string(),
             },
+            system,
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
@@ -491,6 +498,8 @@ struct Turn<'a> {
     place: Place<'a>,
     /// The directory the model is told it works in.
     shown: String,
+    /// The system turn: the route's template when it names one, then the standing instruction.
+    system: String,
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
 }
@@ -501,7 +510,7 @@ impl Turn<'_> {
     /// or interrupted.
     fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
         let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
-        let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
+        let mut conversation = Conversation::new(&self.system, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut usage = Vec::new();
         let mut refused = 0_usize;

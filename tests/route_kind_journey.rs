@@ -1,13 +1,12 @@
-//! Refusals of route kinds the wire does not serve yet (larry#539): until the
-//! per-kind adapters of PR #534 land, the wire speaks OpenAI chat only, so
-//! `route add` of any other kind is refused typed with nothing stored, and
-//! `route resolve` of a stored row of such a kind is refused the same way.
+//! Every named route kind is served by its wire adapter (larry#205,
+//! larry#546): `route add` of any named kind stores it, and `route resolve`
+//! of a stored row of such a kind resolves it. An unknown kind is still
+//! refused before anything is stored.
 //!
-//! Source: the Director's SD-1 half-built rule; a user's first call must never
-//! go out in the wrong shape. Requirement proved: each unserved kind's add
-//! exits 1 with the exact no-adapter line and leaves an empty list, and a
-//! stored row rewritten to an unserved kind resolves to the same line.
-//! Every run drives the shipped binary with a cleared environment.
+//! Source: ADR 0126 (the no-adapter refusal PR #534's remainder deletes).
+//! Requirement proved: each named kind's add succeeds and resolves to a seal
+//! naming the kind. Every run drives the shipped binary with a cleared
+//! environment.
 
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
@@ -21,7 +20,6 @@ use std::path::Path;
 use std::process::Output;
 
 use larry_cli::{spawn_larry_args, stderr_of};
-use lgwks_deps::storefront::rusqlite::Connection;
 use temp_dir::TempDir;
 
 /// What every journey returns.
@@ -35,15 +33,14 @@ fn larry_route(state: &Path, args: &[&str]) -> Result<Output, Box<dyn Error>> {
     Ok(spawn_larry_args(full.as_slice(), &env, &[])?.wait_with_output()?)
 }
 
-/// Until the per-kind wire adapters land, the wire speaks OpenAI chat only:
-/// adding any other kind exits 1 with the exact no-adapter line and stores
-/// nothing, and resolving a stored row of such a kind exits 1 the same way.
+/// Every named kind is served: adding it stores it, and resolving it seals
+/// its name. An unknown kind is refused before anything is stored.
 #[test]
-fn an_unserved_kind_is_refused_before_anything_is_stored() -> TestResult {
-    for kind in ["anthropic-messages", "openai-responses"] {
+fn every_named_kind_is_served_and_seals_its_name() -> TestResult {
+    for kind in ["openai-chat", "anthropic-messages", "openai-responses"] {
         let state = TempDir::new()?;
         let key_env = route_key::key_env(state.path(), "KIND")?;
-        let refused = larry_route(
+        let added = larry_route(
             state.path(),
             &[
                 "add",
@@ -58,33 +55,33 @@ fn an_unserved_kind_is_refused_before_anything_is_stored() -> TestResult {
                 "CA",
                 "--kind",
                 kind,
+                "--default",
             ],
         )?;
-        assert_eq!(
-            refused.status.code(),
-            Some(1),
-            "{kind} is refused: {}",
-            stderr_of(&refused)
-        );
-        let line = format!("route kind {kind} has no adapter in this build");
         assert!(
-            stderr_of(&refused).lines().any(|text| text.trim() == line),
-            "{kind}: the refusal is the exact line: {}",
-            stderr_of(&refused)
+            added.status.success(),
+            "{kind} is served: {}",
+            stderr_of(&added)
         );
-        let stored = larry_route(state.path(), &["list"])?;
+        let resolved = larry_route(state.path(), &["resolve"])?;
         assert!(
-            stored.stdout.is_empty(),
-            "{kind}: no refused route was stored"
+            resolved.status.success(),
+            "{kind} resolves: {}",
+            stderr_of(&resolved)
+        );
+        let seal = String::from_utf8_lossy(&resolved.stdout);
+        assert!(
+            seal.contains(&format!("\"kind\":\"{kind}\"")),
+            "{kind} seals with its name: {seal}"
         );
     }
     let state = TempDir::new()?;
     let key_env = route_key::key_env(state.path(), "KIND")?;
-    let added = larry_route(
+    let refused = larry_route(
         state.path(),
         &[
             "add",
-            "main",
+            "bogus",
             "--url",
             "https://gateway.test:8443/v1",
             "--model",
@@ -93,29 +90,22 @@ fn an_unserved_kind_is_refused_before_anything_is_stored() -> TestResult {
             &key_env,
             "--residency",
             "CA",
-            "--default",
+            "--kind",
+            "bogus-kind",
         ],
     )?;
-    assert!(
-        added.status.success(),
-        "openai-chat stores: {}",
-        stderr_of(&added)
-    );
-    Connection::open(state.path().join("executor.db"))?
-        .execute("UPDATE routes SET kind = 'anthropic-messages'", [])?;
-    let resolved = larry_route(state.path(), &["resolve"])?;
     assert_eq!(
-        resolved.status.code(),
+        refused.status.code(),
         Some(1),
-        "a stored unserved kind is refused: {}",
-        stderr_of(&resolved)
+        "an unknown kind is refused: {}",
+        stderr_of(&refused)
     );
     assert!(
-        stderr_of(&resolved)
-            .lines()
-            .any(|text| text.trim() == "route kind anthropic-messages has no adapter in this build"),
-        "the stored refusal is the exact line: {}",
-        stderr_of(&resolved)
+        stderr_of(&refused).contains("route kind must be one of"),
+        "the refusal names the kind: {}",
+        stderr_of(&refused)
     );
+    let stored = larry_route(state.path(), &["list"])?;
+    assert!(stored.stdout.is_empty(), "no refused route was stored");
     Ok(())
 }

@@ -5,24 +5,86 @@
 //! Ported from forge-harness `completion_body.rs` (tolerant reply framing) and
 //! the body and reply handling of `openai_compatible.rs`.
 
-use lgwks_std::json::{self, Value, json};
+use lgwks_std::json::{self, Map, Value, json};
 
+use super::route::Kind;
 use super::{Completion, Message, ModelError, Usage};
 
-/// Serialize a non-streaming request. Every request names the pinned model and
-/// the temperature; `stream` is never sent. A `Value` always renders, so this
-/// cannot fail; the temperature is finite by construction of the config.
-pub(super) fn request_body(model: &str, temperature: f64, messages: &[Message]) -> Vec<u8> {
+/// The `max_tokens` an Anthropic Messages request carries: the API refuses a
+/// request without one, and the per-route context bound stays `request_bytes`,
+/// which the client enforces before any byte is sent (larry#205).
+const ADAPTER_MAX_TOKENS: u32 = 8192;
+
+/// Serialize a non-streaming request for `kind`. Every shape names the pinned
+/// model; `stream` is never sent. A `Value` always renders, so this cannot
+/// fail. The temperature rides along only when the route pins one: a model
+/// that rejects the field answers with a 4xx, which is terminal (larry#205).
+pub(super) fn request_body(
+    kind: Kind,
+    model: &str,
+    temperature: Option<f64>,
+    messages: &[Message],
+) -> Vec<u8> {
+    match kind {
+        Kind::OpenAiChat => openai_body(model, temperature, messages),
+        Kind::AnthropicMessages => anthropic_body(model, temperature, messages),
+        Kind::OpenAiResponses => responses_body(model, temperature, messages),
+    }
+}
+
+/// The members every request body carries: the pinned model, and the
+/// temperature only when the route pins it.
+fn body_base(model: &str, temperature: Option<f64>) -> Map {
+    let mut object = Map::new();
+    object.insert(String::from("model"), json!(model));
+    if let Some(degrees) = temperature {
+        object.insert(String::from("temperature"), json!(degrees));
+    }
+    object
+}
+
+/// The OpenAI chat-completions shape: model, messages and the temperature when pinned.
+fn openai_body(model: &str, temperature: Option<f64>, messages: &[Message]) -> Vec<u8> {
     let turns: Vec<Value> = messages
         .iter()
         .map(|turn| json!({ "role": turn.role.as_str(), "content": turn.content }))
         .collect();
-    let body = json!({
-        "model": model,
-        "temperature": temperature,
-        "messages": turns,
-    });
-    body.to_string().into_bytes()
+    let mut object = body_base(model, temperature);
+    object.insert(String::from("messages"), Value::Array(turns));
+    Value::Object(object).to_string().into_bytes()
+}
+
+/// The Anthropic Messages shape: system turns ride as `system`, the rest as
+/// `messages`, and `max_tokens` is always present because the API requires it.
+fn anthropic_body(model: &str, temperature: Option<f64>, messages: &[Message]) -> Vec<u8> {
+    let mut system: Vec<&str> = Vec::new();
+    let mut turns: Vec<Value> = Vec::new();
+    for turn in messages {
+        if turn.role == super::Role::System {
+            system.push(turn.content.as_str());
+        } else {
+            turns.push(json!({ "role": turn.role.as_str(), "content": turn.content }));
+        }
+    }
+    let mut object = body_base(model, temperature);
+    object.insert(String::from("max_tokens"), json!(ADAPTER_MAX_TOKENS));
+    object.insert(String::from("messages"), Value::Array(turns));
+    if !system.is_empty() {
+        object.insert(String::from("system"), json!(system.join("\n\n")));
+    }
+    Value::Object(object).to_string().into_bytes()
+}
+
+/// The OpenAI Responses shape: the turns ride as `input`, with the same roles
+/// the chat shape uses.
+fn responses_body(model: &str, temperature: Option<f64>, messages: &[Message]) -> Vec<u8> {
+    let turns: Vec<Value> = messages
+        .iter()
+        .map(|turn| json!({ "role": turn.role.as_str(), "content": turn.content }))
+        .collect();
+    let mut object = body_base(model, temperature);
+    object.insert(String::from("input"), Value::Array(turns));
+    Value::Object(object).to_string().into_bytes()
 }
 
 /// `finish_reason` values that say the model ended its reply itself, compared ignoring ASCII
@@ -32,13 +94,24 @@ pub(super) fn request_body(model: &str, temperature: f64, messages: &[Message]) 
 /// model did not finish, so the list is closed and anything past it is refused (larry#396).
 const FINISHED: [&str; 3] = ["stop", "end_turn", "stop_sequence"];
 
-/// Read one successful reply body into its completion. The body may be a bare
-/// JSON document, a document followed by `data: [DONE]`, or an SSE chunk stream;
-/// all three reduce to the same document (see [`leading_document`]). A reply the
-/// model did not finish is refused before its content is read, so a filtered reply
-/// with no content is named by its reason (larry#396).
-pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
+/// Read one successful reply body of `kind` into its completion. The
+/// OpenAI chat shape may be a bare JSON document, a document followed by
+/// `data: [DONE]`, or an SSE chunk stream; all three reduce to the same
+/// document (see [`leading_document`]). The Anthropic and Responses shapes are
+/// bare documents only. A reply the model did not finish is refused before its
+/// content is read, so a filtered reply with no content is named by its reason
+/// (larry#396).
+pub(super) fn parse_completion(kind: Kind, body: &[u8]) -> Result<Completion, ModelError> {
     let text = std::str::from_utf8(body).map_err(ModelError::NotUtf8)?;
+    match kind {
+        Kind::OpenAiChat => parse_chat(text),
+        Kind::AnthropicMessages => parse_anthropic(text),
+        Kind::OpenAiResponses => parse_responses(text),
+    }
+}
+
+/// One OpenAI chat-completions reply.
+fn parse_chat(text: &str) -> Result<Completion, ModelError> {
     let document = leading_document(text)?;
     finished(&document)?;
     let content = document
@@ -52,6 +125,102 @@ pub(super) fn parse_completion(body: &[u8]) -> Result<Completion, ModelError> {
         content: content.to_owned(),
         usage: usage_of(&document),
     })
+}
+
+/// One Anthropic Messages reply: the `text` blocks joined, refused unless
+/// `stop_reason` says the model ended its turn, with the input/output counts.
+fn parse_anthropic(text: &str) -> Result<Completion, ModelError> {
+    let document = json::from_str::<Value>(text.trim()).map_err(|cause| ModelError::NotJson {
+        column: cause.column(),
+    })?;
+    let reason = document
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .ok_or(ModelError::Malformed("the reply has no stop reason"))?;
+    if !matches!(reason, "end_turn" | "stop_sequence") {
+        return Err(ModelError::Unfinished {
+            reason: bounded(reason, MAX_CODE_CHARS),
+        });
+    }
+    let blocks = document
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or(ModelError::Malformed("the reply has no message content"))?;
+    let mut content = String::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            content.push_str(
+                block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or(ModelError::Malformed("the reply has no message content"))?,
+            );
+        }
+    }
+    Ok(Completion {
+        content,
+        usage: anthropic_usage(&document),
+    })
+}
+
+/// One OpenAI Responses reply: the `output_text` of its message outputs
+/// joined, refused unless `status` is `completed`, with the input/output counts.
+fn parse_responses(text: &str) -> Result<Completion, ModelError> {
+    let document = json::from_str::<Value>(text.trim()).map_err(|cause| ModelError::NotJson {
+        column: cause.column(),
+    })?;
+    let status = document
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or(ModelError::Malformed("the reply has no status"))?;
+    if status != "completed" {
+        return Err(ModelError::Unfinished {
+            reason: bounded(status, MAX_CODE_CHARS),
+        });
+    }
+    let outputs = document
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or(ModelError::Malformed("the reply has no message content"))?;
+    let mut content = String::new();
+    for output in outputs {
+        if output.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let parts = output
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or(ModelError::Malformed("the reply has no message content"))?;
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) == Some("output_text") {
+                content.push_str(
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .ok_or(ModelError::Malformed("the reply has no message content"))?,
+                );
+            }
+        }
+    }
+    Ok(Completion {
+        content,
+        usage: responses_usage(&document),
+    })
+}
+
+/// The file text a structured reply carries: the `content` string of the one
+/// JSON object the kind's brief asks for. A reply that is not that object is
+/// refused, never written (larry#205).
+pub(crate) fn structured_content(text: &str) -> Result<String, ModelError> {
+    let document = json::from_str::<Value>(text.trim()).map_err(|cause| ModelError::NotJson {
+        column: cause.column(),
+    })?;
+    document
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or(ModelError::Malformed(
+            "the reply is not a JSON object with a content string",
+        ))
 }
 
 /// Refuses a reply whose first choice says the model did not finish it. A missing or `null`
@@ -90,18 +259,61 @@ fn finished(document: &Value) -> Result<(), ModelError> {
 /// dropped, so a cost is never built on them.
 fn usage_of(document: &Value) -> Option<Usage> {
     let usage = &document["usage"];
-    let prompt_tokens = usage["prompt_tokens"].as_u64()?;
-    let completion_tokens = usage["completion_tokens"].as_u64()?;
     let details = &usage["prompt_tokens_details"];
-    let cached = first_count(&[
-        &details["cached_tokens"],
-        &usage["prompt_cache_hit_tokens"],
-        &usage["cache_read_input_tokens"],
-    ]);
-    let written = first_count(&[
-        &details["cache_write_tokens"],
-        &usage["cache_creation_input_tokens"],
-    ]);
+    counts(
+        usage["prompt_tokens"].as_u64(),
+        usage["completion_tokens"].as_u64(),
+        first_count(&[
+            &details["cached_tokens"],
+            &usage["prompt_cache_hit_tokens"],
+            &usage["cache_read_input_tokens"],
+        ]),
+        first_count(&[
+            &details["cache_write_tokens"],
+            &usage["cache_creation_input_tokens"],
+        ]),
+    )
+}
+
+/// The Anthropic `usage` block: `input_tokens` and `output_tokens`, with the
+/// prompt-caching counts when reported.
+fn anthropic_usage(document: &Value) -> Option<Usage> {
+    let usage = &document["usage"];
+    counts(
+        usage["input_tokens"].as_u64(),
+        usage["output_tokens"].as_u64(),
+        first_count(&[&usage["cache_read_input_tokens"]]),
+        first_count(&[&usage["cache_creation_input_tokens"]]),
+    )
+}
+
+/// The Responses `usage` block: `input_tokens` and `output_tokens`, with the
+/// cached input tokens when reported.
+fn responses_usage(document: &Value) -> Option<Usage> {
+    let usage = &document["usage"];
+    let details = &usage["input_tokens_details"];
+    counts(
+        usage["input_tokens"].as_u64(),
+        usage["output_tokens"].as_u64(),
+        first_count(&[&details["cached_tokens"]]),
+        None,
+    )
+}
+
+/// The `Usage` for these counts, or `None` when a count is missing. A gateway
+/// that reports one count, a negative or a fraction reported nothing a cost can
+/// be built on, so nothing is invented (larry#87). Counts that together exceed
+/// the prompt are an impossible report and are dropped, so a cost is never
+/// built on them.
+fn counts(
+    prompt: Option<u64>,
+    completion: Option<u64>,
+    cached: Option<u64>,
+    written: Option<u64>,
+) -> Option<Usage> {
+    let (Some(prompt_tokens), Some(completion_tokens)) = (prompt, completion) else {
+        return None;
+    };
     let together = cached
         .into_iter()
         .chain(written)
@@ -204,6 +416,11 @@ fn without_done_marker(text: &str) -> &str {
 #[cfg(test)]
 #[path = "sim_wire.rs"]
 mod sim;
+
+/// Seeded simulations of the per-kind adapters (larry#205).
+#[cfg(test)]
+#[path = "sim_adapter.rs"]
+mod adapter;
 
 /// Most characters of a gateway's own refusal message an error carries.
 const MAX_DETAIL_CHARS: usize = 512;

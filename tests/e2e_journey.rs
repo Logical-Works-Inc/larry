@@ -22,6 +22,8 @@ mod ps;
 mod pty;
 #[path = "support/terminal_cases.rs"]
 mod terminal_cases;
+#[path = "support/tui_queue.rs"]
+mod tui_queue;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
