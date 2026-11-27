@@ -14,7 +14,7 @@
 //! swapped in behind this trait without the reducer, the journal or the
 //! effect lifecycle noticing, because none of them reference the world.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use larry_contracts::effect::{
     EffectIntent, EffectOutcome, TerminalDisposition, TerminalReceipt, terminal_disposition,
@@ -103,6 +103,9 @@ pub trait ProjectionBackend {
     /// Where `operation` stands.
     fn effect_phase(&self, operation: OperationId) -> Option<EffectPhase>;
 
+    /// The run that recorded `operation`, if the journal has an intent for it.
+    fn effect_run(&self, operation: OperationId) -> Option<RunId>;
+
     /// How many dispatches the journal records for `operation`, or the whole
     /// budget when a record cannot prove a lower count (larry#182).
     ///
@@ -117,6 +120,9 @@ pub trait ProjectionBackend {
 
     /// Every published terminal receipt, in publication order.
     fn receipts(&self) -> &[TerminalReceipt];
+
+    /// Whether the journal has published a receipt for `operation`.
+    fn has_receipt(&self, operation: OperationId) -> bool;
 
     /// Every recorded authorization, in decision order. Replaying this slice
     /// through `replay::replay_log` re-derives each decision from its own
@@ -216,8 +222,12 @@ impl RunView {
 pub struct FoldProjection {
     /// Run views keyed in deterministic identity order.
     runs: BTreeMap<RunId, RunView>,
+    /// The operation-to-run witness used by the tick's hot effect lookups.
+    operation_runs: BTreeMap<OperationId, RunId>,
     /// Terminal receipts in recorded order.
     receipts: Vec<TerminalReceipt>,
+    /// Receipt identities for constant-size hot duplicate checks.
+    receipt_operations: BTreeSet<OperationId>,
     /// Pinned decisions in recorded order.
     authorizations: Vec<ReplayRecord>,
     /// Recorded spend per tenant, in deterministic tenant order (larry#208).
@@ -242,7 +252,9 @@ impl FoldProjection {
     pub fn new(capacity: usize) -> Self {
         Self {
             runs: BTreeMap::new(),
+            operation_runs: BTreeMap::new(),
             receipts: Vec::new(),
+            receipt_operations: BTreeSet::new(),
             authorizations: Vec::new(),
             reserved: BTreeMap::new(),
             intents: Vec::new(),
@@ -301,8 +313,12 @@ impl FoldProjection {
     fn fold_intent(&mut self, event: &Event) -> Result<(), RuntimeError> {
         let payload: IntentPayload = lgwks_std::json::from_slice(event.payload())?;
         let operation = payload.intent.operation;
+        if self.operation_runs.contains_key(&operation) {
+            return Err(RuntimeError::DuplicateOperation { operation });
+        }
         let view = self.entry(event.run(), event)?;
         view.effects.insert(operation, EffectPhase::Reserved);
+        self.operation_runs.insert(operation, event.run());
         // The cost is charged to the tenant the recorded event named, never to
         // the tenant the intent declared (D42, larry#208).
         let spent = self.reserved.entry(event.tenant()).or_insert(0);
@@ -336,6 +352,9 @@ impl FoldProjection {
     fn fold_receipt(&mut self, event: &Event) -> Result<(), RuntimeError> {
         let payload: ReceiptPayload = lgwks_std::json::from_slice(event.payload())?;
         let operation = payload.receipt.operation();
+        if !self.receipt_operations.insert(operation) {
+            return Err(RuntimeError::ReceiptAlreadyPublished { operation });
+        }
         let view = self.entry(payload.receipt.run(), event)?;
         view.effects.insert(
             operation,
@@ -393,7 +412,9 @@ impl ProjectionBackend for FoldProjection {
 
     fn rebuild(&mut self, journal: &Journal) -> Result<(), RuntimeError> {
         self.runs.clear();
+        self.operation_runs.clear();
         self.receipts.clear();
+        self.receipt_operations.clear();
         self.authorizations.clear();
         self.reserved.clear();
         self.intents.clear();
@@ -431,17 +452,22 @@ impl ProjectionBackend for FoldProjection {
     }
 
     fn effect_phase(&self, operation: OperationId) -> Option<EffectPhase> {
-        self.runs
-            .values()
-            .find_map(|view| view.effects.get(&operation).copied())
+        self.operation_runs
+            .get(&operation)
+            .and_then(|run| self.runs.get(run))
+            .and_then(|view| view.effects.get(&operation).copied())
+    }
+
+    fn effect_run(&self, operation: OperationId) -> Option<RunId> {
+        self.operation_runs.get(&operation).copied()
     }
 
     fn dispatches(&self, operation: OperationId) -> u8 {
-        match self
-            .runs
-            .values()
-            .find_map(|view| view.dispatches(operation))
-        {
+        match self.effect_run(operation).and_then(|run| {
+            self.runs
+                .get(&run)
+                .and_then(|view| view.dispatches(operation))
+        }) {
             Some(spent) => spent,
             // The journal proves no dispatch, so it cannot prove fewer than the
             // whole budget was spent (larry#182): fail closed, never recharge.
@@ -459,6 +485,10 @@ impl ProjectionBackend for FoldProjection {
 
     fn receipts(&self) -> &[TerminalReceipt] {
         &self.receipts
+    }
+
+    fn has_receipt(&self, operation: OperationId) -> bool {
+        self.receipt_operations.contains(&operation)
     }
 
     fn authorizations(&self) -> &[ReplayRecord] {
