@@ -46,15 +46,6 @@ const OWNER_ONLY: u32 = 0o600;
 /// before, and the tree and `ws/<task>/` followed the process umask (larry#211).
 const OWNER_DIR: u32 = 0o700;
 
-/// Schema of the route table, version 5 (larry#201): the routes a tenant owns, at
-/// most 256 each, with one default per tenant. A route holds the NAME of the
-/// variable its key is read from, never the key. `temperature` and `residency`
-/// are NULL when the route pins none.
-const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant TEXT NOT NULL, id TEXT NOT NULL, \
-    kind TEXT NOT NULL, base_url TEXT NOT NULL, key_env TEXT NOT NULL, model TEXT NOT NULL, \
-    temperature REAL, request_bytes INTEGER NOT NULL, residency TEXT, describe TEXT NOT NULL, \
-    is_default INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tenant, id));";
-
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
 
@@ -99,17 +90,22 @@ impl Ledger {
             .open(&database)
             .map_err(ExecError::KeyStore)?;
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
+        // The steps are positional: the migrator runs the statements past the
+        // file's version in order, so a shipped step never moves. Main's price
+        // step claimed 8 first (larry#204); the tenant step appends as 9
+        // (larry#211).
         lgwks_deps::sqlite::migrate(
             &conn,
-            8,
+            9,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
                 TENANT_KEY_SCHEMA,
                 REPORT_SCHEMA,
-                ROUTE_SCHEMA,
+                routes::ROUTE_SCHEMA,
                 policy::POLICY_SCHEMA,
                 policy::REPO_ROOT_SCHEMA,
+                routes::PRICE_SCHEMA,
                 tenant::STEP_EIGHT,
             ],
         )
