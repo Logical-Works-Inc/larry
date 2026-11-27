@@ -7,33 +7,16 @@ mod temp_dir;
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/route_spawn.rs"]
+mod route_spawn;
+use route_spawn::{larry_route, stderr_of};
 
 use std::error::Error;
-use std::path::Path;
-use std::process::{Command, Output};
 
 use lgwks_deps::storefront::rusqlite::Connection;
 use temp_dir::TempDir;
 
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// The child's stderr as text.
-fn stderr_of(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-/// Runs `larry route` with a cleared environment and one state directory.
-fn larry_route(state: &Path, args: &[&str]) -> Result<Output, Box<dyn Error>> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
-    command
-        .arg("route")
-        .args(args)
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .env("LARRY_STATE_DIR", state);
-    coverage::forward(&mut command);
-    Ok(command.output()?)
-}
 
 /// A route written before the transport rule remains inspectable and removable,
 /// but resolution refuses it before any key read or network attempt.
