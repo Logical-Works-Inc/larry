@@ -44,7 +44,7 @@ use super::observation::redact_observation;
 use super::prepare;
 use super::run::{CommandResult, Place, run_command};
 use super::workspace::report_members;
-use crate::model::{Completion, ModelClient};
+use crate::model::{Completion, ModelClient, Usage};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
@@ -297,6 +297,22 @@ pub(crate) struct Ended {
     pub(crate) report: Report,
 }
 
+/// The `authored` usage array of a sealed session report: one entry per model
+/// completion, so `larry eval` prices a session task like a brief (larry#217).
+fn authored_usage(usage: &[Option<Usage>]) -> Vec<Value> {
+    usage
+        .iter()
+        .map(|spent| {
+            json!({
+                "prompt_tokens": spent.map(|value| value.prompt_tokens),
+                "completion_tokens": spent.map(|value| value.completion_tokens),
+                "cached_tokens": spent.and_then(|value| value.cached_tokens),
+                "cache_write_tokens": spent.and_then(|value| value.cache_write_tokens),
+            })
+        })
+        .collect()
+}
+
 /// The one denial line of a report the gate sealed without running anything.
 fn denial(report: &Report) -> String {
     let first = report
@@ -376,6 +392,7 @@ pub(crate) fn run_session(
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
+        let authored = authored_usage(&done.usage);
         let mut outcome = Outcome::None;
         let mut diff = None;
         if let Some(ref isle) = island
@@ -389,6 +406,7 @@ pub(crate) fn run_session(
             "task_digest": task_digest,
             "diff": null,
             "results": done.records,
+            "authored": authored,
             "denied": [],
             "session": {
                 "stop": done.stop.name(),
@@ -432,6 +450,8 @@ struct Steps {
     stop: Stop,
     /// Each command's record, in order.
     records: Vec<Value>,
+    /// Usage reported by each model completion, in order.
+    usage: Vec<Option<Usage>>,
     /// What compaction did.
     compaction: Value,
     /// Commands the person declined; none of them ran.
@@ -468,6 +488,7 @@ impl Turn<'_> {
         let task = session_prompt(instruction, &self.shown);
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
+        let mut usage = Vec::new();
         let mut refused = 0_usize;
         let mut declined = 0_usize;
         let mut interrupted = 0_usize;
@@ -479,6 +500,7 @@ impl Turn<'_> {
                 Ok(completion) => completion,
                 Err(stop) => break stop,
             };
+            usage.push(completion.usage());
             if self.observer.cancelled() {
                 break Stop::Cancelled;
             }
@@ -554,6 +576,7 @@ impl Turn<'_> {
         Ok(Steps {
             stop,
             records: steps,
+            usage,
             compaction: conversation.json(),
             declined,
             interrupted,

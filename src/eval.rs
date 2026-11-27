@@ -20,7 +20,10 @@ use std::time::Instant;
 
 use lgwks_macros::Error;
 
-use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
+use crate::executor::{
+    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, Settings, Stop,
+    Task, execute, run_command, run_session,
+};
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
 pub(crate) use score::parse_price;
@@ -28,7 +31,7 @@ pub(crate) use score::parse_price;
 pub(crate) use score::percentile;
 use score::{Ending, Outcome, Spent, card};
 pub use score::{PriceError, PriceFault, Prices, Scorecard};
-use set::{EvalTask, TaskSet};
+use set::{EvalPath, EvalTask, TaskSet};
 pub use set::{MAX_SET_BYTES, SetError};
 
 /// Why `larry eval` stopped without a scorecard.
@@ -276,49 +279,154 @@ fn finish_origin(origin: Origin, ran: Result<Outcome, EvalError>) -> Result<Outc
     ran
 }
 
-/// Runs `task` in its written `origin` and records how it ended.
-fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outcome, EvalError> {
-    let repo = origin
-        .dir
-        .to_str()
-        .ok_or_else(|| EvalError::StatePath(origin.dir.clone()))?;
-    let document: Task = task.task(repo).map_err(|cause| EvalError::Exec {
+/// An eval session approves every model command so the measured path is the same one Larry ships.
+struct EvalObserver;
+
+impl Observer for EvalObserver {
+    fn handed(&mut self, _line: &str, _applied: bool) {}
+
+    fn approve(&mut self, _step: usize, _command: &str) -> Approval {
+        Approval::Run
+    }
+
+    fn started(&mut self, _step: usize, _command: &str) {}
+
+    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
+
+    fn message(&mut self, _text: &str) {}
+
+    fn cancelled(&self) -> bool {
+        false
+    }
+}
+
+/// Runs the task's acceptance commands in the origin the session worked in, each as
+/// `sh -c` through the executor's command runner, the same way the command path runs
+/// them: the session is scored by the set's verifier, never by its own commands
+/// (larry#217).
+fn session_acceptance_passed(
+    origin: &Origin,
+    settings: &Settings,
+    task: &EvalTask,
+) -> Result<bool, EvalError> {
+    let ledger = Ledger::open(settings.state_dir()).map_err(|cause| EvalError::Exec {
         id: task.id.clone(),
-        cause: ExecError::Task(cause),
+        cause,
     })?;
-    let started = Instant::now();
-    let finished = execute(&document, settings);
-    let micros =
-        u64::try_from(started.elapsed().as_micros()).map_err(|cause| EvalError::Overlong {
+    let run = format!("{}-acceptance", task.id);
+    for command in &task.acceptance {
+        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let result = run_command(
+            &argv,
+            Place::Open(&origin.dir),
+            settings.path_env(),
+            settings.timeout(),
+            &ledger,
+            &run,
+            &|| false,
+        )
+        .map_err(|cause| EvalError::Exec {
             id: task.id.clone(),
             cause,
         })?;
-    let (ending, spent) = match finished {
+        if result.exit_code() != Some(0) || result.timed_out() || result.interrupted() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Runs the task's brief path and classifies its sealed report.
+fn command_outcome(
+    task: &EvalTask,
+    document: &Task,
+    settings: &Settings,
+) -> Result<(Ending, Option<Spent>), EvalError> {
+    match execute(document, settings) {
         Ok(report) => {
             let ending = if report.accepted() {
                 Ending::Accepted
             } else {
                 Ending::Rejected
             };
-            (ending, tokens(&report))
+            Ok((ending, tokens(&report)))
         }
-        // Only the gateway's refusal or the model's own empty reply is the arm's; a symlink or
-        // a write failure is the set's or the machine's, and stops the run below (larry#396).
         Err(
             error @ ExecError::Author {
                 fault: AuthorFault::Model(_) | AuthorFault::EmptyReply,
                 ..
             },
-        ) => (Ending::Refused(error.to_string()), None),
-        Err(cause) => {
-            return Err(EvalError::Exec {
-                id: task.id.clone(),
-                cause,
-            });
+        ) => Ok((Ending::Refused(error.to_string()), None)),
+        Err(cause) => Err(EvalError::Exec {
+            id: task.id.clone(),
+            cause,
+        }),
+    }
+}
+
+/// Runs the task's terminal session path, then its acceptance commands in the
+/// session's origin, and classifies the outcome by the set's verifier.
+fn session_outcome(
+    origin: &Origin,
+    settings: &Settings,
+    task: &EvalTask,
+) -> Result<(Ending, Option<Spent>), EvalError> {
+    let mut observer = EvalObserver;
+    match run_session(
+        &task.goal,
+        &origin.dir,
+        settings,
+        Isolation::Host,
+        &mut observer,
+    ) {
+        Ok(ended) => {
+            let ending = match ended.stop {
+                Stop::EndTurn if session_acceptance_passed(origin, settings, task)? => {
+                    Ending::Accepted
+                }
+                Stop::Refusal(ref cause) => Ending::Refused(cause.clone()),
+                Stop::EndTurn | Stop::MaxTurnRequests | Stop::Cancelled => Ending::Rejected,
+            };
+            Ok((ending, tokens(&ended.report)))
         }
+        Err(
+            error @ ExecError::Author {
+                fault: AuthorFault::Model(_) | AuthorFault::EmptyReply,
+                ..
+            },
+        ) => Ok((Ending::Refused(error.to_string()), None)),
+        Err(cause) => Err(EvalError::Exec {
+            id: task.id.clone(),
+            cause,
+        }),
+    }
+}
+
+/// Runs `task` in its written `origin` and records how it ended.
+fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outcome, EvalError> {
+    let repo = origin
+        .dir
+        .to_str()
+        .ok_or_else(|| EvalError::StatePath(origin.dir.clone()))?;
+    let started = Instant::now();
+    let (ending, spent) = match task.path {
+        EvalPath::Command => {
+            let document: Task = task.task(repo).map_err(|cause| EvalError::Exec {
+                id: task.id.clone(),
+                cause: ExecError::Task(cause),
+            })?;
+            command_outcome(task, &document, settings)?
+        }
+        EvalPath::Session => session_outcome(origin, settings, task)?,
     };
+    let micros =
+        u64::try_from(started.elapsed().as_micros()).map_err(|cause| EvalError::Overlong {
+            id: task.id.clone(),
+            cause,
+        })?;
     Ok(Outcome {
         id: task.id.clone(),
+        path: task.path.name(),
         ending,
         micros,
         tokens: spent,

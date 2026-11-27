@@ -66,13 +66,8 @@ const MAX_TENANT_KEYS: u32 = 65_536;
 /// A tenant name is 1..=64 bytes, as the edge reads it.
 const MAX_TENANT_BYTES: usize = 64;
 
-/// The probe's fixed body: no clock, no counter, nothing a tenant could read
-/// of another.
-const HEALTH_BODY: &str = concat!(
-    "{\"status\":\"ok\",\"service\":\"larry\",\"version\":\"",
-    env!("CARGO_PKG_VERSION"),
-    "\"}"
-);
+/// The probe's fixed body: no clock, version, counter or tenant data.
+const HEALTH_BODY: &str = "{\"status\":\"ok\",\"service\":\"larry\"}";
 
 /// Where `larry serve` listens, the key digests it admits and the state
 /// directory it reloads them from.
@@ -630,12 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_body_is_json_naming_the_version() -> Result<(), lgwks_std::json::Error> {
+    fn health_probe_omits_version() -> Result<(), lgwks_std::json::Error> {
         let body: lgwks_std::json::Value = lgwks_std::json::from_str(HEALTH_BODY)?;
-        assert_eq!(
-            body.get("version").and_then(lgwks_std::json::Value::as_str),
-            Some(env!("CARGO_PKG_VERSION")),
-            "the probe names the running version"
+        assert!(
+            body.get("version").is_none(),
+            "the public probe omits version"
         );
         assert_eq!(
             body.get("status").and_then(lgwks_std::json::Value::as_str),
