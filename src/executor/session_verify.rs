@@ -3,25 +3,31 @@
 //! check receipt over a tree the check did not change, plus present artifacts,
 //! the first finish returns the checklist, the repeated identical finish ends
 //! the session, and any later command voids the handshake. The seeded sim drives
-//! the session turn loop's production functions over a generated task with a
-//! scripted model, and an independent reference rule replays the same steps from
-//! its own content map; both verdicts match for every finish of every seed, and
-//! the same seed replays the same trace hash.
+//! the session turn loop's production verdict (`Turn::finish_reply`) over a
+//! generated task with a scripted model, and an independent reference rule
+//! replays the same steps from its own content map; both verdicts match for
+//! every finish of every seed, and the same seed replays the same trace hash.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
+use lgwks_bot::kernel::clock::Clock;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
 
+use crate::model::{ModelClient, sim_config};
 use crate::sim_error::SimError;
 
+use super::super::run::Place;
 use super::super::session_gate::{
-    CheckProof, FingerprintFault, fingerprint_tree, first_change, invalidate_finish, is_special,
+    CheckProof, VerificationFault, fingerprint_tree, first_change, invalidate_finish, is_special,
 };
 use super::super::session_reply::{ReplyFault, parse_reply};
+use super::super::{Ledger, Settings};
 use super::{
-    FinishRequest, command_passed, has_fresh_check, same_finish, verification_receipt, word,
+    FinishRequest, Observer, Turn, command_passed, has_fresh_check, same_finish,
+    verification_receipt, word,
 };
 
 #[test]
@@ -82,6 +88,81 @@ enum Verdict {
     End,
     /// The finish is refused; the reason class and, for a mutated check, its path.
     Refused(&'static str, Option<String>),
+}
+
+/// A person nobody asks: the production verdict needs an observer, and the sim
+/// answers finishes without asking anyone, so every command is approved and the
+/// client never cancels.
+struct NullObserver;
+
+impl Observer for NullObserver {
+    fn approve(&mut self, _step: usize, _command: &str) -> super::Approval {
+        super::Approval::Run
+    }
+}
+
+/// The sim never waits out a retry backoff: a `true` here would sleep the test
+/// thread on a retryable refusal, breaking the seeded simulations' determinism
+/// (SD-4). Named so the policy is pinned by a test, not hidden in a closure.
+fn no_retry_wait(_wait: Duration) -> bool {
+    false
+}
+
+#[test]
+fn the_sim_client_never_waits_out_a_retry() {
+    assert!(!no_retry_wait(Duration::ZERO));
+    assert!(!no_retry_wait(Duration::from_secs(60)));
+}
+
+/// What the production verdict needs beyond the scripted steps: the client, the
+/// settings, the ledger and the run identity a session turn borrows.
+struct GateCtx {
+    /// The model gateway the turn borrows; the sim never sends on it.
+    client: ModelClient,
+    /// The executor's settings the turn borrows.
+    settings: Settings,
+    /// The ledger the turn's proofs record in.
+    ledger: Ledger,
+    /// The run identity the turn reports under.
+    task_id: String,
+}
+
+/// The production verdict for one scripted finish: the session turn loop's own
+/// `finish_reply` over the scenario tree, so the sim exercises the shipped
+/// composition (fresh receipt, unchanged tree, present artifacts, handshake),
+/// never a reimplementation of it. Maps its typed fault to the sim's classes.
+fn production_verdict(
+    ctx: &GateCtx,
+    tree: &Path,
+    last_command: Option<&str>,
+    last_passed: bool,
+    last_proof: Option<&CheckProof>,
+    first: &mut Option<FinishRequest>,
+    request: &FinishRequest,
+) -> Verdict {
+    let mut null = NullObserver;
+    let mut turn = Turn {
+        client: &ctx.client,
+        settings: &ctx.settings,
+        ledger: &ctx.ledger,
+        task_id: &ctx.task_id,
+        place: Place::Open(tree),
+        shown: String::from("."),
+        artifact_root: tree,
+        last_proof: None,
+        observer: &mut null,
+    };
+    match turn.finish_reply(request, last_command, last_passed, last_proof, first) {
+        Ok(Some(_)) => Verdict::End,
+        Ok(None) => Verdict::Checklist,
+        Err(VerificationFault::NoFreshCheck) => Verdict::Refused("nofresh", None),
+        Err(VerificationFault::CheckMutated { path }) => Verdict::Refused("mutated", Some(path)),
+        Err(VerificationFault::FingerprintTooLarge { .. }) => Verdict::Refused("toolarge", None),
+        Err(VerificationFault::FingerprintIo { .. }) => Verdict::Refused("unreadable", None),
+        Err(VerificationFault::BadArtifactPath { .. }) => Verdict::Refused("badpath", None),
+        Err(VerificationFault::MissingArtifact { .. }) => Verdict::Refused("missing", None),
+        Err(VerificationFault::SymlinkArtifact { .. }) => Verdict::Refused("symlink", None),
+    }
 }
 
 /// One entry of the reference rule's own content map: the whole bytes, not a digest.
@@ -189,8 +270,9 @@ fn run_argv(
 
 /// One scenario's live state: the generated task, the scripted model's place in
 /// it, and what both verdicts saw. The bytes every step feeds into the trace hash
-/// accumulate in `trace`; the scenario hashes them once at the end.
-#[derive(Debug)]
+/// accumulate in `trace`; the scenario hashes them once at the end. No `Debug`:
+/// the gate context holds the client, the settings and the ledger, none of which
+/// the trace ever prints.
 struct Driver {
     /// The generated task's tree.
     tree: PathBuf,
@@ -206,6 +288,9 @@ struct Driver {
     last_proof: Option<CheckProof>,
     /// The gate's first-finish slot.
     first: Option<FinishRequest>,
+    /// What the production verdict borrows: the client, the settings, the
+    /// ledger and the run identity.
+    gate: GateCtx,
     /// The reference rule's own first-finish slot, voided by the same commands.
     ref_first: Option<FinishRequest>,
     /// The reference content map before the last command ran.
@@ -217,48 +302,19 @@ struct Driver {
 }
 
 impl Driver {
-    /// The production gate's verdict for one finish, exactly as the session turn
-    /// loop reads it: fresh receipt, unchanged tree, present artifacts, then the
-    /// handshake.
+    /// The production gate's verdict for one finish: the session turn loop's own
+    /// `finish_reply` over the scenario tree, so the sim answers from the
+    /// shipped verdict, never a reimplementation of it.
     fn gate(&mut self, request: &FinishRequest) -> Verdict {
-        if !has_fresh_check(
+        production_verdict(
+            &self.gate,
+            &self.tree,
             self.last_command.as_deref(),
             self.last_passed,
-            &request.check,
-        ) {
-            return Verdict::Refused("nofresh", None);
-        }
-        match self.last_proof.clone() {
-            Some(CheckProof::Clean) => {}
-            Some(CheckProof::Mutated { path }) => {
-                return Verdict::Refused("mutated", Some(path));
-            }
-            Some(CheckProof::Fault(FingerprintFault::TooLarge { .. })) => {
-                return Verdict::Refused("toolarge", None);
-            }
-            Some(CheckProof::Fault(FingerprintFault::Unreadable { .. })) => {
-                return Verdict::Refused("unreadable", None);
-            }
-            None => return Verdict::Refused("nofresh", None),
-        }
-        for path in &request.artifacts {
-            if !super::super::author::is_writable_path(path) {
-                return Verdict::Refused("badpath", None);
-            }
-            match std::fs::symlink_metadata(self.tree.join(path)) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    return Verdict::Refused("symlink", None);
-                }
-                Ok(_) => {}
-                Err(_) => return Verdict::Refused("missing", None),
-            }
-        }
-        if same_finish(self.first.as_ref(), request) {
-            Verdict::End
-        } else {
-            self.first = Some(request.clone());
-            Verdict::Checklist
-        }
+            self.last_proof.as_ref(),
+            &mut self.first,
+            request,
+        )
     }
 
     /// The reference rule's verdict for the same finish from its own content maps.
@@ -512,6 +568,17 @@ fn scenario(seed: u64) -> Result<(String, Counts), SimError> {
     let mut rng = Seeded::from_seed(seed);
     let root = super::super::sim_tree::scratch("verify-gate-scenario")?;
     std::fs::create_dir_all(root.join("sub"))?;
+    let state = super::super::sim_tree::scratch("verify-gate-state")?;
+    let gate = GateCtx {
+        client: ModelClient::new(
+            sim_config(None)?,
+            Clock::virtual_at(Duration::ZERO),
+            no_retry_wait,
+        ),
+        settings: super::super::sim_tree::settings(&state, None)?,
+        ledger: super::super::Ledger::open(&state)?,
+        task_id: format!("verify-gate-{seed}"),
+    };
     let mut driver = Driver {
         tree: root.to_path_buf(),
         pool: vec![
@@ -524,6 +591,7 @@ fn scenario(seed: u64) -> Result<(String, Counts), SimError> {
         last_passed: false,
         last_proof: None,
         first: None,
+        gate,
         ref_first: None,
         ref_before: BTreeMap::new(),
         ref_after: BTreeMap::new(),
