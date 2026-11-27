@@ -13,6 +13,8 @@ use lgwks_std::json;
 use lgwks_std::seeded::DrawError;
 
 use crate::executor::ExecError;
+use crate::executor::session_gate::FingerprintFault;
+use crate::model::ModelError;
 
 /// Why a simulation helper could not build its input.
 #[derive(Debug, Error)]
@@ -35,6 +37,12 @@ pub(crate) enum SimError {
     /// A fixed table or a path lacked what the helper needs.
     #[error("missing: {0}")]
     Missing(&'static str),
+    /// A check fingerprint could not be taken.
+    #[error("fingerprint: {0}")]
+    Fingerprint(#[from] FingerprintFault),
+    /// A model client could not be built.
+    #[error("model: {0}")]
+    Model(#[from] ModelError),
     /// The executor refused a step the helper needs (a ledger, an origin, a workspace).
     #[error("executor: {0}")]
     Exec(#[from] ExecError),

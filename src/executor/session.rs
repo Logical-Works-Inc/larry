@@ -23,10 +23,14 @@
 //! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
+use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use lgwks_macros::Error;
 use lgwks_std::json::{self, Value, json};
+#[cfg(test)]
+use lgwks_std::seeded::Seeded;
 
 use super::ExecError;
 use super::Ledger;
@@ -41,7 +45,8 @@ use super::island::{Island, Isolation, Outcome};
 use super::prepare;
 use super::run::{CommandResult, Place, run_command};
 use super::session_gate::{
-    SessionIdentity, VerificationFault, checklist, has_fresh_check, invalidate_finish, kept_reply,
+    CheckProof, Fingerprint, FingerprintFault, SessionIdentity, VerificationFault, checklist,
+    fingerprint_tree, first_change, has_fresh_check, invalidate_finish, kept_reply,
     reached_refusal_limit,
 };
 use super::session_reply::{Reply, parse_reply};
@@ -282,6 +287,9 @@ pub(crate) fn run_session(
                 Some(ref isle) => isle.path(),
                 None => cwd,
             },
+            // A check must change nothing: the proof starts empty and each command
+            // replaces it with its own before and after fingerprints.
+            last_proof: None,
             // The model is told its directory is `.` in a copy, so the request carries
             // no run id and no path of the person's.
             shown: match island {
@@ -360,11 +368,38 @@ struct Turn<'a> {
     shown: String,
     /// The real tree used to resolve the typed finish's artifact paths.
     artifact_root: &'a Path,
+    /// What the last command proved about the session tree: clean, mutated at a
+    /// path, or refused to fingerprint. `None` before the first command runs.
+    last_proof: Option<CheckProof>,
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
 }
 
+/// What one `command` reply asked of the session loop.
+#[derive(Debug)]
+enum CommandDecision {
+    /// The person declined: nothing ran, and the model is told the answer.
+    Declined(Answer),
+    /// The command ran: its observed step and the proof it left about the tree.
+    Ran(CommandStep, CheckProof),
+    /// The client cancelled before or while it ran: the loop ends.
+    Cancelled,
+}
+
+/// The proof one command left about the session tree: its before fingerprint
+/// against the after fingerprint taken once it ended.
+fn prove_command(before: Result<Fingerprint, FingerprintFault>, root: &Path) -> CheckProof {
+    match (before, fingerprint_tree(root)) {
+        (Ok(before), Ok(after)) => match first_change(&before, &after) {
+            Some(path) => CheckProof::Mutated { path },
+            None => CheckProof::Clean,
+        },
+        (Err(fault), _) | (_, Err(fault)) => CheckProof::Fault(fault),
+    }
+}
+
 /// One command's observed result and the facts the verification gate needs.
+#[derive(Debug)]
 struct CommandStep {
     /// The bounded answer appended to the model conversation.
     answer: Answer,
@@ -406,10 +441,12 @@ impl Turn<'_> {
             let kept = kept_reply(reply, MAX_REPLY_BYTES);
             match parse_reply(reply) {
                 Ok(Reply::Finish(request)) => {
+                    let proof = self.last_proof.clone();
                     match self.finish_reply(
                         &request,
                         last_command.as_deref(),
                         last_passed == Some(true),
+                        proof.as_ref(),
                         &mut first_finish,
                     ) {
                         Ok(Some(receipt)) => {
@@ -436,29 +473,25 @@ impl Turn<'_> {
                 Ok(Reply::Command(command)) => {
                     refused = 0;
                     let step = steps.len();
-                    if self.observer.approve(step, &command) == Approval::Decline {
-                        declined = declined.saturating_add(1);
-                        let answer = Answer::Observed {
-                            step,
-                            command,
-                            status: String::from(DECLINED),
-                            output: Some(String::new()),
-                        };
-                        conversation.push(kept, answer);
-                        continue;
-                    }
-                    if self.observer.cancelled() {
-                        break Stop::Cancelled;
-                    }
-                    let result = self.command_step(step, &command)?;
-                    invalidate_finish(&mut first_finish);
-                    last_command = Some(command.clone());
-                    conversation.push(kept, result.answer);
-                    steps.push(result.record);
-                    last_passed = Some(result.passed);
-                    if result.interrupted {
-                        interrupted = interrupted.saturating_add(1);
-                        break Stop::Cancelled;
+                    match self.run_one_command(step, &command)? {
+                        CommandDecision::Declined(answer) => {
+                            declined = declined.saturating_add(1);
+                            conversation.push(kept, answer);
+                        }
+                        CommandDecision::Ran(result, proof) => {
+                            self.last_proof = Some(proof);
+                            invalidate_finish(&mut first_finish);
+                            last_command = Some(command.clone());
+                            last_passed = Some(result.passed);
+                            let halted = result.interrupted;
+                            conversation.push(kept, result.answer);
+                            steps.push(result.record);
+                            if halted {
+                                interrupted = interrupted.saturating_add(1);
+                                break Stop::Cancelled;
+                            }
+                        }
+                        CommandDecision::Cancelled => break Stop::Cancelled,
                     }
                 }
                 Err(fault) => {
@@ -483,15 +516,34 @@ impl Turn<'_> {
         })
     }
 
-    /// Checks the last fresh-shell result and every named artifact before completion.
+    /// Checks the last fresh-shell result, that the last command changed nothing,
+    /// and every named artifact before completion.
     fn verify_finish(
         &self,
         request: &FinishRequest,
         last_command: Option<&str>,
         last_passed: bool,
+        last_proof: Option<&CheckProof>,
     ) -> Result<Value, VerificationFault> {
         if !has_fresh_check(last_command, last_passed, &request.check) {
             return Err(VerificationFault::NoFreshCheck);
+        }
+        match last_proof.cloned() {
+            Some(CheckProof::Clean) => {}
+            Some(CheckProof::Mutated { path }) => {
+                return Err(VerificationFault::CheckMutated { path });
+            }
+            Some(CheckProof::Fault(FingerprintFault::TooLarge { what, limit })) => {
+                return Err(VerificationFault::FingerprintTooLarge { what, limit });
+            }
+            Some(CheckProof::Fault(FingerprintFault::Unreadable { path, source })) => {
+                let source = match Arc::try_unwrap(source) {
+                    Ok(source) => source,
+                    Err(shared) => io::Error::new(shared.kind(), shared.to_string()),
+                };
+                return Err(VerificationFault::FingerprintIo { path, source });
+            }
+            None => return Err(VerificationFault::NoFreshCheck),
         }
         let mut artifacts = Vec::with_capacity(request.artifacts.len());
         for path in &request.artifacts {
@@ -552,9 +604,10 @@ impl Turn<'_> {
         request: &FinishRequest,
         last_command: Option<&str>,
         last_passed: bool,
+        last_proof: Option<&CheckProof>,
         first_finish: &mut Option<FinishRequest>,
     ) -> Result<Option<Value>, VerificationFault> {
-        let receipt = self.verify_finish(request, last_command, last_passed)?;
+        let receipt = self.verify_finish(request, last_command, last_passed, last_proof)?;
         if same_finish(first_finish.as_ref(), request) {
             self.observer.message(&request.summary);
             return Ok(Some(receipt));
@@ -579,6 +632,34 @@ impl Turn<'_> {
             },
         );
         *refused = 0;
+    }
+
+    /// Asks the person about one model command and runs it when approved: the
+    /// decision the loop records. A declined command runs nothing; a cancelled
+    /// client ends the loop.
+    fn run_one_command(
+        &mut self,
+        step: usize,
+        command: &str,
+    ) -> Result<CommandDecision, ExecError> {
+        if self.observer.approve(step, command) == Approval::Decline {
+            let answer = Answer::Observed {
+                step,
+                command: command.to_owned(),
+                status: String::from(DECLINED),
+                output: Some(String::new()),
+            };
+            return Ok(CommandDecision::Declined(answer));
+        }
+        if self.observer.cancelled() {
+            return Ok(CommandDecision::Cancelled);
+        }
+        let before = fingerprint_tree(self.artifact_root);
+        let outcome = self.command_step(step, command)?;
+        Ok(CommandDecision::Ran(
+            outcome,
+            prove_command(before, self.artifact_root),
+        ))
     }
 
     /// Runs one model command in its fresh process group and records its receipt.
@@ -642,10 +723,29 @@ impl Turn<'_> {
     }
 }
 
+/// One lowercase word drawn from the seed; the seeded session simulations share
+/// it so every request field stays bounded text.
+#[cfg(test)]
+pub(super) fn word(rng: &mut Seeded) -> Result<String, crate::sim_error::SimError> {
+    let len = rng.index(12)?.saturating_add(1);
+    let mut out = String::with_capacity(len);
+    for _ in 0..len {
+        out.push(char::from(
+            b'a'.saturating_add(u8::try_from(rng.index(26)?)?),
+        ));
+    }
+    Ok(out)
+}
+
 /// Keeps a bounded model reply in the compacted conversation.
 #[cfg(test)]
 #[path = "session_verify.rs"]
 mod verification_tests;
+
+/// Seeded turn-loop simulations against a scripted person.
+#[cfg(test)]
+#[path = "sim_person.rs"]
+mod person_sim;
 
 #[cfg(test)]
 #[path = "sim_session.rs"]

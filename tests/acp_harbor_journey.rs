@@ -10,6 +10,11 @@
 mod json_at;
 use json_at::At;
 
+#[path = "acp_harbor_journey/cancel.rs"]
+mod cancel;
+#[path = "acp_harbor_journey/verification.rs"]
+mod verification;
+
 #[path = "support/acp_agent.rs"]
 mod acp_agent;
 #[path = "support/acp_session.rs"]
@@ -129,8 +134,9 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
         let instruction = harbor_task(task.path())?;
         let replies = [
             r#"{"command":"printf hello > hello.txt"}"#,
-            r#"{"finish":{"summary":"wrote hello.txt","check":"printf hello > hello.txt","artifacts":["hello.txt"],"state":["ready"],"servers":["none"]}}"#,
-            r#"{"finish":{"summary":"wrote hello.txt","check":"printf hello > hello.txt","artifacts":["hello.txt"],"state":["ready"],"servers":["none"]}}"#,
+            r#"{"command":"grep -q hello hello.txt"}"#,
+            r#"{"finish":{"summary":"wrote hello.txt","check":"grep -q hello hello.txt","artifacts":["hello.txt"],"state":["ready"],"servers":["none"]}}"#,
+            r#"{"finish":{"summary":"wrote hello.txt","check":"grep -q hello hello.txt","artifacts":["hello.txt"],"state":["ready"],"servers":["none"]}}"#,
         ];
         mock_model::run(scripted(seed, &replies), |mock| -> TestResult {
             let started = Instant::now();
@@ -144,10 +150,12 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
                 [
                     "tool_call",
                     "tool_call_update",
+                    "tool_call",
+                    "tool_call_update",
                     "agent_message_chunk",
                     "agent_message_chunk",
                 ],
-                "one command, its result, the summary"
+                "two commands, their results, the summary"
             );
             let call = notes.first().ok_or("a first update")?.at("/params")?;
             assert_eq!(
@@ -162,7 +170,7 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
                 said(&notes).is_some_and(|text| text.contains("verification checklist")),
                 "the first finish paints the checklist"
             );
-            assert_eq!(mock.served(), 3, "command and finish pair");
+            assert_eq!(mock.served(), 4, "write, check and finish pair");
             let asked = message_text(mock.requests().first().ok_or("a first request")?, 1)?;
             assert!(
                 asked.contains(instruction.trim()),
@@ -179,10 +187,12 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
                 "end_turn",
                 "the report's stop"
             );
+            assert_eq!(*report.at("/results/0/exit_code")?, 0, "the write's record");
+            assert_eq!(*report.at("/results/1/exit_code")?, 0, "the check's record");
             assert_eq!(
-                *report.at("/results/0/exit_code")?,
-                0,
-                "the command's record"
+                *report.at("/verification/check")?,
+                "grep -q hello hello.txt",
+                "the receipt names the read-only check"
             );
             let (code, verdict) = verify(state.path(), report)?;
             // A session has no diff for Larry to accept: the seal verifies, and the
@@ -267,8 +277,9 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
     let (state, work) = fixture()?;
     let mut replies = vec![r#"{"command":"yes larry | head -c 4000"}"#; 11];
     replies.push(r#"{"command":"touch compact.txt"}"#);
-    replies.push(r#"{"finish":{"summary":"read every chunk","check":"touch compact.txt","artifacts":["compact.txt"],"state":["chunks read"],"servers":["none"]}}"#);
-    replies.push(r#"{"finish":{"summary":"read every chunk","check":"touch compact.txt","artifacts":["compact.txt"],"state":["chunks read"],"servers":["none"]}}"#);
+    replies.push(r#"{"command":"test -f compact.txt"}"#);
+    replies.push(r#"{"finish":{"summary":"read every chunk","check":"test -f compact.txt","artifacts":["compact.txt"],"state":["chunks read"],"servers":["none"]}}"#);
+    replies.push(r#"{"finish":{"summary":"read every chunk","check":"test -f compact.txt","artifacts":["compact.txt"],"state":["chunks read"],"servers":["none"]}}"#);
     let config = Config {
         max_body_bytes: SMALL_WINDOW,
         ..scripted(43, &replies)
@@ -279,11 +290,15 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
         let (_, reply) = acp.call(&prompt(2, &session, "read twelve chunks"))?;
         assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
         let report = reply.at("/result/_meta/larry/report")?;
-        assert_eq!(*report.at("/session/commands")?, 12, "every command ran");
+        assert_eq!(*report.at("/session/commands")?, 13, "every command ran");
         let compaction = report.at("/session/compaction")?;
         assert!(compaction["shrinks"].as_u64() >= Some(1), "{compaction}");
         assert!(compaction["cleared"].as_u64() >= Some(1), "{compaction}");
-        assert_eq!(mock.served(), 14, "the check and finish pair are served");
+        assert_eq!(
+            mock.served(),
+            15,
+            "the write, the check and the finish pair"
+        );
         let requests = mock.requests();
         let first = json::from_slice::<Value>(requests.first().ok_or("a request")?)?;
         let last = json::from_slice::<Value>(requests.last().ok_or("a request")?)?;
@@ -334,53 +349,6 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
 }
 
 #[test]
-fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
-    let (state, work) = fixture()?;
-    let fifo = work.path().join("gate.fifo");
-    assert!(
-        Command::new("mkfifo").arg(&fifo).status()?.success(),
-        "mkfifo"
-    );
-    let replies = [
-        r#"{"command":"cat gate.fifo"}"#,
-        r#"{"command":"touch after.txt"}"#,
-    ];
-    mock_model::run(scripted(17, &replies), |mock| -> TestResult {
-        let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
-        let session = acp.open(work.path())?;
-        acp.send(&prompt(2, &session, "wait"))?;
-        let started = acp.recv()?;
-        assert_eq!(
-            *started.at("/params/update/sessionUpdate")?,
-            "tool_call",
-            "running"
-        );
-        acp.send(&json!({"jsonrpc":"2.0","method":"session/cancel",
-            "params":{"sessionId":session}}))?;
-        acp.logged("cancel requested")?;
-        // The write lets cat end. The cancel can kill cat before cat opens the fifo, and a
-        // write-only open then waits for a reader for good (larry#458): opened read-write, the
-        // fifo never waits, on Linux or on macOS, whichever came first.
-        let mut gate = fs::OpenOptions::new().read(true).write(true).open(&fifo)?;
-        gate.write_all(b"go\n")?;
-        let (notes, reply) = acp.until(&json!(2))?;
-        drop(gate);
-        assert_eq!(*reply.at("/result/stopReason")?, "cancelled", "{reply}");
-        assert_eq!(
-            kinds(&notes),
-            ["tool_call_update"],
-            "the running command ends"
-        );
-        assert_eq!(mock.served(), 1, "no model call after the cancel");
-        assert!(
-            !work.path().join("after.txt").exists(),
-            "no command after the cancel"
-        );
-        Ok(())
-    })
-}
-
-#[test]
 fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult {
     let (state, work) = fixture()?;
     let fifo = work.path().join("gate.fifo");
@@ -391,8 +359,9 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
     let replies = [
         r#"{"command":"cat gate.fifo"}"#,
         r#"{"command":"touch recovered.txt"}"#,
-        r#"{"finish":{"summary":"recovered","check":"touch recovered.txt","artifacts":["recovered.txt"],"state":["recovered"],"servers":["none"]}}"#,
-        r#"{"finish":{"summary":"recovered","check":"touch recovered.txt","artifacts":["recovered.txt"],"state":["recovered"],"servers":["none"]}}"#,
+        r#"{"command":"test -f recovered.txt"}"#,
+        r#"{"finish":{"summary":"recovered","check":"test -f recovered.txt","artifacts":["recovered.txt"],"state":["recovered"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"recovered","check":"test -f recovered.txt","artifacts":["recovered.txt"],"state":["recovered"],"servers":["none"]}}"#,
     ];
     mock_model::run(scripted(19, &replies), |mock| -> TestResult {
         let mut killed = agent(state.path(), mock, Some(SESSION_POLICY))?;
@@ -428,10 +397,19 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
 fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
     let name = format!("tenant{index}.txt");
     let command = format!(r#"{{"command":"touch {name}"}}"#);
+    let check = format!(r#"{{"command":"test -f {name}"}}"#);
     let finish = format!(
-        r#"{{"finish":{{"summary":"ok","check":"touch {name}","artifacts":["{name}"],"state":["ready"],"servers":["none"]}}}}"#
+        r#"{{"finish":{{"summary":"ok","check":"test -f {name}","artifacts":["{name}"],"state":["ready"],"servers":["none"]}}}}"#
     );
-    let config = scripted(23, &[command.as_str(), finish.as_str(), finish.as_str()]);
+    let config = scripted(
+        23,
+        &[
+            command.as_str(),
+            check.as_str(),
+            finish.as_str(),
+            finish.as_str(),
+        ],
+    );
     mock_model::run(config, |mock| {
         let mut acp = agent(state, mock, Some(SESSION_POLICY))?;
         let session = acp.open(work)?;
@@ -439,7 +417,7 @@ fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
         assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
         assert!(work.join(&name).exists(), "its own file");
         let report = reply.at("/result/_meta/larry/report")?.clone();
-        let expected = format!("touch {name}");
+        let expected = format!("test -f {name}");
         assert_eq!(
             report.at("/verification/check")?.as_str(),
             Some(expected.as_str()),
@@ -469,7 +447,7 @@ fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> Te
     };
     assert_eq!(
         (first_served, second_served),
-        (3, 3),
+        (4, 4),
         "each gateway saw its own session"
     );
     assert_ne!(
@@ -502,8 +480,9 @@ fn padded_session(state: &Path, work: &Path) -> TestResult<(String, Option<Strin
             31,
             &[
                 r#"{"command":"touch padded.txt"}"#,
-                r#"{"finish":{"summary":"ok","check":"touch padded.txt","artifacts":["padded.txt"],"state":["ready"],"servers":["none"]}}"#,
-                r#"{"finish":{"summary":"ok","check":"touch padded.txt","artifacts":["padded.txt"],"state":["ready"],"servers":["none"]}}"#,
+                r#"{"command":"test -f padded.txt"}"#,
+                r#"{"finish":{"summary":"ok","check":"test -f padded.txt","artifacts":["padded.txt"],"state":["ready"],"servers":["none"]}}"#,
+                r#"{"finish":{"summary":"ok","check":"test -f padded.txt","artifacts":["padded.txt"],"state":["ready"],"servers":["none"]}}"#,
             ],
         )
     };
@@ -652,8 +631,9 @@ fn a_client_that_dies_mid_prompt_stops_the_session() -> TestResult {
     let replies = [
         r#"{"command":"head -c 1 gate.fifo"}"#,
         r#"{"command":"touch after.txt"}"#,
-        r#"{"finish":{"summary":"finished","check":"touch after.txt","artifacts":["after.txt"],"state":["finished"],"servers":["none"]}}"#,
-        r#"{"finish":{"summary":"finished","check":"touch after.txt","artifacts":["after.txt"],"state":["finished"],"servers":["none"]}}"#,
+        r#"{"command":"test -f after.txt"}"#,
+        r#"{"finish":{"summary":"finished","check":"test -f after.txt","artifacts":["after.txt"],"state":["finished"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"finished","check":"test -f after.txt","artifacts":["after.txt"],"state":["finished"],"servers":["none"]}}"#,
     ];
     mock_model::run(scripted(53, &replies), |mock| -> TestResult {
         let env = operator(state.path(), mock, Some(SESSION_POLICY));
@@ -727,8 +707,9 @@ fn a_queued_prompt_does_not_clear_the_running_prompts_cancel() -> TestResult {
     let replies = [
         r#"{"command":"head -c 1 gate.fifo"}"#,
         r#"{"command":"touch after.txt"}"#,
-        r#"{"finish":{"summary":"A done","check":"touch after.txt","artifacts":["after.txt"],"state":["done"],"servers":["none"]}}"#,
-        r#"{"finish":{"summary":"A done","check":"touch after.txt","artifacts":["after.txt"],"state":["done"],"servers":["none"]}}"#,
+        r#"{"command":"test -f after.txt"}"#,
+        r#"{"finish":{"summary":"A done","check":"test -f after.txt","artifacts":["after.txt"],"state":["done"],"servers":["none"]}}"#,
+        r#"{"finish":{"summary":"A done","check":"test -f after.txt","artifacts":["after.txt"],"state":["done"],"servers":["none"]}}"#,
     ];
     mock_model::run(scripted(59, &replies), |mock| -> TestResult {
         let mut console = agent(state.path(), mock, Some(SESSION_POLICY))?;

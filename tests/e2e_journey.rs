@@ -22,6 +22,9 @@ mod pty;
 #[path = "support/terminal_cases.rs"]
 mod terminal_cases;
 
+#[path = "e2e_journey/verification.rs"]
+mod verification;
+
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
@@ -44,9 +47,12 @@ const REVIEW: &str = "Apply this change";
 const APPLIED: &str = "applied to your folder";
 // What the model's command writes.
 const COMMAND: &str = r#"{"command":"printf 'hello\n' > hello.txt"}"#;
-const FINISH_HELLO: &str = r#"{"finish":{"summary":"wrote hello.txt","check":"printf 'hello\n' > hello.txt","artifacts":["hello.txt"],"state":["ready for review"],"servers":["none"]}}"#;
-const FINISH_PATH: &str = r#"{"finish":{"summary":"read the path","check":"printf '%s' \"$PATH\" > path.txt","artifacts":["path.txt"],"state":["ready for review"],"servers":["none"]}}"#;
-const FINISH_CHECKED: &str = r#"{"finish":{"summary":"left it alone","check":"touch checked.txt","artifacts":["checked.txt"],"state":["unchanged"],"servers":["none"]}}"#;
+const CHECK_HELLO: &str = r#"{"command":"grep -q hello hello.txt"}"#;
+const FINISH_HELLO: &str = r#"{"finish":{"summary":"wrote hello.txt","check":"grep -q hello hello.txt","artifacts":["hello.txt"],"state":["ready for review"],"servers":["none"]}}"#;
+const CHECK_PATH: &str = r#"{"command":"test -f path.txt"}"#;
+const FINISH_PATH: &str = r#"{"finish":{"summary":"read the path","check":"test -f path.txt","artifacts":["path.txt"],"state":["ready for review"],"servers":["none"]}}"#;
+const CHECK_CHECKED: &str = r#"{"command":"test -f checked.txt"}"#;
+const FINISH_CHECKED: &str = r#"{"finish":{"summary":"left it alone","check":"test -f checked.txt","artifacts":["checked.txt"],"state":["unchanged"],"servers":["none"]}}"#;
 // What Larry tells the model about a declined command (`executor::session::DECLINED`).
 const DECLINED: &str = "not run: the person declined this command";
 const CLEAR: &str = "\x15";
@@ -83,9 +89,11 @@ fn wrote(ran: &Ran) -> bool {
     ran.work.path().join("hello.txt").exists()
 }
 
-/// Approves the follow-up check, then declines the workspace review.
+/// Approves the write, then the read-only check, then declines the workspace review.
 fn decline_checked_command(pty: &mut Pty<'_>) -> Journey {
     pty.wait_for("$ touch checked.txt")?;
+    pty.send("y")?;
+    pty.wait_for("$ test -f checked.txt")?;
     pty.send("y")?;
     pty.wait_for(REVIEW)?;
     pty.send("n")?;
@@ -96,7 +104,7 @@ fn decline_checked_command(pty: &mut Pty<'_>) -> Journey {
 // the file written in the working directory, the model's summary painted, Ctrl+C exits 0.
 #[test]
 fn tui_journey_runs_task_with_mock_gateway() -> Journey {
-    let replies = [COMMAND, FINISH_HELLO, FINISH_HELLO];
+    let replies = [COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO];
     let ran = frame(scripted(7, &replies), |pty, mock, work| {
         ask(pty)?;
         assert!(
@@ -105,6 +113,8 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
         );
         pty.send("y")?;
         // The command ran in a copy: the person's folder changes only at the review.
+        pty.wait_for("$ grep -q hello hello.txt")?;
+        pty.send("y")?;
         pty.wait_for(REVIEW)?;
         assert!(
             !work.join("hello.txt").exists(),
@@ -113,7 +123,11 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
         pty.send("y")?;
         pty.wait_for(APPLIED)?;
         pty.wait_for("wrote hello.txt")?;
-        assert_eq!(mock.served(), 3, "the command, then the finish pair");
+        assert_eq!(
+            mock.served(),
+            4,
+            "the write, the check, then the finish pair"
+        );
         Ok(())
     })?;
     assert!(
@@ -133,34 +147,6 @@ fn tui_journey_runs_task_with_mock_gateway() -> Journey {
     Ok(())
 }
 
-#[test]
-fn tui_journey_requires_the_typed_verification_finish() -> Journey {
-    let check = r#"{"command":"test -f hello.txt"}"#;
-    let finish = r#"{"finish":{"summary":"verified hello.txt","check":"test -f hello.txt","artifacts":["hello.txt"],"state":["the workspace copy is ready for review"],"servers":["none"]}}"#;
-    let replies = [COMMAND, check, finish, finish];
-    let ran = frame(scripted(271, &replies), |pty, mock, work| {
-        ask(pty)?;
-        pty.send("y")?;
-        pty.wait_for("$ test -f hello.txt")?;
-        pty.send("y")?;
-        pty.wait_for(REVIEW)?;
-        assert!(!work.join("hello.txt").exists(), "review precedes handoff");
-        pty.send("y")?;
-        pty.wait_for(APPLIED)?;
-        pty.wait_for("verified hello.txt")?;
-        assert!(
-            mock.requests().iter().any(|request| {
-                String::from_utf8_lossy(request).contains("verification checklist")
-            }),
-            "the first finish returns its checklist to the model"
-        );
-        assert_eq!(mock.served(), 4, "write, check and two typed finishes");
-        Ok(())
-    })?;
-    assert!(ran.status.success(), "the gated journey exits cleanly");
-    Ok(())
-}
-
 // A declined command never runs: `n` at the question, the model is told, the file never
 // appears, and the model's next request carries the decline.
 #[test]
@@ -169,6 +155,7 @@ fn sim_session_declined_command_never_runs() -> Journey {
         let replies = [
             COMMAND,
             r#"{"command":"touch checked.txt"}"#,
+            CHECK_CHECKED,
             FINISH_CHECKED,
             FINISH_CHECKED,
         ];
@@ -202,6 +189,7 @@ fn tui_journey_a_key_typed_before_the_question_never_runs_the_command() -> Journ
             &[
                 COMMAND,
                 r#"{"command":"touch checked.txt"}"#,
+                CHECK_CHECKED,
                 FINISH_CHECKED,
                 FINISH_CHECKED,
             ],
@@ -391,7 +379,7 @@ fn sim_tui_same_seed_same_trace_hash_through_the_binary() -> Journey {
     for _ in 0..2 {
         let config = Config {
             script: vec![Some(Fault::PaddedDone)],
-            ..scripted(21, &[COMMAND, FINISH_HELLO, FINISH_HELLO])
+            ..scripted(21, &[COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO])
         };
         let ran = frame_in(
             &state,
@@ -399,6 +387,8 @@ fn sim_tui_same_seed_same_trace_hash_through_the_binary() -> Journey {
             config,
             Box::new(|pty, mock, _| {
                 ask(pty)?;
+                pty.send("y")?;
+                pty.wait_for("$ grep -q hello hello.txt")?;
                 pty.send("y")?;
                 pty.wait_for(REVIEW)?;
                 pty.send("y")?;
@@ -463,9 +453,11 @@ fn tui_journey_write_outside_workspace_leaves_origin_identical() -> Journey {
 /// and git sees that one untracked file and nothing else changed.
 #[test]
 fn tui_journey_apply_writes_the_diff_into_the_folder() -> Journey {
-    let replies = [COMMAND, FINISH_HELLO, FINISH_HELLO];
+    let replies = [COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO];
     let ran = frame(scripted(43, &replies), |pty, _, work| {
         ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for("$ grep -q hello hello.txt")?;
         pty.send("y")?;
         pty.wait_for(REVIEW)?;
         pty.wait_for("hello.txt  new  +1 -0")?;
@@ -495,11 +487,14 @@ fn the_terminal_gets_the_fixed_path_not_the_host() -> Journey {
     let expected = pty::test_path()?;
     let replies = [
         r#"{"command":"printf '%s' \"$PATH\" > path.txt"}"#,
+        CHECK_PATH,
         FINISH_PATH,
         FINISH_PATH,
     ];
     let ran = frame(scripted(47, &replies), |pty, _, _| {
         ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for("$ test -f path.txt")?;
         pty.send("y")?;
         pty.wait_for(REVIEW)?;
         pty.wait_for(expected)?;
@@ -516,9 +511,11 @@ fn the_terminal_gets_the_fixed_path_not_the_host() -> Journey {
 /// receipt takes the pane, and Tab goes back to the command's output.
 #[test]
 fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
-    let replies = [COMMAND, FINISH_HELLO, FINISH_HELLO];
+    let replies = [COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO];
     let ran = frame(scripted(44, &replies), |pty, _, work| {
         ask(pty)?;
+        pty.send("y")?;
+        pty.wait_for("$ grep -q hello hello.txt")?;
         pty.send("y")?;
         pty.wait_for(REVIEW)?;
         pty.wait_for("  hello.txt  +1 -0")?;
@@ -529,7 +526,7 @@ fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
         );
         pty.send("y")?;
         pty.wait_for(APPLIED)?;
-        pty.wait_for("commands  1 run, 0 declined, 0 interrupted")?;
+        pty.wait_for("commands  2 run, 0 declined, 0 interrupted")?;
         pty.wait_for("digest    ")?;
         pty.send("\t")?;
         pty.wait_for("$ printf")
@@ -573,8 +570,9 @@ fn tui_journey_probe_reports_isolation_overhead_against_a_plain_copy() -> Journe
         let replies = [
             COMMAND,
             r#"{"command":"touch checked.txt"}"#,
-            r#"{"finish":{"summary":"left it alone","check":"touch checked.txt","artifacts":["checked.txt"],"state":["ready"],"servers":["none"]}}"#,
-            r#"{"finish":{"summary":"left it alone","check":"touch checked.txt","artifacts":["checked.txt"],"state":["ready"],"servers":["none"]}}"#,
+            CHECK_CHECKED,
+            FINISH_CHECKED,
+            FINISH_CHECKED,
         ];
         let config = scripted(u64::try_from(round)?, &replies);
         let ran = frame_in(
@@ -588,11 +586,7 @@ fn tui_journey_probe_reports_isolation_overhead_against_a_plain_copy() -> Journe
                 pty.wait_for(ASK)?;
                 isolated.push(sent.elapsed());
                 pty.send("y")?;
-                pty.wait_for("$ touch checked.txt")?;
-                pty.send("y")?;
-                pty.wait_for(REVIEW)?;
-                pty.send("n")?;
-                pty.wait_for("left it alone")
+                decline_checked_command(pty)
             }),
         )?;
         assert!(
@@ -667,7 +661,7 @@ fn tui_journey_kill9_then_fresh_start_restores() -> Journey {
 fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
     let (state_a, work_a) = fixture()?;
     let (state_b, work_b) = fixture()?;
-    let replies = [COMMAND, FINISH_HELLO, FINISH_HELLO];
+    let replies = [COMMAND, CHECK_HELLO, FINISH_HELLO, FINISH_HELLO];
     mock_model::run(scripted(11, &replies), |mock_a| -> Journey {
         mock_model::run(scripted(12, &replies), |mock_b| -> Journey {
             std::thread::scope(|owner| -> Journey {
@@ -676,6 +670,10 @@ fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
                     Pty::open(owner, work_b.path(), &operator(state_b.path(), mock_b))?;
                 ask(&mut first)?;
                 ask(&mut second)?;
+                first.send("y")?;
+                second.send("y")?;
+                first.wait_for("$ grep -q hello hello.txt")?;
+                second.wait_for("$ grep -q hello hello.txt")?;
                 first.send("y")?;
                 second.send("y")?;
                 first.wait_for(REVIEW)?;
@@ -689,7 +687,7 @@ fn tui_journey_two_state_dirs_keep_their_own_reports() -> Journey {
                 assert!(first.finish()?.0.success() && second.finish()?.0.success());
                 assert_eq!(
                     (mock_a.served(), mock_b.served()),
-                    (3, 3),
+                    (4, 4),
                     "one gateway each"
                 );
                 for (state, other) in [(&state_a, &state_b), (&state_b, &state_a)] {
