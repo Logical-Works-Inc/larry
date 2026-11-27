@@ -37,8 +37,12 @@ Status: accepted, 2026-11-24 (larry#439). Second half of larry#213; extends ADR 
 - `execute` reads the ceilings before `prepare`. A task past one is `ExecError::PastCeiling`
   naming shell, base, timeout_ms or deadline_ms: nothing is cloned, spawned or written.
 - A task's deadline starts on the run's one live clock. Each command's timeout is cut to what
-  is left. A command cut short ends the task `ExecError::DeadlinePassed` after its group is
-  killed and reaped, and no later command runs.
+  is left. A deadline spent before the clone refuses `ExecError::DeadlinePassed` typed with
+  nothing cloned, because nothing ran; a deadline spent after it seals a rejected report keeping
+  every result so far (the cut command's, with `timed_out: true`), the diff as it stands and
+  `deadline_passed: {"deadline_ms": N}` beside the results, exit 2. `accepted` derives false
+  whenever that member is present, and `larry verify` re-derives it, so a receipt claiming
+  accepted beside it is `Inconsistent`.
 
 Rejected: one deadline for the whole process in `LARRY_EXEC_DEADLINE_MS`. Two tenants with
 different needs could not share a host, and a planner could not ask for less. Rejected too: a
@@ -50,5 +54,8 @@ no restart reverses this: measure how often an operator restarts to change one.
 
 - `tests/executor_journey/ceiling.rs` runs the shipped binary: two tenants, one admitted and
   one refused; a refused shell, base and deadline with 0 workspaces; a 1.5 s deadline over a
-  30 s command ends typed with the group reaped and the second command never run.
+  30 s command seals a rejected report with `deadline_passed`, `accepted: false`, exit 2, one
+  `timed_out: true` result, the group reaped and the second command never run; verify re-derives
+  the rejection. `executor::receipt::deadline_tests` refuses a forged `accepted: true` beside a
+  spent deadline as `Inconsistent`.
 - `executor::sim_ceiling` proves every boundary and the deadline cut on a virtual clock.

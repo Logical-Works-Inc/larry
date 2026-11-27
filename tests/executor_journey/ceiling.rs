@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 use lgwks_std::json::Value;
 
 use crate::exec_cli::deadline::await_group_exit;
-use crate::exec_cli::{TempDir, TestResult, assert_refused, fixture, report_of, spawn_larry_args};
+use crate::exec_cli::{
+    TempDir, TestResult, assert_refused, fixture, flag_of, report_of, spawn_larry_args, stderr_of,
+};
 use crate::held_group::ledger_rows;
 
 /// What a helper here returns.
@@ -149,28 +151,83 @@ fn a_shell_base_or_deadline_past_the_ceiling_clones_nothing() -> TestResult {
     Ok(())
 }
 
-/// A task past its whole-task deadline ends with one typed line naming the deadline: the
-/// running command's group is killed and gone, the ledger holds no row, and the command after
-/// it never starts.
+/// A task past its whole-task deadline seals a rejected report: the running command's group is
+/// killed and gone, the cut command's result stays with `timed_out: true`, the sealed report
+/// carries `deadline_passed` beside its results, `accepted` is false, exit 2, `larry verify`
+/// re-derives the rejection, the ledger holds no row, and the command after it never starts.
 #[test]
-fn a_task_past_its_deadline_ends_typed_with_its_group_reaped() -> TestResult {
+fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult {
     let (state, origin) = fixture()?;
     let scratch = TempDir::new()?;
     let pid_file = scratch.join("pid");
     let second = scratch.join("second");
+    let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
     let acceptance = format!(
-        r#"[["sh","-c","echo $$ > {}; exec sleep 30"],["sh","-c","touch {}"]]"#,
-        pid_file.display(),
+        r#"[["sh","-c","{script}"],["sh","-c","touch {}"]]"#,
         second.display()
     );
     let task = task_with(origin.path(), "HEAD", &acceptance, r#","deadline_ms":1500"#);
     let started = Instant::now();
     let output = exec_with(state.path(), &[], &task)?;
     let elapsed = started.elapsed();
-    assert_refused(&output, "deadline");
     assert!(
         elapsed >= Duration::from_millis(1500),
         "the run ends at its deadline, not before: {elapsed:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a spent deadline seals a rejected report, exit 2; stderr: {:?}",
+        stderr_of(&output)
+    );
+    let report = report_of(&output)?;
+    assert!(
+        !flag_of(&report, "accepted")?,
+        "a spent deadline is never accepted"
+    );
+    assert_eq!(
+        report.get("deadline_passed"),
+        Some(&lgwks_std::json::json!({"deadline_ms": 1500})),
+        "the seal names the spent deadline beside its results"
+    );
+    assert_eq!(
+        argv_at(&report, 0),
+        Some(vec![String::from("sh"), String::from("-c"), script,]),
+        "the cut command stays as the report's one result"
+    );
+    let results = report
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or("the report lists its results")?;
+    assert_eq!(
+        results.len(),
+        1,
+        "the cut command stays and the second never starts"
+    );
+    let first = results.first().ok_or("the cut command stays")?;
+    assert_eq!(
+        first.get("timed_out").and_then(Value::as_bool),
+        Some(true),
+        "the cut command timed out"
+    );
+    assert_eq!(
+        first.get("exit_code"),
+        Some(&Value::Null),
+        "the killed command names no exit code"
+    );
+    let state_env = [("LARRY_STATE_DIR", state.path().as_os_str())];
+    let verified = spawn_larry_args(&["verify"], &state_env, &output.stdout)?.wait_with_output()?;
+    assert_eq!(
+        verified.status.code(),
+        Some(2),
+        "verify re-derives the rejection, exit 2; stderr: {:?}",
+        stderr_of(&verified)
+    );
+    let verdict: Value = lgwks_std::json::from_str(&String::from_utf8_lossy(&verified.stdout))?;
+    assert_eq!(
+        verdict.get("accepted").and_then(Value::as_bool),
+        Some(false),
+        "verify reads the sealed report as rejected"
     );
     let pid: i32 = fs::read_to_string(&pid_file)?.trim().parse()?;
     await_group_exit(pid)?;
