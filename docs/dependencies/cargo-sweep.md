@@ -18,7 +18,7 @@ sources:
 
 # Cargo sweep
 
-Read 2026-11-03. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
+Read 2026-11-26. Rule (Director 2026-10-24, 2026-11-03): estate first (`std`, `lgwks_std`, `lgwks_bot`,
 `lgwks_ast`, `lgwks_deps`, all at their newest release: 5.0.0, 10.0.3, 6.1.1, 8.0.0 on 2026-11-24); Loco.rs where the estate
 owns nothing; any other crate only with a `gap` issue on its manifest line. Labels: MEASURED, READ, DOC.
 
@@ -30,13 +30,13 @@ owns nothing; any other crate only with a `gap` issue on its manifest line. Labe
 | Larry's estate set less one edge, 2026-11-24: lgwks_bot `edge`, lgwks_ast `lang-rust`, `crossterm` | 209 to 141, 188, 197 | not built | not built | `edge` pulls the bevy ECS world (crates#1138); `lang-rust` pulls ast-grep's matcher and walker (crates#1139) |
 | `rmcp =3.8.0` (`server`, `transport-io`), deps at `opt-level 3` | 62 | 69.5 s | 545 MB | resolves |
 | Larry's estate set + `lgwks_bot =7.1.1` (`edge`, `script`), 2026-11-08; Larry ships on 8.2.0 | 220 (111 without) | 35.8 s (22.7 s) | 1.08 GB | resolves; `edge` alone compiles from 8.0.1 |
-| Larry's branch for larry#88 on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | resolves |
+| Historical larry#88 branch on `lgwks_bot =8.0.1` (`edge`, `signal`), `cargo build --bins`, load 10.4, 2026-11-09 | 225 | 45.97 s | 998 MB | historical, not the shipped pin set |
 | Larry's branch for larry#293 on `lgwks_ast =6.0.3` (`lang-rust`), `env -u CARGO_BUILD_BUILD_DIR cargo build --bins --locked --target-dir <fresh>`, 2026-11-17; the tree without the edge measured 230.8 s on 214 crates the same day | 228 (214 without) | 406.7 s, load 5.75 to 10.55 on 4 cores (73% CPU) | 598 MB | resolves; `larry governance`'s temp-path rule p50 279.5 ms, p95 282.8 ms, p99 356.1 ms per check over the root's `src` and `tests` (ADR 0061) |
-| larry#393: main on lgwks_std 4.2.1 / lgwks_bot 9.0.0, then the branch on 5.0.0 / 10.0.1, `cargo build --bins --locked`, fresh target, no sccache, Oracle 4 cores, load 2.0 then 3.5, 2026-11-23 | 228 to 213 | 249.2 s to 204.3 s | 1.24 GiB to 1.21 GiB | resolves; tracing-subscriber and 7 crates under it leave |
+| Larry shipped pins 5.0.0 / 10.0.3 / 6.1.1 / 8.0.0, fresh target on Toronto, 2026-11-26 | 217 | 124.94 s | 666.4 MiB (682,440 KiB) | resolves; `lgwks-box` cache enabled |
 
-Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u | wc -l`,
-`/usr/bin/time -l cargo build --locked` into a fresh target directory after one warm-up fetch, sccache on
-(40 % Rust hit rate). logical-forms measured 42.2 s for the same Loco stack with the override on a quiet machine.
+Method: `lgwks-box cargo tree --workspace --locked -e normal --prefix none | sort -u | wc -l` printed 217.
+`lgwks-box sh -lc 'fresh=$(mktemp -d /tmp/larry-217-after.XXXXXX); /usr/bin/time -f "elapsed_seconds=%e peak_rss_kib=%M" cargo build --bins --locked --target-dir "$fresh"'`
+printed `elapsed_seconds=124.94 peak_rss_kib=682440` on Toronto with the box cache enabled. Older rows are historical.
 
 ## The boundary, one row per capability
 
@@ -57,12 +57,12 @@ Method: `cargo generate-lockfile`, `cargo tree -e normal --prefix none | sort -u
 | Rerank port (larry#53) | `lgwks_deps` `ml-candle`, `ml-tokenizers` | Python reranker: banned |
 | Terminal UI (larry#239, ADR 0045) | Larry's own cell frame on `crossterm` =0.29.0 and `unicode-width` =0.2.3, gap crates#1067 | AppCUI: bold lost its colour, 82 crates; cursive, iocraft, ratatui: see ADR 0045 |
 | HTTP routes, body and tenant bounds (larry#88) | `lgwks_bot::app` (axum through `lgwks_deps`), ADR 0021 | Loco: +135 crates with every feature off (1.3.1), a second edge |
-| Human sign-in, password hashing, magic links | **Loco** `auth` | estate owns none |
-| Approval mail, out-of-band checks (larry#41) | **Loco** mailers (lettre) | estate owns none |
-| Side jobs (mail fan-out, digests) | **Loco** workers | effects: never, they stay on the journal |
-| Operational tables, migrations | **Loco** SeaORM, rebuilt from the journal | authority in SQL: refused |
-| Config, env, CLI tasks | **Loco** | estate owns none |
-| Row-level tenancy | **Loco** `multi-tenancy`, Postgres RLS backstop | developer discipline alone |
+| Human sign-in, password hashing, magic links | **planned (#89)**: Loco `auth` | estate owns none yet |
+| Approval mail, out-of-band checks (larry#41) | **planned (#91)**: Loco mailers (lettre) | estate owns none yet |
+| Side jobs (mail fan-out, digests) | **planned (#91)**: Loco workers | effects: never, they stay on the journal |
+| Operational tables, migrations | **planned (#90)**: Loco SeaORM, rebuilt from the journal | authority in SQL: refused |
+| Config, env, CLI tasks | **planned (#70)**: Loco | estate owns none yet |
+| Row-level tenancy | **planned (#89)**: Loco `multi-tenancy`, Postgres RLS backstop | developer discipline alone |
 | MCP stdio (Face 3) | forge-mcp server ported onto `lgwks_std::json` | `rmcp`: 62 crates for JSON-RPC we own |
 | MCP remote, Streamable HTTP and OAuth (Face 2) | `rmcp` | stdio port: carries no transport or OAuth |
 | Sandboxed execution | Nova (crates#846) | forge stations: interim, Apple `container` only |
@@ -83,8 +83,8 @@ reset from a held `Dir`; #1141 durable file replace; #1143 process-group exit wa
 - Every Loco table is a projection the journal rebuilds; dropping the database loses nothing but caches.
 - One SQLite engine per binary: the executor ledger (larry#85, ADR 0004) takes `lgwks_deps/sqlite`, and Loco's
   `db-sqlite` links the same `libsqlite3-sys` 0.40 (measured 2026-11-24), so both share one engine (ADR 0104).
-- `larry serve` is in the default build: the edge takes Larry's tree from 118 to 225 crates and the cold build
-  is 45.97 s, under 60 s (ADR 0021). Loco, when #91 adds it, sits behind a feature with the `opt-level 0` override:
+- Historical ADR 0021 measured `larry serve` at 45.97 s on the old 8.0.1 tree. The current shipped-pin measurement
+  is recorded in the table above. Loco, when #91 adds it, sits behind a feature with the `opt-level 0` override:
   `mailer` alone is +150 crates on the default build (ADR 0104).
 - The production config boots in the live test (empty templated YAML becomes null and 500s a route).
 

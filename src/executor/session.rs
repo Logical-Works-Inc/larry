@@ -43,7 +43,7 @@ use super::island::{Island, Isolation, Outcome};
 use super::prepare;
 use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
-use crate::model::{Completion, ModelClient};
+use crate::model::{Completion, ModelClient, Usage};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
@@ -289,6 +289,22 @@ pub(crate) struct Ended {
     pub(crate) report: Report,
 }
 
+/// The `authored` usage array of a sealed session report: one entry per model
+/// completion, so `larry eval` prices a session task like a brief (larry#217).
+fn authored_usage(usage: &[Option<Usage>]) -> Vec<Value> {
+    usage
+        .iter()
+        .map(|spent| {
+            json!({
+                "prompt_tokens": spent.map(|value| value.prompt_tokens),
+                "completion_tokens": spent.map(|value| value.completion_tokens),
+                "cached_tokens": spent.and_then(|value| value.cached_tokens),
+                "cache_write_tokens": spent.and_then(|value| value.cache_write_tokens),
+            })
+        })
+        .collect()
+}
+
 /// The one denial line of a report the gate sealed without running anything.
 fn denial(report: &Report) -> String {
     let first = report
@@ -365,6 +381,7 @@ pub(crate) fn run_session(
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
+        let authored = authored_usage(&done.usage);
         let mut outcome = Outcome::None;
         let mut diff = None;
         if let Some(ref isle) = island
@@ -378,6 +395,7 @@ pub(crate) fn run_session(
             "task_digest": task_digest,
             "diff": null,
             "results": done.records,
+            "authored": authored,
             "denied": [],
             "session": {
                 "stop": done.stop.name(),
@@ -421,6 +439,8 @@ struct Steps {
     stop: Stop,
     /// Each command's record, in order.
     records: Vec<Value>,
+    /// Usage reported by each model completion, in order.
+    usage: Vec<Option<Usage>>,
     /// What compaction did.
     compaction: Value,
     /// Commands the person declined; none of them ran.
@@ -455,6 +475,7 @@ impl Turn<'_> {
         let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
+        let mut usage = Vec::new();
         let mut refused = 0_usize;
         let mut declined = 0_usize;
         let mut interrupted = 0_usize;
@@ -466,6 +487,7 @@ impl Turn<'_> {
                 Ok(completion) => completion,
                 Err(stop) => break stop,
             };
+            usage.push(completion.usage());
             if self.observer.cancelled() {
                 break Stop::Cancelled;
             }
@@ -503,31 +525,7 @@ impl Turn<'_> {
                         break Stop::Cancelled;
                     }
                     self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
-                    // The person's cancel is polled while the command runs, so Esc
-                    // ends it and its whole group, not only the next step (larry#242).
-                    let stream = self.observer.stream_callback();
-                    let result = run_command(
-                        &argv,
-                        self.place,
-                        &self.settings.path,
-                        self.settings.timeout,
-                        self.ledger,
-                        self.task_id,
-                        RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
-                    );
-                    self.observer.stream_dropped();
-                    let result = result?.clipped(OBSERVED_BYTES);
-                    let answer = Answer::Observed {
-                        step,
-                        command,
-                        status: status(&result),
-                        output: Some(streams(&result)),
-                    };
-                    let was_interrupted = result.interrupted();
-                    let passed =
-                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
-                    self.observer.finished(step, &answer.text(), passed);
+                    let (answer, was_interrupted, result) = self.run_step(step, command)?;
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
                     if was_interrupted {
@@ -550,10 +548,44 @@ impl Turn<'_> {
         Ok(Steps {
             stop,
             records: steps,
+            usage,
             compaction: conversation.json(),
             declined,
             interrupted,
         })
+    }
+
+    /// Runs `command` as step `step` and observes it: live output streams while the
+    /// command runs (larry#252), and the person's cancel ends its whole group (larry#242).
+    fn run_step(
+        &mut self,
+        step: usize,
+        command: String,
+    ) -> Result<(Answer, bool, CommandResult), ExecError> {
+        self.observer.started(step, &command);
+        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let stream = self.observer.stream_callback();
+        let result = run_command(
+            &argv,
+            self.place,
+            &self.settings.path,
+            self.settings.timeout,
+            self.ledger,
+            self.task_id,
+            RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
+        );
+        self.observer.stream_dropped();
+        let result = result?.clipped(OBSERVED_BYTES);
+        let answer = Answer::Observed {
+            step,
+            command,
+            status: status(&result),
+            output: Some(streams(&result)),
+        };
+        let was_interrupted = result.interrupted();
+        let passed = result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
+        self.observer.finished(step, &answer.text(), passed);
+        Ok((answer, was_interrupted, result))
     }
 
     /// One completion over `conversation`, compacted first when it needs it and
