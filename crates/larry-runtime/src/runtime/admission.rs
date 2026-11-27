@@ -55,6 +55,29 @@ pub(super) struct Admitted {
     display: Option<DisplayedEffect>,
 }
 
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_refuses_an_accepted_command_with_an_undecodable_payload() -> Result<(), RuntimeError>
+    {
+        let mut journal = Journal::new(4)?;
+        let command = Command::new(
+            larry_contracts::ids::CommandId::from_bytes([1; 16]),
+            TenantId::from_bytes([2; 16]),
+            Vec::new(),
+            larry_contracts::command::CommandContent::new(
+                CommandKind::Submit,
+                Box::from(&b"not json"[..]),
+            ),
+        )?;
+        journal.accept_command(command)?;
+        assert!(matches!(recover(&journal), Err(RuntimeError::Codec(_))));
+        Ok(())
+    }
+}
+
 impl Admitted {
     /// A pending entry for `command`, which targets `run`.
     pub(super) const fn new(
@@ -120,12 +143,10 @@ pub(super) fn recover(journal: &Journal) -> Result<VecDeque<Admitted>, RuntimeEr
             && !accepted.contains(&command.id())
         {
             // Admission and the tick both decode the proposal before the
-            // journal takes a command, so one that does not decode was never
-            // acknowledged here: a hand-built or altered file holds it, the
-            // consumer's digests expose it (E35), and nothing may reduce it.
-            let Ok(run) = target(command) else {
-                continue;
-            };
+            // journal takes a command. An accepted command whose payload no
+            // longer decodes is corrupt accepted history, not an absent
+            // command: restore refuses the journal with the codec cause.
+            let run = target(command)?;
             pending.push_back(Admitted {
                 run,
                 command: command.clone(),
