@@ -1,9 +1,9 @@
-//! Seeded OpenAI-compatible mock model endpoint (larry#82), shared by the
-//! tests and benchmarks of the model client (#83), the MCP server (#84) and the
-//! harness benchmark (#72), so none of them makes a paid model call.
+//! Seeded mock model endpoint (larry#82, larry#205), shared by the tests and
+//! benchmarks of the model client (#83), the MCP server (#84) and the harness
+//! benchmark (#72), so none of them makes a paid model call.
 //!
-//! `POST /v1/chat/completions` (JSON, non-streaming: the forge client sends no
-//! `stream` key, and `"stream": true` is refused with a 400). One seed fixes
+//! `POST /v1/chat/completions`, `/v1/messages` and `/v1/responses` (JSON,
+//! non-streaming: the forge client sends no `stream` key, and `"stream": true` is refused with a 400). One seed fixes
 //! every response: the reply for request number `n` is a pure function of the
 //! seed, `n` and the request body, so the same seed and the same request
 //! sequence give byte-identical responses and the same trace hash. The trace
@@ -34,6 +34,11 @@ use lgwks_std::json::{self, Value, json};
 use lgwks_std::seeded::{DrawError, Seeded};
 
 use crate::http_wire::{Refusal, Request, read_request, render};
+
+#[path = "mock_replies.rs"]
+mod replies;
+
+use replies::{completion, with_choice};
 
 /// Socket read and write bound for every connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -208,7 +213,8 @@ struct Ledger {
     trace: Hasher,
     /// The first [`MAX_RECORDED`] request bodies.
     bodies: Vec<Vec<u8>>,
-    /// The `Authorization` header of each recorded body, at the same index.
+    /// The credential each recorded body carried, at the same index: the
+    /// `Authorization` value, else the `x-api-key` value.
     authorizations: Vec<Option<String>>,
 }
 
@@ -269,47 +275,10 @@ fn reject(status: u16, message: &str) -> Result<Planned, Failure> {
 /// The first eight bytes of the body's BLAKE3 digest, as a word.
 fn fold(request: &Request) -> u64 {
     let mut hasher = Hasher::new();
+    hasher.write_framed(request.path.as_bytes());
     hasher.write_framed(&request.body);
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hasher.finalize().as_bytes();
     u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
-}
-
-/// A well-formed chat completion for `model`: the scripted content when there is
-/// one, otherwise words drawn from the seed.
-fn completion(
-    model: &str,
-    request: &Request,
-    rng: &mut Seeded,
-    scripted: Option<&String>,
-) -> Result<Vec<u8>, Failure> {
-    let count = usize::try_from(rng.below(10)?.saturating_add(3))?;
-    let mut words = Vec::with_capacity(count);
-    for _ in 0..count {
-        words.push(*VOCAB.get(rng.index(VOCAB.len())?).ok_or(Failure::Table)?);
-    }
-    let (content, produced) = match scripted {
-        Some(text) => (text.clone(), text.len().div_ceil(4)),
-        None => (words.join(" "), count),
-    };
-    let prompt = u64::try_from(request.body.len().div_ceil(4))?;
-    let produced = u64::try_from(produced)?;
-    let value = json!({
-        "id": format!("chatcmpl-{:016x}", rng.next_u64()),
-        "object": "chat.completion",
-        "created": 0,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": content },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": prompt,
-            "completion_tokens": produced,
-            "total_tokens": prompt.saturating_add(produced)
-        }
-    });
-    Ok(json::to_vec(&value)?)
 }
 
 impl State {
@@ -341,12 +310,14 @@ impl State {
     }
 
     /// Validate the request and compose the reply with its fault applied.
+    /// Each provider path speaks its own shape: chat and messages carry
+    /// `messages`, responses carries `input`; messages requires `max_tokens`.
+    /// A body for the wrong path is a 4xx, never a completion. Credentials
+    /// are recorded, never refused: the journey asserts each kind sent its
+    /// own scheme.
     fn compose(&self, index: u64, request: &Request) -> Result<Planned, Failure> {
         let mut rng = Seeded::from_seed(self.base.wrapping_add(index).wrapping_add(fold(request)));
         let fault = self.fault_for(index, &mut rng)?;
-        if request.path != "/v1/chat/completions" {
-            return reject(404, "no such route");
-        }
         if !request.method.eq_ignore_ascii_case("POST") {
             return reject(405, "POST only");
         }
@@ -358,20 +329,22 @@ impl State {
         let Ok(body) = json::from_slice::<Value>(&request.body) else {
             return reject(400, "request body is not JSON");
         };
-        let Some(model) = body.get("model").and_then(Value::as_str) else {
-            return reject(400, "model is required");
-        };
-        match body.get("messages").and_then(Value::as_array) {
-            None => return reject(400, "messages is required"),
-            Some(messages) if messages.is_empty() => return reject(400, "messages is empty"),
-            Some(_) => {}
-        }
         if body.get("stream").and_then(Value::as_bool) == Some(true) {
             return reject(400, "streaming is not supported");
         }
         let scripted = self.config.contents.get(usize::try_from(index)?);
-        let good = completion(model, request, &mut rng, scripted)?;
-        apply(fault, good)
+        let validated = match request.path.as_str() {
+            "/v1/chat/completions" => chat_fields(&body),
+            "/v1/messages" => messages_fields(&body),
+            "/v1/responses" => responses_fields(&body),
+            _ => Err((404, "no such route")),
+        };
+        let model = match validated {
+            Ok(model) => model,
+            Err((status, message)) => return reject(status, message),
+        };
+        let good = completion(&request.path, model, request, &mut rng, scripted)?;
+        apply(fault, &request.path, good)
     }
 
     /// Take the next index, plan the reply, and chain both into the trace.
@@ -393,7 +366,12 @@ impl State {
         }
         if ledger.bodies.len() < MAX_RECORDED {
             ledger.bodies.push(request.body.clone());
-            ledger.authorizations.push(request.authorization.clone());
+            ledger.authorizations.push(
+                request
+                    .authorization
+                    .clone()
+                    .or_else(|| request.api_key.clone()),
+            );
         }
         Ok(planned)
     }
@@ -406,8 +384,51 @@ impl State {
     }
 }
 
-/// Apply `fault` to a good reply body.
-fn apply(fault: Option<Fault>, good: Vec<u8>) -> Result<Planned, Failure> {
+/// The model id of a request body, or the refusal its shape earns.
+fn model_of(body: &Value) -> Result<&str, (u16, &'static str)> {
+    body.get("model")
+        .and_then(Value::as_str)
+        .ok_or((400, "model is required"))
+}
+
+/// The non-empty `messages` list of a chat-shaped body, or its refusal.
+fn messages_of(body: &Value) -> Result<(), (u16, &'static str)> {
+    match body.get("messages").and_then(Value::as_array) {
+        None => Err((400, "messages is required")),
+        Some(messages) if messages.is_empty() => Err((400, "messages is empty")),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The model id of a chat-completions body after its shape checks.
+fn chat_fields(body: &Value) -> Result<&str, (u16, &'static str)> {
+    let model = model_of(body)?;
+    messages_of(body)?;
+    Ok(model)
+}
+
+/// The model id of a Messages body after its shape checks.
+fn messages_fields(body: &Value) -> Result<&str, (u16, &'static str)> {
+    let model = model_of(body)?;
+    if body.get("max_tokens").and_then(Value::as_u64).is_none() {
+        return Err((400, "max_tokens is required"));
+    }
+    messages_of(body)?;
+    Ok(model)
+}
+
+/// The model id of a Responses body after its shape checks.
+fn responses_fields(body: &Value) -> Result<&str, (u16, &'static str)> {
+    let model = model_of(body)?;
+    match body.get("input").and_then(Value::as_array) {
+        None => Err((400, "input is required")),
+        Some(input) if input.is_empty() => Err((400, "input is empty")),
+        Some(_) => Ok(model),
+    }
+}
+
+/// Apply `fault` to a good reply body for `path`.
+fn apply(fault: Option<Fault>, path: &str, good: Vec<u8>) -> Result<Planned, Failure> {
     Ok(match fault {
         None => Planned::whole(200, Vec::new(), good),
         Some(Fault::Delay) => Planned {
@@ -452,29 +473,12 @@ fn apply(fault: Option<Fault>, good: Vec<u8>) -> Result<Planned, Failure> {
         Some(Fault::Finish { reason }) => Planned::whole(
             200,
             Vec::new(),
-            with_choice(&good, "finish_reason", reason)?,
+            with_choice(path, &good, "finish_reason", reason)?,
         ),
-        Some(Fault::EmptyContent) => Planned::whole(200, Vec::new(), with_choice(&good, "", "")?),
+        Some(Fault::EmptyContent) => {
+            Planned::whole(200, Vec::new(), with_choice(path, &good, "", "")?)
+        }
     })
-}
-
-/// `good` with its first choice's `member` set to `value`, or its message content set to
-/// `value` when `member` is empty.
-fn with_choice(good: &[u8], member: &str, value: &str) -> Result<Vec<u8>, Failure> {
-    let mut reply = json::from_slice::<Value>(good)?;
-    let choice = reply
-        .get_mut("choices")
-        .and_then(|choices| choices.get_mut(0_usize))
-        .ok_or(Failure::Table)?;
-    let target = if member.is_empty() {
-        choice
-            .get_mut("message")
-            .and_then(|message| message.get_mut("content"))
-    } else {
-        choice.get_mut(member)
-    };
-    *target.ok_or(Failure::Table)? = json!(value);
-    Ok(json::to_vec(&reply)?)
 }
 
 /// Write a transport-level refusal.
