@@ -3,10 +3,11 @@
 //! exactly as `larry_submit_task` runs it (ADR 0008): its origin repository is
 //! written and committed under the state directory, the arm's model writes the
 //! named files, the acceptance commands run and the report is sealed. The arm is
-//! the model `LARRY_MODEL_*` pins, priced by `LARRY_EVAL_PRICE_IN` and
+//! the model `LARRY_MODEL_*` pins, priced by its route's versioned price table
+//! when the route declares one, else by `LARRY_EVAL_PRICE_IN` and
 //! `LARRY_EVAL_PRICE_OUT`; the scorecard prints cost per accepted task, the
 //! acceptance count and p50/p95/p99 wall time, and the comparison is two arms
-//! over one set (ADR 0009). Model money is spent only by the arm an operator runs.
+//! over one set (ADR 0009, ADR 0126). Model money is spent only by the arm an operator runs.
 
 mod score;
 mod set;
@@ -25,6 +26,7 @@ use crate::executor::{
 };
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
+pub(crate) use score::parse_price;
 #[cfg(test)]
 pub(crate) use score::percentile;
 use score::{Ending, Outcome, Spent, card};
@@ -39,6 +41,11 @@ pub enum EvalError {
     /// The task set was refused before any task ran.
     #[error("eval set: {0}")]
     Set(#[source] SetError),
+    /// Neither the route table nor the environment prices the arm: the route
+    /// declares no table and `LARRY_EVAL_PRICE_IN` or `LARRY_EVAL_PRICE_OUT`
+    /// is unset or refused.
+    #[error("eval price: {0}")]
+    Price(#[source] PriceError),
     /// No model route is configured (no tenant default and no `LARRY_MODEL_*`
     /// environment route), so no arm is configured.
     #[error(
@@ -96,6 +103,7 @@ impl EvalError {
         match *self {
             Self::Stopped { ref card, .. } => Some(card),
             Self::Set(_)
+            | Self::Price(_)
             | Self::ModelUnconfigured
             | Self::StatePath(_)
             | Self::Origin { .. }
@@ -416,10 +424,17 @@ fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outco
 
 /// Runs every task of the set in `bytes` as one arm and scores it. The whole set is
 /// checked first; a refused set or an unconfigured model stops with a typed error before
-/// anything is spent, and a model refusal is the arm's and is scored. An infrastructure
+/// anything is spent, and a model refusal is the arm's and is scored. The arm is
+/// priced by its route's versioned price table when the route declares one, else
+/// by `prices`: a declared table wins, so a priced route needs no `LARRY_EVAL_PRICE_*`
+/// in its environment. An infrastructure
 /// failure ends the arm at its task with [`EvalError::Stopped`], which keeps the card of
 /// every outcome before it, since those were paid for (larry#399).
-pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecard, EvalError> {
+pub fn run(
+    bytes: &[u8],
+    settings: &Settings,
+    prices: Result<Prices, PriceError>,
+) -> Result<Scorecard, EvalError> {
     let set = TaskSet::parse(bytes).map_err(EvalError::Set)?;
     let route = match settings.arm_route() {
         Ok(route) => route,
@@ -430,6 +445,12 @@ pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecar
                 cause,
             });
         }
+    };
+    let route_prices = Prices::from_route(&route);
+    let prices = if route_prices.declared() {
+        route_prices
+    } else {
+        prices.map_err(EvalError::Price)?
     };
     settings.sweep_origins().map_err(|cause| EvalError::Exec {
         id: String::from("(sweep)"),
@@ -442,6 +463,7 @@ pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecar
             Err(cause) => {
                 let partial = card(&set.name, route.model(), prices, &outcomes)
                     .with_route(route.id())
+                    .with_price_version(route.price_version())
                     .stopped(&task.id, &cause.to_string());
                 return Err(EvalError::Stopped {
                     card: Box::new(partial),
@@ -450,7 +472,9 @@ pub fn run(bytes: &[u8], settings: &Settings, prices: Prices) -> Result<Scorecar
             }
         }
     }
-    Ok(card(&set.name, route.model(), prices, &outcomes).with_route(route.id()))
+    Ok(card(&set.name, route.model(), prices, &outcomes)
+        .with_route(route.id())
+        .with_price_version(route.price_version()))
 }
 
 #[cfg(test)]
