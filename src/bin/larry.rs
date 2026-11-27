@@ -295,9 +295,11 @@ fn model_once() -> Result<(), ModelCheck> {
 }
 
 /// Writes one diagnostic line to standard error, never to the protocol stream.
+/// Exactly one trailing newline is written, however the refusal reads, so the
+/// next shell output starts on its own line (larry#543).
 fn diagnose(message: &str) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    stderr.write_all(message.as_bytes())?;
+    stderr.write_all(message.trim_end_matches('\n').as_bytes())?;
     stderr.write_all(b"\n")
 }
 
