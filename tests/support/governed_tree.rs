@@ -14,6 +14,8 @@ use lgwks_std::hash;
 
 use super::temp_dir::TempDir;
 
+use crate::coverage::forward;
+
 /// The repository the journeys copy from.
 pub(crate) const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 /// The shipped binary.
@@ -118,13 +120,15 @@ pub(crate) fn digests(tree: &Tree) -> Result<Vec<(String, String)>, Box<dyn Erro
 
 /// Runs the shipped `larry` with `args` from `directory`, with only `PATH` set.
 pub(crate) fn larry(args: &[&str], directory: &Path) -> Result<Output, Box<dyn Error>> {
-    Ok(Command::new(LARRY)
+    let mut command = Command::new(LARRY);
+    command
         .args(args)
         .current_dir(directory)
         .env_clear()
         .env("PATH", env::var("PATH")?)
-        .stdin(Stdio::null())
-        .output()?)
+        .stdin(Stdio::null());
+    forward(&mut command);
+    Ok(command.output()?)
 }
 
 /// A stream as text.

@@ -6,6 +6,8 @@
 //! Requirement: the frame paints, asks before every command, never runs a declined one,
 //! survives kill -9 with a clean next start, writes nothing while idle, and exits 0 on Ctrl+C.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/journey.rs"]

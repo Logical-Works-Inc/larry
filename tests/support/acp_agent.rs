@@ -16,6 +16,8 @@ use lgwks_std::json::{self, Value, json};
 use crate::json_at::At;
 use crate::larry_child;
 
+use crate::coverage::forward;
+
 /// What every step here returns.
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -101,7 +103,8 @@ impl Agent {
 
     /// Initializes and opens one session in `cwd`, returning its id.
     pub(crate) fn open(&mut self, cwd: &Path) -> TestResult<String> {
-        let provision = Command::new(env!("CARGO_BIN_EXE_larry"))
+        let mut provision = Command::new(env!("CARGO_BIN_EXE_larry"));
+        provision
             .args(["serve", "provision"])
             .arg(cwd)
             .env_clear()
@@ -110,8 +113,9 @@ impl Agent {
             .env("LARRY_POLICY", &self.policy)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()?;
+            .stderr(Stdio::piped());
+        forward(&mut provision);
+        let provision = provision.output()?;
         if !provision.status.success() {
             return Err(format!(
                 "serve provision refused {}: {}",

@@ -30,6 +30,9 @@ mod route_key;
 #[path = "support/sealed_report.rs"]
 mod sealed_report;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
@@ -56,14 +59,16 @@ fn larry_route(
     env: &[(&str, &OsStr)],
     args: &[&str],
 ) -> Result<Output, Box<dyn Error>> {
-    Ok(Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
         .arg("route")
         .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .env("LARRY_STATE_DIR", state)
-        .envs(env.iter().copied())
-        .output()?)
+        .envs(env.iter().copied());
+    coverage::forward(&mut command);
+    Ok(command.output()?)
 }
 
 /// The host and port a mock listens on, as a sealed report names it.
