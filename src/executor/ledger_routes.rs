@@ -16,9 +16,11 @@ use crate::model::{Draft, Kind, MAX_ROUTES, Route, RouteError, Table};
 
 /// Inserts a route, or replaces the fields of the one with this id, unless the
 /// tenant holds the most routes it may and this id is new: that writes no row.
+/// A replacement keeps the default flag and the price table it found: `route
+/// add` names no prices, so re-adding a priced route must not wipe its table.
 const UPSERT: &str = "INSERT INTO routes (tenant, id, kind, base_url, key_env, model, temperature, \
-    request_bytes, residency, describe, is_default) \
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0 \
+    request_bytes, residency, describe, is_default, price_version, price_input, price_output) \
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?12, ?13, ?14 \
     WHERE EXISTS (SELECT 1 FROM routes WHERE tenant = ?1 AND id = ?2) \
     OR (SELECT COUNT(*) FROM routes WHERE tenant = ?1) < ?11 \
     ON CONFLICT (tenant, id) DO UPDATE SET kind = excluded.kind, base_url = excluded.base_url, \
@@ -46,6 +48,12 @@ struct Stored {
     residency: Option<String>,
     /// The capability description.
     describe: String,
+    /// The price-table revision.
+    price_version: i64,
+    /// Prompt micro-dollars per million tokens.
+    price_input: i64,
+    /// Completion micro-dollars per million tokens.
+    price_output: i64,
     /// 1 for the tenant's default route, else 0.
     is_default: i64,
 }
@@ -61,6 +69,15 @@ impl Stored {
         let Ok(request_bytes) = usize::try_from(self.request_bytes) else {
             return Err(damaged(Some(RouteError::BadRequestBytes)));
         };
+        let Ok(version) = u32::try_from(self.price_version) else {
+            return Err(damaged(None));
+        };
+        let Ok(input) = u64::try_from(self.price_input) else {
+            return Err(damaged(Some(RouteError::BadPrice { field: "input" })));
+        };
+        let Ok(output) = u64::try_from(self.price_output) else {
+            return Err(damaged(Some(RouteError::BadPrice { field: "output" })));
+        };
         Route::stored(&Draft {
             id: &self.id,
             kind,
@@ -72,6 +89,8 @@ impl Stored {
             residency: self.residency.as_deref(),
             describe: &self.describe,
         })
+        .map_err(|refusal| damaged(Some(refusal)))?
+        .with_price(version, input, output)
         .map_err(|refusal| damaged(Some(refusal)))
     }
 }
@@ -113,10 +132,10 @@ impl Ledger {
         Ok(())
     }
 
-    /// Stores `route` for `tenant`, replacing the fields of the route with its
-    /// id, and makes it the tenant's default when `make_default`. A replacement
-    /// keeps the default flag it had. One transaction, so a crash leaves the
-    /// route stored or not, and the default moved or not.
+    /// Stores `route` for `tenant`, replacing the fields the route names, and
+    /// makes it the tenant's default when `make_default`. A replacement keeps
+    /// the default flag and the price table it found. One transaction, so a
+    /// crash leaves the route stored or not, and the default moved or not.
     ///
     /// # Errors
     ///
@@ -130,6 +149,13 @@ impl Ledger {
     ) -> Result<(), ExecError> {
         let Ok(bytes) = i64::try_from(route.request_bytes()) else {
             return Err(ExecError::Route(RouteError::BadRequestBytes));
+        };
+        let version = i64::from(route.price_version());
+        let (Ok(input), Ok(output)) = (
+            i64::try_from(route.price_input()),
+            i64::try_from(route.price_output()),
+        ) else {
+            return Err(ExecError::Route(RouteError::BadPrice { field: "input" }));
         };
         let step = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
             .map_err(ExecError::Sql)?;
@@ -147,7 +173,10 @@ impl Ledger {
                     bytes,
                     route.residency(),
                     route.describe(),
-                    i64::from(MAX_ROUTES)
+                    i64::from(MAX_ROUTES),
+                    version,
+                    input,
+                    output
                 ],
             )
             .map_err(ExecError::Sql)?;
@@ -178,7 +207,8 @@ impl Ledger {
             .conn
             .prepare(
                 "SELECT id, kind, base_url, key_env, model, temperature, request_bytes, \
-                 residency, describe, is_default FROM routes WHERE tenant = ?1 ORDER BY id LIMIT ?2",
+                 residency, describe, price_version, price_input, price_output, is_default \
+                 FROM routes WHERE tenant = ?1 ORDER BY id LIMIT ?2",
             )
             .map_err(ExecError::Sql)?;
         let rows = statement
@@ -193,7 +223,10 @@ impl Ledger {
                     request_bytes: row.get(6)?,
                     residency: row.get(7)?,
                     describe: row.get(8)?,
-                    is_default: row.get(9)?,
+                    price_version: row.get(9)?,
+                    price_input: row.get(10)?,
+                    price_output: row.get(11)?,
+                    is_default: row.get(12)?,
                 })
             })
             .map_err(ExecError::Sql)?;
@@ -254,6 +287,39 @@ impl Ledger {
             )
             .map_err(ExecError::Sql)?;
         if moved == 0 {
+            return Err(ExecError::Route(RouteError::NoSuchId { id: id.to_owned() }));
+        }
+        Ok(())
+    }
+
+    /// Sets the price table of `tenant`'s route `id` to `input` and `output`
+    /// micro-dollars per million tokens, bumping its revision in the same
+    /// statement, so two pricings cannot write one revision. Only `larry route
+    /// price` writes these columns; `route add` never does.
+    ///
+    /// # Errors
+    ///
+    /// [`RouteError::NoSuchId`] (as [`ExecError::Route`]) when the tenant has no
+    /// such route, which changes nothing; [`ExecError::Sql`] otherwise.
+    pub(crate) fn set_route_price(
+        &self,
+        tenant: &str,
+        id: &str,
+        input: u64,
+        output: u64,
+    ) -> Result<(), ExecError> {
+        let (Ok(input), Ok(output)) = (i64::try_from(input), i64::try_from(output)) else {
+            return Err(ExecError::Route(RouteError::BadPrice { field: "input" }));
+        };
+        let priced = self
+            .conn
+            .execute(
+                "UPDATE routes SET price_version = price_version + 1, price_input = ?3, \
+                 price_output = ?4 WHERE tenant = ?1 AND id = ?2",
+                rusqlite::params![tenant, id, input, output],
+            )
+            .map_err(ExecError::Sql)?;
+        if priced == 0 {
             return Err(ExecError::Route(RouteError::NoSuchId { id: id.to_owned() }));
         }
         Ok(())
@@ -387,6 +453,73 @@ mod tests {
             "tenant a still reads: the damage is tenant b's"
         );
         // A cleanup that fails is a test failure, never a dropped error.
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    /// Prices round trip beside the route: a new row carries revision 1 with no
+    /// rates, `set_route_price` bumps the revision and sets the rates, re-adding
+    /// the route keeps the priced table, and a row edited past the bound or
+    /// negative is damaged with the rate named.
+    #[test]
+    fn route_prices_round_trip_bump_and_refuse_damage() -> Result<(), Box<dyn std::error::Error>> {
+        let (ledger, directory) = open()?;
+        ledger.put_route("tenant-a", &route("alpha", "model-a1")?, true)?;
+        let stored = ledger.routes("tenant-a")?;
+        let first = stored.lookup(Some("alpha")).ok_or("stored route")?;
+        assert_eq!(first.price_version(), 1, "a new row carries revision 1");
+        assert_eq!(first.price_input(), 0, "no input rate until priced");
+        assert_eq!(first.price_output(), 0, "no output rate until priced");
+        ledger.set_route_price("tenant-a", "alpha", 300_000, 1_200_000)?;
+        let priced = ledger.routes("tenant-a")?;
+        let second = priced.lookup(Some("alpha")).ok_or("priced route")?;
+        assert_eq!(second.price_version(), 2, "the set bumps the revision");
+        assert_eq!(second.price_input(), 300_000, "thirty cents a million in");
+        assert_eq!(second.price_output(), 1_200_000, "a dollar twenty out");
+        ledger.set_route_price("tenant-a", "alpha", 300_000, 1_200_000)?;
+        let bumped = ledger.routes("tenant-a")?;
+        let third = bumped.lookup(Some("alpha")).ok_or("repriced route")?;
+        assert_eq!(third.price_version(), 3, "every set bumps the revision");
+        assert!(
+            matches!(
+                ledger.set_route_price("tenant-a", "nope", 1, 1),
+                Err(ExecError::Route(RouteError::NoSuchId { .. }))
+            ),
+            "an unknown id is refused"
+        );
+        ledger.put_route("tenant-a", &route("alpha", "model-a2")?, false)?;
+        let kept = ledger.routes("tenant-a")?;
+        let fourth = kept.lookup(Some("alpha")).ok_or("re-added route")?;
+        assert_eq!(fourth.price_version(), 3, "re-adding keeps the table");
+        assert_eq!(
+            fourth.model(),
+            "model-a2",
+            "re-adding still replaces the fields it names"
+        );
+        ledger.conn.execute(
+            "UPDATE routes SET price_input = -1 WHERE tenant = 'tenant-a'",
+            [],
+        )?;
+        assert!(
+            matches!(
+                ledger.routes("tenant-a"),
+                Err(ExecError::Route(RouteError::Damaged { cause: Some(ref inner), .. }))
+                    if **inner == RouteError::BadPrice { field: "input" }
+            ),
+            "a negative rate is damaged, not read"
+        );
+        ledger.conn.execute(
+            "UPDATE routes SET price_input = 0, price_output = 10000000001 WHERE tenant = 'tenant-a'",
+            [],
+        )?;
+        assert!(
+            matches!(
+                ledger.routes("tenant-a"),
+                Err(ExecError::Route(RouteError::Damaged { cause: Some(ref inner), .. }))
+                    if **inner == RouteError::BadPrice { field: "output" }
+            ),
+            "a rate past the bound is damaged, not read"
+        );
         std::fs::remove_dir_all(&directory)?;
         Ok(())
     }

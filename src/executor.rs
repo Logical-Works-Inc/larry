@@ -258,6 +258,8 @@ pub struct Settings {
     secrets: Arc<[String]>,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
+    /// Shared bounded tenant-route model budget and limiter.
+    limiter: Arc<crate::model::Limiter>,
 }
 
 impl fmt::Debug for Settings {
@@ -304,6 +306,7 @@ impl Settings {
             policy,
             secrets: Arc::from(secrets.into_boxed_slice()),
             read: Arc::new(read),
+            limiter: crate::model::Limiter::new(),
         })
     }
 
@@ -461,7 +464,15 @@ fn model_step<'task>(
     let route = settings.route(ledger, task.route())?;
     // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    let client = ModelClient::new(settings.model_config(&route)?, clock, backoff);
+    let tenant = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+    let client = ModelClient::with_limiter(
+        settings.model_config(&route)?,
+        clock,
+        Arc::clone(&settings.limiter),
+        tenant,
+        route.id(),
+        backoff,
+    );
     Ok(Some(ModelStep {
         route,
         brief,

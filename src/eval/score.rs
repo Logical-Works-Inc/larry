@@ -6,6 +6,8 @@
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
+use crate::model::Route;
+
 /// Highest price accepted: 10,000 dollars per million tokens, in micro-dollars.
 const MAX_PRICE_MICRO: u64 = 10_000_000_000;
 /// Micro-dollars in one dollar, and the fraction digits a price may carry.
@@ -46,14 +48,17 @@ pub(crate) struct Spent {
 }
 
 /// Why a price setting was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PriceFault {
     /// Not a plain decimal: digits, then optionally `.` and digits.
+    #[error("is not a plain decimal like 0.30")]
     Malformed,
     /// More than six fraction digits: finer than a micro-dollar per million tokens.
+    #[error("has more than 6 fraction digits")]
     TooPrecise,
     /// Above 10,000 dollars per million tokens.
+    #[error("is over 10000 dollars per million tokens")]
     TooLarge,
 }
 
@@ -68,24 +73,13 @@ pub enum PriceError {
         variable: &'static str,
     },
     /// The variable is set and refused.
-    #[error("{variable} {}", fault.why())]
+    #[error("{variable} {fault}")]
     Refused {
         /// The variable.
         variable: &'static str,
         /// Why.
         fault: PriceFault,
     },
-}
-
-impl PriceFault {
-    /// What a refused setting is told, after its variable's name.
-    const fn why(self) -> &'static str {
-        match self {
-            Self::Malformed => "is not a plain decimal like 0.30",
-            Self::TooPrecise => "has more than 6 fraction digits",
-            Self::TooLarge => "is over 10000 dollars per million tokens",
-        }
-    }
 }
 
 /// The value of an all-ASCII-digit string, `None` past `u64::MAX`.
@@ -123,6 +117,21 @@ pub(crate) fn parse_price(text: &str) -> Result<u64, PriceFault> {
 }
 
 impl Prices {
+    /// Reads the immutable price table carried by a resolved route.
+    pub(crate) const fn from_route(route: &Route) -> Prices {
+        Prices {
+            input: route.price_input(),
+            output: route.price_output(),
+            cached: None,
+            cache_write: None,
+        }
+    }
+
+    /// Whether the route has a non-zero table instead of a legacy empty row.
+    pub(crate) const fn declared(self) -> bool {
+        self.input != 0 || self.output != 0
+    }
+
     /// Reads `LARRY_EVAL_PRICE_IN` and `LARRY_EVAL_PRICE_OUT` through `read`, and
     /// the optional `LARRY_EVAL_PRICE_CACHED` and `LARRY_EVAL_PRICE_CACHE_WRITE`
     /// (unset or empty: not declared, so the input price applies).
@@ -256,6 +265,14 @@ impl Scorecard {
                 String::from("route"),
                 Value::String(route.to_owned().into()),
             );
+        }
+        self
+    }
+
+    /// The price-table revision used for this arm.
+    pub(crate) fn with_price_version(mut self, version: u32) -> Scorecard {
+        if let Some(object) = self.json.as_object_mut() {
+            object.insert(String::from("price_version"), json!(version));
         }
         self
     }

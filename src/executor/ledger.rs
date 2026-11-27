@@ -55,6 +55,14 @@ const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant TEXT NOT NU
 const RESIDENCY_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS tenant_residency(tenant TEXT PRIMARY KEY, codes TEXT NOT NULL);";
 
+/// Schema of the route price table, version 7 (larry#204): the versioned
+/// price-table revision and the input and output rates in micro-dollars per
+/// million tokens. Existing rows keep revision 1 with no rates, which prices
+/// nothing until `larry route price` sets them.
+const PRICE_SCHEMA: &str = "ALTER TABLE routes ADD COLUMN price_version INTEGER NOT NULL DEFAULT 1; \
+    ALTER TABLE routes ADD COLUMN price_input INTEGER NOT NULL DEFAULT 0; \
+    ALTER TABLE routes ADD COLUMN price_output INTEGER NOT NULL DEFAULT 0;";
+
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
 
@@ -97,7 +105,7 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            6,
+            7,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -105,6 +113,7 @@ impl Ledger {
                 REPORT_SCHEMA,
                 ROUTE_SCHEMA,
                 RESIDENCY_SCHEMA,
+                PRICE_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;

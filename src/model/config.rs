@@ -32,10 +32,16 @@ const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Attempts per completion, first try included.
 const DEFAULT_ATTEMPTS: u32 = 3;
-/// Backoff after the first failed attempt, in milliseconds.
-const DEFAULT_BACKOFF_MS: u64 = 500;
+/// Backoff after the first failed attempt, in milliseconds. Zero by default,
+/// like the executor, which never waits for a retry: a wait it is asked for
+/// stops the retry at once, so the default asks for none.
+const DEFAULT_BACKOFF_MS: u64 = 0;
 /// Total budget across every attempt of one completion, in milliseconds.
 const DEFAULT_DEADLINE_MS: u64 = 300_000;
+/// An unset model token budget keeps the legacy unlimited route behaviour.
+const DEFAULT_TOKEN_BUDGET: u64 = u64::MAX;
+/// An unset model money budget keeps the legacy unlimited route behaviour.
+const DEFAULT_MICRO_BUDGET: u64 = u64::MAX;
 /// Most attempts a configuration may ask for.
 const MAX_ATTEMPTS: u32 = 16;
 
@@ -56,6 +62,14 @@ pub struct ModelConfig {
     timeout: Duration,
     /// How failed attempts are spaced and when retrying stops.
     retry: RetryPolicy,
+    /// The maximum reported tokens this client may spend for its tenant.
+    token_budget: u64,
+    /// The maximum micro-dollar spend this client may report.
+    micro_budget: u64,
+    /// Route input price, in micro-dollars per million tokens.
+    price_input: u64,
+    /// Route output price, in micro-dollars per million tokens.
+    price_output: u64,
 }
 
 /// A whole number read from `variable`, or `default` when it is unset.
@@ -136,8 +150,11 @@ impl ModelConfig {
     ///
     /// `LARRY_MODEL_KEY`, `LARRY_MODEL_URL` and `LARRY_MODEL` are required.
     /// `LARRY_MODEL_TEMPERATURE`, `LARRY_MODEL_TIMEOUT_MS`,
-    /// `LARRY_MODEL_ATTEMPTS` (1 to 16), `LARRY_MODEL_BACKOFF_MS` and
-    /// `LARRY_MODEL_DEADLINE_MS` fall back to their defaults.
+    /// `LARRY_MODEL_ATTEMPTS` (1 to 16), `LARRY_MODEL_BACKOFF_MS` (zero when
+    /// unset, like the executor, which never waits) and
+    /// `LARRY_MODEL_DEADLINE_MS` fall back to their defaults, as do the
+    /// token and micro-dollar budgets (unlimited when unset) and the price
+    /// overrides (the route table's rates when it declares any).
     ///
     /// # Errors
     ///
@@ -187,6 +204,22 @@ impl ModelConfig {
         }
         let backoff = whole(read, "LARRY_MODEL_BACKOFF_MS", DEFAULT_BACKOFF_MS)?;
         let deadline = whole(read, "LARRY_MODEL_DEADLINE_MS", DEFAULT_DEADLINE_MS)?;
+        let token_budget = whole(read, "LARRY_MODEL_TOKEN_BUDGET", DEFAULT_TOKEN_BUDGET)?;
+        let micro_budget = whole(
+            read,
+            "LARRY_MODEL_MICRO_DOLLAR_BUDGET",
+            DEFAULT_MICRO_BUDGET,
+        )?;
+        // A declared route table prices the calls; the environment rates only
+        // fill a route that carries none (the environment route always does).
+        let (price_input, price_output) = if route.price_input() != 0 || route.price_output() != 0 {
+            (route.price_input(), route.price_output())
+        } else {
+            (
+                whole(read, "LARRY_MODEL_PRICE_IN_MICROS", 0)?,
+                whole(read, "LARRY_MODEL_PRICE_OUT_MICROS", 0)?,
+            )
+        };
         Ok(Self {
             base_url: route.base_url().to_owned(),
             api_key,
@@ -199,6 +232,10 @@ impl ModelConfig {
                 Duration::from_millis(backoff),
                 Duration::from_millis(deadline),
             ),
+            token_budget,
+            micro_budget,
+            price_input,
+            price_output,
         })
     }
 
@@ -236,6 +273,26 @@ impl ModelConfig {
     pub(super) const fn retry(&self) -> RetryPolicy {
         self.retry
     }
+
+    /// The tenant's maximum reported token usage.
+    pub(super) const fn token_budget(&self) -> u64 {
+        self.token_budget
+    }
+
+    /// The tenant's maximum micro-dollar spend.
+    pub(super) const fn micro_budget(&self) -> u64 {
+        self.micro_budget
+    }
+
+    /// The route's input price in micro-dollars per million tokens.
+    pub(super) const fn price_input(&self) -> u64 {
+        self.price_input
+    }
+
+    /// The route's output price in micro-dollars per million tokens.
+    pub(super) const fn price_output(&self) -> u64 {
+        self.price_output
+    }
 }
 
 impl fmt::Debug for ModelConfig {
@@ -248,6 +305,10 @@ impl fmt::Debug for ModelConfig {
             .field("request_bytes", &self.request_bytes)
             .field("timeout", &self.timeout)
             .field("retry", &self.retry)
+            .field("token_budget", &self.token_budget)
+            .field("micro_budget", &self.micro_budget)
+            .field("price_input", &self.price_input)
+            .field("price_output", &self.price_output)
             .finish()
     }
 }
@@ -271,4 +332,28 @@ pub(crate) fn sim_config(bound: Option<usize>) -> Result<ModelConfig, ModelError
     ModelConfig::for_route(&route, &|name: &str| {
         (name == "LARRY_KEY_SIM").then(|| String::from("sim-key"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The unset backoff matches the executor, which never waits for a retry:
+    /// a wait it is asked for stops the retry at once, so the default asks for
+    /// none. A default that waited would promise retries the executor refuses.
+    #[test]
+    fn the_unset_backoff_matches_the_executor_that_never_waits() -> Result<(), ModelError> {
+        let config = ModelConfig::from_env(|name: &str| match name {
+            "LARRY_MODEL_URL" => Some(String::from("http://127.0.0.1:9/v1")),
+            "LARRY_MODEL" => Some(String::from("sim-model")),
+            "LARRY_MODEL_KEY" => Some(String::from("sim-key")),
+            _ => None,
+        })?;
+        assert_eq!(
+            config.retry().base_delay,
+            Duration::ZERO,
+            "the unset backoff is zero, like the executor's"
+        );
+        Ok(())
+    }
 }

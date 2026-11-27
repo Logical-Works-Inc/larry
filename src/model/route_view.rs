@@ -60,13 +60,36 @@ impl Route {
     pub(crate) fn describe(&self) -> &str {
         &self.describe
     }
+    /// The route price-table revision.
+    pub(crate) const fn price_version(&self) -> u32 {
+        self.price_version
+    }
+    /// Prompt micro-dollars per million tokens from the route table.
+    pub(crate) const fn price_input(&self) -> u64 {
+        self.price_input
+    }
+    /// Completion micro-dollars per million tokens from the route table.
+    pub(crate) const fn price_output(&self) -> u64 {
+        self.price_output
+    }
     /// What a sealed report says about the route, without a key or key variable.
     pub(crate) fn seal(&self) -> Value {
-        json!({
+        let mut sealed = json!({
             "id": self.id,
             "model": self.model,
             "host": self.host,
             "residency": self.residency,
-        })
+        });
+        if (self.price_input != 0 || self.price_output != 0)
+            && let Some(object) = sealed.as_object_mut()
+        {
+            object.insert(String::from("price_version"), json!(self.price_version));
+            object.insert(String::from("price_input_micros"), json!(self.price_input));
+            object.insert(
+                String::from("price_output_micros"),
+                json!(self.price_output),
+            );
+        }
+        sealed
     }
 }
