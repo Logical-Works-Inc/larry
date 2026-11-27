@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use lgwks_macros::Error;
 
-use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute};
+use crate::executor::{AuthorFault, ExecError, Report, Settings, Task, execute_eval};
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
 #[cfg(test)]
@@ -279,7 +279,7 @@ fn run_in(origin: &Origin, settings: &Settings, task: &EvalTask) -> Result<Outco
         cause: ExecError::Task(cause),
     })?;
     let started = Instant::now();
-    let finished = execute(&document, settings);
+    let finished = execute_eval(&document, settings);
     let micros =
         u64::try_from(started.elapsed().as_micros()).map_err(|cause| EvalError::Overlong {
             id: task.id.clone(),

@@ -311,6 +311,12 @@ pub(crate) fn run_session(
     // A host that cannot confine refuses here, before the ledger, the model or a copy.
     isolation.check()?;
     let (ledger, key) = prepare(settings)?;
+    let repository = ledger.authorized_repo(
+        &super::tenant_key(settings.state_dir()),
+        settings.state_dir(),
+        cwd,
+    )?;
+    let cwd = repository.as_path();
     let route = settings.route(&ledger, None)?;
     let config = settings.model_config(&route)?;
     let document = json::to_vec(&json!({
@@ -407,6 +413,64 @@ pub(crate) fn run_session(
         }
     };
     Ok(Ended { stop, report })
+}
+
+#[cfg(test)]
+mod issue207_tests {
+    use super::{Approval, Isolation, Observer, run_session};
+    use crate::executor::gate;
+    use crate::executor::sim_tree::scratch;
+    use crate::executor::{Ledger, Settings, tenant_key};
+
+    /// An observer that must never be reached by a refusal before model setup.
+    struct QuietObserver;
+
+    impl Observer for QuietObserver {
+        fn handed(&mut self, _line: &str, _applied: bool) {}
+
+        fn approve(&mut self, _step: usize, _command: &str) -> Approval {
+            Approval::Decline
+        }
+
+        fn started(&mut self, _step: usize, _command: &str) {}
+
+        fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
+
+        fn message(&mut self, _text: &str) {}
+
+        fn cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    /// A remote ACP session must refuse an unallowlisted cwd before route or model resolution.
+    #[test]
+    fn sim_session_refuses_an_unallowlisted_cwd_before_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch("issue207-session-state")?;
+        let work = scratch("issue207-session-work")?;
+        let policy = gate::session_scopes();
+        Ledger::open(&state)?.set_tenant_policy(&tenant_key(&state), &policy)?;
+        let state_text = state.to_string_lossy().into_owned();
+        let path = std::env::var("PATH")?;
+        let settings = Settings::remote_from_env(move |name| match name {
+            "LARRY_STATE_DIR" => Some(state_text.clone()),
+            "PATH" => Some(path.clone()),
+            _ => None,
+        })?;
+        let mut observer = QuietObserver;
+        assert!(matches!(
+            run_session(
+                "read this repository",
+                &work,
+                &settings,
+                Isolation::Host,
+                &mut observer
+            ),
+            Err(super::super::ExecError::RepoNotAllowed { .. })
+        ));
+        Ok(())
+    }
 }
 
 /// What one session's loop did.

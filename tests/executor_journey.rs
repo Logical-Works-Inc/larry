@@ -471,7 +471,7 @@ fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
     assert_refused(&output, "LARRY_STATE_DIR");
 
     let output = run_exec(state.path(), &task_json(empty.path(), "HEAD", quick), None)?;
-    assert_refused(&output, "could not clone");
+    assert_refused(&output, "not in the tenant allowlist");
 
     let output = run_exec(
         state.path(),

@@ -161,7 +161,7 @@ pub(super) fn with_expiry(
 /// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
 /// estate capability name `replay::capability` gives it (larry#77), without
 /// its `larry.` prefix, so the scope-to-name mapping has one owner.
-fn scope_name(scope: Scope) -> String {
+pub(super) fn scope_name(scope: Scope) -> String {
     let capability = larry_contracts::replay::capability(scope);
     let name = capability.as_str();
     match name.strip_prefix(CAPABILITY_PREFIX) {
@@ -187,6 +187,14 @@ fn named_scope(name: &str) -> Option<Scope> {
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
     let Some(text) = read("LARRY_POLICY") else {
         return Ok(default_policy());
+    };
+    policy_names(Some(&text))
+}
+
+/// Parses a durable policy record. A missing ledger row is remote deny-all.
+pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecError> {
+    let Some(text) = text else {
+        return Ok(BTreeSet::new());
     };
     let mut scopes = BTreeSet::new();
     for name in text.split(',') {

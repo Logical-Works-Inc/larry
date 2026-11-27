@@ -402,6 +402,12 @@ fn a_keyed_retry_after_a_recovery_fault_runs_nothing_and_keeps_the_journal() -> 
 
     // A journal whose bytes are refused is set aside, and still answers its keyed retry.
     let damaged_state = TempDir::new()?;
+    let damaged_state_text = damaged_state.path().to_string_lossy().into_owned();
+    larry_demo::executor::provision_tenant(
+        move |_| Some(damaged_state_text.clone()),
+        "file.read,file.write,process.spawn,model.invoke,model.command",
+        &[origin.path()],
+    )?;
     let damaged_count = scratch.path().join("damaged-runs");
     let damaged = killed_keyed_run(
         damaged_state.path(),

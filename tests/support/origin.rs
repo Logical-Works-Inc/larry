@@ -23,6 +23,11 @@ pub(crate) fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
     let state = TempDir::new()?;
     let origin = TempDir::new()?;
     origin_repo(origin.path())?;
+    larry_demo::executor::provision_tenant(
+        |_| Some(state.path().to_string_lossy().into_owned()),
+        "file.read,file.write,process.spawn,model.invoke,model.command",
+        &[origin.path()],
+    )?;
     Ok((state, origin))
 }
 
