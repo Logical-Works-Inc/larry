@@ -12,6 +12,7 @@
 mod client;
 mod config;
 mod route;
+mod route_transport;
 mod wire;
 
 use std::num::{ParseFloatError, ParseIntError};

@@ -46,10 +46,11 @@ const SUBCOMMANDS: [&str; 13] = [
 
 /// The `LARRY_*` variables a user must be able to find in help: one per command
 /// that reads one, and the two wildcards the executor and the routes use.
-const VARIABLES: [&str; 11] = [
+const VARIABLES: [&str; 12] = [
     "LARRY_STATE_DIR",
     "LARRY_POLICY",
     "LARRY_EXEC_TIMEOUT_MS",
+    "LARRY_FENCE_CONTROL",
     "LARRY_MODEL_URL",
     "LARRY_MODEL_KEY",
     "LARRY_RECEIPT_KEY",
@@ -250,7 +251,7 @@ fn route_add_errors_name_the_field_once() -> TestResult {
                 "add",
                 id,
                 "--url",
-                "http://gateway.test:8443/v1",
+                "https://gateway.test:8443/v1",
                 "--model",
                 "model-1",
                 "--key-env",

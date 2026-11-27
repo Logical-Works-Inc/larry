@@ -45,6 +45,28 @@ fn a_built_route_keeps_its_parts_and_seals_no_key() -> Result<(), RouteError> {
     Ok(())
 }
 
+/// A non-loopback plaintext route is refused before the client can send bytes.
+#[test]
+fn sim_plaintext_non_loopback_is_refused_before_send() {
+    let mut draft = accepted();
+    draft.base_url = "http://gateway.example:8443/v1";
+    assert_eq!(
+        Route::new(&draft),
+        Err(RouteError::InsecureTransport {
+            host: String::from("gateway.example:8443")
+        }),
+        "plaintext must not reach a remote host"
+    );
+}
+
+/// Loopback is the only host class where plaintext is permitted for a local mock.
+#[test]
+fn sim_plaintext_loopback_is_allowed() -> Result<(), RouteError> {
+    let mut draft = accepted();
+    draft.base_url = "http://127.0.0.1:8443/v1";
+    Route::new(&draft).map(|_| ())
+}
+
 /// The resolver's order: named, else default, else environment, else none;
 /// a name nothing has never falls through.
 #[test]

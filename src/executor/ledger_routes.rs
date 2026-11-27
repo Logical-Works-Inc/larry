@@ -96,7 +96,7 @@ impl Stored {
         let Ok(output) = u64::try_from(self.price_output) else {
             return Err(damaged(Some(RouteError::BadPrice { field: "output" })));
         };
-        Route::new(&Draft {
+        Route::stored(&Draft {
             id: &self.id,
             kind,
             base_url: &self.base_url,
@@ -330,7 +330,7 @@ mod tests {
         Route::new(&Draft {
             id,
             kind: Kind::OpenAiChat,
-            base_url: "http://gateway.test:9/v1",
+            base_url: "https://gateway.test:9/v1",
             model,
             key_env: "LARRY_KEY_TEST",
             temperature: Some(0.5),
