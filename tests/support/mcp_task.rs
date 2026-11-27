@@ -13,6 +13,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use crate::coverage::forward;
+
 /// The variables an operator exports to put an executor behind `larry mcp`:
 /// the state directory, the gateway, a key, no backoff wait, plus `extra`.
 pub(crate) fn operator(
@@ -81,15 +83,17 @@ pub(crate) fn submit(session: &mut Session, task: &Value) -> TestResult<Value> {
 
 /// Runs `larry <subcommand>` with only PATH and `env` set and `input` on stdin.
 fn run_larry(subcommand: &str, env: &[(&str, &OsStr)], input: &[u8]) -> TestResult<Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
         .arg(subcommand)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    forward(&mut command);
+    let mut child = command.spawn()?;
     let mut stdin = child.stdin.take().ok_or("child stdin was not piped")?;
     stdin.write_all(input)?;
     drop(stdin);

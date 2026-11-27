@@ -19,6 +19,8 @@ use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::time::Duration;
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/deadline.rs"]
 mod deadline;
 #[path = "support/larry_cli.rs"]

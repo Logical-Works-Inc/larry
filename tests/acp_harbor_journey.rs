@@ -3,6 +3,8 @@
 //! Requirement proved: commands, refusals, cancellation, recovery and reports
 //! stay on the binary path without a paid model call.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
@@ -93,13 +95,15 @@ fn harbor_task(root: &Path) -> TestResult<String> {
 
 /// Runs the verifier and returns its reward.
 fn reward(task: &Path, work: &Path, logs: &Path) -> TestResult<String> {
-    let status = Command::new("sh")
+    let mut verifier = Command::new("sh");
+    verifier
         .arg(task.join("tests").join("test.sh"))
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .env("WORKDIR", work)
-        .env("LOGS", logs)
-        .status()?;
+        .env("LOGS", logs);
+    coverage::forward(&mut verifier);
+    let status = verifier.status()?;
     assert!(status.success(), "the verifier runs");
     let written = fs::read_to_string(logs.join("verifier").join("reward.txt"))?;
     Ok(written.trim().to_owned())
@@ -613,8 +617,7 @@ fn send_line(out: &mut impl Write, message: &Value) -> TestResult {
     let mut line = message.to_string();
     line.push('\n');
     out.write_all(line.as_bytes())?;
-    out.flush()?;
-    Ok(())
+    Ok(out.flush()?)
 }
 
 /// Reads one protocol message from `input`.

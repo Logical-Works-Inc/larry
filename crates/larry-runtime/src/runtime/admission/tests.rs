@@ -27,6 +27,7 @@ use crate::protocol::{
 };
 use crate::runtime::{Runtime, RuntimeSettings, restore};
 
+mod sim_bounds;
 mod sim_reduce;
 
 // The shared temp guard of the repository's tests (larry#311), included as source so this crate

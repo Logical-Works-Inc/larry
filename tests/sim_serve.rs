@@ -13,6 +13,8 @@
 //! trace hash; and many keyed tenants at once, two of them on one path, are each
 //! answered as themselves with no cross-talk.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/serve_cli.rs"]
 mod serve_cli;
 

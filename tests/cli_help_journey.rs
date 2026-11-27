@@ -12,6 +12,8 @@
 //! names the argv-array form with an example; `route add` errors carry one
 //! `route` word. The MCP door's own form is proved in `tests/mcp_stdio_journey.rs`.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/temp_dir.rs"]

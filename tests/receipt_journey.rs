@@ -12,6 +12,8 @@
 //! directory (tenant) is untrusted; the key survives a kill -9 of the executor;
 //! and an offline verifier needs only the printed public key.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
 

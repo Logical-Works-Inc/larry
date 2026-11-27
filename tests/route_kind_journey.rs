@@ -8,6 +8,8 @@
 //! naming the kind. Every run drives the shipped binary with a cleared
 //! environment.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/route_key.rs"]
