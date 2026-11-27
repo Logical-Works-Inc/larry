@@ -1,13 +1,15 @@
-//! The model client (#83): one blocking OpenAI-compatible chat-completions
-//! client that the executor (#85) calls to run a task on a cheap model through
-//! the route the task resolves to (#201): a gateway and a model the tenant owns
-//! as data, never one compiled into the binary.
+//! The model client (#83): one blocking completion client per provider kind
+//! (OpenAI chat, Anthropic Messages, OpenAI Responses, larry#205) that the
+//! executor (#85) calls to run a task on a cheap model through the route the
+//! task resolves to (#201): a gateway and a model the tenant owns as data,
+//! never one compiled into the binary.
 //!
 //! Ported from forge-harness `sdk/forge-providers` (`openai_compatible.rs`,
 //! `completion_body.rs`) onto `lgwks_std::http`, `retry` and `json`. Every
-//! request is non-streaming and carries the route's model and temperature. Every
-//! bound refuses with a typed error: 256 messages, the route's request body
-//! bound (1 MiB unless the route names another, 16 MiB at most) and a 4 MiB reply.
+//! request is non-streaming and carries the route's model and its temperature
+//! only when the route pins one. Every bound refuses with a typed error: 256
+//! messages, the route's request body bound (1 MiB unless the route names
+//! another, 16 MiB at most) and a 4 MiB reply.
 
 mod client;
 mod config;
@@ -34,6 +36,7 @@ pub(crate) use route::tenant_namespace;
 pub(crate) use route::{
     DEFAULT_PRICE_VERSION, Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve,
 };
+pub(crate) use wire::structured_content;
 
 /// Most messages one completion request carries.
 pub(crate) const MAX_MESSAGES: usize = 256;
@@ -115,6 +118,13 @@ pub enum ModelError {
         /// The reply line the chunk is on, from 1.
         line: usize,
         /// The column of the chunk's payload where the JSON reader refused it.
+        column: usize,
+    },
+    /// A reply body is not JSON, so the content it carried is lost. The reader
+    /// reports where it refused the body (larry#205).
+    #[error("malformed model reply: the reply is not JSON (column {column})")]
+    NotJson {
+        /// The column of the reply body where the JSON reader refused it.
         column: usize,
     },
     /// The model did not finish its reply: the gateway's `finish_reason` names a cut
