@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0130: Semantic route selection on the shipped local reranker"
+title: "ADR 0131: Semantic route selection on the shipped local reranker"
 description: Why an unnamed task is ranked by meaning on route descriptions with the pinned Qwen3 reranker after residency and budget filters, and what the sealed record carries.
-resource: /docs/adr/0130-semantic-route-selection.md
+resource: /docs/adr/0131-semantic-route-selection.md
 tags: [larry, adr, model, routing]
 generated: {by: codex, at: 2026-11-27}
 verified: {by: codex, method: lgwks-box cargo nextest and clippy on toronto, 2026-11-27}
@@ -11,7 +11,7 @@ stale_after: 2027-05-27
 sources: [larry#202]
 ---
 
-# ADR 0130
+# ADR 0131
 
 ## Context
 
@@ -71,10 +71,10 @@ standing in for meaning (SD-2).
   `route_cli_journey.rs`.
 - `ranked_choice_latency_with_the_pinned_ranker` (in `select_latency.rs`, a
   measurement control outside the `sim_*` modules, feature `rerank` only,
-  toronto box): cold 68236.3 ms (weights load over 2 routes, winner `beta`,
+  toronto box): cold 38824.4 ms (weights load over 2 routes, winner `beta`,
   the database-migration route for a database-migration task, stable across
-  every run), p50 55492.7 ms, p95 58698.0 ms, p99 58698.0 ms, peak RSS
-  3588156 KiB. Wall times feed only the printed card, never an assertion. No
+  every run), p50 16756.8 ms, p95 22806.1 ms, p99 22806.1 ms, peak RSS
+  3587168 KiB. Wall times feed only the printed card, never an assertion. No
   Microsoft counterpart exposes local-reranker route-choice latency to beat
   on a matched workload; the proof is absolute latency plus the
   replay-identity sims above.

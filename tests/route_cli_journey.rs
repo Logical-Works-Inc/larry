@@ -23,6 +23,9 @@ mod route_journey;
 #[path = "support/route_tenant.rs"]
 mod route_tenant;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;

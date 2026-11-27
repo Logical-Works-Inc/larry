@@ -20,6 +20,8 @@
 //! the same task chooses the same route twice; a delayed or padded gateway
 //! still seals the choice; a gateway fault never reads as a selection refusal.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 

@@ -24,11 +24,14 @@ use std::time::{Duration, Instant};
 /// clone and its first command can wait seconds for a core.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(30);
 
-/// A FIFO release armed over the journey's workspaces (larry#252). The streamed
+/// A FIFO release armed over the journey's workspaces (larry#252, larry#552). The streamed
 /// command's first line is proved before its FIFO is released, so the release sits on
 /// the happy path; every other exit (a failed wait, a refused assertion) drops this
 /// guard, which best-effort opens any `stream.fifo` still present so the `cat` holding
 /// the command sees its writer, then EOF, and never orphans the command past the test.
+/// An explicit release opens write-only, which blocks until the command holds the FIFO
+/// open for reading: a read-write open never blocks, so releasing before `cat` opened
+/// it was lost and `second` never printed (missing "second" under load, larry#552).
 pub(crate) struct FifoRelease {
     /// Every live workspace tree is joined under here.
     workspaces: PathBuf,
@@ -46,8 +49,13 @@ impl FifoRelease {
     }
 
     /// Releases `fifo` now and disarms the guard; the drop after success is a no-op.
+    /// The open is write-only, so it blocks until the command holds the FIFO for
+    /// reading, inside [`PATIENCE`]: the reader's open is the event, never a sleep
+    /// (larry#552). Closing at once then hands that reader EOF so it finishes.
     pub(crate) fn release(&mut self, fifo: &Path) -> io::Result<()> {
-        release_fifo(fifo)?;
+        let writer =
+            await_fifo_writer(fifo).map_err(|cause| io::Error::other(format!("{cause}")))?;
+        drop(writer);
         self.done = true;
         Ok(())
     }
