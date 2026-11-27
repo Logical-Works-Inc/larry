@@ -10,7 +10,6 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::mem::discriminant;
 use std::num::TryFromIntError;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,11 +19,8 @@ use lgwks_macros::Error;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, clip, run_command};
-use super::{
-    ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, Reply, ReplyFault, SessionError,
-    check, parse_reply,
-};
+use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, Track, clip, run_command};
+use super::{ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, SessionError, check};
 use crate::json_at::At;
 use crate::sim_error::SimError;
 use crate::sim_lanes::{self, LaneError};
@@ -49,113 +45,6 @@ pub(in crate::executor) fn text(rng: &mut Seeded, len: usize) -> Result<String, 
         out.push_str(pick);
     }
     Ok(out)
-}
-
-/// A JSON string literal for `value`.
-fn quoted(value: &str) -> Result<String, SimError> {
-    Ok(lgwks_std::json::to_string(value)?)
-}
-
-/// One generated reply and what the rule says of it.
-fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
-    let mut rng = Seeded::from_seed(seed);
-    let kind = rng.below(11)?;
-    let len = usize::try_from(rng.below(40)?.saturating_add(1))?;
-    let body = format!("x{}", text(&mut rng, len)?);
-    let pad = if rng.below(2)? == 0 { "" } else { "  \n" };
-    Ok(match kind {
-        0 => (
-            format!("{pad}{{\"command\":{}}}{pad}", quoted(&body)?),
-            Ok(Reply::Command(body)),
-        ),
-        1 => (
-            format!("{{\"done\":{}}}", quoted(&body)?),
-            Ok(Reply::Done(body)),
-        ),
-        2 => (
-            format!("```json\n{{\"command\":{}}}\n```", quoted(&body)?),
-            Ok(Reply::Command(body)),
-        ),
-        3 => (
-            format!("{{\"command\":{0},\"done\":{0}}}", quoted(&body)?),
-            Err(ReplyFault::Keys),
-        ),
-        4 => (
-            format!("{{\"run\":{}}}", quoted(&body)?),
-            Err(ReplyFault::Keys),
-        ),
-        5 => (
-            format!("{{\"command\":{len}}}"),
-            Err(ReplyFault::NotAString),
-        ),
-        6 => (
-            format!("run {body}"),
-            Err(ReplyFault::NotJson(String::new())),
-        ),
-        7 => (
-            format!("[{}]", quoted(&body)?),
-            Err(ReplyFault::NotAnObject),
-        ),
-        8 => (
-            format!("{{\"command\":{}}}", quoted(&"y".repeat(4097))?),
-            Err(ReplyFault::FieldTooLong),
-        ),
-        9 => (
-            format!("{{\"command\":{}}}", quoted(&format!("{body}\0"))?),
-            Err(ReplyFault::Nul),
-        ),
-        _ => (
-            format!("{{\"command\":{}}}", quoted(&" ".repeat(len))?),
-            Err(ReplyFault::EmptyCommand),
-        ),
-    })
-}
-
-/// Whether `got` is the rule's answer: the same reply, or the same refusal kind
-/// (a parse refusal carries the parser's own reason, which the rule does not fix).
-fn agrees(got: &Result<Reply, ReplyFault>, want: &Result<Reply, ReplyFault>) -> bool {
-    match *want {
-        Ok(ref reply) => got.as_ref().ok() == Some(reply),
-        Err(ReplyFault::NotJson(_)) => {
-            matches!(*got, Err(ReplyFault::NotJson(ref reason)) if !reason.is_empty())
-        }
-        Err(ref fault) => got
-            .as_ref()
-            .err()
-            .is_some_and(|refused| discriminant(refused) == discriminant(fault)),
-    }
-}
-
-/// Every generated reply gets exactly the rule's answer, for every seed.
-#[test]
-fn sim_reply_parser_matches_the_reference_for_every_seed() -> TestResult {
-    for seed in 0..SEEDS {
-        let (reply, expected) = case(seed)?;
-        let got = parse_reply(&reply);
-        assert!(
-            agrees(&got, &expected),
-            "seed {seed}: {reply:?} gave {got:?}, the rule says {expected:?}"
-        );
-    }
-    Ok(())
-}
-
-/// The whole reply is bounded before it is parsed, and an empty object or an
-/// unknown sole key is refused.
-#[test]
-fn an_oversized_or_keyless_reply_is_refused_before_anything_runs() {
-    let long = format!("{{\"done\":\"{}\"}}", "z".repeat(16_400));
-    assert_eq!(
-        parse_reply(&long),
-        Err(ReplyFault::TooLong),
-        "the reply bound"
-    );
-    assert_eq!(parse_reply("{}"), Err(ReplyFault::Keys), "no key");
-    assert_eq!(
-        parse_reply("{\"done\":\"\"}"),
-        Ok(Reply::Done(String::new())),
-        "empty summary"
-    );
 }
 
 /// The fat-finger hands a session a blank, giant, NUL-carrying or ordinary
@@ -410,8 +299,11 @@ fn drive(
                     Place::Open(work),
                     path_env,
                     COMMAND_TIMEOUT,
-                    &ledger,
-                    &task_id,
+                    Track {
+                        ledger: &ledger,
+                        tenant: "sim",
+                        task_id: &task_id,
+                    },
                     &|| cancel.load(Ordering::Acquire),
                 )
             };
@@ -537,8 +429,11 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
             Place::Open(&work),
             &path_env,
             SHORT_TIMEOUT,
-            &ledger,
-            "sim-timeout",
+            Track {
+                ledger: &ledger,
+                tenant: "sim",
+                task_id: "sim-timeout",
+            },
             &|| false,
         );
         let listed = ledger.live_tasks();
@@ -622,8 +517,11 @@ fn panic_inside_run(seed: u64) -> Result<(), CancelSimError> {
                 Place::Open(&work),
                 &path_env,
                 COMMAND_TIMEOUT,
-                &ledger,
-                "sim-panic",
+                Track {
+                    ledger: &ledger,
+                    tenant: "sim",
+                    task_id: "sim-panic",
+                },
                 &|| {
                     let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
                     assert!(

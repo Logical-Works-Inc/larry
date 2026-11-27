@@ -224,13 +224,27 @@ pub(crate) enum Place<'a> {
 /// never both at once. The group waits read one deadline from the live clock this
 /// builds (`larry_runtime::live_clock`, larry#268), so no wait is decided by a count of
 /// yields.
+/// What an acceptance command is tracked under: the store, the tenant that
+/// started it and the run it belongs to (larry#211).
+#[derive(Clone, Copy)]
+pub(crate) struct Track<'track> {
+    /// The state directory's store.
+    pub(crate) ledger: &'track Ledger,
+    /// The hex text of the tenant that started the command.
+    pub(crate) tenant: &'track str,
+    /// The run the command belongs to.
+    pub(crate) task_id: &'track str,
+}
+
+/// Runs one acceptance command in its own process group, tracks the leader in
+/// the ledger under the tenant that started it, and returns the clipped
+/// result. A leader that cannot be tracked is killed with its group first.
 pub(crate) fn run_command(
     argv: &[String],
     place: Place<'_>,
     path_env: &str,
     timeout: Duration,
-    ledger: &Ledger,
-    task_id: &str,
+    track: Track<'_>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CommandResult, ExecError> {
     let started_at = Instant::now();
@@ -265,7 +279,7 @@ pub(crate) fn run_command(
             return Err(discard(&mut child, refusal));
         }
     };
-    let identity = track(&clock, &mut child, pgid, program, (ledger, task_id))?;
+    let identity = track_clock(&clock, &mut child, pgid, program, &track)?;
 
     let (status_sender, status_receiver) = mpsc::sync_channel::<io::Result<ExitStatus>>(1);
     let settled = Arc::new(AtomicBool::new(false));
@@ -304,7 +318,7 @@ pub(crate) fn run_command(
         },
     )?;
     let status = status.map_err(|source| spawn_failure(program, source))?;
-    ledger.remove(&identity)?;
+    track.ledger.remove(&identity)?;
     if stdout.open || stderr.open {
         // A child that left the group and kept a stream open is reported, and the run ends:
         // the report would otherwise claim whole streams it could not read (larry#334).
@@ -390,12 +404,12 @@ pub(super) fn command_for(
 
 /// Identifies the leader of `pgid` and records it in the ledger under `task_id`; a
 /// leader that cannot be tracked is killed with its group first.
-fn track(
+fn track_clock(
     clock: &Clock,
     child: &mut Child,
     pgid: i32,
     program: &str,
-    (ledger, task_id): (&Ledger, &str),
+    track: &Track<'_>,
 ) -> Result<ProcessIdentity, ExecError> {
     let identity = match identify_process(pgid) {
         Ok(Some(identity)) => identity,
@@ -414,7 +428,7 @@ fn track(
             return Err(abandon(clock, child, pgid, spawn_failure(program, source)));
         }
     };
-    match ledger.insert(task_id, &identity) {
+    match track.ledger.insert(track.tenant, track.task_id, &identity) {
         Ok(()) => Ok(identity),
         Err(error) => Err(abandon(clock, child, pgid, error)),
     }

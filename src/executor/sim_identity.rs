@@ -11,14 +11,12 @@
 //! another state directory's key. One seed drives every draw, so a failing seed
 //! replays exactly.
 
-use std::path::Path;
-
 use lgwks_macros::Error;
 use lgwks_std::json::{self, Value};
 use lgwks_std::seeded::Seeded;
 
 use super::super::Task;
-use super::{fresh_id, run_id, tenant_of};
+use super::{fresh_id, named_tenant, run_id, worker_of};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -82,18 +80,18 @@ fn drawn_key(seeded: &mut Seeded, length: usize) -> Result<String, SimFault> {
 /// one run id, and two different keys never mint one id, for every seed.
 #[test]
 fn sim_a_double_clicked_document_is_one_run_id_for_every_seed() -> TestResult {
-    let state = Path::new("/tmp/larry-sim-identity");
+    let tenant = named_tenant("larry-sim-identity")?;
     for seed in SEEDS {
         let mut seeded = Seeded::from_seed(seed);
         let length = 1_usize.saturating_add(seeded.index(64)?);
         let key = drawn_key(&mut seeded, length)?;
         let task = document("/tmp/a", Some(&Value::String(key.as_str().into())))?;
-        let first = run_id(&task, state)?;
+        let first = run_id(&task, &tenant)?;
         let clicks = seeded.index(8)?;
         for _click in 0..clicks {
             assert_eq!(
                 first,
-                run_id(&task, state)?,
+                run_id(&task, &tenant)?,
                 "seed {seed}: a resubmission of one keyed document keeps one run id"
             );
         }
@@ -103,7 +101,7 @@ fn sim_a_double_clicked_document_is_one_run_id_for_every_seed() -> TestResult {
             let other = document("/tmp/a", Some(&Value::String(other_key.as_str().into())))?;
             assert_ne!(
                 first,
-                run_id(&other, state)?,
+                run_id(&other, &tenant)?,
                 "seed {seed}: two different keys are two requests"
             );
         }
@@ -111,13 +109,25 @@ fn sim_a_double_clicked_document_is_one_run_id_for_every_seed() -> TestResult {
     Ok(())
 }
 
-/// The neighbour: two state directories never mint one keyed run id for one task
-/// and one key, and each keeps its own tenant, for every seed.
+/// The worker follows the tenant, never the path: one worker per tenant, and
+/// two tenants never share one (larry#211).
+#[test]
+fn sim_worker_identity_follows_the_tenant() -> TestResult {
+    let left = named_tenant("left")?;
+    let right = named_tenant("right")?;
+    let first = worker_of(&left);
+    assert_ne!(first, worker_of(&right), "two tenants never share a worker");
+    assert_eq!(first, worker_of(&left), "a worker is pinned to its tenant");
+    Ok(())
+}
+
+/// The neighbour: two tenants never mint one keyed run id for one task and one
+/// key, and each keeps its own tenant, for every seed.
 #[test]
 fn sim_a_neighbour_tenant_never_shares_a_keyed_run_id_for_every_seed() -> TestResult {
     let (left, right) = (
-        Path::new("/tmp/larry-sim-tenant-left"),
-        Path::new("/tmp/larry-sim-tenant-right"),
+        named_tenant("larry-sim-tenant-left")?,
+        named_tenant("larry-sim-tenant-right")?,
     );
     for seed in SEEDS {
         let mut seeded = Seeded::from_seed(seed);
@@ -125,18 +135,18 @@ fn sim_a_neighbour_tenant_never_shares_a_keyed_run_id_for_every_seed() -> TestRe
         let key = drawn_key(&mut seeded, length)?;
         let task = document("/tmp/a", Some(&Value::String(key.as_str().into())))?;
         assert_ne!(
-            tenant_of(left),
-            tenant_of(right),
-            "seed {seed}: two state directories are two tenants"
+            left.as_bytes(),
+            right.as_bytes(),
+            "seed {seed}: two tenants are two tenants"
         );
         assert_ne!(
-            run_id(&task, left)?,
-            run_id(&task, right)?,
+            run_id(&task, &left)?,
+            run_id(&task, &right)?,
             "seed {seed}: one key in two tenants is two requests"
         );
         assert_eq!(
-            run_id(&task, left)?,
-            run_id(&task, left)?,
+            run_id(&task, &left)?,
+            run_id(&task, &left)?,
             "seed {seed}: one tenant's answer does not move"
         );
     }
@@ -275,19 +285,19 @@ fn sim_fresh_run_ids_never_repeat_or_go_backwards_for_every_seed() -> TestResult
 /// value, for every seed.
 #[test]
 fn sim_a_keyed_run_id_moves_with_any_part_for_every_seed() -> TestResult {
-    let state = Path::new("/tmp/larry-sim-parts");
+    let tenant = named_tenant("larry-sim-parts")?;
     for seed in SEEDS {
         let mut seeded = Seeded::from_seed(seed);
         let length = 1_usize.saturating_add(seeded.index(32)?);
         let key = drawn_key(&mut seeded, length)?;
         let base = document("/tmp/a", Some(&Value::String(key.as_str().into())))?;
-        let pinned = run_id(&base, state)?;
+        let pinned = run_id(&base, &tenant)?;
 
         // The repository path is part of the task bytes, so it is part of the digest.
         let moved = document("/tmp/b", Some(&Value::String(key.as_str().into())))?;
         assert_ne!(
             pinned,
-            run_id(&moved, state)?,
+            run_id(&moved, &tenant)?,
             "seed {seed}: another task document is another request"
         );
 
@@ -304,7 +314,7 @@ fn sim_a_keyed_run_id_moves_with_any_part_for_every_seed() -> TestResult {
         let recontented = Task::parse(recontented.to_string().as_bytes())?;
         assert_ne!(
             pinned,
-            run_id(&recontented, state)?,
+            run_id(&recontented, &tenant)?,
             "seed {seed}: one key over different content is another request"
         );
 
@@ -312,8 +322,8 @@ fn sim_a_keyed_run_id_moves_with_any_part_for_every_seed() -> TestResult {
         let unkeyed = document("/tmp/a", None)?;
         assert_eq!(unkeyed.idempotency_key(), None, "seed {seed}: no key");
         assert_ne!(
-            run_id(&unkeyed, state)?,
-            run_id(&unkeyed, state)?,
+            run_id(&unkeyed, &tenant)?,
+            run_id(&unkeyed, &tenant)?,
             "seed {seed}: two unkeyed submissions are two runs"
         );
     }

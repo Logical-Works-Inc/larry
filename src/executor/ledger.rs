@@ -7,9 +7,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use lgwks_bot::kernel::clock::Clock;
-use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
+use lgwks_deps::storefront::rusqlite;
 use lgwks_std::process::{ProcessIdentity, reap_orphaned_group};
-use lgwks_std::sign::SecretKey;
 
 use super::ExecError;
 use super::run::await_gone;
@@ -17,13 +16,23 @@ use super::run::await_gone;
 /// Schema of the live-group table, version 1. `IF NOT EXISTS` because two executors
 /// starting at once on one state directory both read `user_version` 0 and both run the
 /// step: `lgwks_deps::sqlite::migrate` reads the version and applies the step outside one
-/// transaction (logicalworks-crates#872).
+/// transaction (logicalworks-crates#872). Step 8 (larry#211) adds the tenant column.
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS live_groups(task_id TEXT NOT NULL, pid INTEGER NOT NULL, \
     started TEXT NOT NULL, PRIMARY KEY(pid, started));";
 
 /// Schema of the receipt key table, version 2: at most one row, a 32-byte ed25519 seed.
+/// Step 8 carries its row into its tenant's key id 1 and drops the table.
 const KEY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS receipt_key(id INTEGER PRIMARY KEY CHECK (id = 1), \
     seed BLOB NOT NULL CHECK (length(seed) = 32));";
+
+/// Schema of the sealed-report table, version 4 (larry#182 defect 3): one row per
+/// keyed run id, holding the report exactly as it was printed. A client retry
+/// whose key derives that id is answered from this row, so the body never runs a
+/// second time. The row is the run's own evidence, so it is never overwritten by
+/// a later run of the same id. Step 8 (larry#211) rebuilds old stores around the
+/// tenant column and stamps legacy rows for the retention window.
+const REPORT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS reports(task_id TEXT PRIMARY KEY, \
+    task_digest TEXT NOT NULL, report BLOB NOT NULL);";
 
 /// Schema of the tenant key table, version 3 (larry#89): one BLAKE3 digest per tenant,
 /// as 64 hex characters; the key itself is shown once and never stored.
@@ -33,13 +42,9 @@ const TENANT_KEY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS tenant_keys(tenant T
 /// Owner-only mode for the store and its write-ahead files: the seed is the key.
 const OWNER_ONLY: u32 = 0o600;
 
-/// Schema of the sealed-report table, version 4 (larry#182 defect 3): one row per
-/// keyed run id, holding the report exactly as it was printed. A client retry
-/// whose key derives that id is answered from this row, so the body never runs a
-/// second time. The row is the run's own evidence, so it is never overwritten by
-/// a later run of the same id.
-const REPORT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS reports(task_id TEXT PRIMARY KEY, \
-    task_digest TEXT NOT NULL, report BLOB NOT NULL);";
+/// Owner-only mode for the state tree itself: only `executor.db` was narrowed
+/// before, and the tree and `ws/<task>/` followed the process umask (larry#211).
+const OWNER_DIR: u32 = 0o700;
 
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
@@ -63,8 +68,10 @@ impl Ledger {
     /// spun beside it).
     ///
     /// The store holds the receipt key, so it is created owner-only before SQLite
-    /// opens it (SQLite gives the write-ahead files the database's mode), and a
-    /// store left wider by an earlier release is narrowed on every open.
+    /// opens it (SQLite gives the write-ahead files the database's mode), a
+    /// store left wider by an earlier release is narrowed on every open, and
+    /// the state tree itself is owner-only: only `executor.db` was narrowed
+    /// before, and the tree followed the process umask (larry#211).
     ///
     /// # Errors
     ///
@@ -72,6 +79,8 @@ impl Ledger {
     /// store, key-store and migration errors of each step.
     pub(crate) fn open(state_dir: &Path) -> Result<Ledger, ExecError> {
         std::fs::create_dir_all(state_dir).map_err(ExecError::StateDir)?;
+        std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(OWNER_DIR))
+            .map_err(ExecError::StateDir)?;
         let database = state_dir.join("executor.db");
         File::options()
             .create(true)
@@ -81,9 +90,13 @@ impl Ledger {
             .open(&database)
             .map_err(ExecError::KeyStore)?;
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
+        // The steps are positional: the migrator runs the statements past the
+        // file's version in order, so a shipped step never moves. Main's price
+        // step claimed 8 first (larry#204); the tenant step appends as 9
+        // (larry#211).
         lgwks_deps::sqlite::migrate(
             &conn,
-            8,
+            9,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -93,6 +106,7 @@ impl Ledger {
                 policy::POLICY_SCHEMA,
                 policy::REPO_ROOT_SCHEMA,
                 routes::PRICE_SCHEMA,
+                tenant::STEP_EIGHT,
             ],
         )
         .map_err(ExecError::Ledger)?;
@@ -106,42 +120,14 @@ impl Ledger {
                 Err(error) => return Err(ExecError::KeyStore(error)),
             }
         }
-        Ok(Ledger { conn })
-    }
-
-    /// The receipt signing key, created from OS entropy on first use.
-    ///
-    /// Executors racing on a fresh store each draw a seed, and `INSERT OR IGNORE`
-    /// into the one-row table keeps the first; every racer then reads that row back,
-    /// so one state directory signs under one key.
-    pub(crate) fn signing_key(&self) -> Result<SecretKey, ExecError> {
-        if let Some(key) = self.stored_key()? {
-            return Ok(key);
-        }
-        let seed = lgwks_std::random::bytes::<32>().map_err(ExecError::Entropy)?;
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO receipt_key (id, seed) VALUES (1, ?1)",
-                rusqlite::params![seed.as_slice()],
-            )
-            .map_err(ExecError::Sql)?;
-        self.stored_key()?.ok_or(ExecError::KeyMissing)
-    }
-
-    /// The stored key, if a row exists; a row whose seed is not 32 bytes is damage.
-    fn stored_key(&self) -> Result<Option<SecretKey>, ExecError> {
-        let row = self
-            .conn
-            .query_row("SELECT seed FROM receipt_key WHERE id = 1", [], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })
-            .optional()
-            .map_err(ExecError::Sql)?;
-        let Some(stored) = row else {
-            return Ok(None);
-        };
-        let seed = <[u8; 32]>::try_from(stored.as_slice()).map_err(ExecError::KeySeedLength)?;
-        Ok(Some(SecretKey::from_seed(seed)))
+        let ledger = Ledger { conn };
+        let tenant = ledger.dir_tenant(state_dir)?;
+        // The one clock the gate builds its own lease on, so the legacy-stamp
+        // backfill shares one timeline; a host whose clock reads before the
+        // epoch refuses with nothing half-migrated (larry#268, larry#436).
+        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+        ledger.backfill_tenant(&tenant::tenant_hex(&tenant), clock.now().as_secs())?;
+        Ok(ledger)
     }
 
     /// Stores `digest` as `tenant`'s one key digest, replacing an earlier one, so
@@ -207,62 +193,19 @@ impl Ledger {
         Ok(removed > 0)
     }
 
-    /// The sealed report `task_id` already recorded, if this state directory holds
-    /// one no longer than `limit` bytes. A keyed run id a retry derives reads its
-    /// earlier run's report here, so the body is never dispatched twice (larry#182).
-    ///
-    /// # Errors
-    ///
-    /// [`ExecError::Sql`] when the statement fails, and [`ExecError::Receipt`] when
-    /// the recorded bytes are longer than `limit`, refused rather than truncated.
-    pub(crate) fn report(&self, task_id: &str, limit: usize) -> Result<Option<Vec<u8>>, ExecError> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT report FROM reports WHERE task_id = ?1",
-                rusqlite::params![task_id],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(ExecError::Sql)?;
-        match row {
-            Some(recorded) if recorded.len() > limit => {
-                Err(ExecError::Receipt(super::ReceiptError::TooLarge {
-                    len: recorded.len(),
-                }))
-            }
-            other => Ok(other),
-        }
-    }
-
-    /// Records `report` as `task_id`'s evidence, unless that id already holds one:
-    /// the first run's record is the run, and a later row under one id would be a
-    /// second claim about one request (larry#182 defect 3).
-    pub(crate) fn keep_report(
-        &self,
-        task_id: &str,
-        task_digest: &str,
-        report: &[u8],
-    ) -> Result<(), ExecError> {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO reports (task_id, task_digest, report) VALUES (?1, ?2, ?3)",
-                rusqlite::params![task_id, task_digest, report],
-            )
-            .map_err(ExecError::Sql)?;
-        Ok(())
-    }
-
-    /// Records a group that a task has started.
+    // The tenant-scoped sealed-report rows live in the reports module (larry#211).
+    /// Records a group that a task has started, under the tenant that started
+    /// it (larry#211).
     pub(crate) fn insert(
         &self,
+        tenant: &str,
         task_id: &str,
         identity: &ProcessIdentity,
     ) -> Result<(), ExecError> {
         self.conn
             .execute(
-                "INSERT INTO live_groups (task_id, pid, started) VALUES (?1, ?2, ?3)",
-                rusqlite::params![task_id, identity.pid(), identity.started()],
+                "INSERT INTO live_groups (tenant, task_id, pid, started) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![tenant, task_id, identity.pid(), identity.started()],
             )
             .map_err(ExecError::Sql)?;
         Ok(())
@@ -395,9 +338,21 @@ impl Ledger {
 #[path = "ledger_routes.rs"]
 mod routes;
 
+pub(crate) use reports::ReportBudget;
+
 /// The tenant policy and repository-root records, kept apart from process rows.
 #[path = "ledger_policy.rs"]
 mod policy;
+
+/// The stored default tenant, the tenant selection and the per-tenant receipt
+/// keys (larry#211), a child module so the connection stays private.
+#[path = "ledger_tenant.rs"]
+mod tenant;
+
+/// The tenant-scoped sealed-report rows with retention and a byte quota
+/// (larry#211), a child module so the connection stays private.
+#[path = "ledger_reports.rs"]
+mod reports;
 
 /// Seeded adversarial simulations of the report rows a keyed retry answers from
 /// (larry#182 defect 3).
@@ -441,7 +396,7 @@ mod tests {
         let directory = scratch_directory()?;
         let ledger = Ledger::open(&directory)?;
         let dead = ProcessIdentity::new(DEAD_PID, PLATFORM_START)?;
-        ledger.insert("task-a", &dead)?;
+        ledger.insert("tenant", "task-a", &dead)?;
         assert_eq!(
             ledger.live_tasks()?,
             vec!["task-a".to_owned()],
@@ -452,7 +407,7 @@ mod tests {
             ledger.live_tasks()?.is_empty(),
             "removal empties the ledger"
         );
-        ledger.insert("task-b", &dead)?;
+        ledger.insert("tenant", "task-b", &dead)?;
         ledger.conn.execute(
             "INSERT INTO live_groups (task_id, pid, started) VALUES (?1, ?2, ?3)",
             rusqlite::params!["task-c", DEAD_PID, "zzz"],
@@ -480,7 +435,7 @@ mod tests {
             .spawn()?;
         let pid = i32::try_from(running.id())?;
         let identity = lgwks_std::process::identify_process(pid)?.ok_or("the group vanished")?;
-        ledger.insert("task-held", &identity)?;
+        ledger.insert("tenant", "task-held", &identity)?;
         let clock = larry_runtime::live_clock()?;
         let settled = ledger.reap(&clock, |task| Ok(task == "task-held"));
         let group_up = lgwks_std::process::process_group_exists(pid);
@@ -515,7 +470,7 @@ mod tests {
             .spawn()?;
         let pid = i32::try_from(survivor.id())?;
         let stranger = ProcessIdentity::new(pid, PLATFORM_START)?;
-        ledger.insert("task-s", &stranger)?;
+        ledger.insert("tenant", "task-s", &stranger)?;
         let clock = larry_runtime::live_clock()?;
         let settled = ledger.reap(&clock, |_task| Ok(false));
         let group_up = lgwks_std::process::process_group_exists(pid);
@@ -602,35 +557,44 @@ mod tests {
     }
 
     /// A recorded report is read back at exactly its byte bound and refused one
-    /// byte past it, an id with no report is none, and a later record never
-    /// replaces the first under one id (larry#182 defect 3).
+    /// byte past it, an id with no report is none, a later record never
+    /// replaces the first under one id (larry#182 defect 3), and a report one
+    /// tenant recorded reads as none under another (larry#211).
     #[test]
     fn a_report_at_its_byte_bound_is_read_and_one_byte_past_is_refused()
     -> Result<(), Box<dyn std::error::Error>> {
+        use super::reports::ReportBudget;
+
         let directory = scratch_directory()?;
         let ledger = Ledger::open(&directory)?;
+        let budget = ReportBudget::test(1_048_576, 512, 30 * 24 * 3_600, 1_700_000_000);
         let report = [7_u8; 16];
-        ledger.keep_report("run-a", "digest-a", &report)?;
+        ledger.keep_report("tenant-a", "run-a", "digest-a", &report, &budget)?;
         assert_eq!(
-            ledger.report("run-a", report.len())?,
+            ledger.report("tenant-a", "run-a", report.len())?,
             Some(report.to_vec()),
             "a report exactly at the bound is read whole"
         );
         assert!(
             matches!(
-                ledger.report("run-a", report.len().saturating_sub(1)),
+                ledger.report("tenant-a", "run-a", report.len().saturating_sub(1)),
                 Err(crate::executor::ExecError::Receipt(_))
             ),
             "a report one byte past the bound is refused, never truncated"
         );
         assert_eq!(
-            ledger.report("run-b", report.len())?,
+            ledger.report("tenant-a", "run-b", report.len())?,
             None,
             "an id with no record reads as none"
         );
-        ledger.keep_report("run-a", "digest-b", &[9_u8; 8])?;
         assert_eq!(
-            ledger.report("run-a", report.len())?,
+            ledger.report("tenant-b", "run-a", report.len())?,
+            None,
+            "another tenant's id reads as none under this tenant"
+        );
+        ledger.keep_report("tenant-a", "run-a", "digest-b", &[9_u8; 8], &budget)?;
+        assert_eq!(
+            ledger.report("tenant-a", "run-a", report.len())?,
             Some(report.to_vec()),
             "the first record under one id is the run"
         );
@@ -681,8 +645,9 @@ mod tests {
     }
 
     /// Executors racing their first receipt on one fresh state directory all sign
-    /// under one key, a reopen keeps it, the store is owner-only, and another
-    /// directory (another tenant) holds another key (larry#86).
+    /// under the tenant's key id 1, a reopen keeps it, the store is owner-only,
+    /// the tree is owner-only, and another directory (another tenant) holds
+    /// another key (larry#86, larry#211).
     #[test]
     fn sim_racing_first_uses_share_one_signing_key() -> Result<(), Box<dyn std::error::Error>> {
         /// Racers per round: past the two executors the journeys start together.
@@ -699,8 +664,13 @@ mod tests {
                         scope.spawn(|| {
                             barrier.wait();
                             Ledger::open(&directory)
-                                .and_then(|ledger| ledger.signing_key())
-                                .map(|key| key.public_key().to_bytes())
+                                .and_then(|ledger| {
+                                    let tenant =
+                                        super::tenant::tenant_hex(&ledger.dir_tenant(&directory)?);
+                                    ledger
+                                        .signing_key_for(&tenant)
+                                        .map(|(_, key)| key.public_key().to_bytes())
+                                })
                                 .map_err(|error| error.to_string())
                         })
                     })
@@ -718,11 +688,12 @@ mod tests {
                 drawn.iter().all(|key| *key == first),
                 "every racer on one directory signs under one key"
             );
-            let reopened = Ledger::open(&directory)?
-                .signing_key()?
-                .public_key()
-                .to_bytes();
-            assert_eq!(reopened, first, "a reopen keeps the stored key");
+            let reopened = Ledger::open(&directory)?;
+            let tenant = super::tenant::tenant_hex(&reopened.dir_tenant(&directory)?);
+            let (id, _) = reopened.signing_key_for(&tenant)?;
+            assert_eq!(id, 1, "the first seal mints key id 1");
+            let kept = reopened.signing_key_for(&tenant)?.1.public_key().to_bytes();
+            assert_eq!(kept, first, "a reopen keeps the stored key");
             let mode = std::fs::metadata(directory.join("executor.db"))?
                 .permissions()
                 .mode();
@@ -731,6 +702,8 @@ mod tests {
                 0o600,
                 "the store holding the seed is owner-only"
             );
+            let tree = std::fs::metadata(&directory)?.permissions().mode();
+            assert_eq!(tree & 0o777, 0o700, "the state tree is owner-only");
             keys_per_round.push(first);
         }
         let mut distinct = keys_per_round.clone();

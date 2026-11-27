@@ -21,19 +21,21 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope, SecurityEpoch};
-use larry_contracts::binding::{BindingError, EffectTarget, ResolvedEffect};
+use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope};
+use larry_contracts::binding::BindingError;
 use larry_contracts::command::{Command, CommandAcceptance, CommandContent, CommandKind};
-use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
+use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::{OperationId, RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
-use larry_runtime::owner::{EffectOwner, validate_proof};
+use larry_runtime::owner::EffectOwner;
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
@@ -41,12 +43,15 @@ use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 use lgwks_bot::kernel::clock::Clock;
 
 use super::ExecError;
-use super::Report;
-use super::Settings;
-use super::Task;
 use super::identity;
 use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
-use lgwks_bot::kernel::cap::{Auth, Cap};
+use super::{Report, Settings, Task};
+
+/// The owner boundary: the task body as the runtime's one external effect, with
+/// the resolved target identity, the tenant check and the exact owner-side
+/// proof read (larry#211, larry#461, ADR 0120).
+#[path = "gate_owner.rs"]
+pub(super) mod owner;
 
 /// The prefix every policy revision digest carries, so a revision computed here
 /// can never collide with a digest computed for another purpose.
@@ -54,10 +59,6 @@ const POLICY_REVISION_TAG: &[u8] = b"larry/executor/policy-revision/v1\0";
 
 /// The request each task costs against its one-run budget.
 const TASK_COST: u64 = 1;
-
-/// The schema version of the executor's own adapter contract, which a resolved
-/// effect records.
-const ADAPTER_SCHEMA: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
@@ -104,10 +105,11 @@ pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
 /// The prefix the estate capability names carry and a policy name omits.
 const CAPABILITY_PREFIX: &str = "larry.";
 
-/// The tenants one executor state directory serves: its own, because the
-/// tenant is derived from the directory (larry#182). Every shared runtime cap
-/// is whole to that one tenant, and the shipped path names the count rather
-/// than leaving a default nothing reached (larry#333, SD-1).
+/// The tenants one executor run serves: its own, the selected tenant, because
+/// the runtime's budget and question book are per tenant (larry#182, larry#333).
+/// The state directory serves many tenants across runs; each run serves one.
+/// Every shared runtime cap is whole to that one tenant, and the shipped path
+/// names the count rather than leaving a default nothing reached (SD-1).
 const SERVED_TENANTS: usize = 1;
 
 /// The runtime settings one task runs under: the revision of the policy record
@@ -241,12 +243,7 @@ fn first_missing(required: &BTreeSet<Scope>, policy: &BTreeSet<Scope>) -> Option
 
 /// The sealed report a gate denial yields: nothing ran, and the report says
 /// what the gate refused, in the model-commands denial's exact shape.
-fn denied_report(
-    task_id: &str,
-    task_digest: &str,
-    reason: &str,
-    key: &lgwks_std::sign::SecretKey,
-) -> Report {
+fn denied_report(task_id: &str, task_digest: &str, reason: &str, seal: super::Seal<'_>) -> Report {
     Report::sealed(
         lgwks_std::json::json!({
             "task_id": task_id,
@@ -255,7 +252,8 @@ fn denied_report(
             "results": [],
             "denied": [reason],
         }),
-        key,
+        seal.key,
+        seal.id,
     )
 }
 
@@ -286,106 +284,6 @@ pub(super) fn lease_end(now: SystemTime, lease: Duration) -> Result<SystemTime, 
         .ok_or(RuntimeError::ClockOutOfRange { elapsed: total })
 }
 
-/// The owner boundary the executor presents: the task body is the one external
-/// effect. `run` is the gated body, held until the bound reach runs it at most
-/// once; its outcome is the effect's outcome. The executor cannot be queried
-/// after an unbound dispatch, so both unbound dispatch and reconciliation
-/// report unknown — a fact the proposal's `RequiresHuman` strategy records as
-/// such rather than a success it never observed.
-struct TaskOwner<'a, F>
-where
-    F: FnOnce() -> Result<Report, ExecError>,
-{
-    /// The repository path the task binds to.
-    repo: &'a Path,
-    /// The tenant the run belongs to; one state directory is one tenant.
-    tenant: TenantId,
-    /// The security generation the runtime's fence starts at: the epoch a
-    /// resolved effect names, read from the runtime's own settings rather than
-    /// a constant (larry#212).
-    epoch: SecurityEpoch,
-    /// The task document bytes the effect's payload binds to.
-    task_bytes: &'a [u8],
-    /// The gated body, held until the bound reach runs it once.
-    run: Option<F>,
-    /// The body's outcome, shared with the gate through one slot.
-    slot: Rc<RefCell<Option<Result<Report, ExecError>>>>,
-}
-
-impl<F> EffectOwner for TaskOwner<'_, F>
-where
-    F: FnOnce() -> Result<Report, ExecError>,
-{
-    fn resolve(&mut self, _intent: &EffectIntent) -> Result<Option<ResolvedEffect>, BindingError> {
-        let raw = self.repo.as_os_str().as_encoded_bytes();
-        // The resolved link identity is the canonical repository path. A path
-        // that cannot be canonicalized binds to its raw bytes instead, which
-        // resolves identically on every call for a path that does not move.
-        let canonical = match std::fs::canonicalize(self.repo) {
-            Ok(path) => path.as_os_str().as_encoded_bytes().to_vec(),
-            Err(_) => raw.to_vec(),
-        };
-        let target = EffectTarget::new(
-            raw,
-            &canonical,
-            b"",
-            self.tenant.as_bytes(),
-            self.task_bytes,
-            b"larry.executor/v1",
-        )?;
-        // The schema version of the executor's own adapter contract, and the
-        // generation the runtime's fence was built at.
-        Ok(Some(ResolvedEffect::new(
-            target,
-            ADAPTER_SCHEMA,
-            self.epoch,
-        )))
-    }
-
-    fn dispatch_bound(
-        &mut self,
-        intent: &EffectIntent,
-        proof: &Auth,
-        required: &[Cap],
-        _at: SystemTime,
-    ) -> Result<EffectOutcome, BindingError> {
-        validate_proof(proof, required)?;
-        if intent.tenant != self.tenant {
-            return Err(BindingError::Changed {
-                field: larry_contracts::binding::BindingField::Command,
-            });
-        }
-        if self.slot.borrow().is_some() {
-            // The body ran once; a second reach never re-runs it.
-            return Ok(EffectOutcome::Unknown {
-                operation: intent.operation,
-            });
-        }
-        let Some(run) = self.run.take() else {
-            return Ok(EffectOutcome::Unknown {
-                operation: intent.operation,
-            });
-        };
-        let finished = run();
-        let outcome = match finished.is_ok() {
-            true => EffectOutcome::Succeeded {
-                operation: intent.operation,
-            },
-            false => EffectOutcome::Failed {
-                operation: intent.operation,
-            },
-        };
-        *self.slot.borrow_mut() = Some(finished);
-        Ok(outcome)
-    }
-
-    fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
-    }
-}
-
 /// What one gated run presents: the scopes it needs, the path its effect binds
 /// to, and the document bytes its payload binds to.
 pub(super) struct Subject<'a> {
@@ -406,7 +304,8 @@ pub(super) fn admit_and_run(
     settings: &Settings,
     task_id: &str,
     task_digest: &str,
-    key: &lgwks_std::sign::SecretKey,
+    tenant: TenantId,
+    seal: super::Seal<'_>,
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
     if let Some(line) = recovered_evidence(&settings.state_dir, task_id)? {
@@ -414,7 +313,7 @@ pub(super) fn admit_and_run(
         // it. The journal it left is the evidence, recovered or refused; the retry
         // answers from it and nothing here reaches the world again (larry#182
         // defect 3, larry#394).
-        return Ok(denied_report(task_id, task_digest, line, key));
+        return Ok(denied_report(task_id, task_digest, line, seal));
     }
     let policy = &settings.policy;
     let required = subject.required;
@@ -434,8 +333,7 @@ pub(super) fn admit_and_run(
     // copy of any of them (larry#212).
     let run_settings = with_expiry(task_settings(policy), now).map_err(ExecError::Gate)?;
     let expiry = run_settings.validity.valid_until;
-    let tenant = identity::tenant_of(&settings.state_dir);
-    let holder = identity::worker_of(&settings.state_dir);
+    let holder = identity::worker_of(&tenant);
     let (run_id, operation, command_id) = identity::ids_of(task_id);
 
     let proposal = WorkProposal::new(
@@ -466,7 +364,7 @@ pub(super) fn admit_and_run(
     .map_err(RuntimeError::from)?;
 
     let slot: Rc<RefCell<Option<Result<Report, ExecError>>>> = Rc::new(RefCell::new(None));
-    let owner = TaskOwner {
+    let owner = owner::TaskOwner {
         repo: subject.path,
         tenant,
         epoch: run_settings.security_epoch,
@@ -475,6 +373,14 @@ pub(super) fn admit_and_run(
         slot: Rc::clone(&slot),
     };
     std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
+    // The journals hold acknowledged facts; the tree is owner-only throughout
+    // (larry#211).
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        settings.state_dir.join(JOURNALS_DIR),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .map_err(ExecError::Journals)?;
     let path = journal_path(&settings.state_dir, task_id);
     // A journal already here is a dead run's the recovery kept for a passing fault
     // (larry#394): this retry's failure must never remove that evidence.
@@ -497,7 +403,7 @@ pub(super) fn admit_and_run(
                 run_id,
                 operation,
                 task_digest,
-                key,
+                seal,
                 fence_control: settings.fence_control,
             };
             drive(&mut runtime, admission, policy, &slot)
@@ -520,7 +426,7 @@ struct Admission<'a> {
     holder: WorkerId,
     /// The one grant the policy and capabilities allow.
     grant: Grant,
-    /// The state directory's tenant.
+    /// The selected tenant this run executes as.
     tenant: TenantId,
     /// The scopes the task needs.
     required: &'a BTreeSet<Scope>,
@@ -532,8 +438,8 @@ struct Admission<'a> {
     operation: OperationId,
     /// The task document's digest.
     task_digest: &'a str,
-    /// The receipt key a denial is sealed under.
-    key: &'a lgwks_std::sign::SecretKey,
+    /// What a denial is sealed under: the tenant's active key id and secret.
+    seal: super::Seal<'a>,
     /// The operator's one host fence action, applied after durable admission.
     fence_control: Option<super::fence_control::FenceControl>,
 }
@@ -590,7 +496,7 @@ fn drive<O: EffectOwner>(
         run_id,
         operation,
         task_digest,
-        key,
+        seal,
         fence_control,
     } = admission;
     let shown = match runtime.display(&command, holder, &[grant]) {
@@ -604,7 +510,7 @@ fn drive<O: EffectOwner>(
                 Some(scope) => format!("gate: policy_refuses: {}", scope_name(scope)),
                 None => String::from("gate: no covering grant"),
             };
-            return Ok(denied_report(task_id, task_digest, &line, key));
+            return Ok(denied_report(task_id, task_digest, &line, seal));
         }
         Err(other) => return Err(ExecError::Gate(other)),
     };
@@ -633,7 +539,7 @@ fn drive<O: EffectOwner>(
                     task_id,
                     task_digest,
                     &format!("gate: protocol: {refusal}"),
-                    key,
+                    seal,
                 )),
                 other => Err(ExecError::Gate(other)),
             };
@@ -648,7 +554,7 @@ fn drive<O: EffectOwner>(
     // the ledger, and one whose executor died mid-task settles as unknown here.
     if acceptance == CommandAcceptance::DuplicateReplay {
         let line = settled_line(runtime, run_id);
-        return Ok(denied_report(task_id, task_digest, &line, key));
+        return Ok(denied_report(task_id, task_digest, &line, seal));
     }
     let tick = match runtime.tick() {
         Ok(tick) => tick,
@@ -674,7 +580,7 @@ fn drive<O: EffectOwner>(
     }
     // The gate refused at admission: the sealed report names the first reason.
     let line = super::fence_control::report_line(&tick);
-    Ok(denied_report(task_id, task_digest, &line, key))
+    Ok(denied_report(task_id, task_digest, &line, seal))
 }
 
 /// The one denial line a duplicate answers with, from the journal's own evidence:
@@ -699,10 +605,6 @@ where
 #[cfg(test)]
 #[path = "sim_gate_clock.rs"]
 mod sim_clock;
-
-#[cfg(test)]
-#[path = "gate_owner_tests.rs"]
-mod owner_tests;
 
 #[cfg(test)]
 mod tests {

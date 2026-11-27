@@ -46,8 +46,9 @@ const SUBCOMMANDS: [&str; 13] = [
 
 /// The `LARRY_*` variables a user must be able to find in help: one per command
 /// that reads one, and the two wildcards the executor and the routes use.
-const VARIABLES: [&str; 12] = [
+const VARIABLES: [&str; 13] = [
     "LARRY_STATE_DIR",
+    "LARRY_TENANT",
     "LARRY_POLICY",
     "LARRY_EXEC_TIMEOUT_MS",
     "LARRY_FENCE_CONTROL",

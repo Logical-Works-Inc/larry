@@ -129,7 +129,7 @@ fn seal_drawn(seed: u64, stream: &mut Seeded, original: Value) -> Drawn {
     let expected = acceptance(&original);
     let signer = key(stream);
     let trusted = signer.public_key();
-    let (report, accepted) = seal(original, &signer);
+    let (report, accepted) = seal(original, &signer, 1);
     assert_eq!(
         accepted, expected,
         "seed {seed}: the seal keeps the derived verdict"
@@ -227,7 +227,7 @@ fn sim_a_forged_or_foreign_receipt_is_refused_for_every_seed() -> TestResult {
             ),
             "seed {seed}: a verifier holding another key refuses the receipt"
         );
-        let (resealed, _) = seal(body(&mut Seeded::from_seed(seed))?, &stranger);
+        let (resealed, _) = seal(body(&mut Seeded::from_seed(seed))?, &stranger, 1);
         assert!(
             matches!(
                 verify_value(&resealed, &trusted),
@@ -395,7 +395,7 @@ const GROUP_ORDER: [u8; 32] = [
 #[test]
 fn a_malleated_signature_is_refused() -> TestResult {
     let signer = key(&mut Seeded::from_seed(11));
-    let (mut sealed, _) = seal(body(&mut Seeded::from_seed(11))?, &signer);
+    let (mut sealed, _) = seal(body(&mut Seeded::from_seed(11))?, &signer, 1);
     let receipt = receipt_of(&mut sealed)?;
     let hex = receipt["signature"].as_str().ok_or("signature is text")?;
     let mut bytes = lgwks_std::hex::decode(hex)?;
@@ -499,7 +499,7 @@ fn sim_a_truncated_diff_is_never_accepted_and_verify_agrees() -> TestResult {
         );
         let signer = key(&mut stream);
         let trusted = signer.public_key();
-        let (sealed, accepted) = seal(original, &signer);
+        let (sealed, accepted) = seal(original, &signer, 1);
         assert_eq!(
             accepted, !truncated,
             "seed {seed}: a cut diff is never accepted"
@@ -598,19 +598,19 @@ fn a_legacy_receipt_without_the_new_fields_keeps_its_verdict() -> TestResult {
             "denied": [],
         })
     };
-    let (under, accepted) = seal(legacy("x".to_owned()), &signer);
+    let (under, accepted) = seal(legacy("x".to_owned()), &signer, 1);
     assert!(
         accepted && verify_value(&under, &trusted)?.accepted(),
         "a legacy diff under the limit keeps its accepted verdict"
     );
-    let (at_limit, accepted) = seal(legacy("x".repeat(DIFF_LIMIT)), &signer);
+    let (at_limit, accepted) = seal(legacy("x".repeat(DIFF_LIMIT)), &signer, 1);
     assert!(
         !accepted && !verify_value(&at_limit, &trusted)?.accepted(),
         "a legacy diff at the limit may be cut, so it is refused"
     );
     let mut odd = legacy("x".to_owned());
     set(&mut odd, DIFF_TRUNCATED, json::json!("no"))?;
-    let (_, accepted) = seal(odd, &signer);
+    let (_, accepted) = seal(odd, &signer, 1);
     assert!(!accepted, "a non-boolean diff_truncated is refused as cut");
     Ok(())
 }
@@ -657,7 +657,7 @@ fn sim_a_report_with_no_command_is_never_accepted_and_verify_agrees() -> TestRes
         set(&mut original, "results", json::json!([]))?;
         let signer = key(&mut stream);
         let trusted = signer.public_key();
-        let (sealed, accepted) = seal(original.clone(), &signer);
+        let (sealed, accepted) = seal(original.clone(), &signer, 1);
         assert!(
             !accepted,
             "seed {seed}: a report with no command is never accepted"
@@ -673,7 +673,7 @@ fn sim_a_report_with_no_command_is_never_accepted_and_verify_agrees() -> TestRes
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty);
         assert_eq!(
-            seal(ran, &signer).1,
+            seal(ran, &signer, 1).1,
             reference,
             "seed {seed}: one passing command is accepted unless a denial refuses it"
         );

@@ -22,7 +22,7 @@ use lgwks_macros::Error;
 
 use crate::executor::{
     Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, SessionDoor,
-    Settings, Stop, Task, execute_eval, run_command, run_session,
+    Settings, Stop, Task, Track, execute_eval, run_command, run_session,
 };
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
@@ -309,8 +309,11 @@ fn session_acceptance_passed(
             Place::Open(&origin.dir),
             settings.path_env(),
             settings.timeout(),
-            &ledger,
-            &run,
+            Track {
+                ledger: &ledger,
+                tenant: settings.tenant_text(),
+                task_id: &run,
+            },
             &|| false,
         )
         .map_err(|cause| EvalError::Exec {
