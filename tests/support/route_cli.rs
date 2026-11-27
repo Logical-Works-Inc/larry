@@ -22,7 +22,7 @@ pub(crate) use temp_dir::TempDir;
 pub(crate) type TestResult = Result<(), Box<dyn Error>>;
 
 /// A gateway URL no simulation connects to.
-pub(crate) const GATEWAY: &str = "http://gateway.test:8443/v1";
+pub(crate) const GATEWAY: &str = "https://gateway.test:8443/v1";
 
 /// Route ids the generated tables draw from.
 pub(crate) const POOL: [&str; 6] = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];

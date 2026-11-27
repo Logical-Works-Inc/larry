@@ -34,7 +34,9 @@ use std::sync::{Mutex, MutexGuard};
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 
-use crate::executor::{Approval, ExecError, Isolation, Observer, Settings, run_session};
+use crate::executor::{
+    Approval, ExecError, Isolation, Observer, SessionDoor, Settings, run_session,
+};
 use crate::mcp::wire::{self, Envelope, Frame};
 
 /// The one protocol version Larry speaks; any other request is answered with it.
@@ -523,8 +525,14 @@ impl Agent<'_> {
             return updates.close(wire::error(id, wire::INTERNAL_ERROR, &cause.to_string()));
         }
         // `larry acp` runs on the operator's isolated host under `model.command` (larry#93).
-        let reply = match run_session(&instruction, &cwd, &settings, Isolation::Host, &mut updates)
-        {
+        let reply = match run_session(
+            &instruction,
+            &cwd,
+            &settings,
+            Isolation::Host,
+            &mut updates,
+            SessionDoor::Tenant,
+        ) {
             Ok(ended) => stopped(id, ended.stop.name(), Some(ended.report.json())),
             Err(ExecError::Session(cause)) => {
                 wire::error(id, wire::INVALID_PARAMS, &cause.to_string())

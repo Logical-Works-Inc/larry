@@ -90,13 +90,22 @@ impl Ledger {
     }
 
     /// Canonicalizes and authorizes a task repository before any clone or model
-    /// call. State-directory paths are always refused, even if allowlisted.
+    /// call. State-directory paths are always refused, even if allowlisted. A
+    /// local door with no provisioned root row allows any absolute path outside
+    /// the state directory; once the tenant holds a root row it binds the local
+    /// door too, and a remote door denies when the row is absent.
     pub(crate) fn authorized_repo(
         &self,
         tenant: &str,
         state: &Path,
         repo: &Path,
+        local: bool,
     ) -> Result<PathBuf, ExecError> {
+        if !repo.is_absolute() {
+            return Err(ExecError::RepoNotAllowed {
+                repo: repo.to_path_buf(),
+            });
+        }
         let canonical = fs::canonicalize(repo).map_err(|cause| ExecError::RepoPath {
             repo: repo.to_path_buf(),
             cause,
@@ -119,9 +128,67 @@ impl Ledger {
         let allowed = roots
             .iter()
             .any(|root| canonical.starts_with(Path::new(root)));
-        if !allowed {
+        // A first-timer's local door stays open until the tenant's first root
+        // row binds it; a remote door denies when its row is absent (larry#207).
+        if !allowed && !(local && roots.is_empty()) {
             return Err(ExecError::RepoNotAllowed { repo: canonical });
         }
         Ok(canonical)
+    }
+
+    /// Authorizes an evaluator-owned origin: the canonical path must sit under
+    /// the evaluator's own `<state>/eval` directory. Public task execution
+    /// still refuses every state-directory path (larry#207).
+    pub(crate) fn authorized_eval_repo(state: &Path, repo: &Path) -> Result<PathBuf, ExecError> {
+        let repository = fs::canonicalize(repo).map_err(|cause| ExecError::RepoPath {
+            repo: repo.to_path_buf(),
+            cause,
+        })?;
+        let eval_root = fs::canonicalize(state.join("eval")).map_err(ExecError::StateDir)?;
+        if !repository.starts_with(eval_root) {
+            return Err(ExecError::RepoInsideState { repo: repository });
+        }
+        Ok(repository)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ledger;
+    use crate::executor::sim_tree::scratch;
+
+    /// The one authorization: a local door with no root row allows an absolute
+    /// path outside the state directory and binds once its first root exists,
+    /// while a remote door denies with no row (larry#207).
+    #[test]
+    fn a_local_door_stays_open_until_its_first_root() -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch("issue207-policy-state")?;
+        let elsewhere = scratch("issue207-policy-elsewhere")?;
+        let ledger = Ledger::open(&state)?;
+        assert!(
+            ledger
+                .authorized_repo("nobody", &state, &elsewhere, true)
+                .is_ok(),
+            "no root row leaves the local door open"
+        );
+        assert!(matches!(
+            ledger.authorized_repo("nobody", &state, &elsewhere, false),
+            Err(super::super::ExecError::RepoNotAllowed { .. })
+        ));
+        let root = scratch("issue207-policy-root")?;
+        ledger.set_tenant_repo_root("tenant", &root)?;
+        assert!(
+            ledger
+                .authorized_repo("tenant", &state, &root, true)
+                .is_ok(),
+            "a provisioned root allows its own tree on the local door"
+        );
+        assert!(
+            ledger
+                .authorized_repo("tenant", &state, &elsewhere, true)
+                .is_err(),
+            "a provisioned root binds the local door too"
+        );
+        Ok(())
     }
 }

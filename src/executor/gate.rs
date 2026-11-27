@@ -27,10 +27,10 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope, SecurityEpoch};
-use larry_contracts::binding::{BindingError, EffectTarget, ResolvedEffect};
+use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope};
+use larry_contracts::binding::BindingError;
 use larry_contracts::command::{Command, CommandAcceptance, CommandContent, CommandKind};
-use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
+use larry_contracts::effect::ReconciliationStrategy;
 use larry_contracts::ids::{RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
@@ -43,11 +43,15 @@ use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 use lgwks_bot::kernel::clock::Clock;
 
 use super::ExecError;
-use super::Report;
-use super::Settings;
-use super::Task;
 use super::identity;
 use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
+use super::{Report, Settings, Task};
+
+/// The owner boundary: the task body as the runtime's one external effect, with
+/// the resolved target identity, the tenant check and the exact owner-side
+/// proof read (larry#211, larry#461, ADR 0120).
+#[path = "gate_owner.rs"]
+pub(super) mod owner;
 
 /// The prefix every policy revision digest carries, so a revision computed here
 /// can never collide with a digest computed for another purpose.
@@ -55,10 +59,6 @@ const POLICY_REVISION_TAG: &[u8] = b"larry/executor/policy-revision/v1\0";
 
 /// The request each task costs against its one-run budget.
 const TASK_COST: u64 = 1;
-
-/// The schema version of the executor's own adapter contract, which a resolved
-/// effect records.
-const ADAPTER_SCHEMA: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
@@ -302,105 +302,6 @@ pub(super) fn lease_end(now: SystemTime, lease: Duration) -> Result<SystemTime, 
         .ok_or(RuntimeError::ClockOutOfRange { elapsed: total })
 }
 
-/// The owner boundary the executor presents: the task body is the one external
-/// effect. `run` is the gated body, held until the bound reach runs it at most
-/// once; its outcome is the effect's outcome. The executor cannot be queried
-/// after an unbound dispatch, so both unbound dispatch and reconciliation
-/// report unknown — a fact the proposal's `RequiresHuman` strategy records as
-/// such rather than a success it never observed.
-struct TaskOwner<'a, F>
-where
-    F: FnOnce() -> Result<Report, ExecError>,
-{
-    /// The repository path the task binds to.
-    repo: &'a std::path::Path,
-    /// The tenant the run belongs to: the selected tenant, so two tenants on
-    /// one state directory never share a run, a proof or a receipt (larry#211).
-    tenant: TenantId,
-    /// The security generation the runtime's fence starts at: the epoch a
-    /// resolved effect names, read from the runtime's own settings rather than
-    /// a constant (larry#212).
-    epoch: SecurityEpoch,
-    /// The task document bytes the effect's payload binds to.
-    task_bytes: &'a [u8],
-    /// The gated body, held until the bound reach runs it once.
-    run: Option<F>,
-    /// The body's outcome, shared with the gate through one slot.
-    slot: Rc<RefCell<Option<Result<Report, ExecError>>>>,
-}
-
-impl<F> EffectOwner for TaskOwner<'_, F>
-where
-    F: FnOnce() -> Result<Report, ExecError>,
-{
-    fn resolve(&mut self, _intent: &EffectIntent) -> Result<Option<ResolvedEffect>, BindingError> {
-        let raw = self.repo.as_os_str().as_encoded_bytes();
-        // The resolved link identity is the canonical repository path. A path
-        // that cannot be canonicalized binds to its raw bytes instead, which
-        // resolves identically on every call for a path that does not move.
-        let canonical = match std::fs::canonicalize(self.repo) {
-            Ok(path) => path.as_os_str().as_encoded_bytes().to_vec(),
-            Err(_) => raw.to_vec(),
-        };
-        let target = EffectTarget::new(
-            raw,
-            &canonical,
-            b"",
-            self.tenant.as_bytes(),
-            self.task_bytes,
-            b"larry.executor/v1",
-        )?;
-        // The schema version of the executor's own adapter contract, and the
-        // generation the runtime's fence was built at.
-        Ok(Some(ResolvedEffect::new(
-            target,
-            ADAPTER_SCHEMA,
-            self.epoch,
-        )))
-    }
-
-    fn dispatch_bound(
-        &mut self,
-        intent: &EffectIntent,
-        _at: SystemTime,
-    ) -> Result<EffectOutcome, BindingError> {
-        if self.slot.borrow().is_some() {
-            // The body ran once; a second reach never re-runs it.
-            return Ok(EffectOutcome::Unknown {
-                operation: intent.operation,
-            });
-        }
-        let Some(run) = self.run.take() else {
-            return Ok(EffectOutcome::Unknown {
-                operation: intent.operation,
-            });
-        };
-        let finished = run();
-        let outcome = match finished.is_ok() {
-            true => EffectOutcome::Succeeded {
-                operation: intent.operation,
-            },
-            false => EffectOutcome::Failed {
-                operation: intent.operation,
-            },
-        };
-        *self.slot.borrow_mut() = Some(finished);
-        Ok(outcome)
-    }
-
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
-    }
-
-    fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
-    }
-}
-
 /// What one gated run presents: the scopes it needs, the path its effect binds
 /// to, and the document bytes its payload binds to.
 pub(super) struct Subject<'a> {
@@ -481,7 +382,7 @@ pub(super) fn admit_and_run(
     .map_err(RuntimeError::from)?;
 
     let slot: Rc<RefCell<Option<Result<Report, ExecError>>>> = Rc::new(RefCell::new(None));
-    let owner = TaskOwner {
+    let owner = owner::TaskOwner {
         repo: subject.path,
         tenant,
         epoch: run_settings.security_epoch,

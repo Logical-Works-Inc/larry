@@ -251,7 +251,7 @@ fn route_add_errors_name_the_field_once() -> TestResult {
                 "add",
                 id,
                 "--url",
-                "http://gateway.test:8443/v1",
+                "https://gateway.test:8443/v1",
                 "--model",
                 "model-1",
                 "--key-env",

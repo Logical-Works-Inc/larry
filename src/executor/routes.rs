@@ -458,7 +458,7 @@ mod tests {
         let ledger = crate::executor::Ledger::open(&state)?;
         let tenant = super::tenant_text(&ledger, &state, &read)?;
         let key_env = format!("{}MAIN", crate::model::tenant_namespace(&tenant));
-        let mut args = vec!["add", "main", "--url", "http://gateway.test:1/v1"];
+        let mut args = vec!["add", "main", "--url", "https://gateway.test:1/v1"];
         args.extend(["--model", "m", "--key-env", key_env.as_str()]);
         args.extend(["--residency", "CA"]);
         let mut out = Vec::new();

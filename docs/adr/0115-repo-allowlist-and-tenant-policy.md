@@ -23,16 +23,24 @@ store and checked before the clone or model reach.
 
 The executor state ledger stores one bounded repository-root allowlist and one
 policy record per tenant. A task repository must be absolute. Larry resolves it
-before the admission gate, rejects paths inside the state directory, and then
-requires the canonical path to be below a stored root. A refused path never
-creates a workspace or calls git.
+before the admission gate, rejects paths inside the state directory on every
+door, and then requires the canonical path to be below a stored root, except on
+a local door whose tenant holds no root row yet: `larry exec` and bare `larry`
+allow any absolute path outside the state directory until `larry serve
+provision` stores the first root, which then binds the local door too. A
+refused path never creates a workspace or calls git. A relative repository is
+refused before canonicalization on every door.
 
 The local `larry exec` operator keeps `LARRY_POLICY`. Remote executor doors
-load policy from the tenant ledger. A missing remote record is an empty policy.
-The policy is resolved before the task enters the runtime gate, so two tenants
-cannot inherit one process-wide scope set. Task repositories and session working
-directories use the same ledger authorization before route or model resolution.
-`model_commands` is a JSON boolean; another JSON type is a typed task refusal.
+(MCP, ACP, serve) load policy from the tenant ledger. A missing remote record
+is an empty policy. The door rides in `Settings`, set once in `from_env_mode`,
+and reaches `Ledger::authorized_repo` as its one authorization: no second
+function checks a repository. The policy is resolved before the task enters the
+runtime gate, so two tenants cannot inherit one process-wide scope set. Task
+repositories and session working directories use the same ledger authorization
+before route or model resolution. `model_commands` is a JSON boolean; another
+JSON type is a typed task refusal. A `RepoNotAllowed` refusal names the fix:
+run `larry serve provision <root>`.
 Evaluator-owned origins use a crate-private route restricted to canonical
 `<state>/eval` paths; public task execution still refuses every state path.
 ACP reloads the ledger policy before each prompt, so a live provision or
@@ -48,8 +56,12 @@ the local operator's capabilities. Presence checks also turned
 
 ## Consequences
 
-An operator must provision a tenant's ledger roots and policy before a remote
-task can run. A missing remote policy refuses work. Root and policy changes are
+An operator must provision a tenant's ledger roots and policy with
+`larry serve provision <root>` before a remote task can run. A missing remote
+policy refuses work, and a missing remote root row denies every repository. A
+first-timer's local door stays open until that first provision, so bare `larry`
+and `larry exec` work in a project with no setup; provisioning one root binds
+the local door too. Root and policy changes are
 durable and are shared by every executor process that opens the ledger.
 
 The existing SQLite ledger is already the owner of executor state, tenant
@@ -68,3 +80,10 @@ the same task under two ledger policies and observes one run and one typed
 refusal.
 `model_commands_requires_boolean_value` proves false is false and a non-boolean
 is refused.
+`a_local_exec_in_an_unprovisioned_state_runs_and_a_provisioned_root_binds_it`
+drives the binary: an unprovisioned local exec runs, then one provisioned root
+binds it and the same task is refused naming `larry serve provision`.
+`tui_journey_unprovisioned_local_reaches_the_first_approval` drives bare
+`larry` with no provision to the approval prompt for its first command.
+`tenant_a_naming_tenant_b_repo_is_refused` proves two provisioned tenants keep
+their own roots through the binary: A's exec naming B's origin is refused.

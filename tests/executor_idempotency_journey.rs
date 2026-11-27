@@ -236,6 +236,27 @@ fn a_task_without_a_key_runs_once_per_submission() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn executor_owner_reads_proof_tenant_before_running_task() -> TestResult {
+    // Source: OWASP ASVS 4.0.3 V4.2.1. The action boundary must enforce the
+    // authority checked at admission, and the owner must keep the task tenant
+    // attached to the effect it runs.
+    let (state, origin) = fixture()?;
+    let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
+    let output = run_exec(state.path(), &task, None)?;
+    let report = report_of(&output)?;
+    assert_eq!(
+        number_of(result_at(&report, 0)?, "exit_code")?,
+        0,
+        "the owner-bound executor journey runs the authorized task"
+    );
+    assert!(
+        flag_of(&report, "accepted")?,
+        "the owner-bound executor journey seals an accepted report"
+    );
+    Ok(())
+}
+
 /// The `acceptance` member of `document`, rendered back as text.
 fn acceptance_of(document: &str) -> Result<String, Box<dyn Error>> {
     let parsed: Value = json::from_str(document)?;

@@ -199,7 +199,7 @@ pub(super) fn charged_prompt_tokens(handle: &Handle) -> TestResult<u64> {
 pub(super) fn timeless(card: &Value) -> TestResult<Value> {
     let mut stripped = card.clone();
     let top = stripped.as_object_mut().ok_or("card is an object")?;
-    for key in ["p50_micros", "p95_micros", "p99_micros"] {
+    for key in ["p50_micros", "p95_micros", "p99_micros", "peak_rss_kib"] {
         top.insert(key, Value::Null);
     }
     let results = top

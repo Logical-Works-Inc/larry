@@ -8,6 +8,7 @@ mod error;
 mod gate;
 mod identity;
 mod island;
+mod keys;
 mod ledger;
 mod prepared;
 mod receipt;
@@ -33,9 +34,8 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 use larry_contracts::ids::TenantId;
 pub(crate) use ledger::Ledger;
-use lgwks_std::sign::PublicKey;
 use prepared::{Prepared, live_budget, prepare};
-use run::{Place, Track, run_command};
+pub(crate) use run::{Place, Track, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -46,11 +46,17 @@ pub use confine::ConfineError;
 pub(crate) use confine::Platform;
 pub use error::ExecError;
 pub(crate) use island::Isolation;
+pub(crate) use keys::state_ledger;
+pub use keys::{
+    provision_tenant, rotate_receipt_key, state_public_key, trusted_key, verify_state_report,
+};
 pub(crate) use receipt::Seal;
-use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Report, Verdict, verify};
 pub use session::SessionError;
-pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop, run_session};
+pub(crate) use session::{
+    Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, SessionDoor, Stop, run_session,
+};
+pub(crate) use task::Knobs;
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -113,103 +119,6 @@ fn state_dir(read: &impl Fn(&str) -> Option<String>) -> Result<PathBuf, ExecErro
         .ok_or(ExecError::StateDirUnset)
 }
 
-/// The state directory's store, opened (and created or migrated) under its lock: the
-/// one home of the receipt key and the tenant key digests (larry#89).
-pub(crate) fn state_ledger(read: &impl Fn(&str) -> Option<String>) -> Result<Ledger, ExecError> {
-    Ledger::open(&state_dir(read)?)
-}
-
-/// The public half of the selected tenant's active receipt key, read-only: a
-/// tenant with no key yet is refused, and no seed is ever drawn here.
-/// `larry key` and `larry verify` on an empty state directory refuse without
-/// creating the store or minting a secret (larry#211).
-pub fn state_public_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, ExecError> {
-    let directory = state_dir(&read)?;
-    if !directory.join("executor.db").exists() {
-        return Err(ExecError::NoStore);
-    }
-    let ledger = Ledger::open(&directory)?;
-    let (_, tenant) = ledger.selected_tenant(&directory, &read)?;
-    ledger
-        .active_receipt_key(&tenant)?
-        .map(|(_, public)| public)
-        .ok_or(ExecError::NoReceiptKey)
-}
-
-/// Provisions the tenant-owned executor ledger before a local or remote door runs.
-/// The policy text uses the same comma-separated scope names as `LARRY_POLICY`;
-/// roots are canonicalized and bounded by the ledger owner. The tenant is the
-/// selected one: `LARRY_TENANT` when it names one, else the store's default.
-pub fn provision_tenant(
-    read: impl Fn(&str) -> Option<String>,
-    policy_text: &str,
-    roots: &[&std::path::Path],
-) -> Result<(), ExecError> {
-    let state = state_dir(&read)?;
-    let ledger = Ledger::open(&state)?;
-    let (_, tenant) = ledger.selected_tenant(&state, &read)?;
-    let policy = gate::policy_names(Some(policy_text))?;
-    ledger.set_tenant_policy(&tenant, &policy)?;
-    for root in roots {
-        ledger.set_tenant_repo_root(&tenant, root)?;
-    }
-    Ok(())
-}
-
-/// The key a verifier trusts: `LARRY_RECEIPT_KEY` (64 hex characters) when it is
-/// set, which needs no state directory, else the state directory's own key.
-pub fn trusted_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, ExecError> {
-    match read("LARRY_RECEIPT_KEY").filter(|value| !value.is_empty()) {
-        Some(text) => parse_public_key(&text).map_err(ExecError::Receipt),
-        None => state_public_key(read),
-    }
-}
-
-/// Verifies a sealed report against the selected tenant's keys in the state
-/// directory: the receipt's key id selects the key, so a rotated tenant
-/// verifies old receipts by id and new ones under the new id, while another
-/// tenant's receipt is refused as untrusted (larry#211).
-///
-/// # Errors
-///
-/// [`ExecError::NoStore`] when the store is absent, [`ExecError::NoReceiptKey`]
-/// when the named key id is gone, and [`ExecError::Receipt`] when the report
-/// is not a report this tenant sealed.
-pub fn verify_state_report(
-    read: impl Fn(&str) -> Option<String>,
-    bytes: &[u8],
-) -> Result<Verdict, ExecError> {
-    let directory = state_dir(&read)?;
-    if !directory.join("executor.db").exists() {
-        return Err(ExecError::NoStore);
-    }
-    let ledger = Ledger::open(&directory)?;
-    let (_, tenant) = ledger.selected_tenant(&directory, &read)?;
-    let body = lgwks_std::json::from_slice::<lgwks_std::json::Value>(bytes)
-        .map_err(|cause| ExecError::Receipt(ReceiptError::Malformed(cause)))?;
-    let key_id = receipt::key_id_of(&body).map_err(ExecError::Receipt)?;
-    let keys = ledger.receipt_public_keys(&tenant)?;
-    let trusted = keys
-        .iter()
-        .find(|entry| entry.0 == key_id)
-        .map(|entry| &entry.1)
-        .ok_or(ExecError::NoReceiptKey)?;
-    verify(bytes, trusted).map_err(ExecError::Receipt)
-}
-
-/// Rotates the selected tenant's receipt key: appends the next key id and
-/// returns it with the new public key. Old ids stay verifiable up to the kept
-/// history; sealing moves to the new id at once (larry#211).
-pub fn rotate_receipt_key(
-    read: impl Fn(&str) -> Option<String>,
-) -> Result<(i64, PublicKey), ExecError> {
-    let directory = state_dir(&read)?;
-    let ledger = Ledger::open(&directory)?;
-    let (_, tenant) = ledger.selected_tenant(&directory, &read)?;
-    let (id, secret) = ledger.rotate_receipt_key(&tenant)?;
-    Ok((id, secret.public_key()))
-}
-
 /// Reads one environment variable: the process environment in the binary, a
 /// table in a test. A route's key is read through it when a task reaches the
 /// model, not before, so a key rotated between two tasks is the next task's.
@@ -233,6 +142,10 @@ pub struct Settings {
     /// The scopes the gate authorizes tasks against. Local settings read
     /// `LARRY_POLICY`; remote settings read the tenant ledger.
     policy: BTreeSet<Scope>,
+    /// Whether this door is local (`larry exec`, bare `larry`): with no
+    /// provisioned root row it allows any absolute path outside the state
+    /// directory, while a remote door denies. Set once in `from_env_mode`.
+    local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
 }
@@ -300,8 +213,14 @@ impl Settings {
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
+            local,
             read: Arc::new(read),
         })
+    }
+
+    /// Whether this door is local: remote doors deny a tenant with no root row.
+    pub(crate) const fn is_local(&self) -> bool {
+        self.local
     }
 
     /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
@@ -325,6 +244,16 @@ impl Settings {
     pub(crate) fn refresh_remote_policy(&mut self) -> Result<(), ExecError> {
         self.policy = Ledger::open(&self.state_dir)?.tenant_policy(&self.tenant_text)?;
         Ok(())
+    }
+
+    /// The `PATH` acceptance commands and git run under.
+    pub(crate) fn path_env(&self) -> &str {
+        self.path.as_str()
+    }
+
+    /// Longest an acceptance command may run before its group is killed.
+    pub(crate) const fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// The route a task naming `named` (or none) sends its model calls to: the
@@ -383,6 +312,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
         prepared.tenant_text.as_str(),
         &settings.state_dir,
         task.repo(),
+        settings.is_local(),
     )?;
     execute_prepared(task, settings, &prepared, &repository)
 }
@@ -392,15 +322,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
 /// evaluator's own `<state>/eval` directory.
 pub(crate) fn execute_eval(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let prepared = prepare(settings)?;
-    let repository = std::fs::canonicalize(task.repo()).map_err(|cause| ExecError::RepoPath {
-        repo: task.repo().to_path_buf(),
-        cause,
-    })?;
-    let eval_root =
-        std::fs::canonicalize(settings.state_dir().join("eval")).map_err(ExecError::StateDir)?;
-    if !repository.starts_with(eval_root) {
-        return Err(ExecError::RepoInsideState { repo: repository });
-    }
+    let repository = Ledger::authorized_eval_repo(settings.state_dir(), task.repo())?;
     execute_prepared(task, settings, &prepared, &repository)
 }
 
@@ -593,16 +515,22 @@ fn run_task(
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
         // An acceptance command has no person watching it who could cancel it,
-        // so only the timeout ends it (larry#242).
+        // so only the timeout ends it (larry#242). A task that names a shell runs
+        // each command under it as `<shell> -c <command>` (larry#439); a task that
+        // names a timeout runs under it, cut to the default when it names more.
+        let timeout = match task.timeout_ms() {
+            Some(millis) => Duration::from_millis(millis).min(settings.timeout),
+            None => settings.timeout,
+        };
         let place = match confine {
             Some(ref confine) => Place::Confined(confine),
             None => Place::Open(workspace.path()),
         };
         let result = run_command(
-            argv,
+            &task.argv_for(argv),
             place,
             &settings.path,
-            settings.timeout,
+            timeout,
             Track {
                 ledger: &prepared.ledger,
                 tenant: prepared.tenant_text.as_str(),
