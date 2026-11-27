@@ -2,7 +2,7 @@
 
 use lgwks_std::json::{Value, json};
 
-use super::{Kind, Route, RouteError, tenant_namespace};
+use super::{DEFAULT_PRICE_VERSION, Kind, Route, RouteError, tenant_namespace};
 
 impl Route {
     /// The route id.
@@ -60,13 +60,40 @@ impl Route {
     pub(crate) fn describe(&self) -> &str {
         &self.describe
     }
-    /// What a sealed report says about the route, without a key or key variable.
+    /// The route price-table revision.
+    pub(crate) const fn price_version(&self) -> u32 {
+        self.price_version
+    }
+    /// Prompt micro-dollars per million tokens from the route table.
+    pub(crate) const fn price_input(&self) -> u64 {
+        self.price_input
+    }
+    /// Completion micro-dollars per million tokens from the route table.
+    pub(crate) const fn price_output(&self) -> u64 {
+        self.price_output
+    }
+    /// What a sealed report says about the route: its id, the model, the
+    /// gateway's host and port, and the residency (`null` when undeclared).
+    /// Never the URL's path, a key or the name of the key's variable. A priced
+    /// table rides along: the command bumps the revision from the first, so a
+    /// priced route is exactly one whose revision is past 1, even at zero rates.
     pub(crate) fn seal(&self) -> Value {
-        json!({
+        let mut sealed = json!({
             "id": self.id,
             "model": self.model,
             "host": self.host,
             "residency": self.residency,
-        })
+        });
+        if self.price_version != DEFAULT_PRICE_VERSION
+            && let Some(object) = sealed.as_object_mut()
+        {
+            object.insert(String::from("price_version"), json!(self.price_version));
+            object.insert(String::from("price_input_micros"), json!(self.price_input));
+            object.insert(
+                String::from("price_output_micros"),
+                json!(self.price_output),
+            );
+        }
+        sealed
     }
 }
