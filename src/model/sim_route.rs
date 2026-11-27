@@ -48,23 +48,42 @@ fn a_built_route_keeps_its_parts_and_seals_no_key() -> Result<(), RouteError> {
 /// A non-loopback plaintext route is refused before the client can send bytes.
 #[test]
 fn sim_plaintext_non_loopback_is_refused_before_send() {
-    let mut draft = accepted();
-    draft.base_url = "http://gateway.example:8443/v1";
-    assert_eq!(
-        Route::new(&draft),
-        Err(RouteError::InsecureTransport {
-            host: String::from("gateway.example:8443")
-        }),
-        "plaintext must not reach a remote host"
-    );
+    for seed in 0..64_u64 {
+        let url = format!("http://gateway-{seed}.example:8443/v1");
+        let mut draft = accepted();
+        draft.base_url = url.as_str();
+        let host = format!("gateway-{seed}.example:8443");
+        assert_eq!(
+            Route::new(&draft),
+            Err(RouteError::InsecureTransport { host }),
+            "plaintext must not reach a remote host"
+        );
+    }
 }
 
 /// Loopback is the only host class where plaintext is permitted for a local mock.
 #[test]
 fn sim_plaintext_loopback_is_allowed() -> Result<(), RouteError> {
-    let mut draft = accepted();
-    draft.base_url = "http://127.0.0.1:8443/v1";
-    Route::new(&draft).map(|_| ())
+    for seed in 0..64_u64 {
+        let url = format!("http://127.0.0.1:{}/v1", 8000 + seed);
+        let mut draft = accepted();
+        draft.base_url = url.as_str();
+        Route::new(&draft).map(|_| ())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn sim_residency_allows_a_matching_country_only() -> Result<(), RouteError> {
+    let route = Route::new(&accepted())?;
+    let allowed = vec![String::from("CA")];
+    assert!(route.residency_refusal(&allowed).is_none());
+    let refused = route.residency_refusal(&[String::from("DE")]);
+    assert!(matches!(
+        refused,
+        Some(RouteError::ResidencyNotAllowed { .. })
+    ));
+    Ok(())
 }
 
 /// The resolver's order: named, else default, else environment, else none;

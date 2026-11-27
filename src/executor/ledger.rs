@@ -83,7 +83,7 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            8,
+            9,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -93,6 +93,7 @@ impl Ledger {
                 policy::POLICY_SCHEMA,
                 policy::REPO_ROOT_SCHEMA,
                 routes::PRICE_SCHEMA,
+                routes::RESIDENCY_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;

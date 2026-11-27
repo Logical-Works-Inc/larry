@@ -39,12 +39,13 @@ pub(crate) fn operator(
 }
 
 /// Provisions the exact state ledger the remote MCP process will read: the repository root and
-/// every scope needed by an isolated submitted task.
+/// every scope needed by an isolated submitted task, network egress included
+/// for the briefed tasks that reach the model (larry#203).
 pub(crate) fn provision(state: &Path, repo: &Path) -> TestResult<()> {
     let state_text = state.to_string_lossy().into_owned();
     larry_demo::executor::provision_tenant(
         move |_| Some(state_text.clone()),
-        "file.read,file.write,process.spawn,model.invoke,model.command",
+        "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
         &[repo],
     )?;
     Ok(())

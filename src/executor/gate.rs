@@ -60,47 +60,11 @@ const POLICY_REVISION_TAG: &[u8] = b"larry/executor/policy-revision/v1\0";
 /// The request each task costs against its one-run budget.
 const TASK_COST: u64 = 1;
 
-/// The scopes the executor is capable of. The capability snapshot pins them,
-/// so the policy alone decides what a task may do.
-const EXECUTOR_CAPABILITIES: [Scope; 5] = [
-    Scope::FileRead,
-    Scope::FileWrite,
-    Scope::ProcessSpawn,
-    Scope::ModelInvoke,
-    Scope::ModelCommand,
-];
-
-/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
-/// command (larry#93) is never in it: only an operator who isolates the commands
-/// outside Larry, as a Harbor task container does, names `model.command`. A terminal
-/// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
-/// needs no such scope and runs under this policy as it is.
-const DEFAULT_POLICY: [Scope; 4] = [
-    Scope::FileRead,
-    Scope::FileWrite,
-    Scope::ProcessSpawn,
-    Scope::ModelInvoke,
-];
-
-/// The policy when `LARRY_POLICY` is unset.
-fn default_policy() -> BTreeSet<Scope> {
-    DEFAULT_POLICY.iter().copied().collect()
-}
-
-/// The scopes a terminal session needs (larry#93): everything a briefed task needs,
-/// plus the model choosing the commands.
-pub(super) fn session_scopes() -> BTreeSet<Scope> {
-    EXECUTOR_CAPABILITIES.iter().copied().collect()
-}
-
-/// The scopes a terminal session needs when Larry itself confines each command to a
-/// workspace copy (larry#243): a briefed task's scopes without `model.command`, which
-/// names a command run on the host with no confinement of Larry's own.
-pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
-    let mut scopes = session_scopes();
-    scopes.remove(&Scope::ModelCommand);
-    scopes
-}
+/// The scopes the executor is capable of, pinned into the capability snapshot.
+use scopes::EXECUTOR_CAPABILITIES;
+/// The default and session scope bundles, from [`scopes`]: what an unset
+/// `LARRY_POLICY` admits and what a terminal session runs under.
+pub(super) use scopes::{default_policy, isolated_scopes, session_scopes};
 
 /// The prefix the estate capability names carry and a policy name omits.
 const CAPABILITY_PREFIX: &str = "larry.";
@@ -183,7 +147,7 @@ fn named_scope(name: &str) -> Option<Scope> {
         .find(|scope| scope_name(*scope) == name)
 }
 
-/// The `LARRY_POLICY` scopes `read` yields: unset is the four scopes the
+/// The `LARRY_POLICY` scopes `read` yields: unset is the five model-task scopes the
 /// executor uses, the empty string is no scope, names are trimmed and
 /// comma-separated, and an unknown name is a typed refusal.
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
@@ -219,8 +183,8 @@ pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecEr
 }
 
 /// The scopes one task requires: repository read and process spawn always,
-/// and file write plus model invoke when the task carries a brief the model
-/// writes.
+/// and file write, model invoke and network egress when the task carries a
+/// brief the model writes.
 pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     let mut scopes = BTreeSet::new();
     scopes.insert(Scope::FileRead);
@@ -228,6 +192,7 @@ pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     if task.brief().is_some() {
         scopes.insert(Scope::FileWrite);
         scopes.insert(Scope::ModelInvoke);
+        scopes.insert(Scope::NetworkEgress);
     }
     scopes
 }
@@ -310,7 +275,7 @@ pub(super) fn admit_and_run(
     key: &lgwks_std::sign::SecretKey,
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
-    if let Some(line) = recovered_evidence(&settings.state_dir, task_id)? {
+    if let Some(line) = recovered_evidence(settings.state_dir(), task_id)? {
         // This request was already dispatched once and its executor died inside
         // it. The journal it left is the evidence, recovered or refused; the retry
         // answers from it and nothing here reaches the world again (larry#182
@@ -335,8 +300,8 @@ pub(super) fn admit_and_run(
     // copy of any of them (larry#212).
     let run_settings = with_expiry(task_settings(policy), now).map_err(ExecError::Gate)?;
     let expiry = run_settings.validity.valid_until;
-    let tenant = identity::tenant_of(&settings.state_dir);
-    let holder = identity::worker_of(&settings.state_dir);
+    let tenant = identity::tenant_of(settings.state_dir());
+    let holder = identity::worker_of(settings.state_dir());
     let (run_id, operation, command_id) = identity::ids_of(task_id);
 
     let proposal = WorkProposal::new(
@@ -375,15 +340,16 @@ pub(super) fn admit_and_run(
         run: Some(run),
         slot: Rc::clone(&slot),
     };
-    std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
-    let path = journal_path(&settings.state_dir, task_id);
+    std::fs::create_dir_all(settings.state_dir().join(JOURNALS_DIR))
+        .map_err(ExecError::Journals)?;
+    let path = journal_path(settings.state_dir(), task_id);
     // A journal already here is a dead run's the recovery kept for a passing fault
     // (larry#394): this retry's failure must never remove that evidence.
     let leftover = path.try_exists().map_err(ExecError::Journals)?;
     // The run's liveness lock, taken before its journal exists and released after the journal
     // is gone, so no other executor's recovery opens this run's journal (larry#456). `None` is a
     // live run with this id; its journal's own lock then refuses this open, as before.
-    let lock = RunLock::take(&settings.state_dir, task_id)?;
+    let lock = RunLock::take(settings.state_dir(), task_id)?;
     let opened = Journal::open(&path, run_settings.journal_capacity)
         .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
     let outcome = match opened {
@@ -596,6 +562,7 @@ where
     }
 }
 
+mod scopes;
 /// Seeded simulations of the admission lease on an injected clock (larry#436).
 #[cfg(test)]
 #[path = "sim_gate_clock.rs"]
@@ -677,7 +644,7 @@ mod tests {
         );
 
         let mut widened = default_policy();
-        widened.insert(Scope::NetworkEgress);
+        widened.insert(Scope::ModelCommand);
         assert_ne!(
             policy_revision(&default_policy()),
             policy_revision(&widened)

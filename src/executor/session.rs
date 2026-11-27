@@ -38,6 +38,7 @@ use super::digest_hex;
 use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
+use super::observation::redact_observation;
 use super::prepare;
 use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
@@ -196,6 +197,29 @@ fn streams(result: &CommandResult) -> String {
     format!("stdout:\n{}\nstderr:\n{}", result.stdout(), result.stderr())
 }
 
+/// The absolute working directory as an observation redaction when it is long
+/// enough to be selective; a shorter name stays out of the redaction list.
+fn cwd_redaction(absolute: String) -> Option<String> {
+    if absolute.len() >= 8 {
+        Some(absolute)
+    } else {
+        None
+    }
+}
+
+/// Keeps a bounded, redacted model reply for the next conversation turn.
+fn kept_reply(reply: &str, redactions: &[String]) -> String {
+    let kept = if reply.len() > MAX_REPLY_BYTES {
+        format!(
+            "(a reply of {} bytes, over the bound, was dropped)",
+            reply.len()
+        )
+    } else {
+        reply.to_owned()
+    };
+    redact_observation(&kept, redactions)
+}
+
 /// Checks a session's instruction and directory before anything runs.
 pub(crate) fn check(instruction: &str, cwd: &Path) -> Result<(), SessionError> {
     if instruction.trim().is_empty() {
@@ -326,6 +350,11 @@ fn run_session_prepared(
     .map_err(|cause| ExecError::Gate(cause.into()))?;
     let task_id = fresh_id()?;
     let task_digest = digest_hex(&document);
+    let mut redactions = settings.secrets().to_vec();
+    let absolute = cwd.to_string_lossy().into_owned();
+    if let Some(redaction) = cwd_redaction(absolute) {
+        redactions.push(redaction);
+    }
     let mut stop = None;
     let subject = Subject {
         required: isolation.required(),
@@ -353,12 +382,10 @@ fn run_session_prepared(
                 Some(ref isle) => isle.place(),
                 None => Place::Open(cwd),
             },
-            // The model is told its directory is `.` in a copy, so the request carries
-            // no run id and no path of the person's.
-            shown: match island {
-                Some(_) => String::from("."),
-                None => cwd.display().to_string(),
-            },
+            // The model sees a relative directory in every isolation mode, so the
+            // request carries no host path or account name.
+            shown: String::from("."),
+            redactions: &redactions,
             observer: &mut *observer,
         };
         let done = turn.run(instruction)?;
@@ -491,6 +518,8 @@ struct Turn<'a> {
     place: Place<'a>,
     /// The directory the model is told it works in.
     shown: String,
+    /// Exact secrets and the absolute workspace path removed from model-visible text.
+    redactions: &'a [String],
     /// Who hears the session's progress.
     observer: &'a mut dyn Observer,
 }
@@ -500,7 +529,7 @@ impl Turn<'_> {
     /// record, what compaction did and how many commands the person declined
     /// or interrupted.
     fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
-        let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
+        let task = session_prompt(instruction, &self.shown);
         let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
         let mut steps: Vec<Value> = Vec::new();
         let mut usage = Vec::new();
@@ -520,16 +549,7 @@ impl Turn<'_> {
                 break Stop::Cancelled;
             }
             let reply = completion.content();
-            // A reply past the bound is refused below; only its length enters the
-            // conversation, so it cannot grow the next request.
-            let kept = if reply.len() > MAX_REPLY_BYTES {
-                format!(
-                    "(a reply of {} bytes, over the bound, was dropped)",
-                    reply.len()
-                )
-            } else {
-                reply.to_owned()
-            };
+            let kept = kept_reply(reply, self.redactions);
             match parse_reply(reply) {
                 Ok(Reply::Done(summary)) => {
                     self.observer.message(&summary);
@@ -538,11 +558,15 @@ impl Turn<'_> {
                 Ok(Reply::Command(command)) => {
                     refused = 0;
                     let step = steps.len();
-                    if self.observer.approve(step, &command) == Approval::Decline {
+                    let shown_command = redact_observation(&command, self.redactions);
+                    if matches!(
+                        self.observer.approve(step, &shown_command),
+                        Approval::Decline
+                    ) {
                         declined = declined.saturating_add(1);
                         let answer = Answer::Observed {
                             step,
-                            command,
+                            command: shown_command,
                             status: String::from(DECLINED),
                             output: Some(String::new()),
                         };
@@ -589,8 +613,9 @@ impl Turn<'_> {
         step: usize,
         command: String,
     ) -> Result<(Answer, bool, CommandResult), ExecError> {
-        self.observer.started(step, &command);
-        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let shown_command = redact_observation(&command, self.redactions);
+        self.observer.started(step, &shown_command);
+        let argv = [String::from("sh"), String::from("-c"), command];
         let stream = self.observer.stream_callback();
         let result = run_command(
             &argv,
@@ -605,9 +630,9 @@ impl Turn<'_> {
         let result = result?.clipped(OBSERVED_BYTES);
         let answer = Answer::Observed {
             step,
-            command,
+            command: shown_command,
             status: status(&result),
-            output: Some(streams(&result)),
+            output: Some(redact_observation(&streams(&result), self.redactions)),
         };
         let was_interrupted = result.interrupted();
         let passed = result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
@@ -643,6 +668,63 @@ impl Turn<'_> {
     }
 }
 
+/// The user turn that starts every terminal conversation.
+fn session_prompt(instruction: &str, shown: &str) -> String {
+    format!("Working directory: {shown}\n\nTask:\n{instruction}")
+}
+
 #[cfg(test)]
 #[path = "sim_session.rs"]
 pub(super) mod sim;
+
+/// Seeded simulations of the session's model-egress redactions (larry#203):
+/// the route key, the absolute working directory and secret-shaped values never
+/// reach the model, and the bounds that guard them stay exact.
+#[cfg(test)]
+mod residency_tests {
+    use lgwks_std::seeded::Seeded;
+
+    use super::{MAX_REPLY_BYTES, cwd_redaction, kept_reply};
+
+    /// The giant-and-empty fool at the reply bound: a reply of exactly the
+    /// bound is kept, so only a longer one is dropped. A `>=` for the `>`
+    /// would drop it.
+    #[test]
+    fn a_reply_of_exactly_the_bound_is_kept() {
+        let reply = "r".repeat(MAX_REPLY_BYTES);
+        assert_eq!(kept_reply(&reply, &[]), reply);
+    }
+
+    /// The giant-and-empty fool at the redaction floor: an eight-byte working
+    /// directory is still a redaction, a seven-byte one is not. A `>` for the
+    /// `>=` would let the eight-byte path reach the model.
+    #[test]
+    fn an_eight_byte_working_directory_is_still_a_redaction() {
+        assert_eq!(
+            cwd_redaction(String::from("12345678")),
+            Some(String::from("12345678"))
+        );
+        assert_eq!(cwd_redaction(String::from("1234567")), None);
+    }
+
+    /// The saboteur runs after every fool: exact secrets and secret-shaped
+    /// values never survive the kept reply at any seeded offset, while safe
+    /// text does. The oracle is the invariant, never the code's output.
+    #[test]
+    fn sim_secret_shaped_observations_are_redacted() -> Result<(), Box<dyn std::error::Error>> {
+        for seed in 0..256_u64 {
+            let mut rng = Seeded::from_seed(seed);
+            let secret = format!("session-secret-{seed:016x}");
+            let offset = usize::try_from(rng.below(24)?)?;
+            let pad = "p".repeat(offset);
+            let reply = format!("{pad}KEY: {secret} Bearer {secret}-tail\nsafe-{seed}\n");
+            let shown = kept_reply(&reply, std::slice::from_ref(&secret));
+            assert!(!shown.contains(&secret), "seed {seed}: {shown}");
+            assert!(
+                shown.contains(&format!("safe-{seed}")),
+                "seed {seed}: safe text was lost: {shown}"
+            );
+        }
+        Ok(())
+    }
+}

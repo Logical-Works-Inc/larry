@@ -6,6 +6,7 @@
 //! that holds it, under the tag its own tenant's digest names, and the variable
 //! is read only when a task reaches the model (larry#328).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
@@ -17,6 +18,9 @@ use super::{ExecError, Ledger, digest_hex, identity, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
+/// The most country codes one tenant may allow.
+const MAX_RESIDENCY_CODES: usize = 64;
+
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -25,7 +29,7 @@ pub enum RouteCliError {
     /// this one message (larry#543): the derive renders tuple placeholders
     /// onto its extra arguments, so a `{USAGE}` tail would print twice.
     #[error(
-        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | residency <CC,...> | residency --clear | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
     )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
@@ -84,7 +88,9 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::BadResidency
         | RouteError::BadRequestBytes
         | RouteError::BadDescribe
-        | RouteError::BadPrice { .. } => "",
+        | RouteError::BadPrice { .. }
+        | RouteError::ResidencyNotAllowed { .. }
+        | RouteError::ResidencyPolicyTooLarge { .. } => "",
         _ => "route: ",
     }
 }
@@ -124,7 +130,13 @@ pub(super) fn resolve_for(
     } else {
         env_route(read).map_err(ExecError::ModelConfig)?
     };
-    resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
+    let route = resolve(&tenant, &table, named, environment).map_err(ExecError::Route)?;
+    if let Some(allowed) = ledger.residency(&tenant)?
+        && let Some(refusal) = route.residency_refusal(&allowed)
+    {
+        return Err(ExecError::Route(refusal));
+    }
+    Ok(route)
 }
 
 /// The flags of `route add`, each still text.
@@ -189,6 +201,26 @@ fn required<'arg>(
     flag: &'static str,
 ) -> Result<&'arg str, RouteCliError> {
     value.ok_or(RouteCliError::Missing { flag })
+}
+
+/// Parses a tenant's comma-separated, canonical ISO country policy.
+fn residency_codes(text: &str) -> Result<Vec<String>, RouteCliError> {
+    let mut codes = BTreeSet::new();
+    for code in text.split(',').map(str::trim) {
+        if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return Err(RouteCliError::Route(RouteError::BadResidency));
+        }
+        if codes.len() >= MAX_RESIDENCY_CODES && !codes.contains(code) {
+            return Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
+                limit: MAX_RESIDENCY_CODES,
+            }));
+        }
+        codes.insert(code.to_owned());
+    }
+    if codes.is_empty() {
+        return Err(RouteCliError::Route(RouteError::BadResidency));
+    }
+    Ok(codes.into_iter().collect())
 }
 
 /// `text` as a number of type `Number`, or the flag's refusal.
@@ -380,6 +412,7 @@ fn list(
 ) -> Result<(), RouteCliError> {
     let (ledger, tenant) = open(read)?;
     let table = ledger.routes(&tenant).map_err(from_exec)?;
+    let policy = ledger.residency(&tenant).map_err(from_exec)?;
     if as_json {
         let routes: Vec<Value> = table
             .routes()
@@ -388,8 +421,11 @@ fn list(
             .collect();
         return say(
             out,
-            &json!({ "default": table.default_id(), "routes": routes }),
+            &json!({ "default": table.default_id(), "residency": policy, "routes": routes }),
         );
+    }
+    if let Some(codes) = policy.as_deref() {
+        say(out, &format_args!("residency\t{}", codes.join(",")))?;
     }
     for route in table.routes() {
         // A route that declares no residency prints a dash in its column.
@@ -414,6 +450,26 @@ fn list(
         )?;
     }
     Ok(())
+}
+
+/// `larry route residency <CC,...>` stores the tenant policy, or `--clear` removes it.
+fn residency(
+    read: &impl Fn(&str) -> Option<String>,
+    value: &str,
+    out: &mut impl Write,
+) -> Result<(), RouteCliError> {
+    let (ledger, tenant) = open(read)?;
+    match value {
+        "--clear" => {
+            ledger.clear_residency(&tenant).map_err(from_exec)?;
+            say(out, &json!({ "cleared": true, "residency": null }))
+        }
+        value => {
+            let codes = residency_codes(value)?;
+            ledger.set_residency(&tenant, &codes).map_err(from_exec)?;
+            say(out, &json!({ "residency": codes, "saved": true }))
+        }
+    }
 }
 
 /// `larry route remove <id>`: deletes the route; a removed default leaves none.
@@ -471,6 +527,7 @@ pub fn run(
         ["price", id, ref flags @ ..] => price(&read, id, flags, out),
         ["list"] => list(&read, false, out),
         ["list", "--json"] => list(&read, true, out),
+        ["residency", value] => residency(&read, value, out),
         ["remove", id] => remove(&read, id, out),
         ["default", id] => make_default(&read, id, out),
         ["resolve"] => show(&read, None, out),
@@ -575,6 +632,66 @@ mod tests {
         let text = String::from_utf8(out)?;
         assert!(text.contains("\"saved\":true"), "{text}");
         assert!(text.contains(&key_env), "the exact variable: {text}");
+        Ok(())
+    }
+
+    /// The tenant policy accepts 64 shaped country codes and refuses the next one typed.
+    #[test]
+    fn residency_policy_is_bounded_at_sixty_four_codes() {
+        let mut codes = Vec::new();
+        for first in b'A'..=b'C' {
+            for second in b'A'..=b'Z' {
+                codes.push(format!("{}{}", char::from(first), char::from(second)));
+            }
+        }
+        let text = codes.into_iter().take(65).collect::<Vec<_>>().join(",");
+        assert!(matches!(
+            super::residency_codes(&text),
+            Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
+                limit: 64
+            }))
+        ));
+    }
+
+    /// The fat-finger fool at the country-code parser: lowercase, short, long
+    /// and empty codes are refused typed, and a trailing malformed code poisons
+    /// the whole policy. An `&&` for the `||` would admit `ca` and the empty
+    /// string.
+    #[test]
+    fn residency_codes_refuses_malformed_country_codes() -> Result<(), Box<dyn std::error::Error>> {
+        for bad in ["", "C", "CAA", "ca", "cA", "12", "C1", "CA,ca", "CA,,US"] {
+            assert!(
+                matches!(
+                    super::residency_codes(bad),
+                    Err(RouteCliError::Route(RouteError::BadResidency))
+                ),
+                "{bad:?} must be refused"
+            );
+        }
+        assert_eq!(
+            super::residency_codes("CA,US")?,
+            vec![String::from("CA"), String::from("US")]
+        );
+        Ok(())
+    }
+
+    /// Storing the tenant policy says `saved` and clearing it says `cleared`:
+    /// the exact words the operator scripts on. A flipped literal would print
+    /// `false` and break them.
+    #[test]
+    fn route_residency_store_and_clear_say_saved_and_cleared()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = crate::executor::sim_tree::scratch("larry-route-residency-words")?;
+        let dir = state.to_string_lossy().into_owned();
+        let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
+        let mut stored = Vec::new();
+        super::residency(&read, "CA,US", &mut stored)?;
+        let text = String::from_utf8(stored)?;
+        assert!(text.contains("\"saved\":true"), "{text}");
+        let mut cleared = Vec::new();
+        super::residency(&read, "--clear", &mut cleared)?;
+        let text = String::from_utf8(cleared)?;
+        assert!(text.contains("\"cleared\":true"), "{text}");
         Ok(())
     }
 }

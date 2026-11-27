@@ -8,7 +8,7 @@
 //! single statement, so there is never a moment with two defaults or a default
 //! naming a route that is gone.
 
-use lgwks_deps::storefront::rusqlite::{self, Transaction, TransactionBehavior};
+use lgwks_deps::storefront::rusqlite::{self, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::Ledger;
 use crate::executor::ExecError;
@@ -31,6 +31,11 @@ pub(super) const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant 
 pub(super) const PRICE_SCHEMA: &str = "ALTER TABLE routes ADD COLUMN price_version INTEGER NOT NULL DEFAULT 1; \
     ALTER TABLE routes ADD COLUMN price_input INTEGER NOT NULL DEFAULT 0; \
     ALTER TABLE routes ADD COLUMN price_output INTEGER NOT NULL DEFAULT 0;";
+
+/// Schema of the tenant residency policy, version 9 (larry#203): one canonical
+/// comma-separated ISO code list per tenant, kept beside that tenant's routes.
+pub(super) const RESIDENCY_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS tenant_residency(tenant TEXT PRIMARY KEY, codes TEXT NOT NULL);";
 
 /// Inserts a route, or replaces the fields of the one with this id, unless the
 /// tenant holds the most routes it may and this id is new: that writes no row.
@@ -114,6 +119,42 @@ impl Stored {
 }
 
 impl Ledger {
+    /// The tenant's canonical residency policy, or none when it has not set one.
+    pub(crate) fn residency(&self, tenant: &str) -> Result<Option<Vec<String>>, ExecError> {
+        self.conn
+            .query_row(
+                "SELECT codes FROM tenant_residency WHERE tenant = ?1",
+                rusqlite::params![tenant],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(ExecError::Sql)
+            .map(|codes| codes.map(|value| value.split(',').map(str::to_owned).collect()))
+    }
+
+    /// Stores the already checked, sorted residency codes for `tenant`.
+    pub(crate) fn set_residency(&self, tenant: &str, codes: &[String]) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "INSERT INTO tenant_residency (tenant, codes) VALUES (?1, ?2) \
+                 ON CONFLICT (tenant) DO UPDATE SET codes = excluded.codes",
+                rusqlite::params![tenant, codes.join(",")],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
+    /// Clears the tenant's residency policy.
+    pub(crate) fn clear_residency(&self, tenant: &str) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "DELETE FROM tenant_residency WHERE tenant = ?1",
+                rusqlite::params![tenant],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
     /// Stores `route` for `tenant`, replacing the fields the route names, and
     /// makes it the tenant's default when `make_default`. A replacement keeps
     /// the default flag and the price table it found. One transaction, so a

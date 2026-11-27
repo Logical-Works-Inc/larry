@@ -672,13 +672,16 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
     let ran = mock_model::run(config, |handle: &Handle| {
         // The session task runs its model-chosen commands on the host, exactly as
         // `larry acp` runs them, so this arm grants `model.command` the way a
-        // Harbor task container's operator does; brief tasks need only four scopes.
+        // Harbor task container's operator does; brief tasks need five scopes
+        // with network egress (larry#203).
         // The string repeats `support/acp_session.rs`'s SESSION_POLICY, which stays
         // the canonical home; a drift fails the served-count assertion below.
         let mut env = operator(&state, handle.addr(), &FLASH, "3");
         env.push((
             "LARRY_POLICY",
-            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
+            OsString::from(
+                "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
+            ),
         ));
         let ran = score_arm(&env, SHIPPED_SET.as_bytes())?;
         assert_eq!(

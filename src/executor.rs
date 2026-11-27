@@ -11,6 +11,7 @@ mod gate;
 mod identity;
 mod island;
 mod ledger;
+mod observation;
 mod receipt;
 mod recovery;
 pub mod routes;
@@ -71,7 +72,6 @@ pub(crate) const MAX_TIMEOUT_MS: u64 = 86_400_000;
 fn read_by_larry(name: &str) -> bool {
     name == "PATH" || name == "HOME" || name.starts_with("LARRY_")
 }
-
 /// The process environment as one snapshot every setting reads from: a
 /// variable that is absent is unset, and a variable Larry reads whose name or
 /// value is not UTF-8 refuses the whole snapshot, so no setting falls back to
@@ -82,7 +82,14 @@ fn read_by_larry(name: &str) -> bool {
 /// [`ExecError::NotUnicode`] naming the first such variable.
 pub fn process_env() -> Result<impl Fn(&str) -> Option<String> + Send + Sync + 'static, ExecError> {
     let table = snapshot(std::env::vars_os())?;
-    Ok(move |name: &str| table.get(name).cloned())
+    let secrets = observation::secret_values(&table).join("\0");
+    Ok(move |name: &str| {
+        if name == observation::SECRETS_CHANNEL {
+            Some(secrets.clone())
+        } else {
+            table.get(name).cloned()
+        }
+    })
 }
 
 /// The variables Larry reads out of `vars`, as text: the one place a byte string from the
@@ -251,6 +258,9 @@ pub struct Settings {
     /// The scopes the gate authorizes tasks against. Local settings read
     /// `LARRY_POLICY`; remote settings read the tenant ledger.
     policy: BTreeSet<Scope>,
+    /// Exact secret values read from this process snapshot, for terminal
+    /// observation redaction (larry#203). Never formatted or logged.
+    secrets: Arc<[String]>,
     /// Whether this door is local (`larry exec`, bare `larry`): with no
     /// provisioned root row it allows any absolute path outside the state
     /// directory, while a remote door denies. Set once in `from_env_mode`.
@@ -314,12 +324,14 @@ impl Settings {
             Ledger::open(&state_dir)?.tenant_policy(&tenant_key(&state_dir))?
         };
         let fence_control = fence_control::read(&read)?;
+        let secrets = observation::observation_secrets(&read);
         Ok(Settings {
             state_dir,
             timeout,
             ceilings,
             path,
             policy,
+            secrets,
             local,
             read: Arc::new(read),
             fence_control,
@@ -334,6 +346,11 @@ impl Settings {
     /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
     pub(crate) fn state_dir(&self) -> &std::path::Path {
         self.state_dir.as_path()
+    }
+
+    /// The exact secret values in this process snapshot, never formatted or logged.
+    pub(crate) fn secrets(&self) -> &[String] {
+        &self.secrets
     }
 
     /// Refreshes the remote door's policy from the durable tenant ledger. The process may
@@ -410,8 +427,8 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let limits = settings.ceilings.limits(task, settings.timeout)?;
     let (ledger, key) = prepare(settings)?;
     let repository = ledger.authorized_repo(
-        &tenant_key(&settings.state_dir),
-        &settings.state_dir,
+        &tenant_key(settings.state_dir()),
+        settings.state_dir(),
         task.repo(),
         settings.is_local(),
     )?;
@@ -439,7 +456,7 @@ fn execute_prepared(
     key: &lgwks_std::sign::SecretKey,
     repository: &std::path::Path,
 ) -> Result<Report, ExecError> {
-    let task_id = identity::run_id(task, &settings.state_dir)?;
+    let task_id = identity::run_id(task, settings.state_dir())?;
     let task_digest = digest_hex(task.bytes());
     // A task that names an idempotency key is the client's statement that a retry
     // of it is the same request, so a retry whose record the ledger already holds
@@ -485,20 +502,20 @@ fn execute_prepared(
 /// process holds its journal's lock, so no sweep and no recovery reaps a concurrent
 /// run's evidence, and neither asks for a process id (larry#182 defect 3).
 fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), ExecError> {
-    let ledger = Ledger::open(&settings.state_dir)?;
+    let ledger = Ledger::open(settings.state_dir())?;
     let key = ledger.signing_key()?;
     // The one clock the reap's group waits read, built the way the gate builds its own, so a
     // host whose clock reads before the epoch refuses with nothing reaped (larry#268, larry#308).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    let state = settings.state_dir.as_path();
+    let state = settings.state_dir();
     ledger.reap(&clock, |task| recovery::run_held(state, task))?;
     let policy = &settings.policy;
-    for fault in sweep(&settings.state_dir, &ledger.live_tasks()?, |task| {
+    for fault in sweep(settings.state_dir(), &ledger.live_tasks()?, |task| {
         recovery::journal_live(state, policy, task)
     })? {
         fault.report();
     }
-    recovery::recover(&settings.state_dir, &settings.policy)?;
+    recovery::recover(settings.state_dir(), &settings.policy)?;
     Ok((ledger, key))
 }
 
@@ -535,11 +552,11 @@ fn run_task(
     let step = author::model_step(task, settings, ledger)?;
     deadline.cap(limits.timeout)?;
     let workspace = Workspace::create(
-        &settings.state_dir,
+        settings.state_dir(),
         repository,
         task.base(),
         task_id,
-        &settings.path,
+        settings.path_env(),
     )?;
     let mut authored = match step {
         None => None,
@@ -550,7 +567,7 @@ fn run_task(
         }) => {
             // The tenant's digest, the same text a route row is keyed by, names the
             // cache partition so no two tenants share a prompt prefix (larry#230).
-            let partition = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+            let partition = digest_hex(identity::tenant_of(settings.state_dir()).as_bytes());
             let mut records = author::author(brief, workspace.path(), &client, &partition)?;
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
@@ -566,13 +583,15 @@ fn run_task(
         std::fs::create_dir_all(workspace.scratch()).map_err(ExecError::Workspace)?;
         let confine = confine::Confine::new(
             confine::Platform::host(),
-            &settings.state_dir,
+            settings.state_dir(),
             workspace.path(),
             &workspace.scratch(),
         )
         .map_err(ExecError::Confine)?;
         // The host proves it enforces the confinement before a command runs (larry#243).
-        confine.probe(&settings.path).map_err(ExecError::Confine)?;
+        confine
+            .probe(settings.path_env())
+            .map_err(ExecError::Confine)?;
         Some(confine)
     } else {
         None
@@ -611,7 +630,7 @@ fn run_task(
         let result = run_command(
             &task.argv_for(argv),
             place,
-            &settings.path,
+            settings.path_env(),
             timeout,
             ledger,
             task_id,

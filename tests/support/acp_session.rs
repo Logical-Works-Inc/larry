@@ -10,10 +10,11 @@ use std::path::Path;
 use crate::acp_agent::Agent;
 use crate::mock_model::{Config, Handle};
 
-/// Every scope a session needs, `model.command` among them: what an operator
-/// sets inside a Harbor task container.
+/// Every scope a model-reaching run needs, `model.command` among them: what an
+/// operator sets inside a Harbor task container. Briefed tasks require network
+/// egress (larry#203); sessions ride the admitted session but may grant it.
 pub(crate) const SESSION_POLICY: &str =
-    "file.read,file.write,process.spawn,model.invoke,model.command";
+    "file.read,file.write,process.spawn,model.invoke,model.command,net.egress";
 
 /// The settings an operator exports: the state directory, the mock gateway and,
 /// when given, the policy.
