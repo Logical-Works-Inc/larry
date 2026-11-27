@@ -49,6 +49,7 @@ pub use session::SessionError;
 pub(crate) use session::{
     Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, SessionDoor, Stop, run_session,
 };
+pub(crate) use task::Knobs;
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -593,16 +594,22 @@ fn run_task(
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
         // An acceptance command has no person watching it who could cancel it,
-        // so only the timeout ends it (larry#242).
+        // so only the timeout ends it (larry#242). A task that names a shell runs
+        // each command under it as `<shell> -c <command>` (larry#439); a task that
+        // names a timeout runs under it, cut to the default when it names more.
+        let timeout = match task.timeout_ms() {
+            Some(millis) => Duration::from_millis(millis).min(settings.timeout),
+            None => settings.timeout,
+        };
         let place = match confine {
             Some(ref confine) => Place::Confined(confine),
             None => Place::Open(workspace.path()),
         };
         let result = run_command(
-            argv,
+            &task.argv_for(argv),
             place,
             &settings.path,
-            settings.timeout,
+            timeout,
             ledger,
             task_id,
             &|| false,
