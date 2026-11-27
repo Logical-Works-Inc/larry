@@ -7,8 +7,9 @@
 //! person before every command; the rest of a wide screen is kept for artifacts.
 //! The machine in [`app`] holds all state and reads no clock; this driver owns
 //! the terminal (raw mode, bracketed paste, the alternate screen, restored on
-//! every exit path by [`Terminal`]'s drop), feeds it keys, sizes, ticks and the
-//! session's events, and writes only the cells each frame changed ([`buffer`]).
+//! every exit path by [`Terminal`]'s drop), watches SIGTERM and SIGHUP, feeds it
+//! keys, sizes, ticks and the session's events, and writes only the cells each
+//! frame changed ([`buffer`]).
 
 mod app;
 mod ask;
@@ -17,8 +18,11 @@ mod cells;
 mod composer;
 mod layout;
 mod pane;
+mod pending;
 #[cfg(test)]
 mod sim_parts;
+#[cfg(test)]
+mod sim_queue;
 #[cfg(test)]
 mod sim_tui;
 mod style;
@@ -26,10 +30,13 @@ mod worker;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
+use lgwks_bot::rt::sync::CancellationToken;
 use lgwks_macros::Error;
 
 use crate::executor::{ExecError, Isolation, Settings, process_env};
@@ -60,6 +67,63 @@ pub enum TuiError {
     /// The session running at quit had stopped on a panic; the text names it (larry#412).
     #[error("session: {0}")]
     Session(String),
+    /// The process could not register its terminal stop signals.
+    #[error("signal: {0}")]
+    Signal(#[source] io::Error),
+    /// The terminal could not register or join its signal watcher.
+    #[error("signal watcher: {0}")]
+    SignalWatcher(String),
+}
+
+/// The signals that end a terminal also end its owned session.
+#[cfg(unix)]
+struct Signals {
+    /// SIGTERM from a service manager.
+    terminate: lgwks_bot::rt::signal::unix::Signal,
+    /// SIGHUP from a closed controlling terminal or supervisor.
+    hangup: lgwks_bot::rt::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    /// Registers the signals before the terminal starts.
+    fn register() -> io::Result<Self> {
+        use lgwks_bot::rt::signal::unix::{SignalKind, signal};
+        lgwks_bot::rt::runtime::block_on(async {
+            Ok(Self {
+                terminate: signal(SignalKind::terminate())?,
+                hangup: signal(SignalKind::hangup())?,
+            })
+        })
+    }
+
+    /// Marks the frame for shutdown on either signal, or when the frame already ended.
+    fn wait(mut self, stopped: &AtomicBool, done: &CancellationToken) {
+        lgwks_bot::rt::runtime::block_on(async {
+            lgwks_bot::rt::select! {
+                _ = self.terminate.recv() => stopped.store(true, Ordering::Release),
+                _ = self.hangup.recv() => stopped.store(true, Ordering::Release),
+                () = done.cancelled() => {}
+            }
+        });
+    }
+}
+
+/// Signal handling is Unix-specific; other targets still use the same owned watcher shape.
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    /// No Unix signal stream exists on this target.
+    fn register() -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    /// Ends when the frame has ended; no platform signal is consumed here.
+    fn wait(self, _stopped: &AtomicBool, done: &CancellationToken) {
+        lgwks_bot::rt::runtime::block_on(done.cancelled());
+    }
 }
 
 /// The terminal in raw mode on the alternate screen; dropping it restores both.
@@ -173,7 +237,7 @@ fn header(
     let directory = tilde(cwd, home);
     let (model, blocked) = match *settings {
         Ok(ref settings) => {
-            let model = match crate::executor::routes::task_arm_route(settings) {
+            let model = match settings.arm_route() {
                 Ok(route) => Ok(route.model().to_owned()),
                 Err(cause) => Err(format!("none ({cause})")),
             };
@@ -227,11 +291,31 @@ pub fn run() -> Result<(), TuiError> {
     let (welcome, status) = header(&settings, &cwd, home.as_deref());
     let (width, height) = terminal::size().map_err(TuiError::Terminal)?;
     let mut app = App::new(welcome, status, usize::from(width), usize::from(height));
+    let signals = Signals::register().map_err(TuiError::Signal)?;
     // Declared before the terminal, so an unwind restores the screen before the worker's
     // drop reaps the session.
     let mut worker: Option<Worker> = None;
     let mut screen = Terminal::enter().map_err(TuiError::Terminal)?;
-    let outcome = drive(&mut app, &mut screen, &mut worker, &settings, &cwd);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let done = CancellationToken::new();
+    let outcome = std::thread::scope(|scope| {
+        let watcher_stopped = Arc::clone(&stopped);
+        let watcher_done = done.clone();
+        let watcher = scope.spawn(move || signals.wait(&watcher_stopped, &watcher_done));
+        let outcome = drive(
+            &mut app,
+            &mut screen,
+            &mut worker,
+            &settings,
+            &cwd,
+            &stopped,
+        );
+        done.cancel();
+        watcher
+            .join()
+            .map_err(|panic| TuiError::SignalWatcher(crate::panic_text(&*panic)))?;
+        outcome
+    });
     // Every return reaps the session here, so its panic is reported, never dropped (larry#412).
     let panicked = match worker.take().and_then(Worker::finish) {
         Some(why) => Err(TuiError::Session(why)),
@@ -248,11 +332,15 @@ fn drive(
     worker: &mut Option<Worker>,
     settings: &Result<Settings, ExecError>,
     cwd: &Path,
+    stopped: &AtomicBool,
 ) -> Result<(), TuiError> {
     let clock = Instant::now();
     let mut shown: Option<Frame> = None;
     let mut bytes = Vec::new();
     loop {
+        if stopped.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let frame = app.draw();
         bytes.clear();
         render(shown.as_ref(), &frame, &mut bytes);
@@ -328,4 +416,44 @@ fn start(
     };
     app.handle(Input::Worker(Event::Ended(Ended::Failed(failed))));
     None
+}
+
+/// The frame's terminal signals (larry#252).
+#[cfg(test)]
+mod signal_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc::sync_channel};
+    use std::time::Duration;
+
+    use lgwks_bot::rt::sync::CancellationToken;
+
+    use super::Signals;
+
+    /// SIGHUP ends the terminal: a hangup the watcher owns sets the stop flag, so the frame
+    /// finishes its worker instead of running on.
+    #[cfg(unix)]
+    #[test]
+    fn a_hangup_sets_the_frame_stop_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let signals = Signals::register().map_err(|cause| format!("register: {cause}"))?;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let done = CancellationToken::new();
+        let (ended, wait) = sync_channel(1);
+        let flag = Arc::clone(&stopped);
+        std::thread::Builder::new()
+            .name(String::from("signal-watch"))
+            .spawn(move || {
+                signals.wait(&flag, &done);
+                assert!(ended.send(()).is_ok(), "the test waits for the watcher");
+            })
+            .map_err(|cause| format!("spawn: {cause}"))?;
+        let me = std::process::id().to_string();
+        let hungup = std::process::Command::new("kill")
+            .args(["-HUP", &me])
+            .status()?;
+        assert!(hungup.success(), "kill -HUP reached the test process");
+        wait.recv_timeout(Duration::from_secs(5))
+            .map_err(|cause| format!("the watcher never ended: {cause}"))?;
+        assert!(stopped.load(Ordering::Acquire), "SIGHUP sets the stop flag");
+        Ok(())
+    }
 }

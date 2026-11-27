@@ -56,6 +56,20 @@ impl Route {
     pub(crate) fn residency(&self) -> Option<&str> {
         self.residency.as_deref()
     }
+    /// The prompt template prepended to the system turn, when the route names one.
+    pub(crate) fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
+    }
+    /// The BLAKE3 digest of the route's prompt template as hex, `None` when the
+    /// route names none: what a sealed record carries instead of the text
+    /// (larry#205).
+    pub(crate) fn prompt_hash(&self) -> Option<String> {
+        self.prompt.as_deref().map(|template| {
+            let mut hasher = lgwks_std::hash::Hasher::new();
+            hasher.update(template.as_bytes());
+            hasher.finalize().to_hex()
+        })
+    }
     /// What the route is good for.
     pub(crate) fn describe(&self) -> &str {
         &self.describe
@@ -72,17 +86,20 @@ impl Route {
     pub(crate) const fn price_output(&self) -> u64 {
         self.price_output
     }
-    /// What a sealed report says about the route: its id, the model, the
-    /// gateway's host and port, and the residency (`null` when undeclared).
-    /// Never the URL's path, a key or the name of the key's variable. A priced
+    /// What a sealed report says about the route: its id, kind, the model,
+    /// the gateway's host and port, the residency (`null` when undeclared) and
+    /// the prompt template's hash (`null` when the route names none). Never the
+    /// URL's path, the template, a key or the name of the key's variable. A priced
     /// table rides along: the command bumps the revision from the first, so a
     /// priced route is exactly one whose revision is past 1, even at zero rates.
     pub(crate) fn seal(&self) -> Value {
         let mut sealed = json!({
             "id": self.id,
+            "kind": self.kind.name(),
             "model": self.model,
             "host": self.host,
             "residency": self.residency,
+            "prompt_hash": self.prompt_hash(),
         });
         if self.price_version != DEFAULT_PRICE_VERSION
             && let Some(object) = sealed.as_object_mut()

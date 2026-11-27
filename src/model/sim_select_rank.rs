@@ -72,6 +72,7 @@ fn fixture(seed: u64) -> Check<Fixture> {
             temperature: None,
             request_bytes: None,
             residency: residency.as_deref(),
+            prompt: None,
             describe: &describe,
         })?);
     }
@@ -267,6 +268,7 @@ fn build(id: &str, describe: &str) -> Check<Route> {
         temperature: None,
         request_bytes: None,
         residency: Some("CA"),
+        prompt: None,
         describe,
     })?)
 }
@@ -339,6 +341,7 @@ fn sim_the_task_query_is_bounded_and_an_empty_description_falls_back() -> Check 
         temperature: None,
         request_bytes: None,
         residency: None,
+        prompt: None,
         describe: "",
     })?;
     let other = Route::stored(&Draft {
@@ -350,6 +353,7 @@ fn sim_the_task_query_is_bounded_and_an_empty_description_falls_back() -> Check 
         temperature: None,
         request_bytes: None,
         residency: None,
+        prompt: None,
         describe: "something else",
     })?;
     let table = Table::new(vec![plain, other], None);
@@ -422,6 +426,7 @@ fn sim_a_table_past_the_tenant_cap_still_ranks() -> Check {
             temperature: None,
             request_bytes: None,
             residency: Some("CA"),
+            prompt: None,
             describe: "a route past the cap",
         })?);
     }

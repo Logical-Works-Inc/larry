@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0128: Semantic route selection on the shipped local reranker"
+title: "ADR 0130: Semantic route selection on the shipped local reranker"
 description: Why an unnamed task is ranked by meaning on route descriptions with the pinned Qwen3 reranker after residency and budget filters, and what the sealed record carries.
-resource: /docs/adr/0128-semantic-route-selection.md
+resource: /docs/adr/0130-semantic-route-selection.md
 tags: [larry, adr, model, routing]
 generated: {by: codex, at: 2026-11-27}
 verified: {by: codex, method: lgwks-box cargo nextest and clippy on toronto, 2026-11-27}
@@ -11,7 +11,7 @@ stale_after: 2027-05-27
 sources: [larry#202]
 ---
 
-# ADR 0128
+# ADR 0130
 
 ## Context
 

@@ -3,7 +3,7 @@
 //! whose traces must replay identically (a sim that reads the wall clock
 //! cannot replay). One cold ranking, then 2 warm ones over two routes,
 //! printing p50/p95/p99 and peak RSS. The winner is stable across every run;
-//! the printed numbers are the proof SHIP.md and ADR 0128 cite. Two warm runs
+//! the printed numbers are the proof SHIP.md and ADR 0130 cite. Two warm runs
 //! is all the 5-minute hang guard (`.config/nextest.toml`) fits at about a
 //! minute an inference on the shared box; wall-clock times feed only the
 //! printed card, never an assertion, so a loaded host changes the numbers,

@@ -7,7 +7,7 @@
 //! `src/model/sim_select.rs` against a seeded scorer; these journeys prove
 //! the run path around it on the default build (no `rerank` engine). The
 //! tenants, doors and sealed-report assertions live in the shared
-//! `route_tenant` harness, so no journey copies them.
+//! `route_journey` harness, so no journey copies them.
 //!
 //! Source: larry#202 (an explicit route always wins; residency and budget
 //! filter before the ranking, never after; the rank, the scores and the
@@ -23,6 +23,8 @@
 #[path = "support/http_wire.rs"]
 mod http_wire;
 
+#[path = "support/route_journey.rs"]
+mod route_journey;
 #[path = "support/route_tenant.rs"]
 mod route_tenant;
 
@@ -30,13 +32,14 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::process::Output;
 
-use route_tenant::json_at::At;
-use route_tenant::larry_cli::stderr_of;
-use route_tenant::larry_route;
-use route_tenant::mock_model::{Config, Fault, Handle, run};
-use route_tenant::origin::{TempDir, fixture};
-use route_tenant::sealed_report::{denial_lines, flag_of, report_of};
-use route_tenant::{Tenant, TestResult};
+use route_journey::TestResult;
+use route_journey::json_at::At;
+use route_journey::larry_cli::stderr_of;
+use route_journey::larry_route;
+use route_journey::mock_model::{Config, Fault, Handle, run};
+use route_journey::origin::{TempDir, fixture};
+use route_journey::sealed_report::{denial_lines, flag_of, report_of};
+use route_tenant::Tenant;
 
 /// The ranker pin every selection seals, from `src/rerank/model.pin`.
 const RANKER_MODEL: &str = "Qwen/Qwen3-Reranker-0.6B";

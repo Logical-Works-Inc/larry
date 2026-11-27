@@ -18,6 +18,8 @@
 #[path = "support/http_wire.rs"]
 mod http_wire;
 
+#[path = "support/route_journey.rs"]
+mod route_journey;
 #[path = "support/route_tenant.rs"]
 mod route_tenant;
 
@@ -29,13 +31,14 @@ use std::process::Output;
 
 use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::json::{self, Value, json};
-use route_tenant::json_at::At;
-use route_tenant::larry_cli::stderr_of;
-use route_tenant::mock_model::{Config, Fault, run};
-use route_tenant::origin::{TempDir, commit_all, fixture};
-use route_tenant::route_key::key_env;
-use route_tenant::sealed_report::{flag_of, report_of};
-use route_tenant::{Tenant, TestResult, host_of, larry_route};
+use route_journey::json_at::At;
+use route_journey::larry_cli::stderr_of;
+use route_journey::mock_model::{Config, Fault, run};
+use route_journey::origin::{TempDir, commit_all, fixture};
+use route_journey::route_key::key_env;
+use route_journey::sealed_report::{flag_of, report_of};
+use route_journey::{TestResult, host_of, larry_route};
+use route_tenant::Tenant;
 
 /// Two tenants who both call their route `main` run at once. Each report's
 /// authored record names the route id, its own model, its own gateway's host and

@@ -17,20 +17,23 @@ use super::task::Task;
 use super::{ExecError, Ledger, Settings, digest_hex, identity, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{
-    Draft, Kind, ModelConfig, Policy, Route, RouteError, Selection, Table, env_route, is_route_id,
-    query_of, resolve, select,
+    Draft, Kind, Policy, Route, RouteError, Selection, Table, env_route, is_route_id, query_of,
+    resolve, select,
 };
 use crate::rerank::Scorer;
-
-/// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
+#[cfg(feature = "rerank")]
+use crate::rerank::{Candidate, Deadline, RerankError};
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RouteCliError {
-    /// The arguments are not a `larry route` command.
-    #[error("route: {0}; {}", USAGE)]
+    /// The arguments are not a `larry route` command. The synopsis lives in
+    /// this one message (larry#543): the derive renders tuple placeholders
+    /// onto its extra arguments, so a `{USAGE}` tail would print twice.
+    #[error(
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+    )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
     #[error("route: every argument must be UTF-8 text")]
@@ -69,27 +72,15 @@ pub enum RouteCliError {
     Output(#[source] io::Error),
 }
 
-/// What a route refusal is prefixed with. A field refusal already opens with
-/// `route <field>`, so this door adds no second prefix (larry#228); every other
-/// refusal, a new variant included, gets the prefix by default, so none reaches
-/// the user bare (larry#295).
+/// What a route refusal is prefixed with: nothing when the refusal already
+/// opens with `route <field>`, else `route: `, so none reaches the user bare.
+/// The classification lives on the refusal itself
+/// ([`RouteError::opens_with_route`]), listed once with no wildcard.
 const fn route_prefix(cause: &RouteError) -> &'static str {
-    match *cause {
-        RouteError::BadId
-        | RouteError::ReservedId
-        | RouteError::BadUrl
-        | RouteError::BadModel
-        | RouteError::BadKeyEnv
-        | RouteError::KeyEnvOutsideNamespace
-        | RouteError::KeyEnvNotThisTenants { .. }
-        | RouteError::BadTemperature
-        | RouteError::BadResidency
-        | RouteError::BadResidencyRule
-        | RouteError::BadRankSeconds
-        | RouteError::BadRequestBytes
-        | RouteError::BadDescribe
-        | RouteError::BadPrice { .. } => "",
-        _ => "route: ",
+    if cause.opens_with_route() {
+        ""
+    } else {
+        "route: "
     }
 }
 
@@ -131,6 +122,67 @@ pub(super) fn resolve_for(
     resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
 }
 
+/// A scorer that builds the shipped local ranker on its first scored
+/// candidate, never on construction: a tenant whose choice needs no ranking
+/// never fails for a missing model or home directory, and a missing engine
+/// fails only the ranking that needs it, exactly as if no engine had been
+/// built (larry#202).
+#[cfg(feature = "rerank")]
+struct LazyScorer {
+    /// Builds the engine; taken on first use.
+    make: Option<Box<dyn FnMut() -> Result<Box<dyn Scorer>, RouteError>>>,
+    /// The engine once built.
+    engine: Option<Box<dyn Scorer>>,
+}
+
+#[cfg(feature = "rerank")]
+impl LazyScorer {
+    /// A scorer that builds the shipped local ranker on first use.
+    fn local() -> Self {
+        Self {
+            make: Some(Box::new(|| {
+                let scorer: Box<dyn Scorer> =
+                    Box::new(crate::rerank::local_scorer().map_err(|cause| {
+                        RouteError::NoRanker {
+                            detail: format!(
+                                "{cause}; fetch the pinned model and retry, or name the route"
+                            ),
+                        }
+                    })?);
+                Ok(scorer)
+            })),
+            engine: None,
+        }
+    }
+}
+
+#[cfg(feature = "rerank")]
+impl Scorer for LazyScorer {
+    fn score(
+        &mut self,
+        query: &str,
+        rows: &[Candidate],
+        batch: usize,
+        deadline: Deadline,
+    ) -> Result<Vec<f64>, RerankError> {
+        match self.engine {
+            Some(ref mut engine) => engine.score(query, rows, batch, deadline),
+            None => {
+                let mut make = self.make.take().ok_or_else(|| {
+                    RerankError::Engine(String::from("the route ranker is unavailable"))
+                })?;
+                let engine = make().map_err(|cause| match cause {
+                    RouteError::NoRanker { detail } => RerankError::Engine(detail),
+                    _ => RerankError::Engine(cause.to_string()),
+                })?;
+                self.engine
+                    .insert(engine)
+                    .score(query, rows, batch, deadline)
+            }
+        }
+    }
+}
+
 /// The route a briefed task sends its model calls to: the named route when the
 /// task names one (resolved exactly as the configured resolver does), else the
 /// best-ranked eligible route. An explicit name always wins; without one the
@@ -159,13 +211,13 @@ pub(super) fn select_for(
         env_route(read).map_err(ExecError::ModelConfig)?
     };
     let policy = Policy::parse(read).map_err(ExecError::Route)?;
+    // The engine builds on its first scored candidate, never on construction:
+    // a tenant whose choice needs no ranking never fails for a missing model
+    // or home directory, and a missing engine fails only the ranking that
+    // needs it, exactly as if no engine had been built (larry#202).
     #[cfg(feature = "rerank")]
     let mut engine: Option<Box<dyn Scorer>> = if named.is_none() {
-        let scorer: Box<dyn Scorer> = Box::new(crate::rerank::local_scorer().map_err(|cause| {
-            ExecError::Route(RouteError::NoRanker {
-                detail: format!("{cause}; fetch the pinned model and retry, or name the route"),
-            })
-        })?);
+        let scorer: Box<dyn Scorer> = Box::new(LazyScorer::local());
         Some(scorer)
     } else {
         None
@@ -192,26 +244,6 @@ pub(super) fn select_for(
         None => select(&tenant, &table, named, environment, query, &policy, None),
     };
     choice.map_err(ExecError::Route)
-}
-
-/// The route a task naming `named` (or none) sends its model calls to: the
-/// named route, else the tenant's default, else the environment's, else a
-/// refusal. Nothing is sent to resolve it. A briefed task that names none
-/// does not come here: [`task_select`] ranks its eligible routes by meaning
-/// instead (larry#202).
-///
-/// # Errors
-///
-/// [`ExecError::Route`] for an unknown name, no route at all or a damaged row;
-/// [`ExecError::ModelConfig`] for an environment route that cannot be read.
-pub(crate) fn task_route(
-    settings: &Settings,
-    ledger: &Ledger,
-    named: Option<&str>,
-) -> Result<Route, ExecError> {
-    resolve_for(ledger, settings.state_dir(), named, &|name: &str| {
-        (settings.read)(name)
-    })
 }
 
 /// The route a briefed task sends its model calls to: the named route when
@@ -242,30 +274,6 @@ pub(crate) fn task_select(
     )
 }
 
-/// The route `larry eval` scores: what a task naming none resolves to.
-///
-/// # Errors
-///
-/// [`ExecError::Route`] for no route at all or a damaged row.
-pub(crate) fn task_arm_route(settings: &Settings) -> Result<Route, ExecError> {
-    task_route(settings, &Ledger::open(settings.state_dir())?, None)
-}
-
-/// The model configuration for calls over `route`: its key is read now, from
-/// the variable the route names.
-///
-/// # Errors
-///
-/// [`ExecError::ModelConfig`] for a route whose key variable is unset or
-/// empty, or a `LARRY_MODEL_*` knob that does not parse.
-pub(crate) fn task_model_config(
-    settings: &Settings,
-    route: &Route,
-) -> Result<ModelConfig, ExecError> {
-    ModelConfig::for_route(route, &|name: &str| (settings.read)(name))
-        .map_err(ExecError::ModelConfig)
-}
-
 /// The flags of `route add`, each still text.
 #[derive(Default)]
 struct Flags<'arg> {
@@ -281,6 +289,10 @@ struct Flags<'arg> {
     temperature: Option<&'arg str>,
     /// `--request-bytes`.
     request_bytes: Option<&'arg str>,
+    /// The provider kind: `openai-chat` unless `--kind` names another.
+    kind: Option<&'arg str>,
+    /// `--prompt`.
+    prompt: Option<&'arg str>,
     /// `--describe`.
     describe: Option<&'arg str>,
     /// `--default`.
@@ -306,6 +318,8 @@ fn parse_flags<'arg>(flags: &[&'arg str]) -> Result<Flags<'arg>, RouteCliError> 
             "--residency" => &mut parsed.residency,
             "--temperature" => &mut parsed.temperature,
             "--request-bytes" => &mut parsed.request_bytes,
+            "--kind" => &mut parsed.kind,
+            "--prompt" => &mut parsed.prompt,
             "--describe" => &mut parsed.describe,
             _ => return Err(RouteCliError::Usage("unknown flag")),
         };
@@ -379,20 +393,26 @@ fn add(
     out: &mut impl Write,
 ) -> Result<(), RouteCliError> {
     let parsed = parse_flags(flags)?;
-    // A route added without `--describe` has the empty description.
+    // A route added without `--describe` has the empty description, and one
+    // added without `--kind` is an OpenAI chat route.
     let mut describe = "";
     if let Some(text) = parsed.describe {
         describe = text;
     }
+    let kind = match parsed.kind {
+        Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
+        None => Kind::OpenAiChat,
+    };
     let route = Route::new(&Draft {
         id,
-        kind: Kind::OpenAiChat,
+        kind,
         base_url: required(parsed.url, "--url")?,
         model: required(parsed.model, "--model")?,
         key_env: required(parsed.key_env, "--key-env")?,
         temperature: number(parsed.temperature, "--temperature")?,
         request_bytes: number(parsed.request_bytes, "--request-bytes")?,
         residency: Some(required(parsed.residency, "--residency")?),
+        prompt: parsed.prompt,
         describe,
     })
     .map_err(RouteCliError::Route)?;
@@ -488,6 +508,7 @@ fn listed(route: &Route, table: &Table) -> Value {
         "temperature": route.temperature(),
         "request_bytes": route.request_bytes(),
         "residency": route.residency(),
+        "prompt_hash": route.prompt_hash(),
         "price_version": route.price_version(),
         "price_input_micros": route.price_input(),
         "price_output_micros": route.price_output(),
@@ -529,10 +550,11 @@ fn list(
         say(
             out,
             &format_args!(
-                "{}\t{}\t{}\t{residency}{marker}",
+                "{}\t{}\t{}\t{residency}{marker}\t{}",
                 route.id(),
                 route.model(),
-                route.host()
+                route.host(),
+                route.kind().name(),
             ),
         )?;
     }
@@ -640,6 +662,12 @@ mod tests {
         let numbered = said(&RouteCliError::Route(RouteError::BadTemperature));
         assert!(numbered.starts_with("route temperature must"), "{numbered}");
         assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
+        let kind = said(&RouteCliError::Route(RouteError::BadKind));
+        assert!(kind.starts_with("route kind must be one of"), "{kind}");
+        assert_eq!(kind.matches("route").count(), 1, "{kind}");
+        let prompt = said(&RouteCliError::Route(RouteError::BadPrompt));
+        assert!(prompt.starts_with("route prompt must be"), "{prompt}");
+        assert_eq!(prompt.matches("route").count(), 1, "{prompt}");
         let priced = said(&RouteCliError::Route(RouteError::BadPrice {
             field: "input",
         }));

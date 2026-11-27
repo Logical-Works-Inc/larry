@@ -115,6 +115,7 @@ pub(super) fn stored(id: &str, residency: Option<&str>, describe: &str) -> Check
         temperature: None,
         request_bytes: None,
         residency,
+        prompt: None,
         describe,
     })?)
 }
@@ -331,6 +332,7 @@ fn sim_a_malformed_residency_rule_is_refused_by_name() -> Check {
                 temperature: None,
                 request_bytes: None,
                 residency: None,
+                prompt: None,
                 describe: "a route",
             })?),
             "{rule:?} constrains nothing"
@@ -359,6 +361,7 @@ fn sim_a_malformed_residency_rule_is_refused_by_name() -> Check {
         temperature: None,
         request_bytes: None,
         residency: None,
+        prompt: None,
         describe: "a route nowhere",
     })?;
     let rule =
@@ -419,6 +422,7 @@ fn sim_an_empty_table_refuses_before_any_ranking() -> Check {
         temperature: None,
         request_bytes: None,
         residency: Some("CA"),
+        prompt: None,
         describe: "declared by the operator",
     })?;
     let constrained = Policy {
@@ -465,6 +469,7 @@ fn sim_a_plaintext_route_never_ranks() -> Check {
         temperature: None,
         request_bytes: None,
         residency: None,
+        prompt: None,
         describe: "the best route for every task",
     })?;
     let sealed = Route::stored(&Draft {
@@ -476,6 +481,7 @@ fn sim_a_plaintext_route_never_ranks() -> Check {
         temperature: None,
         request_bytes: None,
         residency: None,
+        prompt: None,
         describe: "a worse route for every task",
     })?;
     let policy = open_policy()?;

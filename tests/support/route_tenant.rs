@@ -1,40 +1,28 @@
 //! One tenant's route-journey harness (larry#201, larry#202): a state
 //! directory, an origin repository, a gateway and a key, with the `larry
 //! route` door, the `larry exec` door and the sealed-report assertions every
-//! route journey drives. One home, so no journey copies it: both the
+//! tenant journey drives. One home, so no journey copies it: both the
 //! route-table journeys and the selection journeys run their tenants through
-//! here (`route_cli_journey.rs`, `route_select_journey.rs`).
+//! here (`route_cli_journey.rs`, `route_select_journey.rs`). The `larry
+//! route` and `larry exec` doors it stands on live in the shared
+//! `route_journey` harness, which the journeys without a tenant
+//! (`provider_kinds_journey.rs`) use on its own. Test support, never linked
+//! into a shipped binary (INVARIANTS: test doubles never ship).
 
 use std::error::Error;
 use std::ffi::OsStr;
-use std::path::Path;
 use std::process::{Child, Output};
 
-#[path = "json_at.rs"]
-pub(crate) mod json_at;
-#[path = "larry_cli.rs"]
-pub(crate) mod larry_cli;
-#[path = "mock_model.rs"]
-pub(crate) mod mock_model;
-#[path = "origin.rs"]
-pub(crate) mod origin;
-#[path = "route_key.rs"]
-pub(crate) mod route_key;
-#[path = "sealed_report.rs"]
-pub(crate) mod sealed_report;
-
-use json_at::At;
-use larry_cli::{spawn_larry_args, stderr_of};
+use crate::route_journey::json_at::At;
+use crate::route_journey::larry_cli::stderr_of;
+use crate::route_journey::mock_model::Handle;
+use crate::route_journey::origin::TempDir;
+use crate::route_journey::route_key::key_env;
+use crate::route_journey::sealed_report::{denial_lines, flag_of, report_of};
+use crate::route_journey::{
+    NewRoute, TestResult, add_route, briefed_task, exec_with_key, host_of, start_with_key,
+};
 use lgwks_std::json::{self, Value, json};
-use mock_model::Handle;
-use origin::TempDir;
-use sealed_report::{denial_lines, flag_of, report_of};
-
-/// What every journey returns.
-pub(crate) type TestResult = Result<(), Box<dyn Error>>;
-
-/// The scopes a briefed task needs, so no journey depends on the default policy.
-pub(crate) const POLICY: &str = "file.read,file.write,process.spawn,model.invoke";
 
 /// One tenant: a state directory, an origin repository, a gateway and a key.
 pub(crate) struct Tenant<'tenant> {
@@ -75,26 +63,20 @@ impl<'tenant> Tenant<'tenant> {
     /// Stores the route `id` pointing at this tenant's gateway, as the default.
     pub(crate) fn add_route(&self, id: &str) -> TestResult {
         let url = format!("http://{}/v1", host_of(self.mock));
-        let key_env = route_key::key_env(self.state.path(), self.suffix)?;
-        let output = larry_route(
-            self.state.path(),
-            &[],
-            &[
-                "add",
+        let variable = key_env(self.state.path(), self.suffix)?;
+        add_route(
+            self.state,
+            &NewRoute {
+                url: &url,
                 id,
-                "--url",
-                &url,
-                "--model",
-                self.model,
-                "--key-env",
-                &key_env,
-                "--residency",
-                self.residency,
-                "--default",
-            ],
-        )?;
-        assert!(output.status.success(), "route add: {}", stderr_of(&output));
-        Ok(())
+                model: self.model,
+                key_env: &variable,
+                residency: self.residency,
+                kind: None,
+                prompt: None,
+                temperature: None,
+            },
+        )
     }
 
     /// Runs `larry exec` on `task` with the tenant's key in the child's environment.
@@ -108,7 +90,14 @@ impl<'tenant> Tenant<'tenant> {
         task: &str,
         extra: &[(&str, &OsStr)],
     ) -> Result<Output, Box<dyn Error>> {
-        Ok(self.start(task, extra)?.wait_with_output()?)
+        let variable = key_env(self.state.path(), self.suffix)?;
+        exec_with_key(
+            self.state.path(),
+            &variable,
+            OsStr::new(self.key),
+            task,
+            extra,
+        )
     }
 
     /// Starts `larry exec` on `task` with the extra variables `extra` as well, unwaited.
@@ -117,14 +106,14 @@ impl<'tenant> Tenant<'tenant> {
         task: &str,
         extra: &[(&str, &OsStr)],
     ) -> Result<Child, Box<dyn Error>> {
-        let variable = route_key::key_env(self.state.path(), self.suffix)?;
-        let mut env: Vec<(&str, &OsStr)> = vec![
-            ("LARRY_STATE_DIR", self.state.path().as_os_str()),
-            ("LARRY_POLICY", OsStr::new(POLICY)),
-            (variable.as_str(), OsStr::new(self.key)),
-        ];
-        env.extend_from_slice(extra);
-        spawn_larry_args(&["exec"], &env, task.as_bytes())
+        let variable = key_env(self.state.path(), self.suffix)?;
+        start_with_key(
+            self.state.path(),
+            &variable,
+            OsStr::new(self.key),
+            task,
+            extra,
+        )
     }
 
     /// A briefed task over this tenant's origin, naming `route` and `key` when given.
@@ -140,9 +129,11 @@ impl<'tenant> Tenant<'tenant> {
     pub(crate) fn sealed_route(&self, id: &str) -> Value {
         json!({
             "id": id,
+            "kind": "openai-chat",
             "model": self.model,
             "host": host_of(self.mock),
             "residency": self.residency,
+            "prompt_hash": null,
         })
     }
 
@@ -157,13 +148,13 @@ impl<'tenant> Tenant<'tenant> {
                 Some(self.model),
                 "every request carries the route's model"
             );
-        }
-        let expected = Some(format!("Bearer {}", self.key));
-        for header in self.mock.authorizations() {
-            assert_eq!(
-                header, expected,
-                "only this tenant's key reached its gateway"
-            );
+            let expected = Some(format!("Bearer {}", self.key));
+            for header in self.mock.authorizations() {
+                assert_eq!(
+                    header, expected,
+                    "only this tenant's key reached its gateway"
+                );
+            }
         }
         Ok(())
     }
@@ -177,7 +168,7 @@ impl<'tenant> Tenant<'tenant> {
         assert_eq!(
             *report.at("/authored/0/route")?,
             self.sealed_route(id),
-            "the receipt names this tenant's route, host and residency"
+            "the receipt names this tenant's route, kind, host and residency"
         );
         assert_eq!(
             report.at("/authored/0/route/model")?.as_str(),
@@ -185,7 +176,7 @@ impl<'tenant> Tenant<'tenant> {
             "the sealed route names the model the gateway served"
         );
         let printed = String::from_utf8_lossy(&output.stdout);
-        let variable = route_key::key_env(self.state.path(), self.suffix)?;
+        let variable = key_env(self.state.path(), self.suffix)?;
         for secret in [self.key, variable.as_str()] {
             assert!(
                 !printed.contains(secret),
@@ -194,49 +185,4 @@ impl<'tenant> Tenant<'tenant> {
         }
         self.assert_gateway_saw_only_this_tenant()
     }
-}
-
-/// The host and port a mock listens on, as a sealed report names it.
-pub(crate) fn host_of(mock: &Handle) -> String {
-    format!("127.0.0.1:{}", mock.addr().port())
-}
-
-/// Runs `larry route <args>` with only PATH, the state directory and `env` set.
-pub(crate) fn larry_route(
-    state: &Path,
-    env: &[(&str, &OsStr)],
-    args: &[&str],
-) -> Result<Output, Box<dyn Error>> {
-    Ok(std::process::Command::new(env!("CARGO_BIN_EXE_larry"))
-        .arg("route")
-        .args(args)
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .env("LARRY_STATE_DIR", state)
-        .envs(env.iter().copied())
-        .output()?)
-}
-
-/// A briefed task over `origin`: write `note.txt`, then prove it, over the
-/// route `route` and with the idempotency key `key` when given.
-pub(crate) fn briefed_task(
-    origin: &TempDir,
-    route: Option<&str>,
-    key: Option<&str>,
-) -> Result<String, Box<dyn Error>> {
-    let mut task = json!({
-        "repo": origin.path().display().to_string(),
-        "base": "HEAD",
-        "goal": "write the note",
-        "files": ["note.txt"],
-        "acceptance": [["true"]],
-    });
-    let object = task.as_object_mut().ok_or("a task object")?;
-    if let Some(id) = route {
-        object.insert(String::from("route"), json!(id));
-    }
-    if let Some(text) = key {
-        object.insert(String::from("idempotency_key"), json!(text));
-    }
-    Ok(task.to_string())
 }

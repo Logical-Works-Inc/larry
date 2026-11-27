@@ -1,6 +1,7 @@
 //! The task a planner door renders (`larry mcp`, `larry eval`): one task document parsed by the
 //! one parser, so every door shares one digest for the run (ADR 0008). The planner may set the
-//! shell, base and per-command timeout; the tenant's ceilings bound them later (larry#439).
+//! shell, base, per-command timeout and whole-task deadline, each bounded later by the
+//! tenant's ceiling (larry#439, ADR 0111).
 
 use super::{Task, TaskError};
 
@@ -19,6 +20,8 @@ pub(crate) struct Knobs<'arg> {
     pub(crate) base: Option<&'arg str>,
     /// The longest one command may run, in milliseconds.
     pub(crate) timeout_ms: Option<u64>,
+    /// The longest the whole task may run, in milliseconds.
+    pub(crate) deadline_ms: Option<u64>,
 }
 
 impl Task {
@@ -67,8 +70,13 @@ impl Task {
             if let Some(named) = route {
                 object.insert(String::from("route"), lgwks_std::json::json!(named));
             }
-            if let Some(value) = knobs.timeout_ms {
-                object.insert(String::from("timeout_ms"), lgwks_std::json::json!(value));
+            for (key, millis) in [
+                ("timeout_ms", knobs.timeout_ms),
+                ("deadline_ms", knobs.deadline_ms),
+            ] {
+                if let Some(value) = millis {
+                    object.insert(String::from(key), lgwks_std::json::json!(value));
+                }
             }
         }
         Task::parse(document.to_string().as_bytes())
@@ -80,7 +88,7 @@ mod tests {
     use super::{Knobs, Task};
 
     /// larry#439: a planner's task runs each command under `sh -c` at `HEAD` by default, and
-    /// carries the shell, base and timeout the planner set, each read back exactly.
+    /// carries the shell, base, timeout and deadline the planner set, each read back exactly.
     #[test]
     fn a_planner_task_carries_its_knobs_or_the_defaults() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -89,16 +97,18 @@ mod tests {
         assert_eq!(plain.shell_program(), Some("sh"), "the default shell");
         let command = vec![String::from("make test")];
         assert_eq!(plain.argv_for(&command), ["sh", "-c", "make test"]);
-        assert_eq!(plain.timeout_ms(), None, "no timeout by default");
+        assert_eq!((plain.timeout_ms(), plain.deadline_ms()), (None, None));
         let knobs = Knobs {
             shell: Some("bash"),
             base: Some("v1.2"),
             timeout_ms: Some(30_000),
+            deadline_ms: Some(90_000),
         };
         let set = Task::shell_via("/tmp/r", "g", &["f"], &["make test"], Some("local"), knobs)?;
         assert_eq!(set.base(), "v1.2", "the planner's base");
         assert_eq!(set.argv_for(&command), ["bash", "-c", "make test"]);
         assert_eq!(set.timeout_ms(), Some(30_000), "the planner's timeout");
+        assert_eq!(set.deadline_ms(), Some(90_000), "the planner's deadline");
         assert_eq!(set.route(), Some("local"), "the planner's route");
         Ok(())
     }
