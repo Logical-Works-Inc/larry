@@ -8,6 +8,9 @@
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
@@ -31,6 +34,7 @@ fn local_ci(dir: &Path, args: &[&str], state: Option<&OsStr>) -> Check<Output> {
     if let Some(state) = state {
         command.env("LARRY_STATE_DIR", state);
     }
+    coverage::forward(&mut command);
     Ok(command.output()?)
 }
 

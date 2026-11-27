@@ -14,6 +14,10 @@ use lgwks_std::seeded::Seeded;
 
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
+
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use temp_dir::TempDir;
 
 /// Failures propagate instead of panicking.
@@ -86,15 +90,16 @@ impl Runner {
     /// Runs the step as the runner does, for PR `number` of `repo`.
     fn run(&self, number: u64, repo: &str) -> Check<Output> {
         let path = format!("{}:/usr/bin:/bin", self.dir.display());
-        Ok(Command::new("sh")
-            .arg("-e")
+        let mut step = Command::new("sh");
+        step.arg("-e")
             .arg(self.dir.join("step.sh"))
             .env_clear()
             .env("PATH", path)
             .env("GH_TOKEN", "token")
             .env("PR", number.to_string())
-            .env("REPO", repo)
-            .output()?)
+            .env("REPO", repo);
+        coverage::forward(&mut step);
+        Ok(step.output()?)
     }
 
     /// The arguments the stand-in `gh` was called with.
