@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use lgwks_std::json::Value;
 
 use crate::exec_cli::deadline::await_group_exit;
+use crate::exec_cli::fixed_probe::FIXED_PROBE;
 use crate::exec_cli::{
     TempDir, TestResult, assert_refused, fixture, flag_of, report_of, spawn_larry_args, stderr_of,
 };
@@ -35,8 +36,13 @@ fn workspaces(state: &Path) -> Outcome<usize> {
 }
 
 /// Runs `larry exec` over `state` with the tenant settings `extra`, `task` on stdin.
+/// The fixed probe rides every run (larry#274), so the deadline the test names measures the
+/// command, never the live probe's dozen spawns.
 fn exec_with(state: &Path, extra: &[(&str, &str)], task: &str) -> Outcome<Output> {
-    let mut env: Vec<(&str, &OsStr)> = vec![("LARRY_STATE_DIR", state.as_os_str())];
+    let mut env: Vec<(&str, &OsStr)> = vec![
+        ("LARRY_STATE_DIR", state.as_os_str()),
+        ("LARRY_PROBE", OsStr::new(FIXED_PROBE)),
+    ];
     env.extend(extra.iter().map(|&(name, value)| (name, OsStr::new(value))));
     Ok(spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?)
 }

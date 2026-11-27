@@ -11,6 +11,7 @@ mod gate;
 mod identity;
 mod island;
 mod ledger;
+mod probe;
 mod receipt;
 mod recovery;
 pub mod routes;
@@ -138,7 +139,7 @@ pub fn provision_tenant(
 ) -> Result<(), ExecError> {
     let state = state_dir(&read)?;
     let ledger = Ledger::open(&state)?;
-    let tenant = tenant_key(&state);
+    let tenant = identity::tenant_key(&state);
     let policy = gate::policy_names(Some(policy_text))?;
     ledger.set_tenant_policy(&tenant, &policy)?;
     for root in roots {
@@ -311,7 +312,7 @@ impl Settings {
         let policy = if local {
             gate::policy(&read)?
         } else {
-            Ledger::open(&state_dir)?.tenant_policy(&tenant_key(&state_dir))?
+            Ledger::open(&state_dir)?.tenant_policy(&identity::tenant_key(&state_dir))?
         };
         let fence_control = fence_control::read(&read)?;
         Ok(Settings {
@@ -340,7 +341,8 @@ impl Settings {
     /// stay open while an operator provisions or withdraws a tenant, so a cached snapshot
     /// must not outlive the prompt that uses it.
     pub(crate) fn refresh_remote_policy(&mut self) -> Result<(), ExecError> {
-        self.policy = Ledger::open(&self.state_dir)?.tenant_policy(&tenant_key(&self.state_dir))?;
+        self.policy =
+            Ledger::open(&self.state_dir)?.tenant_policy(&identity::tenant_key(&self.state_dir))?;
         Ok(())
     }
 
@@ -349,9 +351,27 @@ impl Settings {
         self.path.as_str()
     }
 
+    /// One process-environment variable through the injected reader.
+    pub(crate) fn env(&self, name: &str) -> Option<String> {
+        (self.read)(name)
+    }
+
     /// Longest an acceptance command may run before its group is killed.
     pub(crate) const fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// The probe this run starts with (larry#274): the live folder probe while
+    /// `LARRY_PROBE` is unset, else exactly the value it names, so a run that
+    /// must replay holds every prompt byte still. A malformed value refuses
+    /// the task; it never falls back to the live probe.
+    pub(crate) fn probe(&self) -> Result<probe::Probe, ExecError> {
+        match (self.read)("LARRY_PROBE") {
+            None => Ok(probe::Probe::Live),
+            Some(value) => probe::Probe::fixed(&value).map_err(|cause| ExecError::BadProbe {
+                reason: cause.to_string(),
+            }),
+        }
     }
 
     /// The route a task naming `named` (or none) sends its model calls to: the
@@ -410,7 +430,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let limits = settings.ceilings.limits(task, settings.timeout)?;
     let (ledger, key) = prepare(settings)?;
     let repository = ledger.authorized_repo(
-        &tenant_key(&settings.state_dir),
+        &identity::tenant_key(&settings.state_dir),
         &settings.state_dir,
         task.repo(),
         settings.is_local(),
@@ -440,7 +460,7 @@ fn execute_prepared(
     repository: &std::path::Path,
 ) -> Result<Report, ExecError> {
     let task_id = identity::run_id(task, &settings.state_dir)?;
-    let task_digest = digest_hex(task.bytes());
+    let task_digest = identity::digest_hex(task.bytes());
     // A task that names an idempotency key is the client's statement that a retry
     // of it is the same request, so a retry whose record the ledger already holds
     // is answered from that record and the body never runs a second time
@@ -519,7 +539,7 @@ fn run_task(
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Report, ExecError> {
     // The digest names the same bytes admission checked, recomputed where the report seals them.
-    let task_digest = digest_hex(task.bytes());
+    let task_digest = identity::digest_hex(task.bytes());
     // The one clock the deadline reads, anchored like every executor clock (larry#268).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     let deadline = ceiling::Deadline::start(&clock, limits);
@@ -541,6 +561,19 @@ fn run_task(
         task_id,
         &settings.path,
     )?;
+    // The one environment probe at task start (larry#274): fixed read-only
+    // facts about the task folder, sealed below and shown to the model, so
+    // both see the same facts. The probe a run starts with is an injected
+    // input: live here in production, one fixed value wherever a run must
+    // replay. A probe section that fails is a typed field, never a refused
+    // task.
+    let (probed, rendered) = match settings.probe()? {
+        probe::Probe::Live => probe::probe_and_render(workspace.path(), settings, ledger, task_id),
+        probe::Probe::Fixed(value) => {
+            let rendered = probe::render(&value);
+            (value, rendered)
+        }
+    };
     let mut authored = match step {
         None => None,
         Some(author::ModelStep {
@@ -550,8 +583,10 @@ fn run_task(
         }) => {
             // The tenant's digest, the same text a route row is keyed by, names the
             // cache partition so no two tenants share a prompt prefix (larry#230).
-            let partition = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
-            let mut records = author::author(brief, workspace.path(), &client, &partition)?;
+            let partition =
+                identity::digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+            let mut records =
+                author::author(brief, workspace.path(), &client, &partition, &rendered)?;
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
                     object.insert(String::from("route"), route.seal());
@@ -587,6 +622,7 @@ fn run_task(
                 workspace: &workspace,
                 base: task.base(),
                 deadline_ms,
+                probe: &probed,
             },
             key,
         )
@@ -628,18 +664,6 @@ fn run_task(
     seal(results, None)
 }
 
-/// The BLAKE3 digest of `bytes`, as 64 hex characters.
-fn digest_hex(bytes: &[u8]) -> String {
-    let mut hasher = lgwks_std::hash::Hasher::new();
-    hasher.update(bytes);
-    hasher.finalize().to_hex()
-}
-
-/// The stable text key shared by the executor's tenant-owned ledger tables.
-fn tenant_key(state: &std::path::Path) -> String {
-    digest_hex(identity::tenant_of(state).as_bytes())
-}
-
 #[cfg(test)]
 mod issue207_tests {
     use std::collections::BTreeSet;
@@ -649,7 +673,7 @@ mod issue207_tests {
     use lgwks_std::json::json;
 
     use super::sim_tree::{Origin, Shape, origin, scratch, settings};
-    use super::{Ledger, Settings, Task, execute, tenant_key};
+    use super::{Ledger, Settings, Task, execute};
 
     fn task(repo: &Path) -> Result<Task, Box<dyn std::error::Error>> {
         let document = json!({
@@ -712,10 +736,10 @@ mod issue207_tests {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let ledger_a = Ledger::open(&state_a)?;
-        ledger_a.set_tenant_policy(&tenant_key(&state_a), &allowed)?;
+        ledger_a.set_tenant_policy(&super::identity::tenant_key(&state_a), &allowed)?;
         let ledger_b = Ledger::open(&state_b)?;
-        ledger_b.set_tenant_repo_root(&tenant_key(&state_b), &root)?;
-        ledger_b.set_tenant_policy(&tenant_key(&state_b), &BTreeSet::new())?;
+        ledger_b.set_tenant_repo_root(&super::identity::tenant_key(&state_b), &root)?;
+        ledger_b.set_tenant_policy(&super::identity::tenant_key(&state_b), &BTreeSet::new())?;
         let same = task(&repository)?;
         let first = execute(&same, &remote_settings(&state_a)?)?;
         let second = execute(&same, &remote_settings(&state_b)?)?;

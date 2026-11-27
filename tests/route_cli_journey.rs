@@ -15,6 +15,8 @@
 //! route and an unset key variable send nothing; a key is never stored; a repo
 //! file cannot redirect a tenant; a keyed retry answers with the route it sealed.
 
+#[path = "support/fixed_probe.rs"]
+mod fixed_probe;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/json_at.rs"]
@@ -36,6 +38,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Child, Command, Output};
 
+use fixed_probe::FIXED_PROBE;
 use json_at::At;
 use larry_cli::{spawn_larry_args, stderr_of};
 use lgwks_deps::storefront::rusqlite::Connection;
@@ -145,6 +148,7 @@ impl<'tenant> Tenant<'tenant> {
             ("LARRY_STATE_DIR", self.state.path().as_os_str()),
             ("LARRY_POLICY", OsStr::new(POLICY)),
             (variable.as_str(), OsStr::new(self.key)),
+            ("LARRY_PROBE", OsStr::new(FIXED_PROBE)),
         ];
         env.extend_from_slice(extra);
         spawn_larry_args(&["exec"], &env, task.as_bytes())

@@ -34,8 +34,8 @@ use super::Report;
 use super::Settings;
 use super::backoff;
 use super::compact::{Answer, Conversation};
-use super::digest_hex;
 use super::gate::{self, Subject};
+use super::identity::digest_hex;
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::prepare;
@@ -285,7 +285,7 @@ pub(crate) fn run_session(
     let (ledger, key) = prepare(settings)?;
     let repository = match door {
         SessionDoor::Tenant => ledger.authorized_repo(
-            &super::tenant_key(settings.state_dir()),
+            &super::identity::tenant_key(settings.state_dir()),
             settings.state_dir(),
             cwd,
             settings.is_local(),
@@ -418,8 +418,9 @@ fn run_session_prepared(
 mod issue207_tests {
     use super::{Approval, Isolation, Observer, run_session};
     use crate::executor::gate;
+    use crate::executor::identity::tenant_key;
     use crate::executor::sim_tree::scratch;
-    use crate::executor::{Ledger, Settings, tenant_key};
+    use crate::executor::{Ledger, Settings};
 
     /// An observer that must never be reached by a refusal before model setup.
     struct QuietObserver;

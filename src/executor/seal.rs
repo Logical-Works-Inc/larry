@@ -5,7 +5,8 @@ use super::workspace::{Workspace, report_members};
 use super::{ExecError, Report};
 
 /// What one finished run seals: its identity, every result it kept, the workspace its diff is
-/// taken from, the brief's records when it has them, and the spent deadline when one ended it.
+/// taken from, the brief's records when it has them, the spent deadline when one ended it,
+/// and the environment probe the model's prompt carried (larry#274, larry#439).
 pub(super) struct SealedRun<'a> {
     /// The run's identity and digest.
     pub(super) task_id: &'a str,
@@ -22,6 +23,9 @@ pub(super) struct SealedRun<'a> {
     pub(super) base: &'a str,
     /// The spent whole-task deadline, when one ended the run.
     pub(super) deadline_ms: Option<u64>,
+    /// The task's first sealed fact (larry#274): the same probe value the model's prompt
+    /// carried, so the person checks what it saw.
+    pub(super) probe: &'a lgwks_std::json::Value,
 }
 
 /// Seals `seal` under `key`: the results, the diff as it stands and, when the deadline spent the
@@ -48,10 +52,13 @@ pub(super) fn seal_run(
         );
     }
     // The diff members name whether the diff is the whole change (larry#206).
+    // The probe is the task's first sealed fact (larry#274): the same value
+    // the model's prompt carried, so the person checks what it saw.
     if let Some(object) = body.as_object_mut() {
         for (name, member) in report_members(diff) {
             object.insert(name.to_owned(), member);
         }
+        object.insert(String::from("probe"), seal.probe.clone());
     }
     // Only a briefed run names what the model wrote, so a plain run's report keeps its shape.
     if let Some(records) = seal.authored

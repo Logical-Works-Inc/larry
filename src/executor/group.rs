@@ -3,7 +3,7 @@
 //! caller injected (larry#214, larry#268) and pausing on a backoff, never spinning (larry#427).
 
 use std::io;
-use std::process::ExitStatus;
+use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -176,3 +176,41 @@ pub(in crate::executor) fn await_gone<E>(
 #[cfg(test)]
 #[path = "sim_group.rs"]
 mod sim_group;
+
+/// Kills the group and the leader of a child that could not be tracked, then returns the
+/// error, or the reap failure that names it when the group or the leader could not be ended.
+pub(super) fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
+    let settled = settle_group(clock, pgid);
+    let waited = child.wait();
+    if let Err(fault) = settled {
+        return ExecError::cleanup(error, "the group could not be settled", fault);
+    }
+    if let Err(fault) = waited {
+        return ExecError::cleanup(
+            error,
+            "the leader could not be reaped",
+            ExecError::Reap(fault),
+        );
+    }
+    error
+}
+
+/// Kills and reaps a child whose group id is unknown, then returns the error, or the reap
+/// failure that names it when the child could not be ended.
+pub(super) fn discard(child: &mut Child, error: ExecError) -> ExecError {
+    if let Err(fault) = child.kill() {
+        return ExecError::cleanup(
+            error,
+            "the child could not be killed",
+            ExecError::Reap(fault),
+        );
+    }
+    if let Err(fault) = child.wait() {
+        return ExecError::cleanup(
+            error,
+            "the child could not be reaped",
+            ExecError::Reap(fault),
+        );
+    }
+    error
+}

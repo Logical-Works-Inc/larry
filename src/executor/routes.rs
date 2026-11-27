@@ -13,7 +13,7 @@ use std::path::Path;
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
-use super::{ExecError, Ledger, digest_hex, identity, state_dir};
+use super::{ExecError, Ledger, identity, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
@@ -99,7 +99,7 @@ fn from_exec(error: ExecError) -> RouteCliError {
 
 /// The tenant a state directory is, as the text every route row is keyed by.
 fn tenant_text(state: &Path) -> String {
-    digest_hex(identity::tenant_of(state).as_bytes())
+    identity::tenant_key(state)
 }
 
 /// The route a task naming `named` (or none) sends its model calls to under the

@@ -74,6 +74,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #230 one prompt prefix per brief, cached tokens priced (ADR 0043): PR #231, 930 tests; errands-v1 over 9router, 8 OpenCode Go models, cache reads 570 ‰ kimi, 475 ‰ mimo, 183 ‰ minimax ([bench-cache](/docs/product/bench-cache.md)).
 - [x] #232 the #209 leaf replayed on Claude Code Haiku and OpenCode DeepSeek V4.1 Flash: 8.75 M and 9.03 M prompt tokens, 983 ‰ and 965 ‰ cached, 0.579 USD and about 0.101 USD (ESTIMATE); DeepSeek's fix passes both falsifiers, Haiku's misses the submit path ([bench-harness](/docs/product/bench-harness.md)).
 - [ ] #233 an Opus lead session replayed on both harnesses, 3 runs per arm, live prices. Proof: per-arm tokens, wall p50/p95, cost and the cross-check, printed in bench-harness.
+- [x] #274 one environment probe at task start, sealed as the report's first fact, an injected input, bounded and secret-free (ADR 0131): PR #560. Proof: 16 lib probe sims green; 9 probe journeys green; the 5 slow journeys 85 green; mutants 10 of 14 killed (71 percent, floor 60); one live `larry exec` 16 s on macOS pre-fix (lead) vs 2.9 s on toronto post-fix; the matched-set turn-count comparison rides #94.
 
 ## 6. Track 4: learning, against Harness² (#60)
 - [ ] #61 harness as a versioned, content-hashed journal value.
@@ -116,5 +117,4 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
 - iOS and Android: #115 in section 4, after #90 and #247.
 
-## Holds and open design
-- Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2. #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.
+## Holds and open design: Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2. #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.

@@ -16,6 +16,10 @@ use std::process::{Child, Command, Output, Stdio};
 mod stdin_feed;
 use stdin_feed::feed_stdin;
 
+#[path = "fixed_probe.rs"]
+mod fixed_probe;
+use fixed_probe::FIXED_PROBE;
+
 /// What every journey returns.
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -51,6 +55,8 @@ pub(super) const FLASH: Arm = Arm {
 };
 
 /// The operator's environment for `arm` against `gateway`, `attempts` per completion.
+/// The fixed probe rides beside the model settings (larry#274), so the same seed
+/// replays the same prompts, trace and card.
 pub(super) fn operator(
     state: &Path,
     gateway: SocketAddr,
@@ -69,6 +75,7 @@ pub(super) fn operator(
         ("LARRY_MODEL", OsString::from(arm.model)),
         ("LARRY_EVAL_PRICE_IN", OsString::from(arm.price_in)),
         ("LARRY_EVAL_PRICE_OUT", OsString::from(arm.price_out)),
+        ("LARRY_PROBE", OsString::from(FIXED_PROBE)),
     ]
 }
 

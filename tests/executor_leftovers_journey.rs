@@ -21,12 +21,15 @@ use std::time::Duration;
 
 #[path = "support/deadline.rs"]
 mod deadline;
+#[path = "support/fixed_probe.rs"]
+mod fixed_probe;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/origin.rs"]
 mod origin;
 
 use deadline::{await_fifo_writer, await_until};
+use fixed_probe::FIXED_PROBE;
 use larry_cli::{spawn_larry_args, stderr_of};
 use origin::{TempDir, fixture};
 
@@ -54,11 +57,16 @@ fn make_fifo(path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Starts `larry exec` with `task` on stdin and the state directory set.
+/// Starts `larry exec` with `task` on stdin and the state directory set. The
+/// fixed probe rides every run (larry#274), so the verdict never pays a live
+/// probe's dozen spawns.
 fn spawn_exec(state: &Path, task: &str) -> Result<Child, Box<dyn Error>> {
     spawn_larry_args(
         &["exec"],
-        &[("LARRY_STATE_DIR", state.as_os_str())],
+        &[
+            ("LARRY_STATE_DIR", state.as_os_str()),
+            ("LARRY_PROBE", std::ffi::OsStr::new(FIXED_PROBE)),
+        ],
         task.as_bytes(),
     )
 }
@@ -105,6 +113,24 @@ exit 0;"#;
     Ok(script)
 }
 
+/// How long the test waits for `larry exec` to end before calling the run hung:
+/// a hang guard, never the verdict. The verdict is the exact typed refusal once the
+/// call returned; a loaded host only delays that return, so no working run may fail
+/// here for being slow (larry#274, fifth pass: the gate's reach base failed this
+/// test at 25.9 s and 33.8 s on a loaded Mac against a 10 s verdict bound).
+const HANG_GUARD: Duration = Duration::from_secs(180);
+
+/// The program the refusal names: the session launcher where the host has one, else
+/// the acceptance command's own `sh`. The word is the platform's, the refusal is the
+/// test's: `Spawn` with `an output stream stayed open after the command ended`.
+fn launcher() -> &'static str {
+    if Path::new("/usr/bin/setsid").is_file() {
+        "/usr/bin/setsid"
+    } else {
+        "sh"
+    }
+}
+
 /// A child that left the process group and kept the command's output stream open cannot hold
 /// the run: the drain ends on the command's status and the cancel input, and a stream still
 /// open is a typed refusal, never a join with no deadline.
@@ -123,7 +149,7 @@ fn a_child_that_left_the_group_and_holds_the_pipe_ends_the_run() -> TestResult {
     let _writer = await_fifo_writer(&hold)?;
     let ended = await_until(
         "larry exec ends with its command's output stream still open",
-        Duration::from_secs(10),
+        HANG_GUARD,
         || Ok(child.try_wait()?),
     );
     let status = match ended {
@@ -141,9 +167,14 @@ fn a_child_that_left_the_group_and_holds_the_pipe_ends_the_run() -> TestResult {
         Some(1),
         "a stream still open past the command ends the run typed; stderr: {stderr:?}"
     );
-    assert!(
-        stderr.contains("output") && stderr.contains("open"),
-        "the refusal names the stream that stayed open: {stderr:?}"
+    let refusal = format!(
+        "exec could not run {}: an output stream stayed open after the command ended",
+        launcher()
+    );
+    assert_eq!(
+        stderr.trim(),
+        refusal,
+        "the run ends with the drain's exact typed refusal, naming the stream left open"
     );
     Ok(())
 }

@@ -64,7 +64,7 @@ impl<'a> RunHooks<'a> {
 #[cfg(test)]
 pub(super) use group::GROUP_PROBE_DEADLINE;
 pub(super) use group::await_gone;
-use group::{await_group_gone, settle_group, status_after_kill};
+use group::{abandon, await_group_gone, discard, settle_group, status_after_kill};
 
 /// Longest one slice of the command wait sleeps before it checks the person's cancel again
 /// (larry#242): it bounds Esc-to-kill latency. `tui_journey_esc_kills_running_command` prints
@@ -233,18 +233,38 @@ impl CommandResult {
     }
 }
 
-/// Where a command runs: a directory as it is, or a workspace the kernel confines it to
-/// (larry#243).
+/// Where a command runs: a directory as it is, a read-only probe of one with its
+/// home beside it, or a workspace the kernel confines it to (larry#243).
 #[derive(Clone, Copy)]
 pub(crate) enum Place<'a> {
     /// This directory, open to whatever the command does in it.
     Open(&'a Path),
+    /// A read-only probe of `cwd`: the command runs there, but its home is
+    /// `home`, outside the probed tree, so a tool that initializes a per-user
+    /// home (a toolchain, a build cache) never writes into the tree and its
+    /// diff (larry#274). The toolchain homes stay resolved from the host's
+    /// real home (read only) when it names one, so a missing toolchain is a
+    /// fast typed failure, never a download into the tree.
+    Probe {
+        /// The tree the probe reads.
+        cwd: &'a Path,
+        /// The probe's own home, outside the tree.
+        home: &'a Path,
+        /// Where the probe child's `RUSTUP_HOME` points, when the host names one.
+        rustup_home: Option<&'a Path>,
+        /// Where the probe child's `CARGO_HOME` points, when the host names one.
+        cargo_home: Option<&'a Path>,
+    },
     /// This confinement's tree, behind its wrapper, with `TMPDIR` at its scratch directory.
     Confined(&'a Confine),
 }
 
 /// Runs `argv` in `place` in a process group of its own, and a session of its own where the host
-/// has `setsid`, with the environment cleared to PATH, HOME (the workspace), and LANG=C. The
+/// has `setsid`, with the environment cleared to PATH, HOME and LANG=C: HOME is the workspace
+/// for an open or confined command and the probe's own home beside the tree for a probe, which
+/// also sets `RUSTUP_AUTO_INSTALL=0` and, when the host names them, `RUSTUP_HOME` and
+/// `CARGO_HOME` resolved from the host's real home (read only), so a missing toolchain is a
+/// fast typed failure, never a download (larry#274). The
 /// leader's exit, a timeout, or the person's cancel (`cancelled`, polled at most
 /// [`CANCEL_POLL`] apart, larry#242) kills the whole group; a timeout and an interrupt are reported as `timed_out` and `interrupted`,
 /// never both at once. The group waits read one deadline from the live clock this
@@ -367,7 +387,10 @@ pub(crate) fn run_command(
 
 /// The command that runs `argv` in `place`, and the program it starts, in a process group of its
 /// own (a session too where the host has `setsid`) with the environment cleared to PATH, HOME
-/// (the workspace) and LANG=C. A confined command is the platform's wrapper plus the model's argv,
+/// and LANG=C: HOME is the workspace for an open or confined command, and the probe's own
+/// home beside the tree for a probe (with the toolchain homes and the no-install switch),
+/// so the probe never writes into what it reads.
+/// A confined command is the platform's wrapper plus the model's argv,
 /// so the kernel confines it and everything it forks; the result still names the model's argv.
 pub(super) fn command_for(
     argv: &[String],
@@ -378,9 +401,11 @@ pub(super) fn command_for(
     if argv.is_empty() {
         return Err(empty());
     }
-    let (workspace, scratch, wrapped) = match place {
-        Place::Open(path) => (path, None, None),
+    let (workspace, home, scratch, wrapped) = match place {
+        Place::Open(path) => (path, path, None, None),
+        Place::Probe { cwd, home, .. } => (cwd, home, None, None),
         Place::Confined(confine) => (
+            confine.tree(),
             confine.tree(),
             Some(confine.scratch()),
             Some(confine.wrap(argv)),
@@ -405,9 +430,23 @@ pub(super) fn command_for(
         .current_dir(workspace)
         .env_clear()
         .env("PATH", path_env)
-        .env("HOME", workspace)
+        .env("HOME", home)
         .env("LANG", "C")
         .stdin(Stdio::null());
+    if let Place::Probe {
+        rustup_home,
+        cargo_home,
+        ..
+    } = place
+    {
+        if let Some(rustup) = rustup_home {
+            command.env("RUSTUP_HOME", rustup);
+        }
+        if let Some(cargo) = cargo_home {
+            command.env("CARGO_HOME", cargo);
+        }
+        command.env("RUSTUP_AUTO_INSTALL", "0");
+    }
     if let Some(directory) = scratch {
         command.env("TMPDIR", directory);
     }
@@ -701,44 +740,6 @@ fn spawn_failure(argv0: &str, source: io::Error) -> ExecError {
         argv0: argv0.to_owned(),
         source,
     }
-}
-
-/// Kills the group and the leader of a child that could not be tracked, then returns the
-/// error, or the reap failure that names it when the group or the leader could not be ended.
-fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
-    let settled = settle_group(clock, pgid);
-    let waited = child.wait();
-    if let Err(fault) = settled {
-        return ExecError::cleanup(error, "the group could not be settled", fault);
-    }
-    if let Err(fault) = waited {
-        return ExecError::cleanup(
-            error,
-            "the leader could not be reaped",
-            ExecError::Reap(fault),
-        );
-    }
-    error
-}
-
-/// Kills and reaps a child whose group id is unknown, then returns the error, or the reap
-/// failure that names it when the child could not be ended.
-fn discard(child: &mut Child, error: ExecError) -> ExecError {
-    if let Err(fault) = child.kill() {
-        return ExecError::cleanup(
-            error,
-            "the child could not be killed",
-            ExecError::Reap(fault),
-        );
-    }
-    if let Err(fault) = child.wait() {
-        return ExecError::cleanup(
-            error,
-            "the child could not be reaped",
-            ExecError::Reap(fault),
-        );
-    }
-    error
 }
 
 /// Settling a command's process group, bounded by one clock reading (larry#268, larry#427).

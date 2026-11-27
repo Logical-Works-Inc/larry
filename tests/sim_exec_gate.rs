@@ -10,6 +10,8 @@
 //! `Scope` order, an admitted task is accepted, and the same seed replays the
 //! same verdict sequence with byte-identical model requests.
 
+#[path = "support/fixed_probe.rs"]
+mod fixed_probe;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/larry_cli.rs"]
@@ -28,6 +30,7 @@ use std::ffi::OsStr;
 use std::num::TryFromIntError;
 use std::path::Path;
 
+use fixed_probe::FIXED_PROBE;
 use larry_cli::spawn_larry_args;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::Seeded;
@@ -122,12 +125,13 @@ fn run_case(
 ) -> Result<String, Box<dyn Error>> {
     let policy_text = policy.join(",");
     let task = document(origin, brief);
-    let env: [(&str, &OsStr); 5] = [
+    let env: [(&str, &OsStr); 6] = [
         ("LARRY_STATE_DIR", state.as_os_str()),
         ("LARRY_POLICY", OsStr::new(policy_text.as_str())),
         ("LARRY_MODEL", OsStr::new("mock-model")),
         ("LARRY_MODEL_KEY", OsStr::new("mock-key")),
         ("LARRY_MODEL_URL", OsStr::new(url)),
+        ("LARRY_PROBE", OsStr::new(FIXED_PROBE)),
     ];
     let output = spawn_larry_args(&["exec"], &env, task.as_bytes())?.wait_with_output()?;
     let report = report_of(&output)?;

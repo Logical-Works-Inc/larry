@@ -13,8 +13,14 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+#[path = "fixed_probe.rs"]
+mod fixed_probe;
+use fixed_probe::FIXED_PROBE;
+
 /// The variables an operator exports to put an executor behind `larry mcp`:
 /// the state directory, the gateway, a key, no backoff wait, plus `extra`.
+/// The fixed probe rides beside the model settings (larry#274), so the same
+/// seed replays the same prompts and the same gateway trace.
 pub(crate) fn operator(
     state: &Path,
     gateway: SocketAddr,
@@ -29,6 +35,7 @@ pub(crate) fn operator(
         ("LARRY_MODEL", OsString::from("mock-model")),
         ("LARRY_MODEL_KEY", OsString::from("mcp-key")),
         ("LARRY_MODEL_BACKOFF_MS", OsString::from("0")),
+        ("LARRY_PROBE", OsString::from(FIXED_PROBE)),
     ];
     env.extend(
         extra

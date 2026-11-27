@@ -72,6 +72,13 @@ pub enum ExecError {
         /// The name that was refused.
         value: String,
     },
+    /// `LARRY_PROBE` is set but is not a probe value: not JSON, not an object,
+    /// or over the bound (larry#274).
+    #[error("exec LARRY_PROBE is not a probe value: {reason}")]
+    BadProbe {
+        /// What the value was refused as.
+        reason: String,
+    },
     /// `LARRY_FENCE_CONTROL` is not one typed host action.
     #[error("exec LARRY_FENCE_CONTROL is invalid: {value}: {cause}")]
     BadFenceControl {
@@ -270,5 +277,47 @@ impl ExecError {
             step,
             fault: Box::new(fault),
         }
+    }
+}
+
+/// Cases for the executor's error messages (larry#274).
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use lgwks_std::seeded::Seeded;
+
+    use super::ExecError;
+
+    /// What every test returns.
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    /// A `BadProbe` refusal names the variable and keeps the reason byte for
+    /// byte, never a fallback and never an empty detail (larry#274). Catches
+    /// a `Display` that drops the reason or renames the variable.
+    #[test]
+    fn error_bad_probe_names_the_variable_and_the_reason() -> TestResult {
+        let alphabet = ['{', '}', '%', ':', ' ', 'x', '#', 'é'];
+        let mut rng = Seeded::from_seed(274);
+        for _ in 0..32 {
+            let len = usize::try_from(rng.below(48)?)?;
+            let offset = usize::try_from(rng.below(8)?)?;
+            let reason: String = alphabet.iter().cycle().skip(offset).take(len).collect();
+            let text = ExecError::BadProbe {
+                reason: reason.clone(),
+            }
+            .to_string();
+            let expected = format!("exec LARRY_PROBE is not a probe value: {reason}");
+            assert_eq!(text, expected, "BadProbe keeps the reason byte for byte");
+        }
+        assert_eq!(
+            ExecError::BadProbe {
+                reason: String::new()
+            }
+            .to_string(),
+            "exec LARRY_PROBE is not a probe value: ",
+            "an empty reason is still named, never dropped"
+        );
+        Ok(())
     }
 }
