@@ -283,3 +283,14 @@ fn e71_a_replayed_older_epoch_is_absorbed_not_obeyed() {
     let advance = SecurityEpoch::new(10);
     assert!(current.later_of(advance).is_later_than(current));
 }
+
+// Source: the fixture's own contract (fixture.rs: "the assertion below
+// names the fixture if a platform ever cannot represent one"). An instant no
+// platform can place is refused loudly at the fixture, never wrapped onto
+// the epoch: `u64::MAX` seconds overflows every SystemTime range, so the
+// `None` arm runs and the representability assertion fires.
+#[test]
+#[should_panic(expected = "fixture instant must be representable")]
+fn fixture_instant_refuses_an_unrepresentable_instant() {
+    epoch_plus(u64::MAX);
+}
