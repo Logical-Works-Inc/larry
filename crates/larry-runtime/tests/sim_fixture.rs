@@ -7,6 +7,7 @@
 //! that fails replays exactly.
 
 use std::collections::BTreeSet;
+use std::error::Error;
 use std::time::SystemTime;
 
 use larry_contracts::authority::SecurityEpoch;
@@ -14,6 +15,7 @@ use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrateg
 use larry_contracts::ids::{EffectId, OperationId, RunId, TenantId};
 use larry_runtime::owner::EffectOwner;
 use larry_runtime::owner::fixture::ScriptedOwner;
+use lgwks_bot::kernel::gate::GrantSet;
 use lgwks_std::seeded::{DrawError, Seeded};
 
 /// Seeds per simulation; each is driven twice.
@@ -58,17 +60,22 @@ fn seen(outcome: EffectOutcome) -> Seen {
 
 /// One seeded world through `dispatch`: the answers for the script, then
 /// three answers past its end.
-fn dispatch_world(seed: u64) -> Result<(Vec<Seen>, [Seen; 3]), DrawError> {
+fn dispatch_world(seed: u64) -> Result<(Vec<Seen>, Vec<Seen>), Box<dyn Error>> {
     let mut stream = Seeded::from_seed(seed);
     let outcomes = script(&mut stream)?;
     let calls = outcomes.len();
     let mut owner = ScriptedOwner::scripted(outcomes);
     let asked = intent(0xee);
+    let proof = GrantSet::empty().issue(&[])?;
     let at = SystemTime::UNIX_EPOCH;
-    let scripted = (0..calls)
-        .map(|_| seen(owner.dispatch(&asked, at)))
-        .collect();
-    let past = [(); 3].map(|()| seen(owner.dispatch(&asked, at)));
+    let mut scripted = Vec::with_capacity(calls);
+    for _ in 0..calls {
+        scripted.push(seen(owner.dispatch(&asked, &proof, &[], at)?));
+    }
+    let mut past = Vec::with_capacity(3);
+    for _ in 0..3 {
+        past.push(seen(owner.dispatch(&asked, &proof, &[], at)?));
+    }
     Ok((scripted, past))
 }
 
@@ -76,7 +83,7 @@ fn dispatch_world(seed: u64) -> Result<(Vec<Seen>, [Seen; 3]), DrawError> {
 // happened answers unknown, so no receipt is published for an effect nobody
 // observed); AGENTS.md "Tests and evidence" (same seed, same trace).
 #[test]
-fn sim_fixture_dispatch_replays_its_script_then_answers_unknown() -> Result<(), DrawError> {
+fn sim_fixture_dispatch_replays_its_script_then_answers_unknown() -> Result<(), Box<dyn Error>> {
     let mut worlds = BTreeSet::new();
     for seed in 0..SEEDS {
         let world = dispatch_world(seed)?;
@@ -96,15 +103,16 @@ fn sim_fixture_dispatch_replays_its_script_then_answers_unknown() -> Result<(), 
 
 /// One seeded world through interleaved `dispatch` and `reconcile`: the
 /// operation bytes each call path recorded, in order.
-fn witness_world(seed: u64) -> Result<(Vec<u8>, Vec<u8>), DrawError> {
+fn witness_world(seed: u64) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
     let mut stream = Seeded::from_seed(seed);
     let mut owner = ScriptedOwner::scripted(script(&mut stream)?);
+    let proof = GrantSet::empty().issue(&[])?;
     let at = SystemTime::UNIX_EPOCH;
     for _ in 0..stream.below(17)? {
         let asked = intent(stream.below(256)?.to_le_bytes()[0]);
         // The scripted outcome is not read here; the witness lists below are.
         let _outcome = if stream.below(2)? == 0 {
-            owner.dispatch(&asked, at)
+            owner.dispatch(&asked, &proof, &[], at)?
         } else {
             owner.reconcile(&asked, at)
         };
@@ -117,7 +125,7 @@ fn witness_world(seed: u64) -> Result<(Vec<u8>, Vec<u8>), DrawError> {
 // runtime actually sent): the double's witness lists are what the forged-claim
 // suites read, so each call path must record exactly its own operations.
 #[test]
-fn sim_fixture_records_each_call_path_in_order() -> Result<(), DrawError> {
+fn sim_fixture_records_each_call_path_in_order() -> Result<(), Box<dyn Error>> {
     for seed in 0..SEEDS {
         let (dispatched, reconciled) = witness_world(seed)?;
         assert_eq!(
