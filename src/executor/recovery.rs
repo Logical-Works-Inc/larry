@@ -27,7 +27,7 @@ use larry_runtime::journal::Journal;
 use larry_runtime::owner::{EffectOwner, validate_proof};
 use larry_runtime::projection::FoldProjection;
 use larry_runtime::runtime::restore;
-use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::{Auth, Cap};
 use lgwks_bot::kernel::journal::JournalError;
 
 use super::ExecError;
@@ -217,10 +217,25 @@ impl EffectOwner for Recovered {
         &mut self,
         recovered_intent: &EffectIntent,
         authority: &Auth,
+        required: &[Cap],
         _observed_at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        validate_proof(authority, &[])?;
+        // The recovered run's body died with its executor: the bound reach
+        // reads the proof like every owner, then answers unknown without
+        // reaching the world. It never forwards to the unbound path.
+        validate_proof(authority, required)?;
         Ok(unknown(recovered_intent))
+    }
+
+    fn dispatch(
+        &mut self,
+        intent: &EffectIntent,
+        authority: &Auth,
+        required: &[Cap],
+        _observed_at: SystemTime,
+    ) -> Result<EffectOutcome, BindingError> {
+        validate_proof(authority, required)?;
+        Ok(unknown(intent))
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {

@@ -88,7 +88,7 @@ where
                 // rather than let through unchecked (larry#197).
                 let auth = match self.live.get(&intent.operation) {
                     Some(live) => match live.proof.checked_auth() {
-                        Ok(auth) => auth,
+                        Ok((auth, required)) => (auth, required),
                         Err(reason) => {
                             report.denied.push((intent.operation, reason));
                             return Ok(None);
@@ -124,10 +124,11 @@ where
                     // query about it is therefore evidence.
                     live.sent = true;
                 }
+                let (auth, required) = auth;
                 let outcome = if intent.binding().is_some() {
-                    self.owner.dispatch_bound(&intent, &auth, at)
+                    self.owner.dispatch_bound(&intent, &auth, &required, at)
                 } else {
-                    self.owner.dispatch(&intent, &auth, at)
+                    self.owner.dispatch(&intent, &auth, &required, at)
                 };
                 let outcome = match outcome {
                     Ok(outcome) => outcome,

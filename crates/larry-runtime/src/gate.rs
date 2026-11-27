@@ -127,9 +127,11 @@ impl Proof {
     /// The owner receives this same proof and performs its own expiry read at
     /// the handoff, so a lease that lapses between the two reads cannot reach
     /// an external effect (larry#461).
-    pub(crate) fn checked_auth(&self) -> Result<Auth, DenialReason> {
+    pub(crate) fn checked_auth(&self) -> Result<(Auth, Vec<Cap>), DenialReason> {
         self.check()?;
-        self.auth.clone()
+        let auth = self.auth.clone()?;
+        let required = self.required.iter().map(|pair| pair.1.clone()).collect();
+        Ok((auth, required))
     }
 }
 
