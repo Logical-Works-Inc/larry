@@ -173,6 +173,7 @@ impl<'tenant> Tenant<'tenant> {
     fn sealed_route(&self, id: &str) -> Value {
         json!({
             "id": id,
+            "kind": "openai-chat",
             "model": self.model,
             "host": host_of(self.mock),
             "residency": self.residency,

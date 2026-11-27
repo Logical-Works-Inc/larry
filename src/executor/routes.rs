@@ -25,7 +25,7 @@ pub enum RouteCliError {
     /// this one message (larry#543): the derive renders tuple placeholders
     /// onto its extra arguments, so a `{USAGE}` tail would print twice.
     #[error(
-        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
     )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
@@ -79,6 +79,8 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::KeyEnvOutsideNamespace
         | RouteError::KeyEnvNotThisTenants { .. }
         | RouteError::BadTemperature
+        | RouteError::BadKind
+        | RouteError::KindNotServed { .. }
         | RouteError::BadResidency
         | RouteError::BadRequestBytes
         | RouteError::BadDescribe
@@ -140,6 +142,8 @@ struct Flags<'arg> {
     temperature: Option<&'arg str>,
     /// `--request-bytes`.
     request_bytes: Option<&'arg str>,
+    /// The provider kind: `openai-chat` unless `--kind` names another.
+    kind: Option<&'arg str>,
     /// `--describe`.
     describe: Option<&'arg str>,
     /// `--default`.
@@ -165,6 +169,7 @@ fn parse_flags<'arg>(flags: &[&'arg str]) -> Result<Flags<'arg>, RouteCliError> 
             "--residency" => &mut parsed.residency,
             "--temperature" => &mut parsed.temperature,
             "--request-bytes" => &mut parsed.request_bytes,
+            "--kind" => &mut parsed.kind,
             "--describe" => &mut parsed.describe,
             _ => return Err(RouteCliError::Usage("unknown flag")),
         };
@@ -238,14 +243,26 @@ fn add(
     out: &mut impl Write,
 ) -> Result<(), RouteCliError> {
     let parsed = parse_flags(flags)?;
-    // A route added without `--describe` has the empty description.
+    // A route added without `--describe` has the empty description, and one
+    // added without `--kind` is an OpenAI chat route.
     let mut describe = "";
     if let Some(text) = parsed.describe {
         describe = text;
     }
+    let kind = match parsed.kind {
+        Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
+        None => Kind::OpenAiChat,
+    };
+    // Until PR #534's adapters land the wire speaks OpenAI chat only, so any
+    // other kind is refused before the store opens and nothing is stored (larry#539).
+    if !kind.is_served() {
+        return Err(RouteCliError::Route(RouteError::KindNotServed {
+            kind: kind.name().to_owned(),
+        }));
+    }
     let route = Route::new(&Draft {
         id,
-        kind: Kind::OpenAiChat,
+        kind,
         base_url: required(parsed.url, "--url")?,
         model: required(parsed.model, "--model")?,
         key_env: required(parsed.key_env, "--key-env")?,
@@ -388,10 +405,11 @@ fn list(
         say(
             out,
             &format_args!(
-                "{}\t{}\t{}\t{residency}{marker}",
+                "{}\t{}\t{}\t{residency}{marker}\t{}",
                 route.id(),
                 route.model(),
-                route.host()
+                route.host(),
+                route.kind().name(),
             ),
         )?;
     }
@@ -497,6 +515,17 @@ mod tests {
         let numbered = said(&RouteCliError::Route(RouteError::BadTemperature));
         assert!(numbered.starts_with("route temperature must"), "{numbered}");
         assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
+        let kind = said(&RouteCliError::Route(RouteError::BadKind));
+        assert!(kind.starts_with("route kind must be one of"), "{kind}");
+        assert_eq!(kind.matches("route").count(), 1, "{kind}");
+        let unserved = said(&RouteCliError::Route(RouteError::KindNotServed {
+            kind: String::from("anthropic-messages"),
+        }));
+        assert_eq!(
+            unserved, "route kind anthropic-messages has no adapter in this build",
+            "{unserved}"
+        );
+        assert_eq!(unserved.matches("route").count(), 1, "{unserved}");
         let priced = said(&RouteCliError::Route(RouteError::BadPrice {
             field: "input",
         }));

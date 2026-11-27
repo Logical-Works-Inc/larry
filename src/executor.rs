@@ -34,6 +34,7 @@ use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 pub(crate) use run::{Place, run_command};
+pub(crate) use run::{RunHooks, StreamCallback};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -617,7 +618,7 @@ fn run_task(
             timeout,
             ledger,
             task_id,
-            &|| false,
+            RunHooks::new(&|| false, None),
         )?;
         results.push(result.into_json());
     }

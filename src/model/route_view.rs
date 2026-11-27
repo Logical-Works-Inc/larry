@@ -72,14 +72,15 @@ impl Route {
     pub(crate) const fn price_output(&self) -> u64 {
         self.price_output
     }
-    /// What a sealed report says about the route: its id, the model, the
-    /// gateway's host and port, and the residency (`null` when undeclared).
+    /// What a sealed report says about the route: its id, kind, the model,
+    /// the gateway's host and port, and the residency (`null` when undeclared).
     /// Never the URL's path, a key or the name of the key's variable. A priced
     /// table rides along: the command bumps the revision from the first, so a
     /// priced route is exactly one whose revision is past 1, even at zero rates.
     pub(crate) fn seal(&self) -> Value {
         let mut sealed = json!({
             "id": self.id,
+            "kind": self.kind.name(),
             "model": self.model,
             "host": self.host,
             "residency": self.residency,
