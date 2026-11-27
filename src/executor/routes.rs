@@ -13,9 +13,14 @@ use std::path::Path;
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
-use super::{ExecError, Ledger, digest_hex, identity, state_dir};
+use super::task::Task;
+use super::{ExecError, Ledger, Settings, digest_hex, identity, state_dir};
 use crate::eval::PriceFault;
-use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
+use crate::model::{
+    Draft, Kind, ModelConfig, Policy, Route, RouteError, Selection, Table, env_route, is_route_id,
+    query_of, resolve, select,
+};
+use crate::rerank::Scorer;
 
 /// The synopsis every usage refusal ends with.
 const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
@@ -79,6 +84,8 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::KeyEnvNotThisTenants { .. }
         | RouteError::BadTemperature
         | RouteError::BadResidency
+        | RouteError::BadResidencyRule
+        | RouteError::BadRankSeconds
         | RouteError::BadRequestBytes
         | RouteError::BadDescribe
         | RouteError::BadPrice { .. } => "",
@@ -122,6 +129,141 @@ pub(super) fn resolve_for(
         env_route(read).map_err(ExecError::ModelConfig)?
     };
     resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
+}
+
+/// The route a briefed task sends its model calls to: the named route when the
+/// task names one (resolved exactly as the configured resolver does), else the
+/// best-ranked eligible route. An explicit name always wins; without one the
+/// transport and key binding gates, then the residency rule and the budget
+/// filter before the shipped local ranker scores the survivors by meaning,
+/// and without the `rerank` feature the eligible default wins (larry#202).
+/// Nothing is sent to choose it.
+///
+/// # Errors
+///
+/// [`ExecError::Route`] for an unknown name, a malformed ranking knob, no
+/// eligible route or an unavailable ranker; [`ExecError::ModelConfig`] for an
+/// environment route that cannot be read.
+pub(super) fn select_for(
+    ledger: &Ledger,
+    state: &Path,
+    named: Option<&str>,
+    query: Option<&str>,
+    read: &impl Fn(&str) -> Option<String>,
+) -> Result<Selection, ExecError> {
+    let tenant = tenant_text(state);
+    let table = ledger.routes(&tenant)?;
+    let environment = if table.lookup(named).is_some() {
+        None
+    } else {
+        env_route(read).map_err(ExecError::ModelConfig)?
+    };
+    let policy = Policy::parse(read).map_err(ExecError::Route)?;
+    #[cfg(feature = "rerank")]
+    let mut engine: Option<Box<dyn Scorer>> = if named.is_none() {
+        let scorer: Box<dyn Scorer> = Box::new(crate::rerank::local_scorer().map_err(|cause| {
+            ExecError::Route(RouteError::NoRanker {
+                detail: format!("{cause}; fetch the pinned model and retry, or name the route"),
+            })
+        })?);
+        Some(scorer)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "rerank"))]
+    let mut engine: Option<Box<dyn Scorer>> = None;
+    // The scorer borrows the engine only for the call below, so each arm
+    // ends the borrow before the choice returns. The query stays an option
+    // into `select`: a named task resolves before the ranker runs, and an
+    // unnamed one ranks only on the text `task_select` built from its brief.
+    let choice = match engine.as_mut() {
+        Some(held) => {
+            let scorer: &mut dyn Scorer = &mut **held;
+            select(
+                &tenant,
+                &table,
+                named,
+                environment,
+                query,
+                &policy,
+                Some(scorer),
+            )
+        }
+        None => select(&tenant, &table, named, environment, query, &policy, None),
+    };
+    choice.map_err(ExecError::Route)
+}
+
+/// The route a task naming `named` (or none) sends its model calls to: the
+/// named route, else the tenant's default, else the environment's, else a
+/// refusal. Nothing is sent to resolve it. A briefed task that names none
+/// does not come here: [`task_select`] ranks its eligible routes by meaning
+/// instead (larry#202).
+///
+/// # Errors
+///
+/// [`ExecError::Route`] for an unknown name, no route at all or a damaged row;
+/// [`ExecError::ModelConfig`] for an environment route that cannot be read.
+pub(crate) fn task_route(
+    settings: &Settings,
+    ledger: &Ledger,
+    named: Option<&str>,
+) -> Result<Route, ExecError> {
+    resolve_for(ledger, settings.state_dir(), named, &|name: &str| {
+        (settings.read)(name)
+    })
+}
+
+/// The route a briefed task sends its model calls to: the named route when
+/// the task names one, else the best-ranked eligible route, with the
+/// residency and budget filters before the ranker and the choice sealed
+/// beside the route for the replay to answer from (larry#202).
+///
+/// # Errors
+///
+/// [`ExecError::Route`] for an unknown name, a malformed ranking knob, no
+/// eligible route or an unavailable ranker; [`ExecError::ModelConfig`] for an
+/// environment route that cannot be read.
+pub(crate) fn task_select(
+    settings: &Settings,
+    ledger: &Ledger,
+    task: &Task,
+) -> Result<Selection, ExecError> {
+    let query = match (task.route(), task.brief()) {
+        (None, Some(brief)) => Some(query_of(brief.goal(), brief.files(), task.acceptance())),
+        _ => None,
+    };
+    select_for(
+        ledger,
+        settings.state_dir(),
+        task.route(),
+        query.as_deref(),
+        &|name: &str| (settings.read)(name),
+    )
+}
+
+/// The route `larry eval` scores: what a task naming none resolves to.
+///
+/// # Errors
+///
+/// [`ExecError::Route`] for no route at all or a damaged row.
+pub(crate) fn task_arm_route(settings: &Settings) -> Result<Route, ExecError> {
+    task_route(settings, &Ledger::open(settings.state_dir())?, None)
+}
+
+/// The model configuration for calls over `route`: its key is read now, from
+/// the variable the route names.
+///
+/// # Errors
+///
+/// [`ExecError::ModelConfig`] for a route whose key variable is unset or
+/// empty, or a `LARRY_MODEL_*` knob that does not parse.
+pub(crate) fn task_model_config(
+    settings: &Settings,
+    route: &Route,
+) -> Result<ModelConfig, ExecError> {
+    ModelConfig::for_route(route, &|name: &str| (settings.read)(name))
+        .map_err(ExecError::ModelConfig)
 }
 
 /// The flags of `route add`, each still text.
@@ -422,7 +564,9 @@ fn make_default(
 }
 
 /// `larry route resolve [<id>]`: the route a task naming `id` (or none) would
-/// use, as the sealed report would record it.
+/// use from configuration alone, as the sealed report would record it. A
+/// briefed task that names none ranks its eligible routes by meaning instead
+/// (larry#202), which needs the task and is not shown here.
 fn show(
     read: &impl Fn(&str) -> Option<String>,
     named: Option<&str>,
@@ -507,6 +651,19 @@ mod tests {
         });
         assert!(rated.starts_with("route price --in must be"), "{rated}");
         assert_eq!(rated.matches("route").count(), 1, "{rated}");
+        // larry#202: the selection knobs refuse as fields too.
+        let rule = said(&RouteCliError::Route(RouteError::BadResidencyRule));
+        assert!(
+            rule.starts_with("route residency rule (LARRY_RESIDENCY) must be"),
+            "{rule}"
+        );
+        assert_eq!(rule.matches("route").count(), 1, "{rule}");
+        let seconds = said(&RouteCliError::Route(RouteError::BadRankSeconds));
+        assert!(
+            seconds.starts_with("route rank seconds (LARRY_ROUTE_RANK_SECONDS) must be"),
+            "{seconds}"
+        );
+        assert_eq!(seconds.matches("route").count(), 1, "{seconds}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [
@@ -514,6 +671,10 @@ mod tests {
                 id: String::from("r9"),
             },
             RouteError::NoRoute,
+            RouteError::NoEligibleRoute,
+            RouteError::NoRanker {
+                detail: String::from("the pinned model is missing"),
+            },
             RouteError::TableFull { limit: 256 },
             RouteError::Damaged {
                 id: String::from("r1"),

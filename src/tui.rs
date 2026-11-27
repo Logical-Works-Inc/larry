@@ -173,7 +173,7 @@ fn header(
     let directory = tilde(cwd, home);
     let (model, blocked) = match *settings {
         Ok(ref settings) => {
-            let model = match settings.arm_route() {
+            let model = match crate::executor::routes::task_arm_route(settings) {
                 Ok(route) => Ok(route.model().to_owned()),
                 Err(cause) => Err(format!("none ({cause})")),
             };

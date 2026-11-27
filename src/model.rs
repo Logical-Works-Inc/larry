@@ -13,8 +13,8 @@ mod client;
 mod config;
 mod route;
 mod route_transport;
+mod select;
 mod wire;
-
 use std::num::{ParseFloatError, ParseIntError};
 use std::str::Utf8Error;
 
@@ -32,6 +32,7 @@ pub(crate) use route::tenant_namespace;
 pub(crate) use route::{
     DEFAULT_PRICE_VERSION, Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve,
 };
+pub(crate) use select::{Policy, Selection, query_of, select};
 
 /// Most messages one completion request carries.
 pub(crate) const MAX_MESSAGES: usize = 256;

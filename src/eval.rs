@@ -436,7 +436,7 @@ pub fn run(
     prices: Result<Prices, PriceError>,
 ) -> Result<Scorecard, EvalError> {
     let set = TaskSet::parse(bytes).map_err(EvalError::Set)?;
-    let route = match settings.arm_route() {
+    let route = match crate::executor::routes::task_arm_route(settings) {
         Ok(route) => route,
         Err(ExecError::Route(RouteError::NoRoute)) => return Err(EvalError::ModelUnconfigured),
         Err(cause) => {

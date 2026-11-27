@@ -37,7 +37,7 @@ pub(crate) use run::{Place, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
-use crate::model::{ModelClient, ModelConfig, Route};
+use crate::model::{ModelClient, Route, Selection};
 pub use author::AuthorFault;
 pub use confine::ConfineError;
 #[cfg(test)]
@@ -343,27 +343,6 @@ impl Settings {
         self.timeout
     }
 
-    /// The route a task naming `named` (or none) sends its model calls to: the
-    /// named route, else the tenant's default, else the environment's, else a
-    /// refusal. Nothing is sent to resolve it.
-    pub(crate) fn route(&self, ledger: &Ledger, named: Option<&str>) -> Result<Route, ExecError> {
-        routes::resolve_for(ledger, &self.state_dir, named, &|name: &str| {
-            (self.read)(name)
-        })
-    }
-
-    /// The route `larry eval` scores: what a task naming none resolves to.
-    pub(crate) fn arm_route(&self) -> Result<Route, ExecError> {
-        self.route(&Ledger::open(&self.state_dir)?, None)
-    }
-
-    /// The model configuration for calls over `route`: its key is read now, from
-    /// the variable the route names.
-    pub(crate) fn model_config(&self, route: &Route) -> Result<ModelConfig, ExecError> {
-        ModelConfig::for_route(route, &|name: &str| (self.read)(name))
-            .map_err(ExecError::ModelConfig)
-    }
-
     /// Makes `dir`, whose files are written, a one-commit repository under these settings.
     pub(crate) fn seed_origin(&self, dir: &std::path::Path) -> Result<(), ExecError> {
         workspace::seed_origin(&self.state_dir, &self.path, dir)
@@ -493,10 +472,13 @@ fn prepare(settings: &Settings) -> Result<(Ledger, lgwks_std::sign::SecretKey), 
 }
 
 /// What a task with a brief needs before anything is cloned: the route its model
-/// calls go to and a client built from it.
+/// calls go to, how it was chosen for the sealed record, and a client built
+/// from it.
 struct ModelStep<'task> {
     /// The route the task resolved to; the sealed report records it.
     route: Route,
+    /// How the route was chosen; the sealed report records it beside the route.
+    selection: Selection,
     /// The brief the model writes files for.
     brief: &'task author::Brief,
     /// The client over `route`, holding the key read for this task alone.
@@ -514,16 +496,18 @@ fn model_step<'task>(
 ) -> Result<Option<ModelStep<'task>>, ExecError> {
     let Some(brief) = task.brief() else {
         if let Some(named) = task.route() {
-            settings.route(ledger, Some(named))?;
+            routes::task_route(settings, ledger, Some(named))?;
         }
         return Ok(None);
     };
-    let route = settings.route(ledger, task.route())?;
+    let selection = routes::task_select(settings, ledger, task)?;
+    let route = selection.route().clone();
     // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-    let client = ModelClient::new(settings.model_config(&route)?, clock, backoff);
+    let client = ModelClient::new(routes::task_model_config(settings, &route)?, clock, backoff);
     Ok(Some(ModelStep {
         route,
+        selection,
         brief,
         client,
     }))
@@ -564,6 +548,7 @@ fn run_task(
         None => None,
         Some(ModelStep {
             route,
+            selection,
             brief,
             client,
         }) => {
@@ -574,6 +559,7 @@ fn run_task(
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
                     object.insert(String::from("route"), route.seal());
+                    object.insert(String::from("route_selection"), selection.seal());
                 }
             }
             Some(records)

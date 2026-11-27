@@ -39,6 +39,16 @@ pub(crate) struct Brief {
 }
 
 impl Brief {
+    /// The goal, as the planner wrote it.
+    pub(crate) fn goal(&self) -> &str {
+        &self.goal
+    }
+
+    /// The repo-relative paths the model may write, in order.
+    pub(crate) fn files(&self) -> &[String] {
+        &self.files
+    }
+
     /// Reads `goal` and `files` from a task document: both or neither.
     pub(crate) fn parse(object: &Map) -> Result<Option<Brief>, TaskError> {
         let (goal, files) = match (object.get("goal"), object.get("files")) {

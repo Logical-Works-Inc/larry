@@ -377,8 +377,8 @@ fn run_session_prepared(
     ledger: &Ledger,
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Ended, ExecError> {
-    let route = settings.route(ledger, None)?;
-    let config = settings.model_config(&route)?;
+    let route = super::routes::task_route(settings, ledger, None)?;
+    let config = super::routes::task_model_config(settings, &route)?;
     let document = json::to_vec(&json!({
         "session": {
             "cwd": cwd.to_string_lossy(),
