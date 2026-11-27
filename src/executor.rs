@@ -233,6 +233,8 @@ pub struct Settings {
     local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
+    /// Shared bounded tenant-route model budget and limiter (larry#204).
+    limiter: Arc<crate::model::Limiter>,
     /// Optional host authority action for the next admitted task.
     pub(crate) fence_control: Option<fence_control::FenceControl>,
 }
@@ -308,6 +310,7 @@ impl Settings {
             policy,
             local,
             read: Arc::new(read),
+            limiter: crate::model::Limiter::new(),
             fence_control,
         })
     }

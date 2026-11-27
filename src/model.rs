@@ -13,6 +13,7 @@
 
 mod client;
 mod config;
+mod limiter;
 mod route;
 mod route_transport;
 mod wire;
@@ -28,6 +29,7 @@ pub use config::ModelConfig;
 pub(crate) use config::env_route;
 #[cfg(test)]
 pub(crate) use config::sim_config;
+pub(crate) use limiter::Limiter;
 pub use route::RouteError;
 #[cfg(test)]
 pub(crate) use route::tenant_namespace;
@@ -181,6 +183,43 @@ pub enum ModelError {
     /// A request or reply exceeded its size bound. Nothing past the bound was read.
     #[error("a model request or reply exceeded its size bound")]
     BodyTooLarge,
+    /// The tenant's reported token usage already reaches its configured budget.
+    #[error("model token budget exceeded: {tokens} of {limit} tokens")]
+    BudgetExceeded {
+        /// Tokens reported by the route so far.
+        tokens: u64,
+        /// The tenant's configured maximum.
+        limit: u64,
+    },
+    /// The tenant's reported micro-dollar spend already reaches its budget.
+    #[error("model micro-dollar budget exceeded: {micros} of {limit}")]
+    MoneyBudgetExceeded {
+        /// Micro-dollars reported by the route so far.
+        micros: u64,
+        /// The tenant's configured maximum.
+        limit: u64,
+    },
+    /// A reported usage cost cannot fit the bounded micro-dollar counter.
+    #[error("model micro-dollar cost overflow")]
+    MoneyCostOverflow,
+    /// The bounded tenant-route limiter has no free key slot.
+    #[error("model tenant-route limiter is full at {limit} keys")]
+    LimiterFull {
+        /// Maximum distinct tenant-route keys.
+        limit: usize,
+    },
+    /// The seeded jitter source could not produce a bounded draw.
+    #[error("model retry jitter is unavailable: {reason}")]
+    JitterUnavailable {
+        /// The random source's typed refusal.
+        reason: String,
+    },
+    /// The in-memory budget state was poisoned by a failed concurrent owner.
+    #[error("model budget state is unavailable: {reason}")]
+    BudgetUnavailable {
+        /// The lock's typed poisoning reason, bounded by the standard library.
+        reason: String,
+    },
 }
 
 /// Whether a member of a refusal's code names the context window: the stem itself, or the
