@@ -37,44 +37,19 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::process::{Child, Command, Output};
+use std::process::{Child, Output};
 
 use json_at::At;
-use larry_cli::{spawn_larry_args, stderr_of};
+use larry_cli::stderr_of;
 use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::json::{self, Value, json};
 use mock_model::{Config, Fault, Handle};
 use origin::{TempDir, commit_all, fixture};
 use sealed_report::{denial_lines, flag_of, report_of};
 
-/// What every journey returns.
-type TestResult = Result<(), Box<dyn Error>>;
-
-/// The scopes a briefed task needs, so no journey depends on the default policy.
-const POLICY: &str = "file.read,file.write,process.spawn,model.invoke";
-
-/// Runs `larry route <args>` with only PATH, the state directory and `env` set.
-fn larry_route(
-    state: &Path,
-    env: &[(&str, &OsStr)],
-    args: &[&str],
-) -> Result<Output, Box<dyn Error>> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
-    command
-        .arg("route")
-        .args(args)
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .env("LARRY_STATE_DIR", state)
-        .envs(env.iter().copied());
-    coverage::forward(&mut command);
-    Ok(command.output()?)
-}
-
-/// The host and port a mock listens on, as a sealed report names it.
-fn host_of(mock: &Handle) -> String {
-    format!("127.0.0.1:{}", mock.addr().port())
-}
+#[path = "support/route_journey.rs"]
+mod route_journey;
+use route_journey::{NewRoute, TestResult, exec_with_key, larry_route, start_with_key};
 
 /// One tenant: a state directory, an origin repository, a gateway and a key.
 struct Tenant<'tenant> {
@@ -110,27 +85,21 @@ impl<'tenant> Tenant<'tenant> {
 
     /// Stores the route `id` pointing at this tenant's gateway, as the default.
     fn add_route(&self, id: &str) -> TestResult {
-        let url = format!("http://{}/v1", host_of(self.mock));
+        let url = format!("http://{}/v1", route_journey::host_of(self.mock));
         let key_env = route_key::key_env(self.state.path(), self.suffix)?;
-        let output = larry_route(
-            self.state.path(),
-            &[],
-            &[
-                "add",
+        route_journey::add_route(
+            self.state,
+            &NewRoute {
+                url: &url,
                 id,
-                "--url",
-                &url,
-                "--model",
-                self.model,
-                "--key-env",
-                &key_env,
-                "--residency",
-                self.residency,
-                "--default",
-            ],
-        )?;
-        assert!(output.status.success(), "route add: {}", stderr_of(&output));
-        Ok(())
+                model: self.model,
+                key_env: &key_env,
+                residency: self.residency,
+                kind: None,
+                prompt: None,
+                temperature: None,
+            },
+        )
     }
 
     /// Runs `larry exec` on `task` with the tenant's key in the child's environment.
@@ -140,38 +109,31 @@ impl<'tenant> Tenant<'tenant> {
 
     /// Runs `larry exec` on `task` with the extra variables `extra` as well.
     fn exec_with(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Output, Box<dyn Error>> {
-        Ok(self.start(task, extra)?.wait_with_output()?)
+        let variable = route_key::key_env(self.state.path(), self.suffix)?;
+        exec_with_key(
+            self.state.path(),
+            &variable,
+            OsStr::new(self.key),
+            task,
+            extra,
+        )
     }
 
     /// Starts `larry exec` on `task` with the extra variables `extra` as well, unwaited.
     fn start(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Child, Box<dyn Error>> {
         let variable = route_key::key_env(self.state.path(), self.suffix)?;
-        let mut env: Vec<(&str, &OsStr)> = vec![
-            ("LARRY_STATE_DIR", self.state.path().as_os_str()),
-            ("LARRY_POLICY", OsStr::new(POLICY)),
-            (variable.as_str(), OsStr::new(self.key)),
-        ];
-        env.extend_from_slice(extra);
-        spawn_larry_args(&["exec"], &env, task.as_bytes())
+        start_with_key(
+            self.state.path(),
+            &variable,
+            OsStr::new(self.key),
+            task,
+            extra,
+        )
     }
 
     /// A briefed task over this tenant's origin, naming `route` and `key` when given.
     fn briefed(&self, route: Option<&str>, key: Option<&str>) -> Result<String, Box<dyn Error>> {
-        let mut task = json!({
-            "repo": self.origin.path().display().to_string(),
-            "base": "HEAD",
-            "goal": "write the note",
-            "files": ["note.txt"],
-            "acceptance": [["true"]],
-        });
-        let object = task.as_object_mut().ok_or("a task object")?;
-        if let Some(id) = route {
-            object.insert(String::from("route"), json!(id));
-        }
-        if let Some(text) = key {
-            object.insert(String::from("idempotency_key"), json!(text));
-        }
-        Ok(task.to_string())
+        route_journey::briefed_task(self.origin, route, key)
     }
 
     /// What a report must say about the route this tenant's task ran under.
@@ -180,8 +142,9 @@ impl<'tenant> Tenant<'tenant> {
             "id": id,
             "kind": "openai-chat",
             "model": self.model,
-            "host": host_of(self.mock),
+            "host": route_journey::host_of(self.mock),
             "residency": self.residency,
+            "prompt_hash": null,
         })
     }
 
@@ -267,8 +230,8 @@ fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult
             one.assert_sealed_under(&out_one, "main")?;
             two.assert_sealed_under(&out_two, "main")?;
             assert_ne!(
-                host_of(mock_a),
-                host_of(mock_b),
+                route_journey::host_of(mock_a),
+                route_journey::host_of(mock_b),
                 "the two tenants reached two different gateways"
             );
             Ok(())
@@ -528,7 +491,7 @@ fn a_stored_route_cannot_name_a_variable_outside_its_namespace() -> TestResult {
     let (state, origin) = fixture()?;
     mock_model::run(Config::seeded(9), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
-        let url = format!("http://{}/v1", host_of(mock));
+        let url = format!("http://{}/v1", route_journey::host_of(mock));
         let secret = OsStr::new("operator-secret-bytes");
         for variable in ["LARRY_MODEL_KEY", "GH_TOKEN", "LARRY_KEY_"] {
             let refused = larry_route(
@@ -600,7 +563,7 @@ fn a_route_cannot_name_another_tenants_key_variable() -> TestResult {
     mock_model::run(Config::seeded(10), |mock| -> TestResult {
         let tenant = Tenant::standard(&state_a, &origin_a, mock);
         let theirs = route_key::key_env(state_b.path(), "A")?;
-        let url = format!("http://{}/v1", host_of(mock));
+        let url = format!("http://{}/v1", route_journey::host_of(mock));
         let mut args = vec!["add", "steal", "--url", url.as_str()];
         args.extend(["--model", "model-a", "--key-env", theirs.as_str()]);
         args.extend(["--residency", "CA", "--default"]);

@@ -1,16 +1,19 @@
-//! The model client (#83): one blocking OpenAI-compatible chat-completions
-//! client that the executor (#85) calls to run a task on a cheap model through
-//! the route the task resolves to (#201): a gateway and a model the tenant owns
-//! as data, never one compiled into the binary.
+//! The model client (#83): one blocking completion client per provider kind
+//! (OpenAI chat, Anthropic Messages, OpenAI Responses, larry#205) that the
+//! executor (#85) calls to run a task on a cheap model through the route the
+//! task resolves to (#201): a gateway and a model the tenant owns as data,
+//! never one compiled into the binary.
 //!
 //! Ported from forge-harness `sdk/forge-providers` (`openai_compatible.rs`,
 //! `completion_body.rs`) onto `lgwks_std::http`, `retry` and `json`. Every
-//! request is non-streaming and carries the route's model and temperature. Every
-//! bound refuses with a typed error: 256 messages, the route's request body
-//! bound (1 MiB unless the route names another, 16 MiB at most) and a 4 MiB reply.
+//! request is non-streaming and carries the route's model and its temperature
+//! only when the route pins one. Every bound refuses with a typed error: 256
+//! messages, the route's request body bound (1 MiB unless the route names
+//! another, 16 MiB at most) and a 4 MiB reply.
 
 mod client;
 mod config;
+mod limiter;
 mod route;
 mod route_transport;
 mod wire;
@@ -26,12 +29,14 @@ pub use config::ModelConfig;
 pub(crate) use config::env_route;
 #[cfg(test)]
 pub(crate) use config::sim_config;
+pub(crate) use limiter::Limiter;
 pub use route::RouteError;
 #[cfg(test)]
 pub(crate) use route::tenant_namespace;
 pub(crate) use route::{
     DEFAULT_PRICE_VERSION, Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve,
 };
+pub(crate) use wire::structured_content;
 
 /// Most messages one completion request carries.
 pub(crate) const MAX_MESSAGES: usize = 256;
@@ -115,6 +120,13 @@ pub enum ModelError {
         /// The column of the chunk's payload where the JSON reader refused it.
         column: usize,
     },
+    /// A reply body is not JSON, so the content it carried is lost. The reader
+    /// reports where it refused the body (larry#205).
+    #[error("malformed model reply: the reply is not JSON (column {column})")]
+    NotJson {
+        /// The column of the reply body where the JSON reader refused it.
+        column: usize,
+    },
     /// The model did not finish its reply: the gateway's `finish_reason` names a cut
     /// (`length`, `max_tokens`), a filter (`content_filter`, `SAFETY`) or another reason the
     /// client does not read as finished, so the content is never used (larry#396).
@@ -171,6 +183,43 @@ pub enum ModelError {
     /// A request or reply exceeded its size bound. Nothing past the bound was read.
     #[error("a model request or reply exceeded its size bound")]
     BodyTooLarge,
+    /// The tenant's reported token usage already reaches its configured budget.
+    #[error("model token budget exceeded: {tokens} of {limit} tokens")]
+    BudgetExceeded {
+        /// Tokens reported by the route so far.
+        tokens: u64,
+        /// The tenant's configured maximum.
+        limit: u64,
+    },
+    /// The tenant's reported micro-dollar spend already reaches its budget.
+    #[error("model micro-dollar budget exceeded: {micros} of {limit}")]
+    MoneyBudgetExceeded {
+        /// Micro-dollars reported by the route so far.
+        micros: u64,
+        /// The tenant's configured maximum.
+        limit: u64,
+    },
+    /// A reported usage cost cannot fit the bounded micro-dollar counter.
+    #[error("model micro-dollar cost overflow")]
+    MoneyCostOverflow,
+    /// The bounded tenant-route limiter has no free key slot.
+    #[error("model tenant-route limiter is full at {limit} keys")]
+    LimiterFull {
+        /// Maximum distinct tenant-route keys.
+        limit: usize,
+    },
+    /// The seeded jitter source could not produce a bounded draw.
+    #[error("model retry jitter is unavailable: {reason}")]
+    JitterUnavailable {
+        /// The random source's typed refusal.
+        reason: String,
+    },
+    /// The in-memory budget state was poisoned by a failed concurrent owner.
+    #[error("model budget state is unavailable: {reason}")]
+    BudgetUnavailable {
+        /// The lock's typed poisoning reason, bounded by the standard library.
+        reason: String,
+    },
 }
 
 /// Whether a member of a refusal's code names the context window: the stem itself, or the
