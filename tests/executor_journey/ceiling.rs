@@ -18,7 +18,8 @@ use lgwks_std::json::Value;
 
 use crate::exec_cli::deadline::await_group_exit;
 use crate::exec_cli::{
-    TempDir, TestResult, assert_refused, fixture, flag_of, report_of, spawn_larry_args, stderr_of,
+    TempDir, TestResult, assert_refused, fixture, flag_of, number_of, report_of, spawn_larry_args,
+    stderr_of,
 };
 use crate::held_group::ledger_rows;
 
@@ -155,13 +156,16 @@ fn a_shell_base_or_deadline_past_the_ceiling_clones_nothing() -> TestResult {
 /// killed and gone, the cut command's result stays with `timed_out: true`, the sealed report
 /// carries `deadline_passed` beside its results, `accepted` is false, exit 2, `larry verify`
 /// re-derives the rejection, the ledger holds no row, and the command after it never starts.
+/// The reaped group is the sealed result's own `pgid`, never a pid file: the deadline may
+/// kill the shell before `echo` flushes it, so a file read after the seal raced the kill
+/// (`Os { code: 2, kind: NotFound }` under load, larry#552); the report names the group
+/// the executor recorded, reaped and removed.
 #[test]
 fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult {
     let (state, origin) = fixture()?;
     let scratch = TempDir::new()?;
-    let pid_file = scratch.join("pid");
     let second = scratch.join("second");
-    let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+    let script = String::from("exec sleep 30");
     let acceptance = format!(
         r#"[["sh","-c","{script}"],["sh","-c","touch {}"]]"#,
         second.display()
@@ -229,7 +233,7 @@ fn a_task_past_its_deadline_seals_rejected_with_its_group_reaped() -> TestResult
         Some(false),
         "verify reads the sealed report as rejected"
     );
-    let pid: i32 = fs::read_to_string(&pid_file)?.trim().parse()?;
+    let pid = i32::try_from(number_of(first, "pgid")?)?;
     await_group_exit(pid)?;
     assert_eq!(
         ledger_rows(&state.path().join("executor.db"))?,

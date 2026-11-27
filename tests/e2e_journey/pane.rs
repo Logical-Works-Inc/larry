@@ -43,7 +43,10 @@ fn tui_journey_pane_shows_diff_and_receipt() -> Journey {
 }
 
 /// A running command's first line reaches the artifact pane before its FIFO is released;
-/// the second line cannot be a buffered completion artifact then.
+/// the second line cannot be a buffered completion artifact then. The release opens the
+/// FIFO write-only, which blocks until the command holds it for reading, so the release
+/// waits on the reader's open, never on a time: a non-blocking release before `cat`
+/// opened it was lost and the screen missed `second` under load (larry#552).
 #[test]
 fn tui_journey_pane_streams_first_line_before_fifo_release() -> Journey {
     let replies = [
