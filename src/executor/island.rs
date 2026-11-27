@@ -67,7 +67,7 @@ impl Isolation {
     /// The refusal that would stop a session before it starts, or `None`: the policy
     /// lacks a scope this isolation requires, or the host cannot confine.
     pub(crate) fn blocked(self, settings: &Settings) -> Option<String> {
-        if !self.required().is_subset(&settings.policy) {
+        if !self.required().is_subset(settings.policy()) {
             return Some(String::from(match self {
                 Self::Host => HOST_REFUSED,
                 Self::Workspace(_) => POLICY_REFUSED,
@@ -141,15 +141,17 @@ impl Island {
         origin: &Path,
     ) -> Result<Island, ExecError> {
         let (workspace, copied) =
-            Workspace::snapshot(&settings.state_dir, origin, task_id, &settings.path)?;
+            Workspace::snapshot(settings.state_dir(), origin, task_id, settings.path_env())?;
         let confine = Confine::new(
             platform,
-            &settings.state_dir,
+            settings.state_dir(),
             workspace.path(),
             &workspace.scratch(),
         )
         .map_err(ExecError::Confine)?;
-        confine.probe(&settings.path).map_err(ExecError::Confine)?;
+        confine
+            .probe(settings.path_env())
+            .map_err(ExecError::Confine)?;
         let base = workspace.head()?;
         Ok(Island {
             workspace,

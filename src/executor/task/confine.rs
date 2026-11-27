@@ -20,6 +20,7 @@ impl Task {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Knobs;
     use super::Task;
 
     /// larry#324: a brief, or the MCP door's flag, confines the acceptance commands; a plain
@@ -27,16 +28,17 @@ mod tests {
     #[test]
     fn a_brief_or_an_mcp_task_is_confined_and_a_plain_task_is_not()
     -> Result<(), Box<dyn std::error::Error>> {
-        let plain = Task::parse(br#"{"repo":"r","base":"HEAD","acceptance":[["true"]]}"#)?;
+        let plain = Task::parse(br#"{"repo":"/tmp/repo","base":"HEAD","acceptance":[["true"]]}"#)?;
         assert!(!plain.confines_acceptance(), "a plain exec task stays open");
         let briefed = Task::parse(
-            br#"{"repo":"r","base":"HEAD","goal":"g","files":["f"],"acceptance":[["true"]]}"#,
+            br#"{"repo":"/tmp/repo","base":"HEAD","goal":"g","files":["f"],"acceptance":[["true"]]}"#,
         )?;
         assert!(
             briefed.confines_acceptance(),
             "a brief means the model wrote the tree"
         );
-        let mcp = Task::shell_via("r", "g", &["f"], &["true"], None)?.confining_acceptance();
+        let mcp = Task::shell_via("/tmp/repo", "g", &["f"], &["true"], None, Knobs::default())?
+            .confining_acceptance();
         assert!(
             mcp.confines_acceptance(),
             "larry_submit_task confines its task"

@@ -461,7 +461,6 @@ impl Route {
             }
         })
     }
-
     /// The residency refusal for this route under `allowed`, when a policy exists.
     pub(crate) fn residency_refusal(&self, allowed: &[String]) -> Option<RouteError> {
         (!allowed.is_empty()

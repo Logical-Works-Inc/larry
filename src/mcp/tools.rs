@@ -2,13 +2,15 @@
 //!
 //! One tool exists: `larry_submit_task`, the typed task Claude hands Larry
 //! (goal, repo, files, acceptance commands; larry#71 Track 3). It runs through
-//! the executor (larry#123): a fresh clone of the repository at `HEAD`, the
-//! model writes each named file, each acceptance command runs under `sh -c`,
-//! and the sealed report comes back with its receipt. Only an accepted run is a
-//! success; a rejected run, a refusal and an unconfigured executor are typed
-//! tool errors, so no success is ever reported for work that did not pass.
+//! the executor (larry#123): a fresh clone of the repository at `HEAD` (or the
+//! base the task names), the model writes each named file, each acceptance
+//! command runs under `sh -c` (or the shell the task names), within the timeout
+//! and deadline the task names (larry#439), and the sealed report comes back
+//! with its receipt. Only an accepted run is a success; a rejected run, a
+//! refusal and an unconfigured executor are typed tool errors, so no success is
+//! ever reported for work that did not pass.
 
-use crate::executor::{ExecError, Report, Settings, Task, execute};
+use crate::executor::{ExecError, Knobs, Report, Settings, Task, execute};
 use crate::model::{RouteError, is_route_id};
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
@@ -17,7 +19,20 @@ use std::path::{Component, Path};
 /// Name of the only tool.
 const SUBMIT_TASK: &str = "larry_submit_task";
 /// Arguments the tool accepts; anything else is refused.
-const ARGUMENTS: [&str; 5] = ["goal", "repo", "files", "acceptance", "route"];
+const ARGUMENTS: [&str; 8] = [
+    "goal",
+    "repo",
+    "files",
+    "acceptance",
+    "route",
+    "shell",
+    "base",
+    "timeout_ms",
+];
+/// Longest shell or base in bytes: the task document's bounds.
+const MAX_WORD_BYTES: usize = 256;
+/// Longest timeout or deadline in milliseconds: one day, the executor's bound.
+const MAX_MILLIS: u64 = 86_400_000;
 /// Longest route id in bytes: the route table's bound.
 const MAX_ROUTE_BYTES: usize = 64;
 /// Longest goal in bytes.
@@ -50,7 +65,7 @@ impl Executor {
     pub(super) fn from_env(
         read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Executor {
-        match Settings::from_env(read) {
+        match Settings::remote_from_env(read) {
             Ok(settings) => Executor::Connected(Box::new(settings)),
             Err(error) => Executor::Absent(error),
         }
@@ -85,7 +100,7 @@ fn declared() -> Vec<Value> {
     vec![json!({
         "name": SUBMIT_TASK,
         "title": "Submit a task to Larry",
-        "description": "Hand Larry a typed task: a goal, the repository (a local path or git URL, cloned fresh at HEAD), the files the model may write and the shell acceptance commands that prove it. Larry has its model write each file, runs every command in the clone, and returns the diff, the command output and an ed25519 receipt that `larry verify` checks. Only an accepted run is a success; a rejected run is task_rejected, a refusal task_refused, a missing executor executor_not_connected.",
+        "description": "Hand Larry a typed task: a goal, the repository (a local path or git URL, cloned fresh at HEAD), the files the model may write and the shell acceptance commands that prove it. Larry has its model write each file, runs every command in the clone, and returns the diff, the command output and an ed25519 receipt that `larry verify` checks. An optional shell (default sh), base (default HEAD) and per-command timeout_ms are carried on the task the executor runs. Only an accepted run is a success; a rejected run is task_rejected, a refusal task_refused, a missing executor executor_not_connected.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -103,7 +118,10 @@ fn declared() -> Vec<Value> {
                     "minItems": 1,
                     "maxItems": MAX_ACCEPTANCE
                 },
-                "route": { "type": "string", "minLength": 1, "maxLength": MAX_ROUTE_BYTES }
+                "route": { "type": "string", "minLength": 1, "maxLength": MAX_ROUTE_BYTES },
+                "shell": { "type": "string", "minLength": 1, "maxLength": MAX_WORD_BYTES },
+                "base": { "type": "string", "minLength": 1, "maxLength": MAX_WORD_BYTES },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_MILLIS }
             },
             "required": ["goal", "repo", "files", "acceptance"],
             "additionalProperties": false
@@ -135,6 +153,7 @@ fn submit_task(arguments: &Map, executor: &Executor) -> Value {
         &checked.files,
         &checked.acceptance,
         checked.route,
+        checked.knobs,
     ) {
         Ok(task) => task.confining_acceptance(),
         Err(error) => return tool_error("invalid_arguments", &error.to_string()),
@@ -183,7 +202,9 @@ fn tool_error(code: &str, message: &str) -> Value {
 #[derive(Debug, PartialEq, Eq, Error)]
 enum TaskError {
     /// An argument outside the schema.
-    #[error("unknown argument; allowed: goal, repo, files, acceptance, route")]
+    #[error(
+        "unknown argument; allowed: goal, repo, files, acceptance, route, shell, base, timeout_ms"
+    )]
     UnknownArgument,
     /// A required argument is absent.
     #[error("`{0}` is required")]
@@ -232,6 +253,8 @@ struct Checked<'args> {
     acceptance: Vec<&'args str>,
     /// The route the model step uses, when the task names one.
     route: Option<&'args str>,
+    /// The shell, base, timeout and deadline the task names (larry#439).
+    knobs: Knobs<'args>,
 }
 
 /// Checks the typed task against the schema `list` advertises.
@@ -273,13 +296,42 @@ fn validate_task(arguments: &Map) -> Result<Checked<'_>, TaskError> {
             Some(named)
         }
     };
+    let knobs = Knobs {
+        shell: optional_text(arguments, "shell")?,
+        base: optional_text(arguments, "base")?,
+        timeout_ms: optional_millis(arguments, "timeout_ms")?,
+    };
     Ok(Checked {
         goal,
         repo,
         files,
         acceptance,
         route,
+        knobs,
     })
+}
+
+/// An optional `text`-valid string of at most [`MAX_WORD_BYTES`]; the task parser then holds
+/// it to the shell or base rule.
+fn optional_text<'a>(arguments: &'a Map, key: &'static str) -> Result<Option<&'a str>, TaskError> {
+    match arguments.get(key) {
+        None => Ok(None),
+        Some(_) => text(arguments, key, MAX_WORD_BYTES).map(Some),
+    }
+}
+
+/// An optional whole number of milliseconds in `1..=`[`MAX_MILLIS`].
+fn optional_millis(arguments: &Map, key: &'static str) -> Result<Option<u64>, TaskError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    match value.as_u64() {
+        Some(millis) if (1..=MAX_MILLIS).contains(&millis) => Ok(Some(millis)),
+        _ => Err(TaskError::WrongType {
+            key,
+            form: "a whole number of milliseconds in 1..=86400000",
+        }),
+    }
 }
 
 /// A required, non-empty string without NUL, at most `max` bytes.

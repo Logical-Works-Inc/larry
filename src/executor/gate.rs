@@ -33,7 +33,7 @@ use larry_contracts::ids::{RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
-use larry_runtime::owner::EffectOwner;
+use larry_runtime::owner::{EffectOwner, validate_proof};
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
@@ -46,6 +46,7 @@ use super::Settings;
 use super::Task;
 use super::identity;
 use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
+use lgwks_bot::kernel::cap::{Auth, Cap};
 
 /// The prefix every policy revision digest carries, so a revision computed here
 /// can never collide with a digest computed for another purpose.
@@ -58,52 +59,11 @@ const TASK_COST: u64 = 1;
 /// effect records.
 const ADAPTER_SCHEMA: u64 = 1;
 
-/// The scopes the executor is capable of. The capability snapshot pins them,
-/// so the policy alone decides what a task may do.
-const EXECUTOR_CAPABILITIES: [Scope; 6] = [
-    Scope::FileRead,
-    Scope::FileWrite,
-    Scope::ProcessSpawn,
-    Scope::ModelInvoke,
-    Scope::ModelCommand,
-    Scope::NetworkEgress,
-];
-
-/// The policy when `LARRY_POLICY` is unset: the five scopes a model task uses. A model
-/// command (larry#93) is never in it: only an operator who isolates the commands
-/// outside Larry, as a Harbor task container does, names `model.command`. A terminal
-/// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
-/// needs no such scope and runs under this policy as it is.
-const DEFAULT_POLICY: [Scope; 5] = [
-    Scope::FileRead,
-    Scope::FileWrite,
-    Scope::ProcessSpawn,
-    Scope::ModelInvoke,
-    Scope::NetworkEgress,
-];
-
-/// The policy when `LARRY_POLICY` is unset.
-fn default_policy() -> BTreeSet<Scope> {
-    DEFAULT_POLICY.iter().copied().collect()
-}
-
-/// The scopes a terminal command session needs (larry#93): command execution and
-/// model-command selection. A model brief adds network egress through
-/// [`required_scopes`], so an ordinary confined session stays local by default.
-pub(super) fn session_scopes() -> BTreeSet<Scope> {
-    let mut scopes: BTreeSet<Scope> = EXECUTOR_CAPABILITIES.iter().copied().collect();
-    scopes.remove(&Scope::NetworkEgress);
-    scopes
-}
-
-/// The scopes a terminal session needs when Larry itself confines each command to a
-/// workspace copy (larry#243): a briefed task's scopes without `model.command`, which
-/// names a command run on the host with no confinement of Larry's own.
-pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
-    let mut scopes = session_scopes();
-    scopes.remove(&Scope::ModelCommand);
-    scopes
-}
+/// The scopes the executor is capable of, pinned into the capability snapshot.
+use scopes::EXECUTOR_CAPABILITIES;
+/// The default and session scope bundles, from [`scopes`]: what an unset
+/// `LARRY_POLICY` admits and what a terminal session runs under.
+pub(super) use scopes::{default_policy, isolated_scopes, session_scopes};
 
 /// The prefix the estate capability names carry and a policy name omits.
 const CAPABILITY_PREFIX: &str = "larry.";
@@ -166,7 +126,7 @@ pub(super) fn with_expiry(
 /// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
 /// estate capability name `replay::capability` gives it (larry#77), without
 /// its `larry.` prefix, so the scope-to-name mapping has one owner.
-fn scope_name(scope: Scope) -> String {
+pub(super) fn scope_name(scope: Scope) -> String {
     let capability = larry_contracts::replay::capability(scope);
     let name = capability.as_str();
     match name.strip_prefix(CAPABILITY_PREFIX) {
@@ -192,6 +152,14 @@ fn named_scope(name: &str) -> Option<Scope> {
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
     let Some(text) = read("LARRY_POLICY") else {
         return Ok(default_policy());
+    };
+    policy_names(Some(&text))
+}
+
+/// Parses a durable policy record. A missing ledger row is remote deny-all.
+pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecError> {
+    let Some(text) = text else {
+        return Ok(BTreeSet::new());
     };
     let mut scopes = BTreeSet::new();
     for name in text.split(',') {
@@ -312,7 +280,7 @@ where
     F: FnOnce() -> Result<Report, ExecError>,
 {
     /// The repository path the task binds to.
-    repo: &'a std::path::Path,
+    repo: &'a Path,
     /// The tenant the run belongs to; one state directory is one tenant.
     tenant: TenantId,
     /// The security generation the runtime's fence starts at: the epoch a
@@ -360,8 +328,16 @@ where
     fn dispatch_bound(
         &mut self,
         intent: &EffectIntent,
+        proof: &Auth,
+        required: &[Cap],
         _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
+        validate_proof(proof, required)?;
+        if intent.tenant != self.tenant {
+            return Err(BindingError::Changed {
+                field: larry_contracts::binding::BindingField::Command,
+            });
+        }
         if self.slot.borrow().is_some() {
             // The body ran once; a second reach never re-runs it.
             return Ok(EffectOutcome::Unknown {
@@ -384,12 +360,6 @@ where
         };
         *self.slot.borrow_mut() = Some(finished);
         Ok(outcome)
-    }
-
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
@@ -422,14 +392,14 @@ pub(super) fn admit_and_run(
     key: &lgwks_std::sign::SecretKey,
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
-    if let Some(line) = recovered_evidence(&settings.state_dir, task_id)? {
+    if let Some(line) = recovered_evidence(settings.state_dir(), task_id)? {
         // This request was already dispatched once and its executor died inside
         // it. The journal it left is the evidence, recovered or refused; the retry
         // answers from it and nothing here reaches the world again (larry#182
         // defect 3, larry#394).
         return Ok(denied_report(task_id, task_digest, line, key));
     }
-    let policy = &settings.policy;
+    let policy = settings.policy();
     let required = subject.required;
     let capabilities = EXECUTOR_CAPABILITIES
         .iter()
@@ -447,8 +417,8 @@ pub(super) fn admit_and_run(
     // copy of any of them (larry#212).
     let run_settings = with_expiry(task_settings(policy), now).map_err(ExecError::Gate)?;
     let expiry = run_settings.validity.valid_until;
-    let tenant = identity::tenant_of(&settings.state_dir);
-    let holder = identity::worker_of(&settings.state_dir);
+    let tenant = identity::tenant_of(settings.state_dir());
+    let holder = identity::worker_of(settings.state_dir());
     let (run_id, operation, command_id) = identity::ids_of(task_id);
 
     let proposal = WorkProposal::new(
@@ -487,15 +457,16 @@ pub(super) fn admit_and_run(
         run: Some(run),
         slot: Rc::clone(&slot),
     };
-    std::fs::create_dir_all(settings.state_dir.join(JOURNALS_DIR)).map_err(ExecError::Journals)?;
-    let path = journal_path(&settings.state_dir, task_id);
+    std::fs::create_dir_all(settings.state_dir().join(JOURNALS_DIR))
+        .map_err(ExecError::Journals)?;
+    let path = journal_path(settings.state_dir(), task_id);
     // A journal already here is a dead run's the recovery kept for a passing fault
     // (larry#394): this retry's failure must never remove that evidence.
     let leftover = path.try_exists().map_err(ExecError::Journals)?;
     // The run's liveness lock, taken before its journal exists and released after the journal
     // is gone, so no other executor's recovery opens this run's journal (larry#456). `None` is a
     // live run with this id; its journal's own lock then refuses this open, as before.
-    let lock = RunLock::take(&settings.state_dir, task_id)?;
+    let lock = RunLock::take(settings.state_dir(), task_id)?;
     let opened = Journal::open(&path, run_settings.journal_capacity)
         .and_then(|journal| restore::<FoldProjection, _>(run_settings, owner, clock, journal));
     let outcome = match opened {
@@ -700,10 +671,15 @@ where
     }
 }
 
+mod scopes;
 /// Seeded simulations of the admission lease on an injected clock (larry#436).
 #[cfg(test)]
 #[path = "sim_gate_clock.rs"]
 mod sim_clock;
+
+#[cfg(test)]
+#[path = "gate_owner_tests.rs"]
+mod owner_tests;
 
 #[cfg(test)]
 mod tests {

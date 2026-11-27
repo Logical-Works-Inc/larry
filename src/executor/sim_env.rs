@@ -141,7 +141,11 @@ fn sim_an_unset_path_is_refused_and_a_set_one_is_kept() -> TestResult {
             ));
         }
         let kept = settings_with(Some(path.clone()))?;
-        assert_eq!(kept.path, path, "seed {seed}: the PATH is kept exactly");
+        assert_eq!(
+            kept.path_env(),
+            path,
+            "seed {seed}: the PATH is kept exactly"
+        );
         let refused = settings_with(None);
         assert!(
             matches!(refused, Err(ExecError::PathUnset)),

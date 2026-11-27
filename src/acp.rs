@@ -34,7 +34,9 @@ use std::sync::{Mutex, MutexGuard};
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 
-use crate::executor::{Approval, ExecError, Isolation, Observer, Settings, run_session};
+use crate::executor::{
+    Approval, ExecError, Isolation, Observer, SessionDoor, Settings, run_session,
+};
 use crate::mcp::wire::{self, Envelope, Frame};
 
 /// The one protocol version Larry speaks; any other request is answered with it.
@@ -97,7 +99,7 @@ fn locked(book: &Book) -> MutexGuard<'_, BTreeMap<String, Entry>> {
 ///
 /// The reader or the writer failed; a malformed or oversized frame is answered, never an error.
 pub fn serve<R: BufRead + Send, W: Write>(reader: R, writer: W) -> io::Result<()> {
-    let settings = crate::executor::process_env().and_then(Settings::from_env);
+    let settings = crate::executor::process_env().and_then(Settings::remote_from_env);
     serve_bounded(
         reader,
         writer,
@@ -509,16 +511,28 @@ impl Agent<'_> {
             prompt_no,
             failed: None,
         };
-        let settings = match *self.settings {
-            Ok(ref settings) => settings,
+        let mut settings = match *self.settings {
+            Ok(ref settings) => settings.clone(),
             Err(ref reason) => {
                 updates.message(&reason.to_string());
                 clear_finished(self.book, session, prompt_no);
                 return updates.close(stopped(id, "refusal", None));
             }
         };
+        if let Err(cause) = settings.refresh_remote_policy() {
+            updates.message(&cause.to_string());
+            clear_finished(self.book, session, prompt_no);
+            return updates.close(wire::error(id, wire::INTERNAL_ERROR, &cause.to_string()));
+        }
         // `larry acp` runs on the operator's isolated host under `model.command` (larry#93).
-        let reply = match run_session(&instruction, &cwd, settings, Isolation::Host, &mut updates) {
+        let reply = match run_session(
+            &instruction,
+            &cwd,
+            &settings,
+            Isolation::Host,
+            &mut updates,
+            SessionDoor::Tenant,
+        ) {
             Ok(ended) => stopped(id, ended.stop.name(), Some(ended.report.json())),
             Err(ExecError::Session(cause)) => {
                 wire::error(id, wire::INVALID_PARAMS, &cause.to_string())

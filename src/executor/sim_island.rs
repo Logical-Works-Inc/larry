@@ -65,12 +65,6 @@ impl Observer for Scripted {
     fn approve(&mut self, _step: usize, _command: &str) -> Approval {
         Approval::Run
     }
-    fn started(&mut self, _step: usize, _command: &str) {}
-    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
-    fn message(&mut self, _text: &str) {}
-    fn cancelled(&self) -> bool {
-        false
-    }
     fn review(&mut self, summary: &[String]) -> Handoff {
         self.reviewed.push(summary.to_vec());
         self.answer
@@ -121,7 +115,7 @@ impl Rig {
         run_command(
             &argv,
             island.place(),
-            &self.settings.path,
+            self.settings.path_env(),
             Duration::from_secs(60),
             &self.ledger,
             id,
@@ -510,6 +504,7 @@ fn sim_island_refused_confinement_starts_nothing() -> TestResult {
         &rig.settings,
         isolation,
         &mut observer,
+        crate::executor::SessionDoor::Tenant,
     );
     assert!(matches!(
         ended,
