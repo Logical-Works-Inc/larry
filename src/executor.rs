@@ -14,6 +14,7 @@ mod ledger;
 mod observation;
 mod receipt;
 mod recovery;
+mod route_select;
 pub mod routes;
 mod run;
 mod seal;
@@ -565,6 +566,7 @@ fn run_task(
         None => None,
         Some(author::ModelStep {
             route,
+            selection,
             brief,
             client,
         }) => {
@@ -575,6 +577,7 @@ fn run_task(
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
                     object.insert(String::from("route"), route.seal());
+                    object.insert(String::from("route_selection"), selection.seal());
                 }
             }
             Some(records)

@@ -1,18 +1,33 @@
 //! The binary-driving harness shared by the route journeys (larry#201,
-//! larry#205): `larry route` and `larry exec` children with a cleared
+//! larry#205, larry#202): `larry route` and `larry exec` children with a cleared
 //! environment, the tenant's key in the child's environment, and the gateway's
-//! address as a sealed report names it. Test support, never linked into a
+//! address as a sealed report names it. The one-tenant driver over these
+//! doors lives in `route_tenant`. Test support, never linked into a
 //! shipped binary (INVARIANTS: test doubles never ship).
 
 use std::error::Error;
-use std::ffi::OsStr;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 
+#[path = "json_at.rs"]
+pub(crate) mod json_at;
+#[path = "larry_cli.rs"]
+pub(crate) mod larry_cli;
+#[path = "mock_model.rs"]
+pub(crate) mod mock_model;
+#[path = "origin.rs"]
+pub(crate) mod origin;
+#[path = "route_key.rs"]
+pub(crate) mod route_key;
+#[path = "sealed_report.rs"]
+pub(crate) mod sealed_report;
+
 use crate::coverage::forward;
-use crate::larry_cli::{spawn_larry_args, stderr_of};
-use crate::mock_model::Handle;
-use crate::origin::TempDir;
+use larry_cli::{spawn_larry_args, stderr_of};
+use lgwks_std::json::json;
+use mock_model::Handle;
+use origin::TempDir;
 
 /// What every route journey returns.
 pub(crate) type TestResult = Result<(), Box<dyn Error>>;
@@ -51,7 +66,6 @@ pub(crate) fn briefed_task(
     route: Option<&str>,
     key: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
-    use lgwks_std::json::json;
     let mut task = json!({
         "repo": origin.path().display().to_string(),
         "base": "HEAD",
@@ -124,6 +138,29 @@ pub(crate) fn add_route(state: &TempDir, route: &NewRoute<'_>) -> TestResult {
     Ok(())
 }
 
+/// The hub directory the shipped ranker resolves its snapshot under, as the
+/// hub's own clients do: `HF_HUB_CACHE`, else `HF_HOME/hub`, else the home
+/// directory's cache. An exec child runs with a cleared environment, so the
+/// harness passes through what the parent resolved; without it an unnamed task
+/// cannot even build the ranker its choice seals beside the route (larry#202).
+fn hub_dir() -> Option<OsString> {
+    if let Some(hub) = std::env::var_os("HF_HUB_CACHE") {
+        return Some(hub);
+    }
+    if let Some(home) = std::env::var_os("HF_HOME") {
+        return Some(PathBuf::from(home).join("hub").into_os_string());
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".cache")
+                .join("huggingface")
+                .join("hub")
+                .into_os_string()
+        })
+}
+
 /// Starts `larry exec` on `task` with `key_var` holding `key` in the child's
 /// environment, beside `extra`, unwaited.
 pub(crate) fn start_with_key(
@@ -139,6 +176,12 @@ pub(crate) fn start_with_key(
         (key_var, key),
     ];
     env.extend_from_slice(extra);
+    // The ranker the choice seals resolves its snapshot here; the cleared
+    // child would otherwise fail every unnamed task before any ranking.
+    let hub = hub_dir();
+    if let Some(dir) = hub.as_ref() {
+        env.push(("HF_HUB_CACHE", dir.as_os_str()));
+    }
     spawn_larry_args(&["exec"], &env, task.as_bytes())
 }
 

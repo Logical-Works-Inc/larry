@@ -147,6 +147,23 @@ pub enum RouteError {
         /// The field check the row fails, when it is one of the route checks.
         cause: Option<Box<RouteError>>,
     },
+    /// `LARRY_RESIDENCY` is not comma-separated ISO 3166-1 alpha-2 country
+    /// codes: the tenant rule cannot be read, so no route is ranked under it.
+    BadResidencyRule,
+    /// No stored route survives the tenant's residency and budget filters, and
+    /// the environment route is absent or filtered too.
+    NoEligibleRoute,
+    /// The ranking deadline is not a whole number of seconds from 1 to 3600.
+    BadRankSeconds,
+    /// The ranker cannot choose a route: no engine is built, the model is not
+    /// cached, a run passed its deadline or a score broke the contract. The
+    /// detail says why, so the operator knows whether to fetch the model,
+    /// retry or name the route.
+    NoRanker {
+        /// Why the ranker is unavailable: the engine's message for its own
+        /// failure, or what the selection measured for a broken contract.
+        detail: String,
+    },
 }
 
 impl RouteError {
@@ -170,12 +187,16 @@ impl RouteError {
             | Self::BadResidency
             | Self::ResidencyNotAllowed { .. }
             | Self::ResidencyPolicyTooLarge { .. }
+            | Self::BadResidencyRule
+            | Self::BadRankSeconds
             | Self::BadRequestBytes
             | Self::BadDescribe
             | Self::BadPrice { .. } => true,
             Self::InsecureTransport { .. }
             | Self::NoSuchId { .. }
             | Self::NoRoute
+            | Self::NoEligibleRoute
+            | Self::NoRanker { .. }
             | Self::TableFull { .. }
             | Self::Damaged { .. } => false,
         }
@@ -252,6 +273,19 @@ impl fmt::Display for RouteError {
                 "the tenant already holds the most routes it may ({limit})"
             ),
             Self::Damaged { ref id, .. } => write!(out, "the stored route {id} fails validation"),
+            Self::BadResidencyRule => out.write_str(
+                "route residency rule (LARRY_RESIDENCY) must be comma-separated ISO 3166-1 alpha-2 country codes, or unset",
+            ),
+            Self::NoEligibleRoute => out.write_str(
+                "no stored route is eligible under the tenant's residency and budget rules",
+            ),
+            Self::BadRankSeconds => out.write_str(
+                "route rank seconds (LARRY_ROUTE_RANK_SECONDS) must be 1 to 3600",
+            ),
+            Self::NoRanker { ref detail } => write!(
+                out,
+                "no route ranker is available to choose a route: {detail}"
+            ),
         }
     }
 }
@@ -417,8 +451,10 @@ fn is_model_id(text: &str) -> bool {
         && text.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-/// Whether `text` is an ISO 3166-1 alpha-2 shaped code: two uppercase ASCII letters.
-fn is_residency(text: &str) -> bool {
+/// Whether `text` is an ISO 3166-1 alpha-2 shaped code: two uppercase ASCII
+/// letters. The selection filter reuses the route field's own shape, so a
+/// knob no route could declare is refused before any ranking (larry#202).
+pub(crate) fn is_residency(text: &str) -> bool {
     text.len() == 2 && text.bytes().all(|byte| byte.is_ascii_uppercase())
 }
 

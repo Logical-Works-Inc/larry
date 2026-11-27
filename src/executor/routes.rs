@@ -4,7 +4,10 @@
 //! shows which route a task naming an id (or none) would use. The key is never
 //! an argument and never stored: a route names the `LARRY_KEY_<TAG>_*` variable
 //! that holds it, under the tag its own tenant's digest names, and the variable
-//! is read only when a task reaches the model (larry#328).
+//! is read only when a task reaches the model (larry#328). A briefed task's
+//! route is chosen by the sibling `route_select` module, which checks the
+//! tenant's stored residency policy after its choice exactly as `resolve_for`
+//! does here (larry#203).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -90,7 +93,7 @@ fn from_exec(error: ExecError) -> RouteCliError {
 }
 
 /// The tenant a state directory is, as the text every route row is keyed by.
-fn tenant_text(state: &Path) -> String {
+pub(super) fn tenant_text(state: &Path) -> String {
     digest_hex(identity::tenant_of(state).as_bytes())
 }
 
@@ -481,7 +484,9 @@ fn make_default(
 }
 
 /// `larry route resolve [<id>]`: the route a task naming `id` (or none) would
-/// use, as the sealed report would record it.
+/// use from configuration alone, as the sealed report would record it. A
+/// briefed task that names none ranks its eligible routes by meaning instead
+/// (larry#202), which needs the task and is not shown here.
 fn show(
     read: &impl Fn(&str) -> Option<String>,
     named: Option<&str>,
@@ -573,6 +578,19 @@ mod tests {
         });
         assert!(rated.starts_with("route price --in must be"), "{rated}");
         assert_eq!(rated.matches("route").count(), 1, "{rated}");
+        // larry#202: the selection knobs refuse as fields too.
+        let rule = said(&RouteCliError::Route(RouteError::BadResidencyRule));
+        assert!(
+            rule.starts_with("route residency rule (LARRY_RESIDENCY) must be"),
+            "{rule}"
+        );
+        assert_eq!(rule.matches("route").count(), 1, "{rule}");
+        let seconds = said(&RouteCliError::Route(RouteError::BadRankSeconds));
+        assert!(
+            seconds.starts_with("route rank seconds (LARRY_ROUTE_RANK_SECONDS) must be"),
+            "{seconds}"
+        );
+        assert_eq!(seconds.matches("route").count(), 1, "{seconds}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [
@@ -580,6 +598,10 @@ mod tests {
                 id: String::from("r9"),
             },
             RouteError::NoRoute,
+            RouteError::NoEligibleRoute,
+            RouteError::NoRanker {
+                detail: String::from("the pinned model is missing"),
+            },
             RouteError::TableFull { limit: 256 },
             RouteError::Damaged {
                 id: String::from("r1"),
