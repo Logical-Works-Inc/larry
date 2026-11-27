@@ -13,7 +13,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use lgwks_std::hash::Hasher;
+use lgwks_std::json::{self, Value};
 
+use crate::exec_cli::fixed_probe::FIXED_PROBE;
 use crate::exec_cli::{
     TempDir, TestResult, denial_lines, fixture, flag_of, millis, number_of, percentile, report_of,
     result_at, run_exec, spawn_larry_args, task_json,
@@ -43,14 +45,18 @@ fn the_endpoint_can_answer_with_every_fault() {
     assert_eq!(EVERY_FAULT.len(), 9, "every fault is named");
 }
 
-/// The environment that points `larry exec` at the seeded endpoint.
-fn model_env<'env>(state: &'env Path, url: &'env str) -> [(&'static str, &'env OsStr); 5] {
+/// The environment that points `larry exec` at the seeded endpoint. The fixed
+/// probe rides beside the model settings (larry#274), so the same seed replays
+/// the same prompts and the same gateway trace, and the confined runs skip the
+/// live probe's dozen spawns each.
+fn model_env<'env>(state: &'env Path, url: &'env str) -> [(&'static str, &'env OsStr); 6] {
     [
         ("LARRY_STATE_DIR", state.as_os_str()),
         ("LARRY_MODEL", OsStr::new("mock-model")),
         ("LARRY_MODEL_KEY", OsStr::new("mock-key")),
         ("LARRY_MODEL_URL", OsStr::new(url)),
         ("LARRY_MODEL_BACKOFF_MS", OsStr::new("0")),
+        ("LARRY_PROBE", OsStr::new(FIXED_PROBE)),
     ]
 }
 
@@ -107,6 +113,12 @@ fn refused_outside_write(
     assert!(
         !target.exists(),
         "the confinement must refuse a write outside the tree"
+    );
+    let expected: Value = json::from_str(FIXED_PROBE)?;
+    assert_eq!(
+        report.get("probe"),
+        Some(&expected),
+        "the sealed probe is the injected fixed value, so the run replays"
     );
     Ok(())
 }

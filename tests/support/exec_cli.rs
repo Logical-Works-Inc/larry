@@ -49,8 +49,14 @@ pub(crate) fn task_json(repo: &Path, base: &str, acceptance: &str) -> String {
     )
 }
 
+#[path = "fixed_probe.rs"]
+pub(crate) mod fixed_probe;
+use fixed_probe::FIXED_PROBE;
+
 /// Starts `larry exec` with a cleared environment, pipes `task` in and closes stdin.
 /// `state` sets `LARRY_STATE_DIR` when given; `timeout_ms` sets the command timeout.
+/// The fixed probe rides every run (larry#274), so no journey pays the live probe's
+/// dozen spawns and the same seed replays the same prompts and gateway trace.
 pub(crate) fn spawn_exec(
     state: Option<&Path>,
     timeout_ms: Option<u64>,
@@ -64,6 +70,7 @@ pub(crate) fn spawn_exec(
     if let Some(ref ms) = timeout {
         env.push(("LARRY_EXEC_TIMEOUT_MS", OsStr::new(ms)));
     }
+    env.push(("LARRY_PROBE", OsStr::new(FIXED_PROBE)));
     spawn_larry_args(&["exec"], &env, task.as_bytes())
 }
 

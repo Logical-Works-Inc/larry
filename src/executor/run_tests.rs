@@ -115,6 +115,87 @@ fn sim_a_command_starts_in_a_session_of_its_own() -> TestResult {
     Ok(())
 }
 
+/// A probe place runs its command in the tree but homes it beside the tree, so a
+/// tool that initializes a per-user home never writes into the probed tree and
+/// its diff; the toolchain homes stay resolved from the host's real home and
+/// the child never auto-installs one, while without a host home it keeps no
+/// host path at all (larry#274, sixth pass).
+#[test]
+fn a_probe_place_runs_in_the_tree_but_homes_beside_it() -> TestResult {
+    let (built, _) = command_for(
+        &[String::from("true")],
+        Place::Probe {
+            cwd: Path::new("/tree"),
+            home: Path::new("/probe-home"),
+            rustup_home: Some(Path::new("/host-home/.rustup")),
+            cargo_home: Some(Path::new("/host-home/.cargo")),
+        },
+        "/usr/bin:/bin",
+    )?;
+    assert_eq!(
+        built.get_current_dir(),
+        Some(Path::new("/tree")),
+        "the probe runs in the tree it reads"
+    );
+    let env = |name: &str| {
+        built
+            .get_envs()
+            .find_map(|(key, value)| (key == name).then_some(value))
+            .flatten()
+    };
+    assert_eq!(
+        env("HOME"),
+        Some(OsStr::new("/probe-home")),
+        "the probe homes outside the tree it reads"
+    );
+    assert_eq!(
+        env("RUSTUP_HOME"),
+        Some(OsStr::new("/host-home/.rustup")),
+        "the toolchain home stays resolved from the host's real home"
+    );
+    assert_eq!(
+        env("CARGO_HOME"),
+        Some(OsStr::new("/host-home/.cargo")),
+        "the cargo home stays resolved from the host's real home"
+    );
+    assert_eq!(
+        env("RUSTUP_AUTO_INSTALL"),
+        Some(OsStr::new("0")),
+        "a missing toolchain is a fast failure, never a download"
+    );
+    let (bare, _) = command_for(
+        &[String::from("true")],
+        Place::Probe {
+            cwd: Path::new("/tree"),
+            home: Path::new("/probe-home"),
+            rustup_home: None,
+            cargo_home: None,
+        },
+        "/usr/bin:/bin",
+    )?;
+    let bare_env = |name: &str| {
+        bare.get_envs()
+            .find_map(|(key, value)| (key == name).then_some(value))
+            .flatten()
+    };
+    assert_eq!(
+        bare_env("RUSTUP_HOME"),
+        None,
+        "without a host home the child keeps no host path"
+    );
+    assert_eq!(
+        bare_env("CARGO_HOME"),
+        None,
+        "without a host home the child keeps no host path"
+    );
+    assert_eq!(
+        bare_env("RUSTUP_AUTO_INSTALL"),
+        Some(OsStr::new("0")),
+        "the no-install switch holds whatever the host names"
+    );
+    Ok(())
+}
+
 /// Every seed keeps the exact head and tail, counts every dropped byte, and replays one trace.
 #[test]
 fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult {

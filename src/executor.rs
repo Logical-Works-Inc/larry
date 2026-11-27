@@ -9,6 +9,7 @@ mod gate;
 mod identity;
 mod island;
 mod ledger;
+mod probe;
 mod receipt;
 mod recovery;
 pub mod routes;
@@ -24,7 +25,7 @@ mod workspace;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -277,6 +278,19 @@ impl Settings {
         self.timeout
     }
 
+    /// The probe this run starts with (larry#274): the live folder probe while
+    /// `LARRY_PROBE` is unset, else exactly the value it names, so a run that
+    /// must replay holds every prompt byte still. A malformed value refuses
+    /// the task; it never falls back to the live probe.
+    pub(crate) fn probe(&self) -> Result<probe::Probe, ExecError> {
+        match (self.read)("LARRY_PROBE") {
+            None => Ok(probe::Probe::Live),
+            Some(value) => probe::Probe::fixed(&value).map_err(|cause| ExecError::BadProbe {
+                reason: cause.to_string(),
+            }),
+        }
+    }
+
     /// The route a task naming `named` (or none) sends its model calls to: the
     /// named route, else the tenant's default, else the environment's, else a
     /// refusal. Nothing is sent to resolve it.
@@ -459,6 +473,19 @@ fn run_task(
         task_id,
         &settings.path,
     )?;
+    // The one environment probe at task start (larry#274): fixed read-only
+    // facts about the task folder, sealed below and shown to the model, so
+    // both see the same facts. The probe a run starts with is an injected
+    // input: live here in production, one fixed value wherever a run must
+    // replay. A probe section that fails is a typed field, never a refused
+    // task.
+    let (probed, rendered) = match settings.probe()? {
+        probe::Probe::Live => probe_and_render(&workspace, settings, ledger, task_id),
+        probe::Probe::Fixed(value) => {
+            let rendered = probe::render(&value);
+            (value, rendered)
+        }
+    };
     let authored = match step {
         None => None,
         Some(ModelStep {
@@ -469,7 +496,8 @@ fn run_task(
             // The tenant's digest, the same text a route row is keyed by, names the
             // cache partition so no two tenants share a prompt prefix (larry#230).
             let partition = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
-            let mut records = author::author(brief, workspace.path(), &client, &partition)?;
+            let mut records =
+                author::author(brief, workspace.path(), &client, &partition, &rendered)?;
             for record in &mut records {
                 if let Some(object) = record.as_object_mut() {
                     object.insert(String::from("route"), route.seal());
@@ -522,10 +550,13 @@ fn run_task(
         "denied": [],
     });
     // The diff members name whether the diff is the whole change (larry#206).
+    // The probe is the task's first sealed fact (larry#274): the same value
+    // the model's prompt carried, so the person checks what it saw.
     if let Some(object) = body.as_object_mut() {
         for (name, member) in report_members(diff) {
             object.insert(name.to_owned(), member);
         }
+        object.insert(String::from("probe"), probed);
     }
     // Only a briefed run names what the model wrote, so a plain run's report keeps its shape.
     if let Some(records) = authored
@@ -537,6 +568,78 @@ fn run_task(
         );
     }
     Ok(Report::sealed(body, key))
+}
+
+/// The live environment probe (larry#274): `run_command` answers every spawned
+/// version, status and disk call under [`probe::PROBE_TIMEOUT`], so timeouts,
+/// group kills and bounded capture are the tested ones. The value's rendering
+/// rides after the model's prompt prefix (ADR 0043). A section that fails is a
+/// typed field, never a refused task. The probe runs in the tree but homes in
+/// its own directory beside it, so a tool that initializes a per-user home
+/// never writes into the tree and its diff.
+fn probe_and_render(
+    workspace: &Workspace,
+    settings: &Settings,
+    ledger: &Ledger,
+    task_id: &str,
+) -> (lgwks_std::json::Value, String) {
+    let tree = workspace.path();
+    // The workspace root this task owns (`state/ws/<task id>`): the probe's home
+    // sits beside the tree and outside it, and the workspace removes it on drop.
+    let home = settings
+        .state_dir
+        .join("ws")
+        .join(task_id)
+        .join("probe-home");
+    // The toolchain homes stay resolved from the host's real home (read only)
+    // when it names one: without one the child keeps no host path, and with
+    // `RUSTUP_AUTO_INSTALL=0` still set a missing toolchain fails fast inside
+    // the probe's own home, never as a download into the tree (larry#274).
+    let host_home = (settings.read)("HOME").map(PathBuf::from);
+    let rustup_home = host_home.as_ref().map(|dir| dir.join(".rustup"));
+    let cargo_home = host_home.as_ref().map(|dir| dir.join(".cargo"));
+    // A missing home refuses the probe's first spawn; a refused spawn is a typed
+    // section, never a refused task, but the home is made here so every tool
+    // finds one.
+    if let Err(cause) = std::fs::create_dir_all(&home) {
+        let probed = probe::probe(
+            tree,
+            &|_: &[String], _: &Path| {
+                Err::<probe::ProbeCall, probe::ProbeError>(probe::ProbeError::Command(
+                    cause.to_string(),
+                ))
+            },
+            &|path: &Path| std::fs::read_to_string(path).map_err(probe::ProbeError::Unreadable),
+        );
+        return (probed.clone(), probe::render(&probed));
+    }
+    let probe_run = |argv: &[String], cwd: &Path| -> Result<probe::ProbeCall, probe::ProbeError> {
+        run_command(
+            argv,
+            Place::Probe {
+                cwd,
+                home: &home,
+                rustup_home: rustup_home.as_deref(),
+                cargo_home: cargo_home.as_deref(),
+            },
+            &settings.path,
+            probe::PROBE_TIMEOUT,
+            ledger,
+            task_id,
+            &|| false,
+        )
+        .map(|result| {
+            probe::ProbeCall::failed(result.exit_code(), result.stdout(), result.stderr())
+                .timed(result.timed_out())
+        })
+        .map_err(|cause| probe::ProbeError::Command(cause.to_string()))
+    };
+    let probe_read = |path: &Path| -> Result<String, probe::ProbeError> {
+        std::fs::read_to_string(path).map_err(probe::ProbeError::Unreadable)
+    };
+    let probed = probe::probe(tree, &probe_run, &probe_read);
+    let rendered = probe::render(&probed);
+    (probed, rendered)
 }
 
 /// The BLAKE3 digest of `bytes`, as 64 hex characters.

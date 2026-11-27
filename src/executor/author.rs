@@ -151,6 +151,7 @@ pub(crate) fn author(
     tree: &Path,
     client: &ModelClient,
     partition: &str,
+    probe: &str,
 ) -> Result<Vec<Value>, ExecError> {
     let mut sources: Vec<Source<'_>> = Vec::with_capacity(brief.files.len());
     for path in &brief.files {
@@ -173,6 +174,7 @@ pub(crate) fn author(
         &system,
         &paths,
         |messages| client.fits(messages),
+        probe,
     );
     let prefix = prefix_label(shared.as_deref());
     let mut authored = Vec::with_capacity(sources.len());
@@ -183,6 +185,7 @@ pub(crate) fn author(
             &brief.goal,
             path,
             source.before.as_deref(),
+            probe,
         );
         let messages = [
             Message::new(Role::System, system.as_str()),
@@ -260,18 +263,21 @@ fn prefix_label(shared: Option<&str>) -> &'static str {
 /// `fits` (the client's own pre-send check) says; otherwise `None`, so the brief
 /// falls back to one-file prompts instead of failing. The context is bounded in
 /// raw bytes, but JSON escaping can grow a control byte sixfold, and a route may
-/// name a bound below the default, so only the encoded request decides.
+/// name a bound below the default, so only the encoded request decides. `probe`
+/// rides every check after the turn's stable bytes, so the check answers for the
+/// prompt the model will read (larry#274).
 fn fitting_context(
     shared: Option<String>,
     system: &str,
     paths: &[&str],
     fits: impl Fn(&[Message]) -> bool,
+    probe: &str,
 ) -> Option<String> {
     shared.filter(|context| {
         paths.iter().all(|path| {
             fits(&[
                 Message::new(Role::System, system),
-                Message::new(Role::User, user_turn(Some(context), "", path, None)),
+                Message::new(Role::User, user_turn(Some(context), "", path, None, probe)),
             ])
         })
     })
@@ -279,10 +285,21 @@ fn fitting_context(
 
 /// The user turn: the shared context and the file to write now, or, when the
 /// context was too large to share, the prompt that carries only this file.
-fn user_turn(shared: Option<&str>, goal: &str, path: &str, current: Option<&str>) -> String {
+/// The probe rides after the byte-stable prefix and before the file line, so
+/// every completion still begins and ends with the bytes it always had (ADR
+/// 0043), whatever the run's probe said (larry#274).
+fn user_turn(
+    shared: Option<&str>,
+    goal: &str,
+    path: &str,
+    current: Option<&str>,
+    probe: &str,
+) -> String {
     match shared {
-        Some(context) => format!("{context}\nWrite this file now: {path}"),
-        None => prompt(goal, path, current),
+        Some(context) if probe.is_empty() => format!("{context}\nWrite this file now: {path}"),
+        Some(context) => format!("{context}\n{probe}\nWrite this file now: {path}"),
+        None if probe.is_empty() => prompt(goal, path, current),
+        None => format!("{}\n{probe}", prompt(goal, path, current)),
     }
 }
 

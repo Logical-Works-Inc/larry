@@ -15,7 +15,8 @@ use lgwks_std::seeded::Seeded;
 
 use super::{
     AuthorFault, Brief, MAX_CONTEXT_BYTES, MAX_FILES, MAX_GOAL_BYTES, SYSTEM, checked_target,
-    file_text, fitting_context, prefix_label, reply_file, shared_context, system_line, user_turn,
+    file_text, fitting_context, prefix_label, prompt, reply_file, shared_context, system_line,
+    user_turn,
 };
 use crate::executor::{ExecError, TaskError};
 use crate::model::{Message, ModelClient, ModelError, Role, sim_config};
@@ -369,7 +370,7 @@ fn sim_every_request_of_a_brief_shares_one_byte_stable_prefix() -> TestResult {
         }
         for view in &views {
             let (path, current) = *view;
-            let turn = user_turn(Some(&shared), &goal, path, current);
+            let turn = user_turn(Some(&shared), &goal, path, current, "");
             let rest = turn
                 .strip_prefix(shared.as_str())
                 .ok_or("a user turn starts with the shared context")?;
@@ -508,7 +509,7 @@ fn sim_a_context_past_its_bound_falls_back_to_one_file() -> TestResult {
         }
         for (index, view) in views.iter().enumerate() {
             let (path, current) = *view;
-            let turn = user_turn(None, &goal, path, current);
+            let turn = user_turn(None, &goal, path, current, "");
             assert!(
                 turn.contains(contents.get(index).copied().ok_or("content")?),
                 "seed {seed}: file {index} carries its own content"
@@ -567,14 +568,24 @@ fn sim_a_context_past_the_request_bound_falls_back_to_one_file() -> TestResult {
         ];
         let raw = shared_context("goal", &views).ok_or("the raw context fits its byte bound")?;
         assert!(
-            fitting_context(Some(raw.clone()), &system, &paths, |sent| default_route
-                .fits(sent))
+            fitting_context(
+                Some(raw.clone()),
+                &system,
+                &paths,
+                |sent| default_route.fits(sent),
+                ""
+            )
             .is_none(),
             "seed {seed}: {count} escaped bytes pass the 1 MiB request bound"
         );
         assert_eq!(
-            fitting_context(Some(raw.clone()), &system, &paths, |sent| wide_route
-                .fits(sent)),
+            fitting_context(
+                Some(raw.clone()),
+                &system,
+                &paths,
+                |sent| wide_route.fits(sent),
+                ""
+            ),
             Some(raw),
             "seed {seed}: a 16 MiB route shares the same context"
         );
@@ -582,28 +593,45 @@ fn sim_a_context_past_the_request_bound_falls_back_to_one_file() -> TestResult {
         let plain = [(paths[1], Some(filler.as_str()))];
         let small = shared_context(&format!("goal {seed}"), &plain).ok_or("a small brief fits")?;
         assert_eq!(
-            fitting_context(Some(small.clone()), &system, &paths[1..], |sent| {
-                default_route.fits(sent)
-            })
+            fitting_context(
+                Some(small.clone()),
+                &system,
+                &paths[1..],
+                |sent| { default_route.fits(sent) },
+                ""
+            )
             .as_deref(),
             Some(small.as_str()),
             "seed {seed}: a small brief is shared on the default route"
         );
         assert!(
-            fitting_context(Some(small), &system, &paths[1..], |sent| narrow_route
-                .fits(sent))
+            fitting_context(
+                Some(small),
+                &system,
+                &paths[1..],
+                |sent| narrow_route.fits(sent),
+                ""
+            )
             .is_none(),
             "seed {seed}: a 1 KiB route refuses a 2 KiB context"
         );
         assert!(
-            fitting_context(None, &system, &paths, |_sent| true).is_none(),
+            fitting_context(None, &system, &paths, |_sent| true, "").is_none(),
             "seed {seed}: no context stays no context"
         );
         let context = format!("context {seed}");
-        let refused = Message::new(Role::User, user_turn(Some(&context), "", paths[1], None));
+        let refused = Message::new(
+            Role::User,
+            user_turn(Some(&context), "", paths[1], None, ""),
+        );
         assert!(
-            fitting_context(Some(context.clone()), &system, &paths, |sent| !sent
-                .contains(&refused))
+            fitting_context(
+                Some(context.clone()),
+                &system,
+                &paths,
+                |sent| !sent.contains(&refused),
+                ""
+            )
             .is_none(),
             "seed {seed}: one file whose request does not fit keeps every file on its own prompt"
         );
@@ -633,5 +661,78 @@ fn sim_an_empty_reply_is_never_written_as_the_file() -> TestResult {
             "seed {seed}: one visible character is a file"
         );
     }
+    Ok(())
+}
+
+/// The probe rides after the turn's stable bytes in both prompt modes, and the
+/// fits check answers for the prompt the model will read: a shared turn still
+/// begins with the whole shared context (ADR 0043) with the probe after it, a
+/// one-file turn carries the probe after its prompt, an empty probe adds
+/// nothing, a probe that fits keeps the shared context and one past the
+/// request bound falls back to one-file prompts (larry#274). Catches a probe
+/// placed inside the byte-stable prefix, a fits check that ignored the probe,
+/// and a fallback that dropped the probe the model was promised.
+#[test]
+fn sim_a_probe_rides_both_prompt_modes_after_the_prefix_and_the_fits_check_counts_it() -> TestResult
+{
+    let client = bounded_client(None)?;
+    let system = system_line(&format!("{:064x}", 0));
+    let probe = "Environment probe (the sealed report holds the same facts):\nfolder: /tree\n";
+    let turn = user_turn(Some("shared context"), "goal", "file.txt", None, probe);
+    assert!(
+        turn.starts_with("shared context\n"),
+        "a shared turn still begins with the whole shared context"
+    );
+    assert!(
+        turn.contains("\nWrite this file now: file.txt"),
+        "the file line still closes the shared turn"
+    );
+    let (context_at, probe_at, write_at) = (
+        turn.find("shared context").ok_or("the context")?,
+        turn.find("Environment probe").ok_or("the probe")?,
+        turn.find("Write this file now").ok_or("the file line")?,
+    );
+    assert!(
+        context_at < probe_at && probe_at < write_at,
+        "the probe rides after the prefix and before the file line, never inside them"
+    );
+    let alone = user_turn(None, "goal", "file.txt", Some("current"), probe);
+    assert!(
+        alone.starts_with(prompt("goal", "file.txt", Some("current")).as_str()),
+        "a one-file turn still begins with its prompt"
+    );
+    assert!(
+        alone.ends_with(probe),
+        "the one-file turn ends with the probe"
+    );
+    let bare = user_turn(None, "goal", "file.txt", None, "");
+    assert_eq!(
+        bare,
+        prompt("goal", "file.txt", None),
+        "an empty probe adds nothing to the turn"
+    );
+    assert!(
+        fitting_context(
+            Some(String::from("shared context")),
+            &system,
+            &["file.txt"],
+            |sent| { client.fits(sent) },
+            probe
+        )
+        .is_some(),
+        "a probe that fits keeps the shared context"
+    );
+    let huge = "p".repeat(2_000_000);
+    assert!(
+        fitting_context(
+            Some(String::from("shared context")),
+            &system,
+            &["file.txt"],
+            |sent| { client.fits(sent) },
+            &huge
+        )
+        .is_none(),
+        "a probe past the request bound falls back to one-file prompts"
+    );
     Ok(())
 }
