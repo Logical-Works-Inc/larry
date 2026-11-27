@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0127: bounded live command output reaches the artifact pane"
+title: "ADR 0129: bounded live command output reaches the artifact pane"
 description: "The TUI streams bounded command output while preserving complete head and tail capture."
-resource: /docs/adr/0127-pane-stream.md
+resource: /docs/adr/0129-pane-stream.md
 tags: [larry, adr, tui, executor, process]
 generated: {by: codex, at: 2026-11-26}
 verified: {by: codex, method: lgwks-box cargo nextest run --locked -p larry-demo, 2026-11-26}
