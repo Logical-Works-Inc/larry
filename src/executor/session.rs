@@ -23,7 +23,6 @@
 //! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
-use std::fmt;
 use std::path::Path;
 
 use lgwks_macros::Error;
@@ -33,7 +32,6 @@ use super::ExecError;
 use super::Ledger;
 use super::Report;
 use super::Settings;
-use super::author::unfenced;
 use super::backoff;
 use super::compact::{Answer, Conversation};
 use super::digest_hex;
@@ -41,9 +39,16 @@ use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::prepare;
-use super::run::{CommandResult, Place, run_command};
+use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
 use crate::model::{Completion, ModelClient, Usage};
+
+/// A terminal session's reply protocol: one JSON object per turn, parsed and
+/// refused with an exact reason the model can retry from (larry#545).
+#[path = "session_reply.rs"]
+pub(crate) mod reply;
+
+use reply::{Reply, parse_reply};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
@@ -141,6 +146,12 @@ pub(crate) trait Observer {
     /// The change in full, as a unified diff of at most 1 MiB, offered once just before
     /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
     fn diff(&mut self, _text: &str) {}
+    /// A nonblocking callback for live command output, when the frontend can paint it.
+    fn stream_callback(&mut self) -> Option<StreamCallback> {
+        None
+    }
+    /// Reports callback chunks dropped at the bounded event channel.
+    fn stream_dropped(&mut self) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
     /// An observer that records nothing leaves this alone.
     fn handed(&mut self, _line: &str, _applied: bool) {}
@@ -162,80 +173,6 @@ pub(crate) trait Observer {
     /// leaves this alone, which never stops the session early.
     fn cancelled(&self) -> bool {
         false
-    }
-}
-
-/// One reply, parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Reply {
-    /// Run this command with `sh -c`.
-    Command(String),
-    /// The task is done; the summary for the person.
-    Done(String),
-}
-
-/// Why a reply was refused; the model is told and may try again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplyFault {
-    /// The reply is over [`MAX_REPLY_BYTES`].
-    TooLong,
-    /// The reply is not JSON; the parser's reason, so the model sees where it broke.
-    NotJson(String),
-    /// The reply is JSON but not an object.
-    NotAnObject,
-    /// The object does not hold exactly one key, `command` or `done`.
-    Keys,
-    /// The key's value is not a string.
-    NotAString,
-    /// The command is empty or blank.
-    EmptyCommand,
-    /// The command or summary is over 4 KiB.
-    FieldTooLong,
-    /// The command holds a NUL byte, which no shell argument can carry.
-    Nul,
-}
-
-impl fmt::Display for ReplyFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TooLong => write!(out, "the reply is over {MAX_REPLY_BYTES} bytes"),
-            Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
-            Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => out.write_str("the object must hold exactly one key, command or done"),
-            Self::NotAString => out.write_str("the value must be a string"),
-            Self::EmptyCommand => out.write_str("the command is empty"),
-            Self::FieldTooLong => write!(
-                out,
-                "the command or summary is over {MAX_COMMAND_BYTES} bytes"
-            ),
-            Self::Nul => out.write_str("the command holds a NUL byte"),
-        }
-    }
-}
-
-/// Parses one model reply: one surrounding code fence and outer whitespace are allowed.
-pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
-    if text.len() > MAX_REPLY_BYTES {
-        return Err(ReplyFault::TooLong);
-    }
-    let value: Value = json::from_str(unfenced(text).trim())
-        .map_err(|cause| ReplyFault::NotJson(cause.to_string()))?;
-    let object = value.as_object().ok_or(ReplyFault::NotAnObject)?;
-    let mut entries = object.iter();
-    let (Some((key, field)), None) = (entries.next(), entries.next()) else {
-        return Err(ReplyFault::Keys);
-    };
-    let text = field.as_str().ok_or(ReplyFault::NotAString)?;
-    if text.len() > MAX_COMMAND_BYTES {
-        return Err(ReplyFault::FieldTooLong);
-    }
-    let name: &str = key;
-    match name {
-        "command" if text.trim().is_empty() => Err(ReplyFault::EmptyCommand),
-        "command" if text.contains('\0') => Err(ReplyFault::Nul),
-        "command" => Ok(Reply::Command(text.to_owned())),
-        "done" => Ok(Reply::Done(text.to_owned())),
-        _ => Err(ReplyFault::Keys),
     }
 }
 
@@ -615,30 +552,7 @@ impl Turn<'_> {
                     if self.observer.cancelled() {
                         break Stop::Cancelled;
                     }
-                    self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
-                    // The person's cancel is polled while the command runs, so Esc
-                    // ends it and its whole group, not only the next step (larry#242).
-                    let result = run_command(
-                        &argv,
-                        self.place,
-                        &self.settings.path,
-                        self.settings.timeout,
-                        self.ledger,
-                        self.task_id,
-                        &|| self.observer.cancelled(),
-                    )?
-                    .clipped(OBSERVED_BYTES);
-                    let answer = Answer::Observed {
-                        step,
-                        command,
-                        status: status(&result),
-                        output: Some(streams(&result)),
-                    };
-                    let was_interrupted = result.interrupted();
-                    let passed =
-                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
-                    self.observer.finished(step, &answer.text(), passed);
+                    let (answer, was_interrupted, result) = self.run_step(step, command)?;
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
                     if was_interrupted {
@@ -666,6 +580,39 @@ impl Turn<'_> {
             declined,
             interrupted,
         })
+    }
+
+    /// Runs `command` as step `step` and observes it: live output streams while the
+    /// command runs (larry#252), and the person's cancel ends its whole group (larry#242).
+    fn run_step(
+        &mut self,
+        step: usize,
+        command: String,
+    ) -> Result<(Answer, bool, CommandResult), ExecError> {
+        self.observer.started(step, &command);
+        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let stream = self.observer.stream_callback();
+        let result = run_command(
+            &argv,
+            self.place,
+            &self.settings.path,
+            self.settings.timeout,
+            self.ledger,
+            self.task_id,
+            RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
+        );
+        self.observer.stream_dropped();
+        let result = result?.clipped(OBSERVED_BYTES);
+        let answer = Answer::Observed {
+            step,
+            command,
+            status: status(&result),
+            output: Some(streams(&result)),
+        };
+        let was_interrupted = result.interrupted();
+        let passed = result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
+        self.observer.finished(step, &answer.text(), passed);
+        Ok((answer, was_interrupted, result))
     }
 
     /// One completion over `conversation`, compacted first when it needs it and

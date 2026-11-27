@@ -14,8 +14,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use lgwks_std::json::Value;
 
 use crate::executor::{
     Approval, ExecError, Handoff, Isolation, Observer, Report, SessionDoor, Settings, Stop,
-    run_session,
+    StreamCallback, run_session,
 };
 
 /// Events one session may have in flight to the frame.
@@ -124,6 +124,10 @@ pub(crate) enum Event {
     Ask(String),
     /// `command` started.
     Started(String),
+    /// A bounded live-output chunk from the running command.
+    Stream(String),
+    /// The number of live-output chunks dropped when the event channel was full.
+    StreamDropped(usize),
     /// The running command ended: what the model was shown, and whether it exited 0.
     Finished {
         /// The observation.
@@ -161,6 +165,8 @@ pub(super) struct Relay {
     decisions: Receiver<Decision>,
     /// Set by the frame to stop the session.
     cancel: Arc<AtomicBool>,
+    /// Chunks rejected by the bounded worker event channel for the current command.
+    stream_dropped: Arc<AtomicUsize>,
     /// Whether the person said to stop asking.
     always: bool,
 }
@@ -195,6 +201,32 @@ impl Observer for Relay {
 
     fn started(&mut self, _step: usize, command: &str) {
         self.send(Event::Started(command.to_owned()));
+    }
+
+    fn stream_callback(&mut self) -> Option<StreamCallback> {
+        self.stream_dropped.store(0, Ordering::Release);
+        let events = self.events.clone();
+        let cancel = Arc::clone(&self.cancel);
+        let dropped = Arc::clone(&self.stream_dropped);
+        Some(Arc::new(move |chunk| {
+            let text = String::from_utf8_lossy(chunk).into_owned();
+            match events.try_send(Event::Stream(text)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    cancel.store(true, Ordering::Release);
+                }
+            }
+        }))
+    }
+
+    fn stream_dropped(&mut self) {
+        let dropped = self.stream_dropped.swap(0, Ordering::Acquire);
+        if dropped > 0 {
+            self.send(Event::StreamDropped(dropped));
+        }
     }
 
     fn finished(&mut self, _step: usize, observation: &str, passed: bool) {
@@ -308,6 +340,7 @@ impl Worker {
             events: event_tx,
             decisions: decision_rx,
             cancel: Arc::clone(&cancel),
+            stream_dropped: Arc::new(AtomicUsize::new(0)),
             always,
         };
         let thread = std::thread::Builder::new()
@@ -403,12 +436,12 @@ impl Drop for Worker {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc::{Receiver, sync_channel};
 
     use lgwks_std::json::json;
 
-    use super::{Decision, Event, Handoff, Observer, Receipt, Relay, receipt_from};
+    use super::{Decision, EVENTS, Event, Handoff, Observer, Receipt, Relay, receipt_from};
 
     /// A relay whose person has `answer` waiting (`None`: the frame is gone), and its events.
     fn relay(answer: Option<Decision>, always: bool, cancelled: bool) -> (Relay, Receiver<Event>) {
@@ -421,9 +454,46 @@ mod tests {
             events: event_tx,
             decisions,
             cancel: Arc::new(AtomicBool::new(cancelled)),
+            stream_dropped: Arc::new(AtomicUsize::new(0)),
             always,
         };
         (relay, events)
+    }
+
+    /// Live output uses the worker's 64-event bound without blocking its command: the 65th
+    /// callback chunk is shed and one typed event reports the exact count.
+    #[test]
+    fn sim_worker_stream_bound_counts_shed_chunks() -> Result<(), Box<dyn std::error::Error>> {
+        let (event_tx, events) = sync_channel(EVENTS);
+        let (_decision_tx, decisions) = sync_channel(1);
+        let mut relay = Relay {
+            events: event_tx,
+            decisions,
+            cancel: Arc::new(AtomicBool::new(false)),
+            stream_dropped: Arc::new(AtomicUsize::new(0)),
+            always: false,
+        };
+        let callback = relay
+            .stream_callback()
+            .ok_or("the TUI relay owns a stream callback")?;
+        for _ in 0..=EVENTS {
+            callback(b"live\n");
+        }
+        for _ in 0..EVENTS {
+            assert!(matches!(events.recv(), Ok(Event::Stream(_))));
+        }
+        relay.stream_dropped();
+        assert_eq!(events.recv().ok(), Some(Event::StreamDropped(1)));
+        Ok(())
+    }
+
+    /// A command with no dropped chunks sends no drop event: the frame only learns a count
+    /// when a chunk was actually shed.
+    #[test]
+    fn sim_worker_no_drop_sends_no_event() {
+        let (mut relay, events) = relay(None, false, false);
+        relay.stream_dropped();
+        assert!(events.try_recv().is_err(), "no shed chunk, no event");
     }
 
     /// Only an explicit yes applies a change to the person's folder: "always", "no", a gone

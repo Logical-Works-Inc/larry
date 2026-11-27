@@ -18,6 +18,8 @@
 //! The busy-ledger sim proves the ledger reader's retry on its own, once, in
 //! this binary (larry#309).
 
+#[path = "executor_journey/ceiling.rs"]
+mod ceiling;
 #[path = "executor_journey/confine.rs"]
 mod confine;
 #[path = "support/exec_cli.rs"]

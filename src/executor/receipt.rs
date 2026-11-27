@@ -31,6 +31,11 @@ const ACCEPTED: &str = "accepted";
 /// The report member that says the diff is not the whole change (larry#206).
 const DIFF_TRUNCATED: &str = "diff_truncated";
 
+/// The report member that says the task's whole-task deadline spent before the run finished
+/// (larry#439): it names the deadline beside the results, and a report carrying it is never
+/// accepted, because commands already ran that no verdict watched.
+const DEADLINE_PASSED: &str = "deadline_passed";
+
 /// Largest report `verify` reads, in bytes (256 MiB). A report holds at most 16
 /// commands with 1 MiB of stdout and 1 MiB of stderr each, plus a 1 MiB diff:
 /// 33 MiB of text. JSON spends at most six bytes on one control byte, so the
@@ -115,9 +120,11 @@ impl Verdict {
     }
 }
 
-/// Whether a report body is an accepted run: no denial, a diff that is the whole change, at least
-/// one command, and every command exited 0 inside its timeout. Anything missing or mistyped is
-/// not, and a report that ran no command checked nothing (larry#395).
+/// Whether a report body is an accepted run: no denial, a diff that is the whole change, at
+/// least one command, every command exited 0 inside its timeout, and no spent deadline.
+/// Anything missing or mistyped is not, a report that ran no command checked nothing
+/// (larry#395), and a report whose deadline spent is never accepted even when every result it
+/// kept passed, because the verdict watched only part of the run (larry#439).
 #[must_use]
 fn acceptance(body: &Value) -> bool {
     let none_denied = body
@@ -126,11 +133,12 @@ fn acceptance(body: &Value) -> bool {
         .is_some_and(Vec::is_empty);
     let has_diff = body.get("diff").is_some_and(Value::is_string);
     let whole_diff = !diff_cut(body);
+    let no_deadline = body.get(DEADLINE_PASSED).is_none();
     let all_passed = body
         .get("results")
         .and_then(Value::as_array)
         .is_some_and(|results| !results.is_empty() && results.iter().all(passed));
-    none_denied && has_diff && whole_diff && all_passed
+    none_denied && has_diff && whole_diff && no_deadline && all_passed
 }
 
 /// Whether the sealed diff is not the whole change (larry#206). A report that carries
@@ -242,5 +250,22 @@ pub fn verify(bytes: &[u8], trusted: &PublicKey) -> Result<Verdict, ReceiptError
 }
 
 #[cfg(test)]
+use lgwks_std::seeded::Seeded;
+
+/// A signing key whose seed `stream` draws, shared by the receipt simulations.
+#[cfg(test)]
+pub(super) fn seeded_key(stream: &mut Seeded) -> SecretKey {
+    let mut seed = [0_u8; 32];
+    for byte in &mut seed {
+        *byte = stream.next_u64().to_le_bytes()[0];
+    }
+    SecretKey::from_seed(seed)
+}
+
+#[cfg(test)]
 #[path = "receipt_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "receipt_deadline_tests.rs"]
+mod deadline_tests;

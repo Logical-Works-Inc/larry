@@ -35,6 +35,32 @@ const TAIL_BYTES: usize = 524_288;
 /// Bytes read from a pipe per piece.
 const CAPTURE_CHUNK: usize = 8_192;
 
+/// Maximum bytes one live-output callback receives.
+pub(crate) const STREAM_CHUNK: usize = 4_096;
+
+/// A nonblocking observer for live command output. The callback runs on the bounded drain
+/// readers, so it must never wait on the command or another reader.
+pub(crate) type StreamCallback = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// Hooks a command exposes while it runs: cancellation and optional live output.
+#[derive(Clone, Copy)]
+pub(crate) struct RunHooks<'a> {
+    /// Whether the owner has cancelled the command.
+    cancelled: &'a dyn Fn() -> bool,
+    /// The nonblocking live-output callback, when a frontend owns one.
+    stream: Option<&'a StreamCallback>,
+}
+
+impl<'a> RunHooks<'a> {
+    /// Builds the hooks for one command.
+    pub(crate) const fn new(
+        cancelled: &'a dyn Fn() -> bool,
+        stream: Option<&'a StreamCallback>,
+    ) -> Self {
+        Self { cancelled, stream }
+    }
+}
+
 #[cfg(test)]
 pub(super) use group::GROUP_PROBE_DEADLINE;
 pub(super) use group::await_gone;
@@ -231,7 +257,7 @@ pub(crate) fn run_command(
     timeout: Duration,
     ledger: &Ledger,
     task_id: &str,
-    cancelled: &dyn Fn() -> bool,
+    hooks: RunHooks<'_>,
 ) -> Result<CommandResult, ExecError> {
     let started_at = Instant::now();
     // The one timeline the group waits read, built the way the gate builds its own (the
@@ -272,14 +298,18 @@ pub(crate) fn run_command(
     let (status, timed_out, interrupted, stdout, stderr) = std::thread::scope(
         |scope| -> Result<(io::Result<ExitStatus>, bool, bool, Drained, Drained), ExecError> {
             let out_settled = Arc::clone(&settled);
-            let stdout_reader = scope.spawn(move || capture_bounded(stdout_pipe, &out_settled));
+            let out_stream = hooks.stream.cloned();
+            let stdout_reader = scope
+                .spawn(move || capture_bounded(stdout_pipe, &out_settled, out_stream.as_ref()));
             let err_settled = Arc::clone(&settled);
-            let stderr_reader = scope.spawn(move || capture_bounded(stderr_pipe, &err_settled));
+            let err_stream = hooks.stream.cloned();
+            let stderr_reader = scope
+                .spawn(move || capture_bounded(stderr_pipe, &err_settled, err_stream.as_ref()));
             // The receiver outlives the wait unless the wait already failed, and that
             // failure is what the scope returns, so a send with no receiver has no reader.
             scope.spawn(move || status_sender.send(child.wait()));
             let (status, timed_out, interrupted) =
-                match wait_for_status(&clock, &status_receiver, pgid, deadline, cancelled) {
+                match wait_for_status(&clock, &status_receiver, pgid, deadline, hooks.cancelled) {
                     Ok(waited) => waited,
                     Err(cause) => {
                         // The readers stop at the grace past this flag, so the scope ends with
@@ -531,17 +561,39 @@ fn capture_pair(argv0: &str) -> Result<(UnixStream, UnixStream), ExecError> {
 /// so a child that left the group cannot hold the run (larry#334). The read timeout
 /// [`capture_pair`] armed makes the flag visible within [`CANCEL_POLL`], so a cancel is
 /// honoured just as quickly.
-fn capture_bounded(mut stream: UnixStream, settled: &AtomicBool) -> io::Result<Drained> {
+fn capture_bounded(
+    mut stream: UnixStream,
+    settled: &AtomicBool,
+    callback: Option<&StreamCallback>,
+) -> io::Result<Drained> {
     let origin = Instant::now();
-    drain(|chunk| stream.read(chunk), || origin.elapsed(), settled)
+    drain_with_callback(
+        |chunk| stream.read(chunk),
+        || origin.elapsed(),
+        settled,
+        callback,
+    )
 }
 
 /// [`capture_bounded`]'s decisions over a read and a clock the caller supplies, so the seeded
 /// sim drives the grace on a virtual clock rather than the wall (larry#334, SD-4).
+#[cfg(test)]
 fn drain(
+    read: impl FnMut(&mut [u8]) -> io::Result<usize>,
+    now: impl Fn() -> Duration,
+    settled: &AtomicBool,
+) -> io::Result<Drained> {
+    drain_with_callback(read, now, settled, None)
+}
+
+/// The bounded drain with an optional live-output callback. The ordinary drain remains the
+/// seeded reference path; the callback path keeps the report capture and its head+tail bounds
+/// unchanged while splitting every observed read into at most [`STREAM_CHUNK`] bytes.
+fn drain_with_callback(
     mut read: impl FnMut(&mut [u8]) -> io::Result<usize>,
     now: impl Fn() -> Duration,
     settled: &AtomicBool,
+    callback: Option<&StreamCallback>,
 ) -> io::Result<Drained> {
     let mut captured = Captured::default();
     let mut chunk = [0_u8; CAPTURE_CHUNK];
@@ -582,6 +634,11 @@ fn drain(
                 let filled = chunk.get(..read).ok_or_else(|| {
                     io::Error::other("a read reported more bytes than its buffer holds")
                 })?;
+                if let Some(callback) = callback {
+                    for piece in filled.chunks(STREAM_CHUNK) {
+                        callback(piece);
+                    }
+                }
                 captured.push(filled)?;
             }
             // A silent read is retried like an interrupted one, settled or not: a sibling command
