@@ -49,3 +49,26 @@ fn dev_profile_optimizes_workspace_hot_path_only() -> TestResult {
     );
     Ok(())
 }
+
+/// ADR 0124 records the decision this file holds: it names this regression test, the measured
+/// critical path and the estate issue that owns each crate on it (larry#414, SD-7).
+#[test]
+fn the_profile_adr_names_its_regression_and_measured_critical_path() -> TestResult {
+    let adr = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/adr/0124-cold-build-profile.md"),
+    )?;
+    for needle in [
+        "dev_profile_optimizes_workspace_hot_path_only",
+        "--timings",
+        "`bevy_ecs`",
+        "`lgwks_bot`",
+        "`libsqlite3-sys`",
+        "logicalworks-crates#1138",
+        "logicalworks-crates#1139",
+        "logicalworks-crates#1145",
+        "Reversal trigger",
+    ] {
+        assert!(adr.contains(needle), "ADR 0124 names {needle}");
+    }
+    Ok(())
+}

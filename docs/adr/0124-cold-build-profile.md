@@ -59,6 +59,15 @@ percentile test timed out at 300.023 s); `lgwks_bot` and `bevy_ecs`
 at 2 (334.33 s cold, 314.175 s suite); the prior Larry-only profile
 (170.91 s cold, 296.343 s suite).
 
+Where the time goes (lead, `cargo build --bins --locked --timings`, Oracle, main `5accb02`, empty
+target and build dir, cache off, load 2.9 to 5.1): 260.26 s wall, 251 units, 925 s of unit time,
+214 normal dependencies (`cargo tree -e normal`). Slowest units: `lgwks_bot` 57.0 s, the
+`libsqlite3-sys` build script 51.6 s, `bevy_ecs` 43.8 s, `syn` 2 36.7 s, `larry-demo` 36.3 s,
+`syn` 3 34.2 s, `lgwks_deps` 32.2 s, `derive_more-impl` 30.7 s, `rustls` 29.7 s, `lgwks_std`
+27.7 s, `lgwks_ast` 12.8 s. The critical path: `bevy_ecs_macro_logic` (starts 97.9 s), then
+`bevy_ecs_macros` (137.3 s), then `bevy_ecs` (155.5 s to 199.3 s), then `lgwks_bot` (196.4 s to
+253.4 s), then the Larry binaries (254.5 s to 260.2 s). About 160 s of the 260 s is that chain.
+
 The remaining critical path is estate-owned: `lgwks_bot` and its
 `edge` path through `bevy_ecs` (logicalworks-crates#1138),
 `lgwks_ast` and its Rust grammar (logicalworks-crates#1139), and
