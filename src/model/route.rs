@@ -90,6 +90,12 @@ pub enum RouteError {
     BadTemperature,
     /// The kind is not one the client speaks.
     BadKind,
+    /// The kind names a provider the wire in this build does not speak: only
+    /// OpenAI chat is served until PR #534's adapters land (larry#539).
+    KindNotServed {
+        /// The kind name the route carries.
+        kind: String,
+    },
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
     BadResidency,
     /// The request byte bound is outside 1024 bytes to 16 MiB.
@@ -152,6 +158,9 @@ impl fmt::Display for RouteError {
             Self::BadKind => out.write_str(
                 "route kind must be one of openai-chat, anthropic-messages, openai-responses",
             ),
+            Self::KindNotServed { ref kind } => {
+                write!(out, "route kind {kind} has no adapter in this build")
+            },
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
             ),
@@ -192,6 +201,7 @@ impl std::error::Error for RouteError {
             | Self::KeyEnvNotThisTenants { .. }
             | Self::BadTemperature
             | Self::BadKind
+            | Self::KindNotServed { .. }
             | Self::BadResidency
             | Self::BadRequestBytes
             | Self::BadDescribe
@@ -224,6 +234,12 @@ impl Kind {
             Self::AnthropicMessages => "anthropic-messages",
             Self::OpenAiResponses => "openai-responses",
         }
+    }
+
+    /// Whether the wire in this build speaks this kind: OpenAI chat only until
+    /// PR #534's adapters land (larry#539).
+    pub(crate) const fn is_served(self) -> bool {
+        matches!(self, Self::OpenAiChat)
     }
 
     /// The kind a stored name means, `None` for a name no kind has.
@@ -472,18 +488,35 @@ pub(crate) fn resolve(
 ) -> Result<Route, RouteError> {
     let Some(route) = table.lookup(named) else {
         return match (named, environment) {
-            (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
+            (Some(id), Some(route)) if id == ENV_ROUTE => served(route),
             (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
-            (None, Some(route)) => Ok(route),
+            (None, Some(route)) => served(route),
             (None, None) => Err(RouteError::NoRoute),
         };
     };
+    if !route.kind().is_served() {
+        return Err(RouteError::KindNotServed {
+            kind: route.kind().name().to_owned(),
+        });
+    }
     if let Some(refusal) = route.transport_refusal() {
         return Err(refusal);
     }
     match route.key_env_refusal(tenant) {
         None => Ok(route.clone()),
         Some(refusal) => Err(refusal),
+    }
+}
+
+/// The environment route a task falls back to, refused when its kind has no
+/// adapter in this build (larry#539).
+fn served(route: Route) -> Result<Route, RouteError> {
+    if route.kind().is_served() {
+        Ok(route)
+    } else {
+        Err(RouteError::KindNotServed {
+            kind: route.kind().name().to_owned(),
+        })
     }
 }
 

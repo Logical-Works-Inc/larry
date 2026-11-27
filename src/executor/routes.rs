@@ -69,6 +69,7 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::KeyEnvNotThisTenants { .. }
         | RouteError::BadTemperature
         | RouteError::BadKind
+        | RouteError::KindNotServed { .. }
         | RouteError::BadResidency
         | RouteError::BadRequestBytes
         | RouteError::BadDescribe => "",
@@ -240,6 +241,13 @@ fn add(
         Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
         None => Kind::OpenAiChat,
     };
+    // Until PR #534's adapters land the wire speaks OpenAI chat only, so any
+    // other kind is refused before the store opens and nothing is stored (larry#539).
+    if !kind.is_served() {
+        return Err(RouteCliError::Route(RouteError::KindNotServed {
+            kind: kind.name().to_owned(),
+        }));
+    }
     let route = Route::new(&Draft {
         id,
         kind,
@@ -436,6 +444,14 @@ mod tests {
         let kind = said(&RouteCliError::Route(RouteError::BadKind));
         assert!(kind.starts_with("route kind must be one of"), "{kind}");
         assert_eq!(kind.matches("route").count(), 1, "{kind}");
+        let unserved = said(&RouteCliError::Route(RouteError::KindNotServed {
+            kind: String::from("anthropic-messages"),
+        }));
+        assert_eq!(
+            unserved, "route kind anthropic-messages has no adapter in this build",
+            "{unserved}"
+        );
+        assert_eq!(unserved.matches("route").count(), 1, "{unserved}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [

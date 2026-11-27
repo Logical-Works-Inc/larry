@@ -35,6 +35,10 @@ adapter work had nowhere to plug in.
 - A route added without `--kind` is an OpenAI chat route, so every stored
   route keeps working and the seal of an old route gains one member.
 - An unknown `--kind` is refused naming the field, and nothing is stored.
+- Only `openai-chat` is served in this build: `route add` and `resolve`
+  refuse any other kind as `RouteError::KindNotServed`, storing nothing,
+  and PR #534's remainder deletes that refusal in the same change that
+  wires the adapter.
 
 ## Proof
 
@@ -42,6 +46,11 @@ adapter work had nowhere to plug in.
   every named kind parses back and seals with its name; an unknown kind
   parses to nothing.
 - `executor::routes::tests::every_route_refusal_names_route_once` (unit):
-  an unknown kind is refused naming the field, storing nothing.
+  an unknown kind is refused naming the field, storing nothing; an
+  unserved kind is refused with its exact no-adapter line.
 - `tests/route_cli_journey.rs`: two tenants' receipts each name
   `openai-chat` by exact seal equality.
+- `tests/route_kind_journey.rs`: `an_unserved_kind_is_refused_before_anything_is_stored`
+  adds each unserved kind and asserts the exact line, exit 1 and an
+  empty list, then rewrites a stored row and asserts `resolve` refuses
+  the same line.
