@@ -40,7 +40,7 @@ fn simulation(initial: u64, fault: u8) -> TestResult<ContentDigest> {
                 "duplicate publish is not a new fact"
             );
         }
-        match read(&runtime, scope, &mut consumer, &mut seen) {
+        match read(&mut runtime, scope, &mut consumer, &mut seen) {
             Ok(_) => {}
             Err(error)
                 if error.downcast_ref::<CursorError>() == Some(&CursorError::ResyncRequired) =>
@@ -89,13 +89,13 @@ fn simulation(initial: u64, fault: u8) -> TestResult<ContentDigest> {
         runtime.resync_consumer(scope, &mut consumer)?;
     }
     runtime.resync_consumer(scope, &mut consumer)?;
-    drain(&runtime, scope, &mut consumer, &mut seen)?;
+    drain(&mut runtime, scope, &mut consumer, &mut seen)?;
     assert_eq!(
         seen,
         expected(&runtime, scope),
         "seed {initial}: no silent gaps or tenant contamination"
     );
-    let replay = subject(Some(runtime.into_journal()))?;
+    let mut replay = subject(Some(runtime.into_journal()))?;
     let mut resumed = replay.subscribe(scope, Some(consumer.cursor()), limits)?;
     assert!(
         replay

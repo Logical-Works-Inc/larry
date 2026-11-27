@@ -92,7 +92,7 @@ struct Subcommand {
 
 /// The variables a command reads that runs a task through the executor: the
 /// state directory, the policy, the command timeout and the model settings.
-const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
+const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_FENCE_CONTROL, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
 
 /// The variables `larry model` reads: one gateway, one key and the retry knobs.
 const MODEL_ENV: &str = "LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY, LARRY_MODEL_TIMEOUT_MS, LARRY_MODEL_ATTEMPTS, LARRY_MODEL_BACKOFF_MS, LARRY_MODEL_DEADLINE_MS";
@@ -295,9 +295,11 @@ fn model_once() -> Result<(), ModelCheck> {
 }
 
 /// Writes one diagnostic line to standard error, never to the protocol stream.
+/// Exactly one trailing newline is written, however the refusal reads, so the
+/// next shell output starts on its own line (larry#543).
 fn diagnose(message: &str) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    stderr.write_all(message.as_bytes())?;
+    stderr.write_all(message.trim_end_matches('\n').as_bytes())?;
     stderr.write_all(b"\n")
 }
 

@@ -295,6 +295,8 @@ impl App {
                     Phase::Stopping(true)
                 };
             }
+            Event::Stream(chunk) => self.pane.stream(&chunk),
+            Event::StreamDropped(chunks) => self.pane.stream_dropped(chunks),
             Event::Finished {
                 observation,
                 passed,

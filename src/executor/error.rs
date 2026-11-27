@@ -37,11 +37,48 @@ pub enum ExecError {
         /// The value that was refused.
         value: String,
     },
+    /// A tenant ceiling setting (`LARRY_EXEC_MAX_*`, `LARRY_EXEC_SHELLS`, `LARRY_EXEC_BASES`)
+    /// is not the form it must take, so no default stands in for it (larry#439).
+    #[error("exec {name} must be {expected}: {value}")]
+    BadCeiling {
+        /// The variable.
+        name: &'static str,
+        /// The form it must take.
+        expected: &'static str,
+        /// The value that was refused.
+        value: String,
+    },
+    /// The task names a shell, base, timeout or deadline past this tenant's ceiling, so
+    /// nothing was cloned and nothing ran (larry#439).
+    #[error("exec task {what} {value} is past this tenant's ceiling {ceiling}; nothing ran")]
+    PastCeiling {
+        /// What the task named: `shell`, `base`, `timeout_ms` or `deadline_ms`.
+        what: &'static str,
+        /// The value it named.
+        value: String,
+        /// The ceiling it passed.
+        ceiling: String,
+    },
+    /// The task ran past its whole-task deadline: the command running then was killed with
+    /// its group and no command after it started (larry#439).
+    #[error("exec task passed its deadline of {deadline_ms} ms; the running group was killed")]
+    DeadlinePassed {
+        /// The deadline, in milliseconds.
+        deadline_ms: u64,
+    },
     /// `LARRY_POLICY` names a scope the executor does not know.
     #[error("exec LARRY_POLICY is not a scope name: {value}")]
     BadPolicy {
         /// The name that was refused.
         value: String,
+    },
+    /// `LARRY_FENCE_CONTROL` is not one typed host action.
+    #[error("exec LARRY_FENCE_CONTROL is invalid: {value}: {cause}")]
+    BadFenceControl {
+        /// The refused control value.
+        value: String,
+        /// The parser's typed cause.
+        cause: String,
     },
     /// The sqlite ledger could not be opened or migrated.
     #[error("exec ledger: {0}")]

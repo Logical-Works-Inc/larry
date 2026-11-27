@@ -59,7 +59,8 @@ pub struct Journal {
     command_index: BTreeMap<CommandId, usize>,
     /// Last accepted event sequence for each run.
     last_sequence: BTreeMap<RunId, EventSequence>,
-    /// Disposable tenant cursor lookup, rebuilt from entries on reopen.
+    /// Disposable tenant cursor lookup, rebuilt from entries on reopen and
+    /// extended on read; appends never hash for it (larry#215, ADR 0121).
     pub(crate) consumer_index: crate::consumer::ConsumerIndex,
     /// Maximum retained entries.
     capacity: usize,
@@ -391,19 +392,24 @@ impl Journal {
     }
 
     /// Stages the accepted fact for the file first, when there is one, then
-    /// publishes the derived descriptor and the fact together.
+    /// publishes the fact. Tenant descriptors extend on read, never here, so
+    /// the hot append path pays no hash per fact (larry#215, ADR 0121).
     ///
     /// # Errors
     ///
-    /// [`RuntimeError::Codec`] when the entry does not encode; the index has
-    /// not taken the entry.
+    /// [`RuntimeError::Codec`] when the entry does not encode.
     fn append_indexed(&mut self, entry: JournalEntry) -> Result<(), RuntimeError> {
         if let Some(backing) = self.durable.as_mut() {
             backing.stage(&entry)?;
         }
-        self.consumer_index.record(&entry, self.entries.len());
         self.entries.push(entry);
         Ok(())
+    }
+
+    /// Extends the tenant catch-up index to the journal head. Reads pay for
+    /// exactly the facts appended since the last read, once.
+    pub(crate) fn sync_consumer_index(&mut self) {
+        self.consumer_index.sync_to(&self.entries);
     }
 
     /// Refuses an append once the configured entry bound is reached.

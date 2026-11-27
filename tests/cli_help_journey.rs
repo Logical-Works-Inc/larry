@@ -46,10 +46,11 @@ const SUBCOMMANDS: [&str; 13] = [
 
 /// The `LARRY_*` variables a user must be able to find in help: one per command
 /// that reads one, and the two wildcards the executor and the routes use.
-const VARIABLES: [&str; 11] = [
+const VARIABLES: [&str; 12] = [
     "LARRY_STATE_DIR",
     "LARRY_POLICY",
     "LARRY_EXEC_TIMEOUT_MS",
+    "LARRY_FENCE_CONTROL",
     "LARRY_MODEL_URL",
     "LARRY_MODEL_KEY",
     "LARRY_RECEIPT_KEY",
@@ -192,6 +193,92 @@ fn route_remove_of_an_unknown_id_names_route() -> TestResult {
     Ok(())
 }
 
+/// `larry route` usage refusals print the synopsis once, and every
+/// subcommand's refusal is exactly one stderr line ending in one newline with
+/// nothing on stdout (larry#543). A doubled synopsis or a missing newline
+/// joins the next shell line to the refusal.
+#[test]
+fn route_usage_ends_with_one_newline() -> TestResult {
+    use std::ffi::OsStr;
+
+    /// The synopsis every route usage refusal ends with, as
+    /// `executor::routes` prints it.
+    const SYNOPSIS: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
+    /// The refusal for arguments no row of the help table describes.
+    const UNKNOWN: &str = "larry: unknown arguments; run `larry help` for every subcommand and its LARRY_* variables\n";
+    /// The shared `governance`/`tracker` usage refusal for `--bogus`.
+    const GOVERNANCE: &str = "usage: larry governance [--report] [--root DIR] | larry tracker [--check] [--root DIR] (got [\"--bogus\"])\n";
+    /// `larry mutants` with no judged run to read.
+    const MUTANTS: &str = "larry mutants verdict: usage: larry mutants verdict <settings> <artifacts> <jobs.json> (fail closed)\n";
+    /// `larry mascot --bogus`.
+    const MASCOT: &str = "usage: larry mascot [--preview] [--pet DIR] [--svg PATH] [--check [--root DIR]] (got [\"--bogus\"])\n";
+
+    /// Runs `larry <words>` and asserts the exact refusal bytes: exit 1,
+    /// nothing on stdout, `expected` on stderr.
+    fn check(words: &[&str], env: &[(&str, &OsStr)], expected: &str) -> TestResult {
+        let output = spawn_larry_args(words, env, b"")?.wait_with_output()?;
+        assert_eq!(output.status.code(), Some(1), "{words:?} exits 1");
+        assert!(
+            output.stdout.is_empty(),
+            "{words:?} prints nothing on stdout: {:?}",
+            output.stdout
+        );
+        let stderr = stderr_of(&output);
+        assert_eq!(
+            stderr, expected,
+            "{words:?} prints exactly one line ending in one newline"
+        );
+        Ok(())
+    }
+
+    let state = TempDir::new()?;
+    let state_env = [("LARRY_STATE_DIR", state.path().as_os_str())];
+    // The route refusals: the usage synopsis once with its reason, the price
+    // refusal, and the unknown id, each exactly one line.
+    let bogus = format!("route: not a route command; {SYNOPSIS}\n");
+    check(&["route", "bogus"], &state_env, &bogus)?;
+    assert_eq!(
+        bogus.matches("usage: larry route").count(),
+        1,
+        "the synopsis appears once"
+    );
+    check(
+        &["route", "price", "r1", "--in", "-1", "--out", "1"],
+        &state_env,
+        "route price --in must be dollars per million tokens like 0.30, at most 10000\n",
+    )?;
+    check(
+        &["route", "price", "nope", "--in", "1", "--out", "1"],
+        &state_env,
+        "route: no route has the id nope\n",
+    )?;
+    check(
+        &["route", "add", "main", "--kind", "bogus"],
+        &state_env,
+        "route kind must be one of openai-chat, anthropic-messages, openai-responses\n",
+    )?;
+    // One refusal from every other subcommand that prints one.
+    check(&["nonsense"], &[], UNKNOWN)?;
+    for words in [
+        vec!["mcp", "--extra"],
+        vec!["acp", "--extra"],
+        vec!["model", "--extra"],
+        vec!["exec", "--extra"],
+        vec!["verify", "--extra"],
+        vec!["key", "--extra"],
+        vec!["eval", "--extra"],
+        vec!["serve", "--extra"],
+        vec!["serve", "key", "t1", "--extra"],
+    ] {
+        check(&words, &[], UNKNOWN)?;
+    }
+    check(&["governance", "--bogus"], &[], GOVERNANCE)?;
+    check(&["tracker", "--bogus"], &[], GOVERNANCE)?;
+    check(&["mutants"], &[], MUTANTS)?;
+    check(&["mascot", "--bogus"], &[], MASCOT)?;
+    Ok(())
+}
+
 /// `larry exec` reads `acceptance` as argv arrays. A document that sends a
 /// string, a bare string per command, or a non-string item is refused with the
 /// form and an example, never with a bare "wrong type" (larry#228).
@@ -250,7 +337,7 @@ fn route_add_errors_name_the_field_once() -> TestResult {
                 "add",
                 id,
                 "--url",
-                "http://gateway.test:8443/v1",
+                "https://gateway.test:8443/v1",
                 "--model",
                 "model-1",
                 "--key-env",

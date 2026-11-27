@@ -14,7 +14,13 @@
 
 use std::fmt;
 
-use lgwks_std::json::{Value, json};
+use super::route_transport::{authority_of, is_loopback};
+
+#[path = "route_table.rs"]
+mod table;
+pub(crate) use table::Table;
+#[path = "route_view.rs"]
+mod view;
 
 /// The id of the route the operator's environment declares; no stored route may
 /// take it, so a task naming `env` can only mean the environment.
@@ -24,7 +30,7 @@ pub(crate) const MAX_ROUTES: u16 = 256;
 /// Longest route id, in bytes.
 const MAX_ID_BYTES: usize = 64;
 /// Longest base URL, in bytes.
-const MAX_URL_BYTES: usize = 2048;
+pub(super) const MAX_URL_BYTES: usize = 2048;
 /// Longest model id, in bytes.
 const MAX_MODEL_BYTES: usize = 256;
 /// Longest key variable name, in bytes.
@@ -49,6 +55,12 @@ const MAX_REQUEST_BYTES: usize = 16_777_216;
 const MAX_TEMPERATURE: f64 = 2.0;
 /// Longest prompt template, in bytes.
 const MAX_PROMPT_BYTES: usize = 8192;
+/// The first route price-table revision.
+pub(crate) const DEFAULT_PRICE_VERSION: u32 = 1;
+/// Highest price a route table may carry, in micro-dollars per million tokens:
+/// the same bound the eval price grammar enforces, so a stored rate and a
+/// `route price` rate answer to one ceiling.
+pub(crate) const MAX_PRICE_MICRO: u64 = 10_000_000_000;
 
 /// Why a route, a route name or a resolution was refused. Every variant is one
 /// failure; none carries a key, a URL or a variable's value.
@@ -62,6 +74,11 @@ pub enum RouteError {
     /// The base URL is not a bare http or https URL: no credentials, query or
     /// fragment, a host made of letters, digits, dots, hyphens and a port.
     BadUrl,
+    /// The route uses plaintext for a host that is not loopback.
+    InsecureTransport {
+        /// The host that would receive the request.
+        host: String,
+    },
     /// The model id is empty, over 256 bytes, or holds whitespace or a control byte.
     BadModel,
     /// The key variable name is not `[A-Z_][A-Z0-9_]{0,63}`.
@@ -89,6 +106,13 @@ pub enum RouteError {
     BadRequestBytes,
     /// The description is over 1 KiB or holds a control byte other than a newline.
     BadDescribe,
+    /// A price is not micro-dollars per million tokens within the bound: a
+    /// negative or over-large stored rate, or a `route price` rate the price
+    /// grammar refuses.
+    BadPrice {
+        /// The rate that failed: `input` or `output`.
+        field: &'static str,
+    },
     /// No route has this id.
     NoSuchId {
         /// The id that was asked for.
@@ -111,6 +135,37 @@ pub enum RouteError {
     },
 }
 
+impl RouteError {
+    /// Whether this refusal already opens with `route <field>`, so a door
+    /// adds no second prefix; every other refusal gets `route: ` by default,
+    /// so none reaches the user bare (larry#228, larry#295). Every variant is
+    /// listed with no wildcard, so a new refusal fails the build until it is
+    /// classified here.
+    pub(crate) const fn opens_with_route(&self) -> bool {
+        match *self {
+            Self::BadId
+            | Self::ReservedId
+            | Self::BadUrl
+            | Self::BadModel
+            | Self::BadKeyEnv
+            | Self::KeyEnvOutsideNamespace
+            | Self::KeyEnvNotThisTenants { .. }
+            | Self::BadTemperature
+            | Self::BadKind
+            | Self::BadPrompt
+            | Self::BadResidency
+            | Self::BadRequestBytes
+            | Self::BadDescribe
+            | Self::BadPrice { .. } => true,
+            Self::InsecureTransport { .. }
+            | Self::NoSuchId { .. }
+            | Self::NoRoute
+            | Self::TableFull { .. }
+            | Self::Damaged { .. } => false,
+        }
+    }
+}
+
 impl fmt::Display for RouteError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -122,6 +177,9 @@ impl fmt::Display for RouteError {
             Self::BadUrl => out.write_str(
                 "route url must be a bare http or https base URL: no credentials, query or fragment",
             ),
+            Self::InsecureTransport { ref host } => {
+                write!(out, "route host {host} requires https unless it is loopback")
+            }
             Self::BadModel => out
                 .write_str("route model must be 1 to 256 bytes with no whitespace or control byte"),
             Self::BadKeyEnv => out.write_str(
@@ -155,6 +213,10 @@ impl fmt::Display for RouteError {
                 "route description must be at most 1024 bytes with no control byte but a newline",
             ),
             Self::NoSuchId { ref id } => write!(out, "no route has the id {id}"),
+            Self::BadPrice { field } => write!(
+                out,
+                "route {field} price must be dollars per million tokens like 0.30, at most 10000"
+            ),
             Self::NoRoute => out.write_str(
                 "no model route: add one with `larry route add`, or set LARRY_MODEL_URL, LARRY_MODEL and LARRY_MODEL_KEY",
             ),
@@ -169,34 +231,21 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Damaged {
-                cause: Some(ref inner),
-                ..
-            } => Some(inner.as_ref()),
-            Self::Damaged { cause: None, .. }
-            | Self::BadId
-            | Self::ReservedId
-            | Self::BadUrl
-            | Self::BadModel
-            | Self::BadKeyEnv
-            | Self::KeyEnvOutsideNamespace
-            | Self::KeyEnvNotThisTenants { .. }
-            | Self::BadTemperature
-            | Self::BadKind
-            | Self::BadPrompt
-            | Self::BadResidency
-            | Self::BadRequestBytes
-            | Self::BadDescribe
-            | Self::NoSuchId { .. }
-            | Self::NoRoute
-            | Self::TableFull { .. } => None,
+        if let Self::Damaged {
+            cause: Some(ref inner),
+            ..
+        } = *self
+        {
+            Some(inner.as_ref())
+        } else {
+            None
         }
     }
 }
 
 /// What speaks at the other end of a route. One variant per provider kind
-/// (larry#205); a new kind is one variant and one wire adapter.
+/// (larry#205, larry#539); the client's wire adapter for a new kind plugs in
+/// at the call site. Every named kind is served (larry#546).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Kind {
@@ -298,29 +347,12 @@ pub(crate) struct Route {
     prompt: Option<String>,
     /// What the route is good for.
     describe: String,
-}
-
-/// The host and port of a bare http or https base URL, `None` when `url` is not one.
-fn authority_of(url: &str) -> Option<&str> {
-    if url.len() > MAX_URL_BYTES
-        || url.chars().any(|character| {
-            character.is_control()
-                || character.is_whitespace()
-                || matches!(character, '?' | '#' | '\\' | '@')
-        })
-    {
-        return None;
-    }
-    let (scheme, rest) = url.split_once("://")?;
-    if scheme != "http" && scheme != "https" {
-        return None;
-    }
-    let authority = rest.split('/').next()?;
-    let well_formed = !authority.is_empty()
-        && authority.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
-        });
-    well_formed.then_some(authority)
+    /// The versioned price table revision for this route.
+    price_version: u32,
+    /// Prompt micro-dollars per million tokens.
+    price_input: u64,
+    /// Completion micro-dollars per million tokens.
+    price_output: u64,
 }
 
 /// Whether `text` is a route id: 1 to 64 bytes of `a-z`, `0-9`, `_` and `-`.
@@ -395,6 +427,26 @@ impl Route {
             return Err(RouteError::ReservedId);
         }
         let route = Route::build(draft)?;
+        if let Some(refusal) = route.transport_refusal() {
+            return Err(refusal);
+        }
+        let in_namespace = route
+            .key_env
+            .strip_prefix(KEY_ENV_PREFIX)
+            .is_some_and(|rest| !rest.is_empty());
+        if !in_namespace {
+            return Err(RouteError::KeyEnvOutsideNamespace);
+        }
+        Ok(route)
+    }
+
+    /// A legacy stored route may be listed or removed even when it predates the
+    /// HTTPS rule. Resolution calls this check before returning it to a sender.
+    pub(crate) fn stored(draft: &Draft<'_>) -> Result<Route, RouteError> {
+        if draft.id == ENV_ROUTE {
+            return Err(RouteError::ReservedId);
+        }
+        let route = Route::build(draft)?;
         let in_namespace = route
             .key_env
             .strip_prefix(KEY_ENV_PREFIX)
@@ -414,7 +466,11 @@ impl Route {
     ///
     /// The [`RouteError`] of the first field that fails its check.
     pub(crate) fn environment(draft: &Draft<'_>) -> Result<Route, RouteError> {
-        Route::build(draft)
+        let route = Route::build(draft)?;
+        match route.transport_refusal() {
+            Some(refusal) => Err(refusal),
+            None => Ok(route),
+        }
     }
 
     /// Checks every field of `draft` and keeps the result.
@@ -466,139 +522,44 @@ impl Route {
             residency: draft.residency.map(str::to_owned),
             prompt: draft.prompt.map(str::to_owned),
             describe: draft.describe.to_owned(),
+            price_version: DEFAULT_PRICE_VERSION,
+            price_input: 0,
+            price_output: 0,
         })
     }
 
-    /// The route id.
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The provider kind.
-    pub(crate) const fn kind(&self) -> Kind {
-        self.kind
-    }
-
-    /// The base URL, without a trailing slash.
-    pub(crate) fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    /// The URL's host and port.
-    pub(crate) fn host(&self) -> &str {
-        &self.host
-    }
-
-    /// The name of the variable that holds the key.
-    pub(crate) fn key_env(&self) -> &str {
-        &self.key_env
-    }
-
-    /// The binding refusal of this route's key variable under `tenant`, `None`
-    /// when the variable is one only that tenant may name: `LARRY_KEY_<TAG>_`
-    /// for this tenant's tag, then at least one byte. A row stored before the
-    /// binding, or edited in the store, fails here, so its value is never read
-    /// (larry#328, CWE-200).
-    pub(crate) fn key_env_refusal(&self, tenant: &str) -> Option<RouteError> {
-        let prefix = tenant_namespace(tenant);
-        if self
-            .key_env
-            .strip_prefix(&prefix)
-            .is_some_and(|rest| !rest.is_empty())
-        {
-            return None;
+    /// The route with its price table set to `version`, `input` and `output`
+    /// micro-dollars per million tokens. Rates past the bound are refused, so
+    /// a damaged row or a hostile flag never prices a call.
+    ///
+    /// # Errors
+    ///
+    /// [`RouteError::BadPrice`] naming the first rate past the bound.
+    pub(crate) fn with_price(
+        mut self,
+        version: u32,
+        input: u64,
+        output: u64,
+    ) -> Result<Route, RouteError> {
+        if input > MAX_PRICE_MICRO {
+            return Err(RouteError::BadPrice { field: "input" });
         }
-        Some(RouteError::KeyEnvNotThisTenants {
-            variable: self.key_env.clone(),
-            prefix,
+        if output > MAX_PRICE_MICRO {
+            return Err(RouteError::BadPrice { field: "output" });
+        }
+        self.price_version = version;
+        self.price_input = input;
+        self.price_output = output;
+        Ok(self)
+    }
+
+    /// The transport refusal, when a route would send plaintext off-host.
+    pub(crate) fn transport_refusal(&self) -> Option<RouteError> {
+        (self.base_url.starts_with("http://") && !is_loopback(&self.host)).then(|| {
+            RouteError::InsecureTransport {
+                host: self.host.clone(),
+            }
         })
-    }
-
-    /// The model id.
-    pub(crate) fn model(&self) -> &str {
-        &self.model
-    }
-
-    /// The pinned sampling temperature, when there is one.
-    pub(crate) const fn temperature(&self) -> Option<f64> {
-        self.temperature
-    }
-
-    /// The request body bound, in bytes.
-    pub(crate) const fn request_bytes(&self) -> usize {
-        self.request_bytes
-    }
-
-    /// The country where the provider processes the data, when declared.
-    pub(crate) fn residency(&self) -> Option<&str> {
-        self.residency.as_deref()
-    }
-
-    /// The prompt template prepended to the system turn, when the route names one.
-    pub(crate) fn prompt(&self) -> Option<&str> {
-        self.prompt.as_deref()
-    }
-
-    /// The BLAKE3 digest of the route's prompt template as hex, `None` when the
-    /// route names none: what a sealed record carries instead of the text.
-    pub(crate) fn prompt_hash(&self) -> Option<String> {
-        self.prompt.as_deref().map(|template| {
-            let mut hasher = lgwks_std::hash::Hasher::new();
-            hasher.update(template.as_bytes());
-            hasher.finalize().to_hex()
-        })
-    }
-
-    /// What the route is good for.
-    pub(crate) fn describe(&self) -> &str {
-        &self.describe
-    }
-
-    /// What a sealed report says about the route: its id, kind, the model, the
-    /// gateway's host and port, the residency (`null` when undeclared) and the
-    /// prompt template's hash (`null` when the route names none). Never the
-    /// URL's path, the template, a key or the name of the key's variable.
-    pub(crate) fn seal(&self) -> Value {
-        json!({
-            "id": self.id,
-            "kind": self.kind.name(),
-            "model": self.model,
-            "host": self.host,
-            "residency": self.residency,
-            "prompt_hash": self.prompt_hash(),
-        })
-    }
-}
-
-/// A tenant's stored routes and which one is the default.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Table {
-    /// The routes, ordered by id.
-    routes: Vec<Route>,
-    /// The id of the default route, when there is one.
-    default: Option<String>,
-}
-
-impl Table {
-    /// A table of `routes` whose default is `default`.
-    pub(crate) fn new(routes: Vec<Route>, default: Option<String>) -> Table {
-        Table { routes, default }
-    }
-
-    /// The routes, ordered by id.
-    pub(crate) fn routes(&self) -> &[Route] {
-        &self.routes
-    }
-
-    /// The id of the default route.
-    pub(crate) fn default_id(&self) -> Option<&str> {
-        self.default.as_deref()
-    }
-
-    /// The stored route `named` asks for, or the default when it names none.
-    pub(crate) fn lookup(&self, named: Option<&str>) -> Option<&Route> {
-        let wanted = named.or(self.default.as_deref())?;
-        self.routes.iter().find(|route| route.id == wanted)
     }
 }
 
@@ -621,20 +582,25 @@ pub(crate) fn resolve(
     named: Option<&str>,
     environment: Option<Route>,
 ) -> Result<Route, RouteError> {
-    if let Some(route) = table.lookup(named) {
-        return match route.key_env_refusal(tenant) {
-            None => Ok(route.clone()),
-            Some(refusal) => Err(refusal),
+    let Some(route) = table.lookup(named) else {
+        return match (named, environment) {
+            (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
+            (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
+            (None, Some(route)) => Ok(route),
+            (None, None) => Err(RouteError::NoRoute),
         };
+    };
+    if let Some(refusal) = route.transport_refusal() {
+        return Err(refusal);
     }
-    match (named, environment) {
-        (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
-        (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
-        (None, Some(route)) => Ok(route),
-        (None, None) => Err(RouteError::NoRoute),
+    match route.key_env_refusal(tenant) {
+        None => Ok(route.clone()),
+        Some(refusal) => Err(refusal),
     }
 }
 /// Unit tests of the field checks at their boundaries and of the resolver order.
+/// They live in `route_tests.rs`: verification beside the mechanism, one file
+/// per job, as the seeded simulations live in `sim_route.rs`.
 #[cfg(test)]
 #[path = "route_tests.rs"]
 mod tests;

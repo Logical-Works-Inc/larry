@@ -1,9 +1,9 @@
-//! Seeded OpenAI-compatible mock model endpoint (larry#82), shared by the
-//! tests and benchmarks of the model client (#83), the MCP server (#84) and the
-//! harness benchmark (#72), so none of them makes a paid model call.
+//! Seeded mock model endpoint (larry#82, larry#205), shared by the tests and
+//! benchmarks of the model client (#83), the MCP server (#84) and the harness
+//! benchmark (#72), so none of them makes a paid model call.
 //!
-//! `POST /v1/chat/completions` (JSON, non-streaming: the forge client sends no
-//! `stream` key, and `"stream": true` is refused with a 400). One seed fixes
+//! `POST /v1/chat/completions`, `/v1/messages` and `/v1/responses` (JSON,
+//! non-streaming: the forge client sends no `stream` key, and `"stream": true` is refused with a 400). One seed fixes
 //! every response: the reply for request number `n` is a pure function of the
 //! seed, `n` and the request body, so the same seed and the same request
 //! sequence give byte-identical responses and the same trace hash. The trace

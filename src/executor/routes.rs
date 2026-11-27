@@ -14,17 +14,19 @@ use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 use super::{ExecError, Ledger, digest_hex, identity, state_dir};
+use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
-
-/// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RouteCliError {
-    /// The arguments are not a `larry route` command.
-    #[error("route: {0}; {}", USAGE)]
+    /// The arguments are not a `larry route` command. The synopsis lives in
+    /// this one message (larry#543): the derive renders tuple placeholders
+    /// onto its extra arguments, so a `{USAGE}` tail would print twice.
+    #[error(
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+    )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
     #[error("route: every argument must be UTF-8 text")]
@@ -43,6 +45,15 @@ pub enum RouteCliError {
         /// Why the text is not a number, in the parser's words.
         reason: String,
     },
+    /// A `route price` rate the price grammar refuses.
+    #[error("route price {flag} must be dollars per million tokens like 0.30, at most 10000")]
+    Price {
+        /// The flag that named the rate.
+        flag: &'static str,
+        /// Why the grammar refused it.
+        #[source]
+        fault: PriceFault,
+    },
     /// A route, a route id or a resolution was refused.
     #[error("{}{__field_0}", route_prefix(__field_0))]
     Route(#[source] RouteError),
@@ -54,26 +65,15 @@ pub enum RouteCliError {
     Output(#[source] io::Error),
 }
 
-/// What a route refusal is prefixed with. A field refusal already opens with
-/// `route <field>`, so this door adds no second prefix (larry#228); every other
-/// refusal, a new variant included, gets the prefix by default, so none reaches
-/// the user bare (larry#295).
+/// What a route refusal is prefixed with: nothing when the refusal already
+/// opens with `route <field>`, else `route: `, so none reaches the user bare.
+/// The classification lives on the refusal itself
+/// ([`RouteError::opens_with_route`]), listed once with no wildcard.
 const fn route_prefix(cause: &RouteError) -> &'static str {
-    match *cause {
-        RouteError::BadId
-        | RouteError::ReservedId
-        | RouteError::BadUrl
-        | RouteError::BadModel
-        | RouteError::BadKeyEnv
-        | RouteError::KeyEnvOutsideNamespace
-        | RouteError::KeyEnvNotThisTenants { .. }
-        | RouteError::BadTemperature
-        | RouteError::BadKind
-        | RouteError::BadPrompt
-        | RouteError::BadResidency
-        | RouteError::BadRequestBytes
-        | RouteError::BadDescribe => "",
-        _ => "route: ",
+    if cause.opens_with_route() {
+        ""
+    } else {
+        "route: "
     }
 }
 
@@ -279,6 +279,64 @@ fn add(
     )
 }
 
+/// `larry route price <id> --in <dollars> --out <dollars>`: sets the route's
+/// versioned price table in micro-dollars per million tokens, bumping its
+/// revision, and prints it. Only this command writes prices; `route add`
+/// never does.
+fn price(
+    read: &impl Fn(&str) -> Option<String>,
+    id: &str,
+    flags: &[&str],
+    out: &mut impl Write,
+) -> Result<(), RouteCliError> {
+    let id = id_arg(id)?;
+    // Exactly the two rates, each with its value, nothing else.
+    let mut input: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut rest = flags.iter().copied();
+    while let Some(flag) = rest.next() {
+        let slot = match flag {
+            "--in" => &mut input,
+            "--out" => &mut output,
+            _ => return Err(RouteCliError::Usage("unknown flag")),
+        };
+        let value = rest
+            .next()
+            .ok_or(RouteCliError::Usage("a flag needs its value"))?;
+        if slot.replace(value).is_some() {
+            return Err(RouteCliError::Usage("a flag was given twice"));
+        }
+    }
+    let (Some(input), Some(output)) = (input, output) else {
+        return Err(RouteCliError::Usage("route price needs --in and --out"));
+    };
+    let input = price_rate(input, "--in")?;
+    let output = price_rate(output, "--out")?;
+    let (ledger, tenant) = open(read)?;
+    ledger
+        .set_route_price(&tenant, id, input, output)
+        .map_err(from_exec)?;
+    let table = ledger.routes(&tenant).map_err(from_exec)?;
+    let held = table
+        .lookup(Some(id))
+        .ok_or_else(|| RouteCliError::Route(RouteError::NoSuchId { id: id.to_owned() }))?;
+    say(
+        out,
+        &json!({
+            "route": id,
+            "priced": true,
+            "price_version": held.price_version(),
+            "price_input_micros": held.price_input(),
+            "price_output_micros": held.price_output(),
+        }),
+    )
+}
+
+/// `text` as micro-dollars per million tokens, or the price refusal naming `flag`.
+fn price_rate(text: &str, flag: &'static str) -> Result<u64, RouteCliError> {
+    crate::eval::parse_price(text.trim()).map_err(|fault| RouteCliError::Price { flag, fault })
+}
+
 /// One route as the JSON listing prints it.
 fn listed(route: &Route, table: &Table) -> Value {
     json!({
@@ -292,6 +350,9 @@ fn listed(route: &Route, table: &Table) -> Value {
         "request_bytes": route.request_bytes(),
         "residency": route.residency(),
         "prompt_hash": route.prompt_hash(),
+        "price_version": route.price_version(),
+        "price_input_micros": route.price_input(),
+        "price_output_micros": route.price_output(),
         "describe": route.describe(),
         "default": table.default_id() == Some(route.id()),
     })
@@ -393,6 +454,7 @@ pub fn run(
 ) -> Result<(), RouteCliError> {
     match *args {
         ["add", id, ref flags @ ..] => add(&read, id, flags, out),
+        ["price", id, ref flags @ ..] => price(&read, id, flags, out),
         ["list"] => list(&read, false, out),
         ["list", "--json"] => list(&read, true, out),
         ["remove", id] => remove(&read, id, out),
@@ -405,7 +467,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::RouteCliError;
+    use super::{PriceFault, RouteCliError};
     use crate::model::RouteError;
 
     /// The `larry route` text of one refusal.
@@ -445,6 +507,17 @@ mod tests {
         let prompt = said(&RouteCliError::Route(RouteError::BadPrompt));
         assert!(prompt.starts_with("route prompt must be"), "{prompt}");
         assert_eq!(prompt.matches("route").count(), 1, "{prompt}");
+        let priced = said(&RouteCliError::Route(RouteError::BadPrice {
+            field: "input",
+        }));
+        assert!(priced.starts_with("route input price must be"), "{priced}");
+        assert_eq!(priced.matches("route").count(), 1, "{priced}");
+        let rated = said(&RouteCliError::Price {
+            flag: "--in",
+            fault: PriceFault::Malformed,
+        });
+        assert!(rated.starts_with("route price --in must be"), "{rated}");
+        assert_eq!(rated.matches("route").count(), 1, "{rated}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [
@@ -475,7 +548,7 @@ mod tests {
             crate::model::tenant_namespace(&super::tenant_text(&state))
         );
         let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
-        let mut args = vec!["add", "main", "--url", "http://gateway.test:1/v1"];
+        let mut args = vec!["add", "main", "--url", "https://gateway.test:1/v1"];
         args.extend(["--model", "m", "--key-env", key_env.as_str()]);
         args.extend(["--residency", "CA"]);
         let mut out = Vec::new();

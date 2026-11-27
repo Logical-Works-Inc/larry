@@ -1,8 +1,8 @@
-//! Journeys of the provider adapters (larry#205): the same briefed task through
-//! a mock of each provider kind (OpenAI chat, Anthropic Messages, OpenAI
-//! Responses). Each receipt names its kind and maps the kind's usage to the
-//! one usage shape; a route with no temperature sends no temperature member;
-//! a route's prompt template is sealed by its hash, never its text.
+//! Journeys of the provider adapters (larry#205, larry#546): the same briefed
+//! task through a mock of each provider kind (OpenAI chat, Anthropic Messages,
+//! OpenAI Responses). Each receipt names its kind and maps the kind's usage to
+//! the one usage shape; a route with no temperature sends no temperature
+//! member; a route's prompt template is sealed by its hash, never its text.
 //!
 //! Source: the Anthropic Messages API (`x-api-key`, `anthropic-version`,
 //! `max_tokens`, `system`, `stop_reason`), the OpenAI Responses API (`input`,

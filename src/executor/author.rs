@@ -16,7 +16,7 @@ use crate::model::{
     Completion, Kind, Message, ModelClient, ModelError, Role, Route, structured_content,
 };
 
-use super::{ExecError, TaskError};
+use super::{ExecError, Ledger, Settings, Task, TaskError, backoff};
 
 /// Longest goal, in bytes.
 const MAX_GOAL_BYTES: usize = 8192;
@@ -147,11 +147,11 @@ struct Source<'brief> {
 ///
 /// Every file is read before any is written, so all the brief's prompts show the
 /// files as they were, and each prompt of the brief begins with the same bytes
-/// (larry#230): the route's template when it names one, the standing
-/// instruction, the tenant's partition, then the shared context. A provider's
+/// (larry#230): the route's template when it names one, then the kind's
+/// instruction, then the tenant's partition, then the shared context. A provider's
 /// prefix cache reads the context once and every later file's prompt hits it.
-/// `partition` names the tenant, so no two tenants share a prompt prefix. The
-/// snapshot holds at most 64 files of 256 KiB; past
+/// `partition` names the tenant, so no two tenants share a prefix. The snapshot
+/// holds at most 64 files of 256 KiB; past
 /// [`MAX_CONTEXT_BYTES`] of context, or when any request carrying it would pass
 /// the route's request bound, each prompt carries only its own file.
 pub(crate) fn author(
@@ -222,7 +222,7 @@ pub(crate) fn author(
     Ok(authored)
 }
 
-/// The system turn: the route's template when it names one, the standing
+/// The system turn: the route's template when it names one, then the standing
 /// instruction for the kind, then the tenant's partition, so two tenants'
 /// prompts differ from the first byte after the instruction and a provider's
 /// prefix cache never serves one tenant's context to another.
@@ -401,6 +401,43 @@ pub(super) fn unfenced(reply: &str) -> &str {
         Some(body) => body,
         None => reply,
     }
+}
+
+/// What a task with a brief needs before anything is cloned: the route its model
+/// calls go to and a client built from it.
+pub(super) struct ModelStep<'task> {
+    /// The route the task resolved to; the sealed report records it.
+    pub(super) route: Route,
+    /// The brief the model writes files for.
+    pub(super) brief: &'task Brief,
+    /// The client over `route`, holding the key read for this task alone.
+    pub(super) client: ModelClient,
+}
+
+/// Resolves the task's route and builds its client, only when the task has a
+/// brief: a task with none never reaches a model, so its route is only checked
+/// when it names one, and a typo in a model setting fails nothing it does not use.
+/// An unknown name is refused here, before any byte leaves the host.
+pub(super) fn model_step<'task>(
+    task: &'task Task,
+    settings: &Settings,
+    ledger: &Ledger,
+) -> Result<Option<ModelStep<'task>>, ExecError> {
+    let Some(brief) = task.brief() else {
+        if let Some(named) = task.route() {
+            settings.route(ledger, Some(named))?;
+        }
+        return Ok(None);
+    };
+    let route = settings.route(ledger, task.route())?;
+    // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
+    let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+    let client = ModelClient::new(settings.model_config(&route)?, clock, backoff);
+    Ok(Some(ModelStep {
+        route,
+        brief,
+        client,
+    }))
 }
 
 #[cfg(test)]

@@ -316,7 +316,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
             "add",
             "main",
             "--url",
-            "http://gateway.test:8443/v1",
+            "https://gateway.test:8443/v1",
             "--model",
             "model-a",
             "--key-env",

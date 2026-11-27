@@ -1,5 +1,9 @@
-//! Unit tests of the field checks at their boundaries and of the resolver order.
-use super::{Draft, ENV_ROUTE, Kind, Route, RouteError, tenant_namespace};
+//! Unit tests of the route field checks at their boundaries and of the resolver
+//! order. Split from `route.rs`, which keeps the mechanism: verification beside
+//! the mechanism, one file per job, as the seeded simulations live in
+//! `sim_route.rs`.
+
+use super::{Draft, ENV_ROUTE, Kind, MAX_PRICE_MICRO, Route, RouteError, tenant_namespace};
 
 /// The tenant text the unit tests build routes under: a 64-hex digest, as
 /// `executor::routes` keys its rows by, whose tag is its first 16 characters.
@@ -157,6 +161,37 @@ fn every_other_field_has_its_boundary_and_its_own_refusal() -> Result<(), RouteE
     Ok(())
 }
 
+/// The price table: ten thousand dollars a million tokens is kept, one
+/// micro-dollar past it is refused naming the rate, and the revision rides
+/// along untouched by the field checks (larry#204, part of #533).
+#[test]
+fn a_price_past_the_bound_is_refused() -> Result<(), RouteError> {
+    let priced = Route::new(&accepted())?.with_price(2, MAX_PRICE_MICRO, 0)?;
+    assert_eq!(priced.price_version(), 2, "the revision rides along");
+    assert_eq!(
+        priced.price_input(),
+        MAX_PRICE_MICRO,
+        "the bound itself is kept"
+    );
+    let both = Route::new(&accepted())?.with_price(2, MAX_PRICE_MICRO, MAX_PRICE_MICRO)?;
+    assert_eq!(
+        both.price_output(),
+        MAX_PRICE_MICRO,
+        "the bound itself is kept on the output too"
+    );
+    assert_eq!(
+        Route::new(&accepted())?.with_price(2, MAX_PRICE_MICRO + 1, 0),
+        Err(RouteError::BadPrice { field: "input" }),
+        "one micro-dollar past ten thousand in"
+    );
+    assert_eq!(
+        Route::new(&accepted())?.with_price(2, 0, MAX_PRICE_MICRO + 1),
+        Err(RouteError::BadPrice { field: "output" }),
+        "one micro-dollar past ten thousand out"
+    );
+    Ok(())
+}
+
 /// The tenant binding: the tag is the tenant text's first 16 characters in upper case, and another tenant's tag is refused by name (larry#328).
 #[test]
 fn a_key_variable_is_bound_to_its_tenants_tag() -> Result<(), RouteError> {
@@ -178,12 +213,81 @@ fn a_key_variable_is_bound_to_its_tenants_tag() -> Result<(), RouteError> {
     Ok(())
 }
 
-/// The kind and the prompt template are checked: every named kind parses
-/// back and seals, and a template past its bound or with a control byte is
-/// refused. The seal names the kind and the template's hash, never the
-/// template's text (larry#205).
+/// The refusal set is closed and classified once: every [`RouteError`]
+/// variant is built here and its [`RouteError::opens_with_route`] answer is
+/// pinned, so a resurrected refusal (larry#546, larry#551) fails the build in
+/// the classifier until it is listed there, and a reader sees the whole set
+/// in one place. `KindNotServed` is deliberately absent: all three named
+/// kinds are served, so no constructor can build it (SD-1).
 #[test]
-fn a_kind_and_prompt_are_checked_and_sealed() -> Result<(), RouteError> {
+fn the_refusal_set_is_closed_with_no_dead_variant() {
+    let refusals = [
+        (RouteError::BadId, true),
+        (RouteError::ReservedId, true),
+        (RouteError::BadUrl, true),
+        (
+            RouteError::InsecureTransport {
+                host: String::from("closed.test"),
+            },
+            false,
+        ),
+        (RouteError::BadModel, true),
+        (RouteError::BadKeyEnv, true),
+        (RouteError::KeyEnvOutsideNamespace, true),
+        (
+            RouteError::KeyEnvNotThisTenants {
+                variable: String::from("LARRY_KEY_CLOSED"),
+                prefix: String::from("LARRY_KEY_FEDCBA9876543210_"),
+            },
+            true,
+        ),
+        (RouteError::BadTemperature, true),
+        (RouteError::BadKind, true),
+        (RouteError::BadPrompt, true),
+        (RouteError::BadResidency, true),
+        (RouteError::BadRequestBytes, true),
+        (RouteError::BadDescribe, true),
+        (RouteError::BadPrice { field: "input" }, true),
+        (
+            RouteError::NoSuchId {
+                id: String::from("closed-9"),
+            },
+            false,
+        ),
+        (RouteError::NoRoute, false),
+        (RouteError::TableFull { limit: 512 }, false),
+        (
+            RouteError::Damaged {
+                id: String::from("closed-1"),
+                cause: None,
+            },
+            false,
+        ),
+        (
+            RouteError::Damaged {
+                id: String::from("closed-2"),
+                cause: Some(Box::new(RouteError::BadKind)),
+            },
+            false,
+        ),
+    ];
+    for (refusal, opens) in refusals {
+        assert_eq!(
+            refusal.opens_with_route(),
+            opens,
+            "the classification is pinned"
+        );
+        assert!(
+            !refusal.to_string().is_empty(),
+            "every refusal says something"
+        );
+    }
+}
+
+/// Every named kind parses back and seals with its name (larry#205,
+/// larry#539). An unknown kind parses to nothing.
+#[test]
+fn each_kind_parses_and_seals_with_its_name() -> Result<(), RouteError> {
     for name in ["openai-chat", "anthropic-messages", "openai-responses"] {
         let kind = Kind::parse(name).ok_or(RouteError::BadKind)?;
         assert_eq!(kind.name(), name, "{name} round trips");
@@ -199,6 +303,14 @@ fn a_kind_and_prompt_are_checked_and_sealed() -> Result<(), RouteError> {
         );
     }
     assert_eq!(Kind::parse("other"), None, "an unknown kind");
+    Ok(())
+}
+
+/// The prompt template is checked at its boundary and sealed by its hash, never
+/// its text: a template past 8 KiB or with a control byte is refused, and the
+/// seal names the BLAKE3 hash the stored template re-derives (larry#205).
+#[test]
+fn a_prompt_template_is_checked_and_sealed_by_its_hash() -> Result<(), RouteError> {
     let long = "p".repeat(8193);
     assert_eq!(
         built(|fields| fields.prompt = Some(&long)),
