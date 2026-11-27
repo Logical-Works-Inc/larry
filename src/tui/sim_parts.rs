@@ -341,7 +341,7 @@ fn sim_ran_tail_counts_hidden_lines_and_marks_failures() {
 }
 
 /// A header for the simulations.
-fn header() -> Header {
+pub(super) fn header() -> Header {
     Header {
         version: String::from("0.0.0"),
         model: Ok(String::from("sim-model")),
@@ -486,7 +486,7 @@ fn sim_grid_writes_outside_the_grid_change_nothing() {
 }
 
 /// The text an app's frame paints, row by row.
-fn shown(app: &App) -> String {
+pub(super) fn shown(app: &App) -> String {
     let frame = app.draw();
     (0..frame.buffer.height())
         .map(|row| frame.buffer.row_text(row))
