@@ -147,15 +147,31 @@ pub(super) fn journal_live(
     policy: &BTreeSet<Scope>,
     task_id: &str,
 ) -> Result<bool, ExecError> {
+    live_between(state, policy, task_id, || Ok(()))
+}
+
+/// [`journal_live`], with `between` run right after the probe's first read of the directory:
+/// the seam a simulation finishes the run at (larry#460).
+fn live_between(
+    state: &Path,
+    policy: &BTreeSet<Scope>,
+    task_id: &str,
+    between: impl FnOnce() -> Result<(), ExecError>,
+) -> Result<bool, ExecError> {
     let path = journal_path(state, task_id);
+    // The run's own lock first: probing its journal while it starts would take that lock from
+    // it (larry#456). The guard is held across the journal probe and then dropped, never removed.
+    let probed = RunLock::probe(&path)?;
+    between()?;
+    let Some(_guard) = probed else {
+        return Ok(true);
+    };
+    // The journal's existence only under the guard: a run removes its journal before it releases
+    // its lock, so a journal gone now stays gone, and the open below never makes an empty one in
+    // a finished run's place for the next start to set aside (larry#460).
     if !path.try_exists().map_err(ExecError::Journals)? {
         return Ok(false);
     }
-    // The run's own lock first: probing its journal while it starts would take that lock from
-    // it (larry#456). The guard is held across the journal probe and then dropped, never removed.
-    let Some(_guard) = RunLock::probe(&path)? else {
-        return Ok(true);
-    };
     let capacity = task_settings(policy).journal_capacity;
     match Journal::open(&path, capacity) {
         Err(RuntimeError::Durable(JournalError::Locked { .. })) => Ok(true),

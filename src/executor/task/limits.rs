@@ -1,6 +1,6 @@
-//! What a task names about how it runs (larry#439): the shell its commands run
-//! under and the per-command timeout. Each is read here; the tenant's ceilings
-//! bound them before anything is cloned.
+//! What a task names about how it runs (larry#439, ADR 0111): the shell its commands run
+//! under, the per-command timeout and the whole-task deadline. Each is read here and bounded
+//! by the tenant's ceiling in `executor::ceiling` before anything is cloned.
 
 use super::{MAX_TIMEOUT_MS, Task, TaskError, is_shell};
 
@@ -15,6 +15,12 @@ impl Task {
     #[must_use]
     pub(crate) const fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
+    }
+
+    /// The whole-task deadline the document names, in milliseconds.
+    #[must_use]
+    pub(crate) const fn deadline_ms(&self) -> Option<u64> {
+        self.deadline_ms
     }
 
     /// The argv that runs for acceptance command `argv`: `<shell> -c <argv...>` when the
@@ -72,7 +78,7 @@ mod tests {
             .into_bytes()
     }
 
-    /// larry#439: for every seed a timeout inside 1..=86400000 reads back exactly,
+    /// larry#439: for every seed a timeout or deadline inside 1..=86400000 reads back exactly,
     /// zero and one past the bound are refused naming the key, a non-number is the wrong type,
     /// and a named shell composes `<shell> -c <argv...>` while no shell leaves the argv alone.
     #[test]
@@ -81,26 +87,28 @@ mod tests {
         for seed in 0..64_u64 {
             let mut rng = Seeded::from_seed(seed);
             let millis = rng.below(86_400_000)?.saturating_add(1);
-            let key = "timeout_ms";
-            let task = Task::parse(&document(&format!(r#","{key}":{millis}"#)))?;
-            assert_eq!(
-                task.timeout_ms(),
-                Some(millis),
-                "seed {seed}: {key} reads back"
-            );
-            for bad in [0, 86_400_001] {
-                assert!(
-                    matches!(
-                        Task::parse(&document(&format!(r#","{key}":{bad}"#))),
-                        Err(TaskError::BadMillis { key: named }) if named == key
-                    ),
-                    "seed {seed}: {key} {bad} is refused by name"
-                );
+            for key in ["timeout_ms", "deadline_ms"] {
+                let task = Task::parse(&document(&format!(r#","{key}":{millis}"#)))?;
+                let read = if key == "timeout_ms" {
+                    task.timeout_ms()
+                } else {
+                    task.deadline_ms()
+                };
+                assert_eq!(read, Some(millis), "seed {seed}: {key} reads back");
+                for bad in [0, 86_400_001] {
+                    assert!(
+                        matches!(
+                            Task::parse(&document(&format!(r#","{key}":{bad}"#))),
+                            Err(TaskError::BadMillis { key: named }) if named == key
+                        ),
+                        "seed {seed}: {key} {bad} is refused by name"
+                    );
+                }
+                assert!(matches!(
+                    Task::parse(&document(&format!(r#","{key}":"{millis}""#))),
+                    Err(TaskError::WrongType { key: named }) if named == key
+                ));
             }
-            assert!(matches!(
-                Task::parse(&document(&format!(r#","{key}":"{millis}""#))),
-                Err(TaskError::WrongType { key: named }) if named == key
-            ));
             let plain = Task::parse(&document(""))?;
             let argv = vec![String::from("c"), String::from("a")];
             assert_eq!(

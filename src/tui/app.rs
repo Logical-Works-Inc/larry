@@ -19,13 +19,14 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::ask::offer;
+use super::ask::answer;
 use super::buffer::Frame;
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
 use super::layout::split;
 use super::paint;
 use super::pane::Pane;
+use super::pending::{Pending, QUEUE_BOUND};
 use super::session_store::Transcript;
 use super::sessions::Snapshot;
 use super::style::{Style, sanitize};
@@ -34,13 +35,14 @@ use super::worker::{Decision, Ended, Event};
 /// Most transcript entries kept; the oldest goes first.
 pub(crate) const MAX_ENTRIES: usize = 512;
 /// What `/help` prints.
-const HELP: [&str; 6] = [
-    "Enter sends the task. Ctrl+J adds a new line.",
+const HELP: [&str; 7] = [
+    "Enter sends the task. Ctrl+J adds a new line. Enter while working queues the next turn (8).",
     "Larry asks before each command: y runs it, a runs it and stops asking, n declines.",
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
     "/resume lists this folder's sessions, /resume 1 continues one; /fork copies one.",
     "/new starts fresh, /rename names it, /export writes Markdown, /recap summarises.",
+    "/quit leaves Larry.",
 ];
 /// One key, already read from the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +133,7 @@ pub(crate) enum Effect {
 
 /// Where the machine is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub(super) enum Phase {
     /// The composer takes a task.
     Idle,
     /// A session runs; the command, while one runs.
@@ -152,7 +154,9 @@ pub(crate) struct App {
     /// The text box.
     composer: Composer,
     /// Where the machine is.
-    phase: Phase,
+    pub(super) phase: Phase,
+    /// Turns queued while a session runs (larry#262).
+    pending: Pending,
     /// Lines `/status` prints.
     status: Vec<String>,
     /// When the running task started.
@@ -166,7 +170,7 @@ pub(crate) struct App {
     /// Transcript rows scrolled up from the bottom.
     scroll: usize,
     /// Whether the person said to stop asking for this run.
-    always: bool,
+    pub(super) always: bool,
     /// Whether Ctrl+C asked to leave once the running session ends.
     quitting: bool,
     /// The session's last message, shown as its summary or its refusal.
@@ -198,6 +202,7 @@ impl App {
             transcript: Transcript::new(header),
             composer: Composer::default(),
             phase: Phase::Idle,
+            pending: Pending::new(),
             status,
             started: Duration::ZERO,
             now: Duration::ZERO,
@@ -233,6 +238,7 @@ impl App {
             phase: &self.phase,
             composer: &self.composer,
             pane: &self.pane,
+            pending: &self.pending,
             scroll: self.scroll,
             width: self.width,
             height: self.height,
@@ -285,6 +291,11 @@ impl App {
     /// Whether the person said to stop asking for this run.
     pub(crate) const fn always(&self) -> bool {
         self.always
+    }
+
+    /// Adds `entry`, dropping the oldest past [`MAX_ENTRIES`].
+    pub(super) fn push(&mut self, entry: Entry) {
+        self.transcript.push(entry);
     }
 
     /// The transcript entries, oldest first; the bound sims read it.
@@ -398,7 +409,17 @@ impl App {
         self.transcript.push(entry);
         self.phase = Phase::Idle;
         if self.quitting {
+            self.pending.clear_queue();
             return vec![Effect::Quit];
+        }
+        if let Some(next) = self.pending.pop_next() {
+            self.push(Entry::User(next.clone()));
+            self.phase = Phase::Working(None);
+            self.started = self.now;
+            self.said = None;
+            self.scroll = 0;
+            self.pane.begin();
+            return vec![Effect::Start(next)];
         }
         Vec::new()
     }
@@ -418,7 +439,7 @@ impl App {
                 ));
                 return Vec::new();
             }
-            return self.answer(key, command, choice);
+            return answer(self, key, command, choice);
         }
         match key {
             Key::PageUp => {
@@ -496,61 +517,6 @@ impl App {
         }
     }
 
-    /// A key while the session asks about `command`, `choice` highlighted.
-    /// The same keys answer the review of a session's change (no `command`), which has no
-    /// "always": its `a` falls to the ignored keys.
-    fn answer(&mut self, key: Key, command: Option<String>, choice: Decision) -> Vec<Effect> {
-        let decision = match key {
-            Key::Char('y' | 'Y') => Decision::Run,
-            Key::Char('a' | 'A') if command.is_some() => Decision::Always,
-            Key::Char('n' | 'N') | Key::Esc | Key::Interrupt => Decision::Decline,
-            Key::Enter => choice,
-            Key::Left | Key::Right => {
-                let order = offer(command.is_some()).1;
-                let at = order.iter().position(|&(item, _)| item == choice);
-                let next = match (key, at) {
-                    (Key::Left, Some(index)) => index.checked_sub(1),
-                    (_, Some(index)) => index.checked_add(1),
-                    (_, None) => None,
-                };
-                if let Some(&(picked, _)) = next.and_then(|index| order.get(index)) {
-                    self.phase = Phase::Asking(command, picked);
-                }
-                return Vec::new();
-            }
-            Key::Char(_)
-            | Key::NewLine
-            | Key::Backspace
-            | Key::Delete
-            | Key::Up
-            | Key::Down
-            | Key::Home
-            | Key::End
-            | Key::PageUp
-            | Key::PageDown
-            | Key::Tab
-            | Key::EndOfInput
-            | Key::KillStart
-            | Key::KillEnd
-            | Key::KillWord => return Vec::new(),
-        };
-        match decision {
-            Decision::Decline => command
-                .into_iter()
-                .for_each(|command| self.transcript.push(Entry::Declined(command))),
-            Decision::Always => self.always = true,
-            Decision::Run => {}
-        }
-        self.phase = Phase::Working(None);
-        let mut effects = vec![Effect::Decide(decision)];
-        if key == Key::Interrupt {
-            self.phase = Phase::Stopping(false);
-            effects.push(Effect::Interrupt);
-        }
-        effects
-    }
-
-    /// Enter on the popup's selected slash command, or on a slash word with its
     /// Enter on the popup's selected slash command.
     fn command(&mut self) -> Vec<Effect> {
         let Some(name) = self.composer.selected() else {
@@ -618,10 +584,38 @@ impl App {
         Vec::new()
     }
 
-    /// Enter on typed text: a task, or a word starting `/` that is no command.
+    /// Pushes the notice for a word starting `/` that is no command.
+    fn unknown_command(&mut self, text: &str) {
+        self.push(Entry::Notice(
+            Style::WARN,
+            format!("Unknown command {text}. Type / to see the commands."),
+        ));
+    }
+
+    /// Enter on typed text: a task, a queued turn while a session runs, or a word
+    /// starting `/` that is no command.
     fn submit(&mut self) -> Vec<Effect> {
+        if self.composer.text().trim().is_empty() {
+            return Vec::new();
+        }
         if self.phase != Phase::Idle {
-            self.hint = Some(String::from("A task is running. Press Esc to stop it."));
+            let text = self.composer.text().to_owned();
+            if text.starts_with('/') && !text.contains(char::is_whitespace) {
+                if self.composer.selected().is_some() {
+                    return self.command();
+                }
+                let unknown = self.composer.take();
+                self.unknown_command(&unknown);
+                return Vec::new();
+            }
+            if self.pending.queue_full() {
+                self.hint = Some(format!(
+                    "The queue is full ({QUEUE_BOUND}). The next turn sends first."
+                ));
+                return Vec::new();
+            }
+            let queued = self.composer.take();
+            self.pending.push_turn(queued);
             return Vec::new();
         }
         if self.composer.text().trim().is_empty() {
@@ -629,10 +623,7 @@ impl App {
         }
         let text = self.composer.take();
         if text.starts_with('/') && !text.contains(char::is_whitespace) {
-            self.transcript.push(Entry::Notice(
-                Style::WARN,
-                format!("Unknown command {text}. Type / to see the commands."),
-            ));
+            self.unknown_command(&text);
             return Vec::new();
         }
         self.transcript.push(Entry::User(text.clone()));

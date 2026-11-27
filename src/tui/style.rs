@@ -219,6 +219,13 @@ pub(crate) fn sanitize(text: &str, keep_newlines: bool) -> String {
     filtered(text, keep_newlines, false)
 }
 
+/// [`sanitize`] for one line that can never hold `\n`: the command's first
+/// line, a queued turn's first line, an output line already split. It takes no
+/// flag, so no dead branch is left for a mutant to flip (larry#262).
+pub(crate) fn sanitize_line(text: &str) -> String {
+    filtered(text, false, false)
+}
+
 /// [`sanitize`] for a command the person approves: each dropped character is shown as
 /// `⟨U+XXXX⟩`, so the command on screen is the command that runs (larry#337).
 pub(crate) fn sanitize_shown(text: &str) -> String {

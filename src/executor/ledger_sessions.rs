@@ -12,14 +12,14 @@ use lgwks_macros::Error;
 
 use super::ExecError;
 
-/// Schema of the TUI session table, version 9 (larry#256): one row per
+/// Schema of the TUI session table, version 10 (larry#256): one row per
 /// terminal session. The transcript column holds the snapshot JSON
 /// `crate::tui::sessions` writes, bounded there before it is stored.
 pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS tui_sessions(id TEXT PRIMARY KEY, \
     name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64), folder TEXT NOT NULL, model TEXT NOT NULL, \
     updated INTEGER NOT NULL, transcript TEXT NOT NULL);";
 
-/// Index of the TUI session table, version 10 (larry#256): a folder's listing
+/// Index of the TUI session table, version 11 (larry#256): a folder's listing
 /// reads newest first without scanning another folder's rows.
 pub(super) const SESSIONS_INDEX_SCHEMA: &str =
     "CREATE INDEX IF NOT EXISTS idx_tui_sessions_folder ON tui_sessions(folder, updated DESC);";

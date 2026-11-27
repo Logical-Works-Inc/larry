@@ -19,10 +19,13 @@ mod composer;
 mod layout;
 mod paint;
 mod pane;
+mod pending;
 mod session_store;
 mod sessions;
 #[cfg(test)]
 mod sim_parts;
+#[cfg(test)]
+mod sim_queue;
 #[cfg(test)]
 mod sim_tui;
 mod style;

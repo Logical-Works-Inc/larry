@@ -18,11 +18,12 @@ const SEEDS: u64 = 64;
 const PINNED_SEEDS: u64 = 96;
 
 /// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken with the
-/// command header painted at `started` so a running command's output has its context.
-/// Rotated 2026-11-27 (larry#256): `/help` lists the ten slash commands and a typed
-/// slash word dispatches with its arguments, so seeds that type them paint new rows.
-/// The row painters themselves (cells, pane, style, buffer) are unchanged.
-const PINNED: &str = "c351a21708e00f417335127e14ec5d06ea1d8beef2606d9d995abe3221f98ffa";
+/// command header painted at `started` so a running command's output has its context,
+/// then advanced once for the queue panel, the queue help line and the working footer
+/// (larry#262) and once for the ten session slash commands a typed word dispatches
+/// (larry#256): the heap assertions above, not this digest, carry the no-heap-text
+/// rule, so a paint feature moves this digest and names its issue here.
+const PINNED: &str = "0696cae284aebb409f3307d2327e006e141f85306f922ef4e7756fc324e18264";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [

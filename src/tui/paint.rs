@@ -15,7 +15,8 @@ use super::cells::Entry;
 use super::composer::Composer;
 use super::layout::split;
 use super::pane::Pane;
-use super::style::{Line, Span, Style, ellipsize, sanitize, sanitize_shown, text_width, wrap};
+use super::pending::{Pending, first_line};
+use super::style::{Line, Span, Style, ellipsize, sanitize_line, sanitize_shown, text_width, wrap};
 
 /// The spinner's frames, one per 100 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -32,6 +33,8 @@ pub(crate) struct View<'frame> {
     pub composer: &'frame Composer,
     /// The artifact pane.
     pub pane: &'frame Pane,
+    /// Turns queued while a session runs.
+    pub pending: &'frame Pending,
     /// Transcript rows scrolled up from the bottom.
     pub scroll: usize,
     /// Columns.
@@ -134,7 +137,7 @@ impl View<'_> {
             &Phase::Idle | &Phase::Asking(..) => return None,
             &Phase::Working(None) => (String::from("Working"), running),
             &Phase::Working(Some(ref command)) => {
-                let first: String = command.lines().take(1).collect();
+                let first = first_line(command);
                 (format!("Running {first}"), running)
             }
             &Phase::Stopping(true) => (
@@ -149,10 +152,7 @@ impl View<'_> {
             .saturating_sub(text_width(&tail));
         Some(vec![
             Span::new(format!("{spin} "), Style::ACCENT),
-            Span::new(
-                ellipsize(&sanitize(&label, false), room),
-                Style::PLAIN.bold(),
-            ),
+            Span::new(ellipsize(&sanitize_line(&label), room), Style::PLAIN.bold()),
             Span::new(tail, Style::MUTED),
         ])
     }
@@ -211,13 +211,14 @@ impl View<'_> {
                 }
             }
             rows.push(vec![Span::new("─".repeat(width), Style::MUTED)]);
+            rows.extend(self.pending.queue_lines(width));
             let (lines, (column, row)) = self.composer.render(width, "Ask Larry to do something");
             cursor = Some((column, rows.len().saturating_add(row)));
             rows.extend(lines);
             if matches!(self.phase, &Phase::Idle) {
                 &["enter send", "/ commands", "ctrl+j newline", "ctrl+c quit"]
             } else {
-                &["esc interrupt", "pgup/pgdn scroll"]
+                &["enter queues", "esc interrupt", "pgup/pgdn scroll"]
             }
         };
         let foot = match *self.hint {
