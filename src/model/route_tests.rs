@@ -211,3 +211,21 @@ fn a_key_variable_is_bound_to_its_tenants_tag() -> Result<(), RouteError> {
     assert!(refused.is_some(), "the bare namespace names nothing");
     Ok(())
 }
+
+/// Every named kind parses back and seals with its name (larry#205,
+/// larry#539). An unknown kind parses to nothing.
+#[test]
+fn each_kind_parses_and_seals_with_its_name() -> Result<(), RouteError> {
+    for name in ["openai-chat", "anthropic-messages", "openai-responses"] {
+        let kind = Kind::parse(name).ok_or(RouteError::BadKind)?;
+        assert_eq!(kind.name(), name, "{name} round trips");
+        let route = built(|fields| fields.kind = kind)?;
+        let sealed = route.seal().to_string();
+        assert!(
+            sealed.contains(&format!("\"kind\":\"{name}\"")),
+            "{name} seals: {sealed}"
+        );
+    }
+    assert_eq!(Kind::parse("other"), None, "an unknown kind");
+    Ok(())
+}

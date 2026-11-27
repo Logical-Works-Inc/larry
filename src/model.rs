@@ -11,6 +11,7 @@
 
 mod client;
 mod config;
+mod limiter;
 mod route;
 mod route_transport;
 mod wire;
@@ -20,13 +21,13 @@ use std::str::Utf8Error;
 
 use lgwks_macros::Error;
 
-pub(crate) use client::Limiter;
 pub use client::ModelClient;
 pub(crate) use client::Request;
 pub use config::ModelConfig;
 pub(crate) use config::env_route;
 #[cfg(test)]
 pub(crate) use config::sim_config;
+pub(crate) use limiter::Limiter;
 pub use route::RouteError;
 #[cfg(test)]
 pub(crate) use route::tenant_namespace;

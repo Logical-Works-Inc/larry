@@ -94,6 +94,14 @@ pub enum RouteError {
     },
     /// The temperature is not a number from 0 to 2.
     BadTemperature,
+    /// The kind is not one the client speaks.
+    BadKind,
+    /// The kind names a provider the wire in this build does not speak: only
+    /// OpenAI chat is served until PR #534's adapters land (larry#539).
+    KindNotServed {
+        /// The kind name the route carries.
+        kind: String,
+    },
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
     BadResidency,
     /// The request byte bound is outside 1024 bytes to 16 MiB.
@@ -160,6 +168,12 @@ impl fmt::Display for RouteError {
                 "route key-env {variable} is not this tenant's: it must start with {prefix}"
             ),
             Self::BadTemperature => out.write_str("route temperature must be a number from 0 to 2"),
+            Self::BadKind => out.write_str(
+                "route kind must be one of openai-chat, anthropic-messages, openai-responses",
+            ),
+            Self::KindNotServed { ref kind } => {
+                write!(out, "route kind {kind} has no adapter in this build")
+            },
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
             ),
@@ -203,6 +217,8 @@ impl std::error::Error for RouteError {
             | Self::KeyEnvOutsideNamespace
             | Self::KeyEnvNotThisTenants { .. }
             | Self::BadTemperature
+            | Self::BadKind
+            | Self::KindNotServed { .. }
             | Self::BadResidency
             | Self::BadRequestBytes
             | Self::BadDescribe
@@ -214,13 +230,18 @@ impl std::error::Error for RouteError {
     }
 }
 
-/// What speaks at the other end of a route. One kind exists today; #205 adds
-/// the others, and a new kind is one variant and one wire adapter.
+/// What speaks at the other end of a route. One variant per provider kind
+/// (larry#205, larry#539); the client's wire adapter for a new kind plugs in
+/// at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Kind {
     /// An OpenAI-compatible chat-completions endpoint.
     OpenAiChat,
+    /// The Anthropic Messages API (`x-api-key`, `anthropic-version`).
+    AnthropicMessages,
+    /// The OpenAI Responses API.
+    OpenAiResponses,
 }
 
 impl Kind {
@@ -228,13 +249,23 @@ impl Kind {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::OpenAiChat => "openai-chat",
+            Self::AnthropicMessages => "anthropic-messages",
+            Self::OpenAiResponses => "openai-responses",
         }
+    }
+
+    /// Whether the wire in this build speaks this kind: OpenAI chat only until
+    /// PR #534's adapters land (larry#539).
+    pub(crate) const fn is_served(self) -> bool {
+        matches!(self, Self::OpenAiChat)
     }
 
     /// The kind a stored name means, `None` for a name no kind has.
     pub(crate) fn parse(name: &str) -> Option<Kind> {
         match name {
             "openai-chat" => Some(Self::OpenAiChat),
+            "anthropic-messages" => Some(Self::AnthropicMessages),
+            "openai-responses" => Some(Self::OpenAiResponses),
             _ => None,
         }
     }
@@ -509,18 +540,35 @@ pub(crate) fn resolve(
 ) -> Result<Route, RouteError> {
     let Some(route) = table.lookup(named) else {
         return match (named, environment) {
-            (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
+            (Some(id), Some(route)) if id == ENV_ROUTE => served(route),
             (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
-            (None, Some(route)) => Ok(route),
+            (None, Some(route)) => served(route),
             (None, None) => Err(RouteError::NoRoute),
         };
     };
+    if !route.kind().is_served() {
+        return Err(RouteError::KindNotServed {
+            kind: route.kind().name().to_owned(),
+        });
+    }
     if let Some(refusal) = route.transport_refusal() {
         return Err(refusal);
     }
     match route.key_env_refusal(tenant) {
         None => Ok(route.clone()),
         Some(refusal) => Err(refusal),
+    }
+}
+
+/// The environment route a task falls back to, refused when its kind has no
+/// adapter in this build (larry#539).
+fn served(route: Route) -> Result<Route, RouteError> {
+    if route.kind().is_served() {
+        Ok(route)
+    } else {
+        Err(RouteError::KindNotServed {
+            kind: route.kind().name().to_owned(),
+        })
     }
 }
 

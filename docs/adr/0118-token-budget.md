@@ -36,7 +36,14 @@ limit already reached is a typed refusal naming the exhausted unit.
 Budget state is the executor's bounded tenant-route limiter: at most 256
 keys, each the authenticated tenant and the resolved route, never only the
 model name. Both the pre-send check and the usage record refuse a 257th key,
-so one tenant's burst never starves another's entry.
+so one tenant's burst never starves another's entry. Each key holds settled
+usage beside the pending hold of its calls in flight: `before` adds the
+call's request size as pending tokens (and its price at the dearer route
+rate as pending micros) under the same lock that checks spent plus pending
+against both budgets, and `record` releases that hold and settles the usage
+the gateway reported, zero on a failed call. A check without the hold
+admitted every call in flight before any of them recorded, spending N times
+past the budget.
 
 Jitter is the estate seeded stream (`lgwks_std::seeded::Seeded`), drawn
 against the retry policy's bound and seeded from the tenant-route key's
@@ -80,4 +87,8 @@ fits two completions in one dollar at a million micro-dollars per million
 tokens. `sim_a_non_zero_backoff_is_waited_then_cancelled` waits one 50 ms
 backoff, cancels, and serves once. `the_unset_backoff_matches_the_executor`
 pins the zero default. The limiter sims share one limiter between two
-tenants and refuse the 257th key on both paths.
+tenants and refuse the 257th key on both paths; `sim_concurrent_reservations_hold_one_budget`
+runs 100 and 1,000 threads on one tenant-route and admits exactly the
+budget's share, leaving the other tenant untouched. `sim_keyed_clients_replay_one_wait_sequence`
+drives two same-key clients through one scripted fault script and asserts
+equal waits inside the policy bound, different for a second tenant.

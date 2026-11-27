@@ -1,7 +1,6 @@
 //! The blocking completion client: one exchange per attempt, retried within the
 //! config's [`RetryPolicy`], with every bound checked before a byte is sent.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,7 +10,7 @@ use lgwks_std::seeded::Seeded;
 
 use super::config::ModelConfig;
 use super::wire;
-use super::{Completion, MAX_MESSAGES, MAX_REPLY_BYTES, Message, ModelError};
+use super::{Completion, Limiter, MAX_MESSAGES, MAX_REPLY_BYTES, Message, ModelError};
 
 /// The `User-Agent` every request names itself with (larry#230): a gateway that
 /// meters or routes by client sees Larry and its version, not the HTTP library's.
@@ -53,92 +52,6 @@ impl Request {
     #[cfg(test)]
     pub(crate) const fn messages(&self) -> usize {
         self.messages
-    }
-}
-
-/// The bounded state shared by model clients in one executor process.
-pub(crate) struct Limiter {
-    /// Tenant and route usage, bounded before a new key is inserted.
-    entries: Mutex<BTreeMap<(String, String), (u64, u64)>>,
-}
-
-impl Limiter {
-    /// Maximum distinct tenant-route keys held by one process.
-    const MAX_KEYS: usize = 256;
-
-    /// A fresh process-local limiter.
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            entries: Mutex::new(BTreeMap::new()),
-        })
-    }
-
-    /// Refuse a call already over either configured budget, before any HTTP work.
-    fn before(
-        &self,
-        tenant: &str,
-        route: &str,
-        token_limit: u64,
-        micro_limit: u64,
-    ) -> Result<(), ModelError> {
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|cause| ModelError::BudgetUnavailable {
-                reason: cause.to_string(),
-            })?;
-        let key = (tenant.to_owned(), route.to_owned());
-        let usage = match entries.get(&key) {
-            Some(usage) => *usage,
-            None if entries.len() < Self::MAX_KEYS => (0, 0),
-            None => {
-                return Err(ModelError::LimiterFull {
-                    limit: Self::MAX_KEYS,
-                });
-            }
-        };
-        if usage.0 >= token_limit {
-            return Err(ModelError::BudgetExceeded {
-                tokens: usage.0,
-                limit: token_limit,
-            });
-        }
-        if usage.1 >= micro_limit {
-            return Err(ModelError::MoneyBudgetExceeded {
-                micros: usage.1,
-                limit: micro_limit,
-            });
-        }
-        entries.entry(key).or_insert(usage);
-        Ok(())
-    }
-
-    /// Add the usage reported by a successful route call. A key the limiter
-    /// never admitted is a new key, so past the bound it is refused rather
-    /// than grown: the table never holds more than its key budget.
-    fn record(
-        &self,
-        tenant: &str,
-        route: &str,
-        tokens: u64,
-        micros: u64,
-    ) -> Result<(), ModelError> {
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|cause| ModelError::BudgetUnavailable {
-                reason: cause.to_string(),
-            })?;
-        let key = (tenant.to_owned(), route.to_owned());
-        if !entries.contains_key(&key) && entries.len() >= Self::MAX_KEYS {
-            return Err(ModelError::LimiterFull {
-                limit: Self::MAX_KEYS,
-            });
-        }
-        let usage = entries.entry(key).or_insert((0, 0));
-        usage.0 = usage.0.saturating_add(tokens);
-        usage.1 = usage.1.saturating_add(micros);
-        Ok(())
     }
 }
 
@@ -258,32 +171,86 @@ impl ModelClient {
         if !self.within_bounds(request) {
             return Err(ModelError::BodyTooLarge);
         }
+        // The pending hold the budgets check: the request's own size as
+        // tokens and its price at the dearer route rate, settled to the
+        // reported usage once the gateway answers and released on any failure.
+        let reserve_tokens = match u64::try_from(request.bytes()) {
+            Ok(value) => value,
+            Err(_) => return Err(ModelError::BodyTooLarge),
+        };
+        let dearer = self.config.price_input().max(self.config.price_output());
+        let reserve_micros = match u64::try_from(
+            u128::from(reserve_tokens)
+                .saturating_mul(u128::from(dearer))
+                .div_euclid(u128::from(TOKENS_PER_MILLION)),
+        ) {
+            Ok(value) => value,
+            Err(_) => return Err(ModelError::MoneyCostOverflow),
+        };
         self.limiter.before(
             &self.tenant,
             &self.route,
             self.config.token_budget(),
             self.config.micro_budget(),
+            reserve_tokens,
+            reserve_micros,
         )?;
-        let completion = self.with_retry(&request.body)?;
-        if let Some(usage) = completion.usage() {
-            // Prices are micro-dollars per million tokens and costs are whole
-            // micro-dollars, so the tokens-times-price product is picodollars
-            // until it is scaled back down (larry#204): recording the product
-            // itself would spend a million budgets on one call.
-            let prompt = u128::from(usage.prompt_tokens);
-            let produced = u128::from(usage.completion_tokens);
-            let pico = prompt
-                .saturating_mul(u128::from(self.config.price_input()))
-                .saturating_add(produced.saturating_mul(u128::from(self.config.price_output())));
-            let micros = pico.div_euclid(u128::from(TOKENS_PER_MILLION));
-            let bounded = match u64::try_from(micros) {
-                Ok(value) => value,
-                Err(_overflow) => return Err(ModelError::MoneyCostOverflow),
-            };
-            let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
-            self.limiter
-                .record(&self.tenant, &self.route, tokens, bounded)?;
-        }
+        let completion = match self.with_retry(&request.body) {
+            Ok(completion) => completion,
+            Err(refusal) => {
+                self.limiter.record(
+                    &self.tenant,
+                    &self.route,
+                    reserve_tokens,
+                    reserve_micros,
+                    0,
+                    0,
+                )?;
+                return Err(refusal);
+            }
+        };
+        // Prices are micro-dollars per million tokens and costs are whole
+        // micro-dollars, so the tokens-times-price product is picodollars
+        // until it is scaled back down (larry#204): recording the product
+        // itself would spend a million budgets on one call.
+        let (tokens, micros) = match completion.usage() {
+            Some(usage) => {
+                let prompt = u128::from(usage.prompt_tokens);
+                let produced = u128::from(usage.completion_tokens);
+                let pico = prompt
+                    .saturating_mul(u128::from(self.config.price_input()))
+                    .saturating_add(
+                        produced.saturating_mul(u128::from(self.config.price_output())),
+                    );
+                let micros = pico.div_euclid(u128::from(TOKENS_PER_MILLION));
+                match u64::try_from(micros) {
+                    Ok(value) => (
+                        usage.prompt_tokens.saturating_add(usage.completion_tokens),
+                        value,
+                    ),
+                    Err(_overflow) => {
+                        self.limiter.record(
+                            &self.tenant,
+                            &self.route,
+                            reserve_tokens,
+                            reserve_micros,
+                            0,
+                            0,
+                        )?;
+                        return Err(ModelError::MoneyCostOverflow);
+                    }
+                }
+            }
+            None => (0, 0),
+        };
+        self.limiter.record(
+            &self.tenant,
+            &self.route,
+            reserve_tokens,
+            reserve_micros,
+            tokens,
+            micros,
+        )?;
         Ok(completion)
     }
 
@@ -437,123 +404,215 @@ fn map_transport(error: HttpError) -> ModelError {
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use lgwks_bot::kernel::clock::Clock;
     use lgwks_std::http::{Error as HttpError, FailureKind, FailureStage};
 
     use super::{
-        JITTER_BOUND, Limiter, ModelClient, ModelError, Seeded, jitter_seed, map_transport,
+        JITTER_BOUND, Limiter, Message, ModelClient, ModelConfig, ModelError, Seeded, jitter_seed,
+        map_transport,
     };
-    use crate::model::config::sim_config;
+    use crate::model::{Draft, Kind, Role, Route};
 
-    /// The jitter draws one tenant-route key names: one seed, one sequence.
-    fn draws(tenant: &str) -> Result<Vec<u64>, ModelError> {
-        let mut stream = Seeded::from_seed(jitter_seed(tenant, "route"));
-        let mut out = Vec::with_capacity(8);
-        for _ in 0..8 {
-            out.push(stream.below(JITTER_BOUND).map_err(|cause| {
-                ModelError::JitterUnavailable {
-                    reason: cause.to_string(),
+    /// One keyed client driven through two 503s and a reply on a virtual
+    /// clock: the waits its pause recorded and the requests the stub served.
+    /// The script and the messages are fixed, so one tenant-route key replays
+    /// one answer.
+    fn drive_keyed_waits(
+        tenant: &str,
+        backoff_ms: u64,
+    ) -> Result<(Vec<Duration>, u64), JitterSimError> {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&waits);
+        std::thread::scope(|scope| {
+            let server = scope.spawn(move || {
+                for status in [503_u16, 503, 200] {
+                    let (mut stream, _) = listener.accept()?;
+                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                    drain_request(&mut stream)?;
+                    let body = if status == 200 {
+                        String::from(
+                            r#"{"id":"chatcmpl-keyed","object":"chat.completion","created":0,"model":"keyed-model","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
+                        )
+                    } else {
+                        String::from(r#"{"error":{"message":"busy","type":"server_error"}}"#)
+                    };
+                    let reason = if status == 200 { "OK" } else { "Service Unavailable" };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )?;
+                    stream.flush()?;
                 }
-            })?);
-        }
-        Ok(out)
-    }
-
-    /// Two tenants sharing one limiter keep their own budgets: one tenant's
-    /// burst to its token budget refuses only its own next call, and the other
-    /// tenant still admits and records under the same route.
-    #[test]
-    fn sim_two_tenants_sharing_one_limiter_keep_their_own_budgets() -> Result<(), ModelError> {
-        for seed in 0..16_u64 {
-            let limiter = Limiter::new();
-            let spent = format!("tenant-{seed}-spent");
-            let fresh = format!("tenant-{seed}-fresh");
-            limiter.record(&spent, "route", 1_000, 50)?;
-            assert!(
-                matches!(
-                    limiter.before(&spent, "route", 1_000, u64::MAX),
-                    Err(ModelError::BudgetExceeded {
-                        tokens: 1_000,
-                        limit: 1_000
-                    })
-                ),
-                "seed {seed}: the spent tenant is refused at its budget"
-            );
-            limiter.before(&fresh, "route", 1_000, u64::MAX)?;
-            limiter.record(&fresh, "route", 1, 0)?;
-            limiter.before(&fresh, "route", 1_000, u64::MAX)?;
-        }
-        Ok(())
-    }
-
-    /// A full limiter refuses a new tenant-route key on both paths: `before`
-    /// admits nothing past 256 keys, and `record` refuses rather than growing
-    /// past the bound, while a key already held still admits.
-    #[test]
-    fn sim_a_full_limiter_refuses_a_new_key_on_record() -> Result<(), ModelError> {
-        let limiter = Limiter::new();
-        for index in 0..256_u32 {
-            limiter.record(&format!("tenant-{index}"), "route", 0, 0)?;
-        }
-        assert!(
-            matches!(
-                limiter.record("tenant-new", "route", 0, 0),
-                Err(ModelError::LimiterFull { limit: 256 })
-            ),
-            "a record past 256 keys is refused, never grown"
-        );
-        assert!(
-            matches!(
-                limiter.before("tenant-new", "route", u64::MAX, u64::MAX),
-                Err(ModelError::LimiterFull { limit: 256 })
-            ),
-            "a call past 256 keys is refused before any gateway byte"
-        );
-        limiter.before("tenant-0", "route", u64::MAX, u64::MAX)?;
-        Ok(())
-    }
-
-    /// One tenant-route key replays one jitter sequence on every process, and
-    /// every draw fits the retry policy's bound. Two clients built for one key
-    /// draw the same waits, so a seeded run replays them.
-    #[test]
-    fn sim_one_seed_replays_one_jitter_sequence() -> Result<(), ModelError> {
-        for seed in 0..16_u64 {
-            let tenant = format!("tenant-{seed}");
-            let first = draws(&tenant)?;
-            let second = draws(&tenant)?;
-            assert_eq!(first, second, "seed {seed}: one key draws one sequence");
-            assert!(
-                first.iter().all(|draw| *draw < JITTER_BOUND),
-                "seed {seed}: every draw fits the bound"
-            );
-            let limiter = Limiter::new();
-            let config = sim_config(None)?;
-            let clock = Clock::virtual_at(std::time::Duration::ZERO);
-            let left = ModelClient::with_limiter(
-                config.clone(),
-                clock.clone(),
-                Arc::clone(&limiter),
-                tenant.clone(),
-                "route",
-                |_wait| true,
-            );
-            let right = ModelClient::with_limiter(
-                config,
-                clock,
-                Arc::clone(&limiter),
+                Ok::<_, std::io::Error>(())
+            });
+            let client = ModelClient::with_limiter(
+                keyed_config(&base, backoff_ms)?,
+                Clock::virtual_at(Duration::ZERO),
+                Limiter::new(),
                 tenant,
                 "route",
-                |_wait| true,
+                move |wait| {
+                    if let Ok(mut record) = seen.lock() {
+                        record.push(wait);
+                    }
+                    true
+                },
             );
+            let outcome = client.complete(&[Message::new(Role::User, "wait-sequence")]);
+            assert!(
+                outcome.is_ok(),
+                "tenant {tenant}: two faults then a reply succeed, got {outcome:?}"
+            );
+            match server.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return Err(JitterSimError::Server),
+            }
+            let waits = match waits.lock() {
+                Ok(record) => record.clone(),
+                Err(_) => return Err(JitterSimError::Poisoned),
+            };
+            Ok::<_, JitterSimError>((waits, 3))
+        })
+    }
+
+    /// Read one length-delimited request (head plus its declared body) and drop
+    /// it: the stub answers from its script, never from the bytes.
+    fn drain_request(stream: &mut std::net::TcpStream) -> Result<(), std::io::Error> {
+        use std::io::Read;
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if head.len() > 65_536 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the request head is past 64 KiB",
+                ));
+            }
+            match stream.read(&mut byte)? {
+                0 => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the peer closed before the head ended",
+                    ));
+                }
+                _ => head.push(byte[0]),
+            }
+        }
+        let text = String::from_utf8_lossy(&head);
+        let length = text
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().to_owned())
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "no content-length")
+            })?;
+        let count: usize = length
+            .parse()
+            .map_err(|cause| std::io::Error::new(std::io::ErrorKind::InvalidData, cause))?;
+        let mut body = vec![0_u8; count.min(65_536)];
+        stream.read_exact(&mut body)?;
+        Ok(())
+    }
+
+    /// The config of a keyed route the wait simulation drives at `base`: the
+    /// key is read from `LARRY_KEY_KEYED`, three attempts, the drawn backoff,
+    /// a deadline no virtual run spends.
+    fn keyed_config(base: &str, backoff_ms: u64) -> Result<ModelConfig, ModelError> {
+        let route = Route::new(&Draft {
+            id: "keyed",
+            kind: Kind::OpenAiChat,
+            base_url: base,
+            model: "keyed-model",
+            key_env: "LARRY_KEY_KEYED",
+            temperature: None,
+            request_bytes: None,
+            residency: None,
+            describe: "a keyed route the wait simulation drives",
+        })
+        .map_err(ModelError::BadRoute)?;
+        ModelConfig::for_route(&route, &|name: &str| match name {
+            "LARRY_KEY_KEYED" => Some(String::from("keyed-key")),
+            "LARRY_MODEL_BACKOFF_MS" => Some(backoff_ms.to_string()),
+            "LARRY_MODEL_ATTEMPTS" => Some(String::from("3")),
+            "LARRY_MODEL_DEADLINE_MS" => Some(String::from("60000")),
+            _ => None,
+        })
+    }
+
+    /// Why one keyed wait simulation could not be driven to its assertions.
+    #[derive(Debug, lgwks_macros::Error)]
+    enum JitterSimError {
+        /// The stub gateway failed.
+        #[error("the stub gateway failed: {0}")]
+        Mock(#[from] std::io::Error),
+        /// The drawn config was refused.
+        #[error("the keyed config was refused: {0}")]
+        Config(#[from] ModelError),
+        /// A drawn number does not fit the type its use needs.
+        #[error("the drawn number is out of range: {0}")]
+        Range(#[from] std::num::TryFromIntError),
+        /// The seeded stream refused a draw.
+        #[error("the seeded draw failed: {0}")]
+        Draw(#[from] lgwks_std::seeded::DrawError),
+        /// The stub server failed its script.
+        #[error("the stub server failed its script")]
+        Server,
+        /// The wait record is poisoned.
+        #[error("the wait record is poisoned")]
+        Poisoned,
+    }
+
+    /// One tenant-route key replays one wait sequence: two clients built for
+    /// one key and driven through one scripted 503 fault script on a virtual
+    /// clock record the same waits, each inside the policy bound, and a second
+    /// tenant records different waits.
+    #[test]
+    fn sim_keyed_clients_replay_one_wait_sequence() -> Result<(), JitterSimError> {
+        use lgwks_std::retry::RetryPolicy;
+        const BACKOFF_MS: u64 = 50;
+        let policy = RetryPolicy::new(
+            3,
+            Duration::from_millis(BACKOFF_MS),
+            Duration::from_millis(60_000),
+        );
+        let (left, left_served) = drive_keyed_waits("tenant-jitter-left", BACKOFF_MS)?;
+        let (right, right_served) = drive_keyed_waits("tenant-jitter-left", BACKOFF_MS)?;
+        assert_eq!(
+            (left_served, right_served),
+            (3, 3),
+            "two faults then a reply: every run serves three requests"
+        );
+        assert_eq!(left, right, "one key replays one wait sequence");
+        let mut stream = Seeded::from_seed(jitter_seed("tenant-jitter-left", "route"));
+        for (index, wait) in left.iter().enumerate() {
+            let attempt = u32::try_from(index)?;
+            let draw = stream.below(JITTER_BOUND)?;
             assert_eq!(
-                format!("{left:?}"),
-                format!("{right:?}"),
-                "seed {seed}: one key builds one client shape"
+                *wait,
+                policy.delay(attempt, draw),
+                "wait {index} is the policy at the keyed draw"
+            );
+            assert!(
+                *wait <= policy.delay(attempt, 0),
+                "wait {index} stays inside the policy bound"
             );
         }
+        let (other, _) = drive_keyed_waits("tenant-jitter-other", BACKOFF_MS)?;
+        assert_ne!(other, left, "a second tenant draws its own waits");
         Ok(())
     }
 
