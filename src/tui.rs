@@ -17,8 +17,11 @@ mod cells;
 mod composer;
 mod layout;
 mod pane;
+mod pending;
 #[cfg(test)]
 mod sim_parts;
+#[cfg(test)]
+mod sim_queue;
 #[cfg(test)]
 mod sim_tui;
 mod style;

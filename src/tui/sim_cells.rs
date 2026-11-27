@@ -18,8 +18,10 @@ const SEEDS: u64 = 64;
 const PINNED_SEEDS: u64 = 96;
 
 /// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken before the cell lost
-/// its `String`.
-const PINNED: &str = "55873c95138689ed6010805d3771dc8e41fdfe8485cb66ed3906e52d934660a4";
+/// its `String`, then advanced once for the queue panel, the six slash commands and the
+/// working footer (larry#262): the heap assertions above, not this digest, carry the
+/// no-heap-text rule, so a paint feature moves this digest and names its issue here.
+const PINNED: &str = "dd578d66e3f398ffa11acc56d5cbe6c7689125f2c3febcf94818280068ae44cf";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [
@@ -76,8 +78,9 @@ fn sim_a_grid_owns_no_heap_text_per_cell() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// The wire of 96 seeds of 96 hostile steps is byte for byte the one the `String` cell wrote,
-/// pinned as one digest taken on the old code.
+/// The wire of 96 seeds of 96 hostile steps is byte for byte the pinned digest: taken on
+/// the old `String`-cell code, advanced once per paint feature with its issue named at
+/// [`PINNED`]. A paint change without an advance named here fails here, by design.
 #[test]
 fn sim_the_wire_of_every_seed_is_the_pinned_one() {
     let mut hasher = Hasher::new();

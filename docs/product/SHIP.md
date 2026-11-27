@@ -113,8 +113,8 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [x] #245 the PTY journeys on macOS in CI (ADR 0048): PR #254, `e2e/journey (macos-latest)` green in 2m21s; probe input p50 1.9 ms, p95 2.5 ms, p99 5.3 ms (20 samples), RSS 8,208 KiB.
 - [x] #244 the artifact pane shows the task's diff, output and receipt (ADR 0047): PR #253, 13 pane sims (256 hostile seeds), journey at 120x32 (the pane opens at 108 columns) shows the diff before the folder changes.
 - [ ] #252 the pane streams a running command's output. Proof: a PTY journey shows a command's first line before its second exists.
+- [x] #262 queue a message while a task runs, /ps and /stop for background commands (ADR 0128): PR #539, 14 sims and 2 PTY journeys green on Oracle; queue bound 8, 16 jobs with 5-line tails.
 - [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
 - iOS and Android: #115 in section 4, after #90 and #247.
-
 ## Holds and open design
 - Memory (C03) waits for Logical-DB, no substitute store; Nova, Moo and Secure-Authority are test doubles until Track 2. #4 shared-context routing and local ML: design only. #56, #57 (logical-cloud) wait for that repository.

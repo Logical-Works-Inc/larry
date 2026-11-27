@@ -8,6 +8,8 @@
 //! lost it (SGR 0 sent after the colour). Widths are Unicode display widths
 //! (UAX #11), so CJK and emoji take two cells and combining marks none.
 
+use std::time::Duration;
+
 use unicode_width::UnicodeWidthChar as _;
 
 /// What a run of text means to the person reading it.
@@ -216,6 +218,13 @@ pub(crate) fn sanitize(text: &str, keep_newlines: bool) -> String {
     filtered(text, keep_newlines, false)
 }
 
+/// [`sanitize`] for one line that can never hold `\n`: the command's first
+/// line, a queued turn's first line, an output line already split. It takes no
+/// flag, so no dead branch is left for a mutant to flip (larry#262).
+pub(crate) fn sanitize_line(text: &str) -> String {
+    filtered(text, false, false)
+}
+
 /// [`sanitize`] for a command the person approves: each dropped character is shown as
 /// `⟨U+XXXX⟩`, so the command on screen is the command that runs (larry#337).
 pub(crate) fn sanitize_shown(text: &str) -> String {
@@ -368,6 +377,47 @@ pub(crate) fn ellipsize(text: &str, width: usize) -> String {
         out.push('…');
     }
     out
+}
+
+/// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
+pub(crate) fn compact(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match (seconds.checked_div(60), seconds.checked_rem(60)) {
+        (Some(0) | None, _) => format!("{seconds}s"),
+        (Some(minutes), Some(rest)) if minutes < 60 => format!("{minutes}m {rest:02}s"),
+        (Some(minutes), _) => match (minutes.checked_div(60), minutes.checked_rem(60)) {
+            (Some(hours), Some(left)) => format!("{hours}h {left:02}m"),
+            _ => format!("{minutes}m"),
+        },
+    }
+}
+
+/// Footer hints joined by ` · ` to fit `width`; a hint that does not fit is
+/// dropped whole and `…` marks the cut (Codex `footer_hint.rs`).
+pub(crate) fn hints(items: &[&str], width: usize) -> Line {
+    let mut text = String::new();
+    for (index, item) in items.iter().enumerate() {
+        let sep = if index == 0 { "" } else { " · " };
+        let more = index.saturating_add(1) < items.len();
+        let next = text_width(&text)
+            .saturating_add(text_width(sep))
+            .saturating_add(text_width(item));
+        if next.saturating_add(if more { 2 } else { 0 }) > width {
+            text.push_str(if index == 0 { "…" } else { " …" });
+            break;
+        }
+        text.push_str(sep);
+        text.push_str(item);
+    }
+    vec![Span::new(text, Style::MUTED)]
+}
+
+/// `said`, or `fallback` when the session said nothing.
+pub(crate) fn or_said(said: Option<String>, fallback: &str) -> String {
+    match said {
+        Some(text) => text,
+        None => fallback.to_owned(),
+    }
 }
 
 #[cfg(test)]
