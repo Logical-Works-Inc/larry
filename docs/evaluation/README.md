@@ -29,7 +29,10 @@ session in the task's working directory. Harbor's agent installs agents from the
 ACP Registry and passes settings with `--agent-env`, so a run sets
 `LARRY_POLICY=file.read,file.write,process.spawn,model.invoke,model.command`,
 `LARRY_STATE_DIR`, `LARRY_MODEL_URL` and `LARRY_MODEL_KEY`. `model.command` is
-named only because Harbor's task container isolates the commands. Each prompt
+named only because Harbor's task container isolates the commands. A remote door
+needs `larry serve provision <root>` first: with no provisioned root row the
+session is refused deny-by-default. Local doors stay open until that first
+provision. Each prompt
 result carries the sealed report under `_meta.larry.report`, and the task's
 `tests/test.sh` decides the reward. The registry listing is a publication the
 Director names (ADR 0035), so `tests/acp_harbor_journey.rs` proves the adapter

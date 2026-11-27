@@ -24,11 +24,26 @@ use lgwks_bot::kernel::cap::Cap;
 /// The owner supplies the capabilities required by its concrete effect. A
 /// lapsed proof and an incomplete proof are distinct typed refusals so the
 /// runtime can record the exact boundary failure.
+///
+/// `Auth::check` today reports only expiry and coverage, but its return type
+/// is the estate's whole [`KernelError`] vocabulary, so every other variant
+/// is named here too: an estate refusal the owner cannot place still means the
+/// endpoint was never reached, so it fails closed as [`BindingError::NoCoveringGrant`]
+/// rather than through a wildcard that would hide the mapping.
 pub fn validate_proof(proof: &Auth, required: &[Cap]) -> Result<(), BindingError> {
     match proof.check(required) {
         Ok(()) => Ok(()),
         Err(KernelError::CredentialExpired { .. }) => Err(BindingError::Expired),
-        Err(KernelError::CapabilityDenied { .. }) => Err(BindingError::NoCoveringGrant),
+        Err(KernelError::CapabilityDenied { .. })
+        | Err(KernelError::Conflict { .. })
+        | Err(KernelError::DomainError { .. })
+        | Err(KernelError::EffectIndeterminate { .. })
+        | Err(KernelError::ActionNotDeclared { .. })
+        | Err(KernelError::EffectUnsettled { .. })
+        | Err(KernelError::EffectRefused { .. }) => Err(BindingError::NoCoveringGrant),
+        // Future estate variants fail closed: a refusal the owner cannot
+        // place still means the endpoint was never reached. This arm is also
+        // the wildcard `#[non_exhaustive]` requires outside its own crate.
         Err(_) => Err(BindingError::NoCoveringGrant),
     }
 }
@@ -63,19 +78,22 @@ pub trait EffectOwner {
         &mut self,
         _intent: &EffectIntent,
         _proof: &Auth,
+        _required: &[Cap],
         _at: SystemTime,
     ) -> Result<EffectOutcome, larry_contracts::binding::BindingError> {
         Err(larry_contracts::binding::BindingError::UnsupportedOwner)
     }
 
-    /// Performs the first effect reach after the owner accepts the checked proof.
+    /// Refuses an unbound reach after checking the proof's capability coverage.
     fn dispatch(
         &mut self,
-        intent: &EffectIntent,
+        _intent: &EffectIntent,
         proof: &Auth,
-        at: SystemTime,
+        required: &[Cap],
+        _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        self.dispatch_bound(intent, proof, at)
+        validate_proof(proof, required)?;
+        Err(BindingError::UnsupportedOwner)
     }
 
     /// Asks the endpoint what happened to an effect whose outcome is still
@@ -113,12 +131,12 @@ pub mod fixture {
     use larry_contracts::ids::OperationId;
 
     use super::{
-        Auth, BindingError, Duration, EffectIntent, EffectOutcome, EffectOwner, SystemTime,
+        Auth, BindingError, Cap, Duration, EffectIntent, EffectOutcome, EffectOwner, SystemTime,
     };
 
     /// Reads the owner-bound credential before the fixture records a reach.
-    fn read_proof(proof: &Auth) -> Result<(), BindingError> {
-        super::validate_proof(proof, &[])
+    fn read_proof(proof: &Auth, required: &[Cap]) -> Result<(), BindingError> {
+        super::validate_proof(proof, required)
     }
 
     /// An owner that returns scripted outcomes in order and records the
@@ -185,6 +203,18 @@ pub mod fixture {
                 None => EffectOutcome::Unknown { operation },
             }
         }
+
+        /// Checks the proof, then records and returns the next scripted outcome.
+        fn send(
+            &mut self,
+            request: &EffectIntent,
+            credential: &Auth,
+            required: &[Cap],
+        ) -> Result<EffectOutcome, BindingError> {
+            read_proof(credential, required)?;
+            self.dispatched.push(request.operation);
+            Ok(self.next(request.operation))
+        }
     }
 
     impl EffectOwner for ScriptedOwner {
@@ -203,11 +233,23 @@ pub mod fixture {
             &mut self,
             request: &EffectIntent,
             credential: &Auth,
+            required: &[Cap],
             _observed_at: SystemTime,
         ) -> Result<EffectOutcome, BindingError> {
-            read_proof(credential)?;
-            self.dispatched.push(request.operation);
-            Ok(self.next(request.operation))
+            self.send(request, credential, required)
+        }
+
+        fn dispatch(
+            &mut self,
+            intent: &EffectIntent,
+            credential: &Auth,
+            required: &[Cap],
+            _observed_at: SystemTime,
+        ) -> Result<EffectOutcome, BindingError> {
+            // The fixture declares unbound support explicitly: it reads the
+            // same proof for this raw intent rather than forwarding to the
+            // bound path, so the two reaches stay distinct.
+            self.send(intent, credential, required)
         }
 
         fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
@@ -276,7 +318,7 @@ pub mod fixture {
             );
             let mut owner = ScriptedOwner::new();
             assert_eq!(
-                owner.dispatch(&intent, &proof, SystemTime::UNIX_EPOCH),
+                owner.dispatch(&intent, &proof, &[], SystemTime::UNIX_EPOCH),
                 Err(BindingError::Expired),
                 "the scripted owner refuses a proof lapsed at its own read"
             );
@@ -284,6 +326,39 @@ pub mod fixture {
                 owner.dispatched.is_empty(),
                 "a refused proof is never recorded as sent"
             );
+            Ok(())
+        }
+
+        #[test]
+        fn sim_scripted_owner_refuses_a_missing_required_capability()
+        -> Result<(), Box<dyn std::error::Error>> {
+            for seed in 0_u8..32 {
+                let granted = Cap::new(format!("larry.granted.{seed}"));
+                let missing = Cap::new(format!("larry.missing.{seed}"));
+                let clock = Clock::virtual_at(Duration::ZERO);
+                let proof = GrantSet::empty()
+                    .grant_expiring(granted.clone(), Duration::from_secs(60))
+                    .issue_at(std::slice::from_ref(&granted), &clock)?;
+                let intent = EffectIntent::new(
+                    EffectId::from_bytes([seed; 16]),
+                    OperationId::from_bytes([seed; 16]),
+                    RunId::from_bytes([seed; 16]),
+                    TenantId::from_bytes([seed; 16]),
+                    ReconciliationStrategy::Queryable,
+                    SecurityEpoch::INITIAL,
+                );
+                let mut owner = ScriptedOwner::new();
+                let required = [granted, missing];
+                assert_eq!(
+                    owner.dispatch_bound(&intent, &proof, &required, SystemTime::UNIX_EPOCH),
+                    Err(BindingError::NoCoveringGrant),
+                    "seed {seed}: the scripted owner must require every effect capability"
+                );
+                assert!(
+                    owner.dispatched.is_empty(),
+                    "seed {seed}: a missing capability must not be recorded as sent"
+                );
+            }
             Ok(())
         }
     }

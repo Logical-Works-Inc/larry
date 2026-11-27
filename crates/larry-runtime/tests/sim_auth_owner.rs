@@ -17,6 +17,7 @@ use larry_runtime::owner::EffectOwner;
 use larry_runtime::runtime::Runtime;
 use larry_runtime::{error::RuntimeError, projection::FoldProjection};
 use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::Cap;
 use lgwks_bot::kernel::clock::Clock;
 
 use seed::step;
@@ -39,12 +40,23 @@ impl LapsBeforeRead {
         }
     }
 
-    fn read(&self, proof: &Auth) -> Result<(), BindingError> {
-        if proof.is_expired() {
-            Err(BindingError::Expired)
-        } else {
-            Ok(())
+    /// Advances the shared clock past the proof's lease, then reads the proof:
+    /// each reach lapses before its own read, and a lapsed proof records
+    /// nothing as sent.
+    fn send(
+        &mut self,
+        request: &EffectIntent,
+        proof: &Auth,
+        required: &[Cap],
+    ) -> Result<EffectOutcome, BindingError> {
+        if self.clock.advance(Duration::from_secs(3_601)).is_err() {
+            return Err(BindingError::Expired);
         }
+        larry_runtime::owner::validate_proof(proof, required)?;
+        self.sent.push((request.tenant, request.operation));
+        Ok(EffectOutcome::Unknown {
+            operation: request.operation,
+        })
     }
 }
 
@@ -55,27 +67,22 @@ impl EffectOwner for LapsBeforeRead {
 
     fn dispatch(
         &mut self,
-        request: &EffectIntent,
+        intent: &EffectIntent,
         credential: &Auth,
+        required: &[Cap],
         _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        if self.clock.advance(Duration::from_secs(3_601)).is_err() {
-            return Err(BindingError::Expired);
-        }
-        self.read(credential)?;
-        self.sent.push((request.tenant, request.operation));
-        Ok(EffectOutcome::Unknown {
-            operation: request.operation,
-        })
+        self.send(intent, credential, required)
     }
 
     fn dispatch_bound(
         &mut self,
         request: &EffectIntent,
         credential: &Auth,
-        at: SystemTime,
+        required: &[Cap],
+        _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        self.dispatch(request, credential, at)
+        self.send(request, credential, required)
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {

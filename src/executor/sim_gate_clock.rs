@@ -15,8 +15,7 @@ use lgwks_macros::Error;
 use lgwks_std::hash::Hasher;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::env::{default_policy, task_settings, with_expiry};
-use super::lease_start;
+use super::{default_policy, lease_start, task_settings, with_expiry};
 
 /// What every test here returns.
 type TestResult = Result<(), ExpirySimError>;

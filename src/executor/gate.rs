@@ -23,34 +23,68 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::rc::Rc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope, SecurityEpoch};
 use larry_contracts::binding::{BindingError, EffectTarget, ResolvedEffect};
 use larry_contracts::command::{Command, CommandAcceptance, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
-use larry_contracts::ids::{RunId, TenantId, WorkerId};
-use larry_contracts::replay::DenialReason;
+use larry_contracts::ids::{OperationId, RunId, TenantId, WorkerId};
+use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
 use larry_runtime::owner::{EffectOwner, validate_proof};
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
-use larry_runtime::runtime::{Runtime, restore};
+use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
 use lgwks_bot::kernel::clock::Clock;
 
 use super::ExecError;
 use super::Report;
 use super::Settings;
 use super::Task;
-use super::env::{EXECUTOR_CAPABILITIES, TASK_COST, scope_name, task_settings, with_expiry};
 use super::identity;
 use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
-use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::{Auth, Cap};
 
-/// Schema version recorded in each resolved executor effect.
+/// The prefix every policy revision digest carries, so a revision computed here
+/// can never collide with a digest computed for another purpose.
+const POLICY_REVISION_TAG: &[u8] = b"larry/executor/policy-revision/v1\0";
+
+/// The request each task costs against its one-run budget.
+const TASK_COST: u64 = 1;
+
+/// The schema version of the executor's own adapter contract, which a resolved
+/// effect records.
 const ADAPTER_SCHEMA: u64 = 1;
+
+/// The scopes the executor is capable of. The capability snapshot pins them,
+/// so the policy alone decides what a task may do.
+const EXECUTOR_CAPABILITIES: [Scope; 5] = [
+    Scope::FileRead,
+    Scope::FileWrite,
+    Scope::ProcessSpawn,
+    Scope::ModelInvoke,
+    Scope::ModelCommand,
+];
+
+/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
+/// command (larry#93) is never in it: only an operator who isolates the commands
+/// outside Larry, as a Harbor task container does, names `model.command`. A terminal
+/// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
+/// needs no such scope and runs under this policy as it is.
+const DEFAULT_POLICY: [Scope; 4] = [
+    Scope::FileRead,
+    Scope::FileWrite,
+    Scope::ProcessSpawn,
+    Scope::ModelInvoke,
+];
+
+/// The policy when `LARRY_POLICY` is unset.
+fn default_policy() -> BTreeSet<Scope> {
+    DEFAULT_POLICY.iter().copied().collect()
+}
 
 /// The scopes a terminal session needs (larry#93): everything a briefed task needs,
 /// plus the model choosing the commands.
@@ -65,6 +99,122 @@ pub(super) fn isolated_scopes() -> BTreeSet<Scope> {
     let mut scopes = session_scopes();
     scopes.remove(&Scope::ModelCommand);
     scopes
+}
+
+/// The prefix the estate capability names carry and a policy name omits.
+const CAPABILITY_PREFIX: &str = "larry.";
+
+/// The tenants one executor state directory serves: its own, because the
+/// tenant is derived from the directory (larry#182). Every shared runtime cap
+/// is whole to that one tenant, and the shipped path names the count rather
+/// than leaving a default nothing reached (larry#333, SD-1).
+const SERVED_TENANTS: usize = 1;
+
+/// The runtime settings one task runs under: the revision of the policy record
+/// it runs under, the executor's capabilities, one request, and the runtime's
+/// own default lease.
+///
+/// The revision is derived from the record itself, so the same `LARRY_POLICY`
+/// always names the same revision and a changed policy names a different one,
+/// rather than a constant only this build knows (larry#212).
+pub(super) fn task_settings(policy: &BTreeSet<Scope>) -> RuntimeSettings {
+    let mut settings = RuntimeSettings::with_defaults(
+        PolicySnapshot::new(policy_revision(policy), policy.clone()),
+        CapabilitySnapshot::new(EXECUTOR_CAPABILITIES.iter().copied().collect()),
+        ValiditySnapshot::new(SystemTime::UNIX_EPOCH),
+        BudgetUnit::Requests,
+        TASK_COST,
+    );
+    settings.max_tenants = SERVED_TENANTS;
+    settings
+}
+
+/// The revision of one policy record: a digest over the policy's own scope
+/// names, in `Scope` order, so the same admitted set always yields the same
+/// revision and a decision is only ever comparable inside one (larry#212).
+fn policy_revision(policy: &BTreeSet<Scope>) -> u64 {
+    let mut record = String::new();
+    for scope in policy {
+        record.push_str(&scope_name(*scope));
+        record.push('\n');
+    }
+    let digest =
+        larry_contracts::ids::ContentDigest::over(&[POLICY_REVISION_TAG, record.as_bytes()]);
+    let mut revision = 0u64;
+    for byte in digest.as_bytes().iter().take(8) {
+        revision = (revision << 8) | u64::from(*byte);
+    }
+    revision
+}
+
+/// `settings` with its validity pinned to the admission lease that starts at
+/// `now`: the lease length is the runtime's own setting, so the executor keeps
+/// no clock constant of its own (larry#212).
+pub(super) fn with_expiry(
+    settings: RuntimeSettings,
+    now: SystemTime,
+) -> Result<RuntimeSettings, RuntimeError> {
+    let mut settings = settings;
+    settings.validity = ValiditySnapshot::new(lease_end(now, settings.lease)?);
+    Ok(settings)
+}
+
+/// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
+/// estate capability name `replay::capability` gives it (larry#77), without
+/// its `larry.` prefix, so the scope-to-name mapping has one owner.
+pub(super) fn scope_name(scope: Scope) -> String {
+    let capability = larry_contracts::replay::capability(scope);
+    let name = capability.as_str();
+    match name.strip_prefix(CAPABILITY_PREFIX) {
+        Some(short) => short.to_owned(),
+        None => name.to_owned(),
+    }
+}
+
+/// The scope a policy name admits, or `None` for a name that is not one: the
+/// executor's own scopes plus network egress, which a policy may name though
+/// no executor task needs it.
+fn named_scope(name: &str) -> Option<Scope> {
+    EXECUTOR_CAPABILITIES
+        .iter()
+        .copied()
+        .chain(core::iter::once(Scope::NetworkEgress))
+        .find(|scope| scope_name(*scope) == name)
+}
+
+/// The `LARRY_POLICY` scopes `read` yields: unset is the four scopes the
+/// executor uses, the empty string is no scope, names are trimmed and
+/// comma-separated, and an unknown name is a typed refusal.
+pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
+    let Some(text) = read("LARRY_POLICY") else {
+        return Ok(default_policy());
+    };
+    policy_names(Some(&text))
+}
+
+/// Parses a durable policy record. A missing ledger row is remote deny-all.
+pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecError> {
+    let Some(text) = text else {
+        return Ok(BTreeSet::new());
+    };
+    let mut scopes = BTreeSet::new();
+    for name in text.split(',') {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match named_scope(name) {
+            Some(scope) => {
+                scopes.insert(scope);
+            }
+            None => {
+                return Err(ExecError::BadPolicy {
+                    value: name.to_owned(),
+                });
+            }
+        }
+    }
+    Ok(scopes)
 }
 
 /// The scopes one task requires: repository read and process spawn always,
@@ -87,24 +237,6 @@ fn first_missing(required: &BTreeSet<Scope>, policy: &BTreeSet<Scope>) -> Option
         .iter()
         .copied()
         .find(|scope| !policy.contains(scope))
-}
-
-/// The one denial line a recorded authorization reason stands for, naming the
-/// refused scope with its dotted name.
-fn denial_line(reason: &DenialReason) -> String {
-    match *reason {
-        DenialReason::PolicyRefuses { scope } => {
-            format!("gate: policy_refuses: {}", scope_name(scope))
-        }
-        DenialReason::CapabilityMissing { scope } => {
-            format!("gate: capability_missing: {}", scope_name(scope))
-        }
-        DenialReason::AuthorityExpired => String::from("gate: authority_expired"),
-        DenialReason::BudgetExhausted { .. } => String::from("gate: budget_exhausted"),
-        DenialReason::UnitMismatch { .. } => String::from("gate: unit_mismatch"),
-        DenialReason::NotApproved => String::from("gate: not_approved"),
-        _ => String::from("gate: denied"),
-    }
 }
 
 /// The sealed report a gate denial yields: nothing ran, and the report says
@@ -141,9 +273,25 @@ pub(super) fn lease_start(clock: &Clock) -> Result<SystemTime, RuntimeError> {
         .ok_or(RuntimeError::ClockOutOfRange { elapsed })
 }
 
+/// `now + lease` as an instant, or the typed refusal when the platform cannot
+/// hold the reading.
+pub(super) fn lease_end(now: SystemTime, lease: Duration) -> Result<SystemTime, RuntimeError> {
+    let elapsed = match now.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(elapsed) => elapsed,
+        Err(_) => Duration::ZERO,
+    };
+    let total = elapsed.saturating_add(lease);
+    SystemTime::UNIX_EPOCH
+        .checked_add(total)
+        .ok_or(RuntimeError::ClockOutOfRange { elapsed: total })
+}
+
 /// The owner boundary the executor presents: the task body is the one external
 /// effect. `run` is the gated body, held until the bound reach runs it at most
-/// once; its outcome is the effect's outcome.
+/// once; its outcome is the effect's outcome. The executor cannot be queried
+/// after an unbound dispatch, so both unbound dispatch and reconciliation
+/// report unknown — a fact the proposal's `RequiresHuman` strategy records as
+/// such rather than a success it never observed.
 struct TaskOwner<'a, F>
 where
     F: FnOnce() -> Result<Report, ExecError>,
@@ -152,7 +300,9 @@ where
     repo: &'a Path,
     /// The tenant the run belongs to; one state directory is one tenant.
     tenant: TenantId,
-    /// The security generation the runtime's fence starts at.
+    /// The security generation the runtime's fence starts at: the epoch a
+    /// resolved effect names, read from the runtime's own settings rather than
+    /// a constant (larry#212).
     epoch: SecurityEpoch,
     /// The task document bytes the effect's payload binds to.
     task_bytes: &'a [u8],
@@ -168,6 +318,9 @@ where
 {
     fn resolve(&mut self, _intent: &EffectIntent) -> Result<Option<ResolvedEffect>, BindingError> {
         let raw = self.repo.as_os_str().as_encoded_bytes();
+        // The resolved link identity is the canonical repository path. A path
+        // that cannot be canonicalized binds to its raw bytes instead, which
+        // resolves identically on every call for a path that does not move.
         let canonical = match std::fs::canonicalize(self.repo) {
             Ok(path) => path.as_os_str().as_encoded_bytes().to_vec(),
             Err(_) => raw.to_vec(),
@@ -180,6 +333,8 @@ where
             self.task_bytes,
             b"larry.executor/v1",
         )?;
+        // The schema version of the executor's own adapter contract, and the
+        // generation the runtime's fence was built at.
         Ok(Some(ResolvedEffect::new(
             target,
             ADAPTER_SCHEMA,
@@ -191,15 +346,17 @@ where
         &mut self,
         intent: &EffectIntent,
         proof: &Auth,
+        required: &[Cap],
         _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        validate_proof(proof, &[])?;
+        validate_proof(proof, required)?;
         if intent.tenant != self.tenant {
             return Err(BindingError::Changed {
                 field: larry_contracts::binding::BindingField::Command,
             });
         }
         if self.slot.borrow().is_some() {
+            // The body ran once; a second reach never re-runs it.
             return Ok(EffectOutcome::Unknown {
                 operation: intent.operation,
             });
@@ -298,22 +455,15 @@ pub(super) fn admit_and_run(
         CommandContent::new(CommandKind::Submit, payload.into_boxed_slice()),
     )
     .map_err(RuntimeError::from)?;
-    let budget = Budget::new(TASK_COST, BudgetUnit::Requests);
-    let grant =
-        Grant::new(tenant, holder, granted, budget, expiry, 0).map_err(RuntimeError::from)?;
-    let grant = if grant.scopes().is_empty() {
-        grant
-    } else {
-        let policy = larry_contracts::authority::ResourcePolicy::new(grant.scopes().clone());
-        let request = larry_contracts::authority::AttenuationRequest::new(
-            holder,
-            grant.scopes().clone(),
-            budget,
-            expiry,
-        );
-        larry_contracts::authority::attenuate(&grant, &policy, &request)
-            .map_err(RuntimeError::from)?
-    };
+    let grant = Grant::new(
+        tenant,
+        holder,
+        granted,
+        Budget::new(TASK_COST, BudgetUnit::Requests),
+        expiry,
+        0,
+    )
+    .map_err(RuntimeError::from)?;
 
     let slot: Rc<RefCell<Option<Result<Report, ExecError>>>> = Rc::new(RefCell::new(None));
     let owner = TaskOwner {
@@ -341,15 +491,16 @@ pub(super) fn admit_and_run(
                 command,
                 holder,
                 grant,
-                operation,
                 tenant,
                 required: &required,
                 task_id,
                 run_id,
+                operation,
                 task_digest,
                 key,
+                fence_control: settings.fence_control,
             };
-            drive(&mut runtime, admission, policy, settings, &slot)
+            drive(&mut runtime, admission, policy, &slot)
         }
         Err(error) => Err(ExecError::Gate(error)),
     };
@@ -369,8 +520,6 @@ struct Admission<'a> {
     holder: WorkerId,
     /// The one grant the policy and capabilities allow.
     grant: Grant,
-    /// The operation the host controls apply to.
-    operation: larry_contracts::ids::OperationId,
     /// The state directory's tenant.
     tenant: TenantId,
     /// The scopes the task needs.
@@ -379,10 +528,14 @@ struct Admission<'a> {
     task_id: &'a str,
     /// The run id that identity names: what the journal records this request as.
     run_id: RunId,
+    /// The operation the fence withdraws when the host action names one.
+    operation: OperationId,
     /// The task document's digest.
     task_digest: &'a str,
     /// The receipt key a denial is sealed under.
     key: &'a lgwks_std::sign::SecretKey,
+    /// The operator's one host fence action, applied after durable admission.
+    fence_control: Option<super::fence_control::FenceControl>,
 }
 
 /// Removes a returned task's journal: its record is now the sealed report the
@@ -425,20 +578,20 @@ fn drive<O: EffectOwner>(
     runtime: &mut Runtime<FoldProjection, O>,
     admission: Admission<'_>,
     policy: &BTreeSet<Scope>,
-    settings: &Settings,
     slot: &RefCell<Option<Result<Report, ExecError>>>,
 ) -> Result<Report, ExecError> {
     let Admission {
         command,
         holder,
         grant,
-        operation,
         tenant,
         required,
         task_id,
         run_id,
+        operation,
         task_digest,
         key,
+        fence_control,
     } = admission;
     let shown = match runtime.display(&command, holder, &[grant]) {
         Ok(shown) => shown,
@@ -486,8 +639,8 @@ fn drive<O: EffectOwner>(
             };
         }
     };
-    if let Some(control) = settings.fence_control {
-        apply_fence_control(runtime, control, operation)?;
+    if let Some(control) = fence_control {
+        super::fence_control::apply(runtime, control, operation)?;
     }
     // A duplicate is this request already recorded under this one run id (E28,
     // larry#182 defect 3). The body must not run again, so the caller is answered
@@ -520,43 +673,8 @@ fn drive<O: EffectOwner>(
         return finished;
     }
     // The gate refused at admission: the sealed report names the first reason.
-    let line = match tick.denied().first() {
-        Some(pair) => denial_line(&pair.1),
-        None => match tick.fenced().first() {
-            Some(&(_operation, ref refusal)) => format!("gate: fence: {refusal}"),
-            None => match tick.refused().first().map(|pair| &pair.1) {
-                Some(refusal) => format!("gate: refusal: {refusal}"),
-                None => String::from("gate: denied"),
-            },
-        },
-    };
+    let line = super::fence_control::report_line(&tick);
     Ok(denied_report(task_id, task_digest, &line, key))
-}
-
-/// Applies one operator authority action after durable admission and before
-/// `Runtime::tick` reaches the external owner.
-fn apply_fence_control<O: EffectOwner>(
-    runtime: &mut Runtime<FoldProjection, O>,
-    control: super::FenceControl,
-    operation: larry_contracts::ids::OperationId,
-) -> Result<(), RuntimeError> {
-    match control {
-        super::FenceControl::Revoke => runtime
-            .fence_mut()
-            .revoke(operation)
-            .map(|_| ())
-            .map_err(RuntimeError::from),
-        super::FenceControl::Advance => runtime
-            .fence_mut()
-            .advance_epoch()
-            .map(|_| ())
-            .map_err(RuntimeError::from),
-        super::FenceControl::Authenticate(epoch) => runtime
-            .fence_mut()
-            .authenticate(epoch)
-            .map(|_| ())
-            .map_err(RuntimeError::from),
-    }
 }
 
 /// The one denial line a duplicate answers with, from the journal's own evidence:
@@ -581,3 +699,87 @@ where
 #[cfg(test)]
 #[path = "sim_gate_clock.rs"]
 mod sim_clock;
+
+#[cfg(test)]
+#[path = "gate_owner_tests.rs"]
+mod owner_tests;
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use larry_contracts::authority::Scope;
+
+    use super::{SERVED_TENANTS, default_policy, policy_revision, task_settings, with_expiry};
+
+    /// The executor's lease and the runtime's tick are one timeline: the live
+    /// clock the executor passes reads after 2023, not 1970, and the validity
+    /// the runtime is built with sits exactly one configured lease after that
+    /// reading (larry#182, larry#212).
+    #[test]
+    fn the_executors_lease_and_the_runtimes_tick_share_one_timeline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let clock = larry_runtime::live_clock()?;
+        let tick = SystemTime::UNIX_EPOCH
+            .checked_add(clock.now())
+            .ok_or("tick instant overflow")?;
+        let anchored = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_700_000_000))
+            .ok_or("anchor instant overflow")?;
+        assert!(
+            tick > anchored,
+            "the live clock is anchored after 2023, not at 1970: {tick:?}"
+        );
+        let run_settings = with_expiry(task_settings(&default_policy()), tick)?;
+        let gap = run_settings.validity.valid_until.duration_since(tick)?;
+        assert_eq!(
+            gap, run_settings.lease,
+            "the validity sits one configured lease after the tick"
+        );
+        Ok(())
+    }
+
+    /// The executor's settings name the tenants one state directory serves, so
+    /// the runtime's shared caps divide by a value the shipped task path sets,
+    /// not by a default nothing reached (larry#333, SD-1).
+    #[test]
+    fn task_settings_name_the_tenants_the_executor_serves() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let settings = task_settings(&default_policy());
+        assert_eq!(
+            settings.max_tenants, SERVED_TENANTS,
+            "the task settings carry the tenant count"
+        );
+        assert_eq!(SERVED_TENANTS, 1, "one state directory is one tenant");
+        let tick = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_700_000_000))
+            .ok_or("tick instant overflow")?;
+        let carried = with_expiry(settings, tick)?;
+        assert_eq!(
+            carried.max_tenants, 1,
+            "the settings a task runs under carry it"
+        );
+        Ok(())
+    }
+
+    /// The policy revision is a fact about the policy record, not a constant:
+    /// the same admitted set yields the same revision, and one more scope
+    /// yields a different one (larry#212).
+    #[test]
+    fn task_settings_derive_the_revision_from_the_policy_record() {
+        let first = task_settings(&default_policy());
+        let again = task_settings(&default_policy());
+        assert_eq!(
+            first.policy.revision(),
+            again.policy.revision(),
+            "the same policy record yields the same revision"
+        );
+
+        let mut widened = default_policy();
+        widened.insert(Scope::NetworkEgress);
+        assert_ne!(
+            policy_revision(&default_policy()),
+            policy_revision(&widened)
+        );
+    }
+}

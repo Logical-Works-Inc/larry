@@ -70,11 +70,11 @@ fn dispatch_world(seed: u64) -> Result<(Vec<Seen>, Vec<Seen>), Box<dyn Error>> {
     let at = SystemTime::UNIX_EPOCH;
     let mut scripted = Vec::with_capacity(calls);
     for _ in 0..calls {
-        scripted.push(seen(owner.dispatch(&asked, &proof, at)?));
+        scripted.push(seen(owner.dispatch(&asked, &proof, &[], at)?));
     }
     let mut past = Vec::with_capacity(3);
     for _ in 0..3 {
-        past.push(seen(owner.dispatch(&asked, &proof, at)?));
+        past.push(seen(owner.dispatch(&asked, &proof, &[], at)?));
     }
     Ok((scripted, past))
 }
@@ -112,7 +112,7 @@ fn witness_world(seed: u64) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Error>> {
         let asked = intent(stream.below(256)?.to_le_bytes()[0]);
         // The scripted outcome is not read here; the witness lists below are.
         let _outcome = if stream.below(2)? == 0 {
-            owner.dispatch(&asked, &proof, at)?
+            owner.dispatch(&asked, &proof, &[], at)?
         } else {
             owner.reconcile(&asked, at)
         };

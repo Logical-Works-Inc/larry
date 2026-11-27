@@ -429,11 +429,12 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         stale.join("hello.txt").exists(),
         "the old leftover is present"
     );
-    let root = crate::executor::sim_tree::scratch("tui-worker")?;
-    let settings = unreachable_model(&root)?;
+    let state = crate::executor::sim_tree::scratch("tui-worker-state")?;
+    let work = crate::executor::sim_tree::scratch("tui-worker-work")?;
+    let settings = unreachable_model(&state)?;
     let mut worker = super::worker::Worker::spawn(
         String::from("write hello.txt"),
-        root.to_path_buf(),
+        work.to_path_buf(),
         settings.clone(),
         Isolation::Host,
         false,
@@ -461,13 +462,13 @@ fn sim_tui_worker_drives_run_session_through_observer() -> Result<(), Box<dyn st
         "{seen:?}"
     );
     assert!(
-        !root.join("hello.txt").exists(),
+        !work.join("hello.txt").exists(),
         "a refused session runs nothing"
     );
     // A worker dropped before its session reports is cancelled and joined, not leaked.
     let early = super::worker::Worker::spawn(
         String::from("x"),
-        root.to_path_buf(),
+        work.to_path_buf(),
         settings,
         Isolation::Host,
         true,

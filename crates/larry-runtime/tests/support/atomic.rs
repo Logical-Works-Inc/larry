@@ -9,7 +9,7 @@ use larry_contracts::binding::{BindingError, BindingField, EffectTarget, Resolve
 use larry_contracts::effect::{EffectIntent, EffectOutcome};
 use larry_contracts::ids::{OperationId, TenantId, WorkerId};
 use larry_runtime::owner::{EffectOwner, validate_proof};
-use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::{Auth, Cap};
 use lgwks_bot::kernel::gate::GrantSet;
 
 /// Host-authenticated holder the display journeys share: the identity every
@@ -105,42 +105,43 @@ impl EffectOwner for AtomicOwner {
 
     fn dispatch_bound(
         &mut self,
-        request: &EffectIntent,
+        bound: &EffectIntent,
         credential: &Auth,
+        required: &[Cap],
         _observed_at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        validate_proof(credential, &[])?;
+        validate_proof(credential, required)?;
         let current = self.observe()?;
-        request
+        bound
             .binding()
             .ok_or(BindingError::MissingDisplay)?
             .resolved()
             .verify(&current)?;
         // The validated resolved value itself is executed, never a second lookup.
-        self.executed
-            .push((request.tenant, request.operation, current));
+        self.executed.push((bound.tenant, bound.operation, current));
         Ok(if self.lose_reply {
             EffectOutcome::Unknown {
-                operation: request.operation,
+                operation: bound.operation,
             }
         } else {
             EffectOutcome::Succeeded {
-                operation: request.operation,
+                operation: bound.operation,
             }
         })
     }
 
     fn dispatch(
         &mut self,
-        request: &EffectIntent,
+        legacy: &EffectIntent,
         credential: &Auth,
+        required: &[Cap],
         _observed_at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
-        validate_proof(credential, &[])?;
         // Any legacy dispatch is an observable test failure, not a fallback.
         self.observations = u64::MAX;
+        validate_proof(credential, required)?;
         Ok(EffectOutcome::Unknown {
-            operation: request.operation,
+            operation: legacy.operation,
         })
     }
 
@@ -207,7 +208,7 @@ mod tests {
         );
         assert!(
             matches!(
-                owner.dispatch_bound(&intent, &proof, at),
+                owner.dispatch_bound(&intent, &proof, &[], at),
                 Err(BindingError::MissingDisplay)
             ),
             "an unbound intent is refused, never dispatched"

@@ -23,11 +23,11 @@ use larry_contracts::ids::{CommandId, ContentDigest, OperationId, RunId, TenantI
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::{Journal, JournalEntry};
-use larry_runtime::owner::EffectOwner;
+use larry_runtime::owner::{EffectOwner, validate_proof};
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend, replay_authorizations};
 use larry_runtime::runtime::{Runtime, RuntimeSettings, restore};
-use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::{Auth, Cap};
 use lgwks_bot::kernel::clock::Clock;
 
 /// Each simulation family exhausts this deterministic seed interval.
@@ -607,16 +607,15 @@ impl EffectOwner for ResolverOnly {
 
     fn dispatch(
         &mut self,
-        request: &EffectIntent,
+        unbound: &EffectIntent,
         credential: &Auth,
+        required: &[Cap],
         _observed_at: SystemTime,
     ) -> std::result::Result<EffectOutcome, BindingError> {
-        if credential.is_expired() {
-            return Err(BindingError::Expired);
-        }
+        validate_proof(credential, required)?;
         self.legacy_calls = self.legacy_calls.saturating_add(1);
         Ok(EffectOutcome::Succeeded {
-            operation: request.operation,
+            operation: unbound.operation,
         })
     }
 

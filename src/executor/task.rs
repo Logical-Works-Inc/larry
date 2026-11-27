@@ -168,6 +168,12 @@ impl Task {
             None => None,
             Some(entry) => Some(bounded_key(entry)?),
         };
+        let model_commands = match object.get("model_commands") {
+            None => false,
+            Some(entry) => entry.as_bool().ok_or(TaskError::WrongType {
+                key: "model_commands",
+            })?,
+        };
         let route = match object.get("route") {
             None => None,
             Some(entry) => Some(route_id(entry)?),
@@ -176,7 +182,7 @@ impl Task {
             repo: PathBuf::from(repo_text),
             base: base_text.to_owned(),
             acceptance,
-            model_commands: object.contains_key("model_commands"),
+            model_commands,
             brief,
             idempotency_key,
             route,
@@ -299,7 +305,7 @@ pub enum TaskError {
         "task document key acceptance must be an array of argv arrays, one string array per command, such as [[\"true\"]]"
     )]
     AcceptanceNotArgv,
-    /// The repository path was empty, oversize, or held a NUL byte.
+    /// The repository path was empty, oversize, relative, or held a NUL byte.
     #[error("task document repository path is invalid")]
     BadRepo,
     /// The base was empty, oversize, option-like, or held a control character or whitespace.
@@ -369,6 +375,30 @@ pub enum TaskError {
     /// The route was not 1 to 64 bytes of `a-z`, `0-9`, `_` and `-`.
     #[error("task document route is not a route id: 1 to 64 bytes of a-z, 0-9, _ and -")]
     BadRoute,
+}
+
+#[cfg(test)]
+mod issue207_tests {
+    use super::{Task, TaskError};
+
+    #[test]
+    fn model_commands_requires_boolean_value() -> Result<(), Box<dyn std::error::Error>> {
+        let false_value =
+            br#"{"repo":"/tmp/repo","base":"HEAD","acceptance":[["true"]],"model_commands":false}"#;
+        let task = Task::parse(false_value)?;
+        assert!(
+            !task.has_model_commands(),
+            "false must not request model commands"
+        );
+        let wrong_type = br#"{"repo":"/tmp/repo","base":"HEAD","acceptance":[["true"]],"model_commands":"false"}"#;
+        assert!(matches!(
+            Task::parse(wrong_type),
+            Err(TaskError::WrongType {
+                key: "model_commands"
+            })
+        ));
+        Ok(())
+    }
 }
 
 /// Seeded simulation tests for the task parser.
@@ -452,7 +482,7 @@ mod tests {
 
     /// Builds one random valid task for a seed.
     fn valid_task(generator: &mut SplitMix64) -> Result<ValidTask, Box<dyn std::error::Error>> {
-        let repo = generator.next_text(8)?;
+        let repo = format!("/tmp/{}", generator.next_text(8)?);
         let base = generator.next_word(8)?;
         // A valid task names 1 to 16 commands (larry#395).
         let command_count = usize::try_from(generator.next_bound(16)?.saturating_add(1))?;
@@ -494,7 +524,10 @@ mod tests {
     /// A valid repository path and base the seed draws.
     fn repo_and_base(seed: u64) -> Result<(String, String), Box<dyn std::error::Error>> {
         let mut generator = SplitMix64::new(seed);
-        Ok((generator.next_text(4)?, generator.next_word(4)?))
+        Ok((
+            format!("/tmp/{}", generator.next_text(4)?),
+            generator.next_word(4)?,
+        ))
     }
 
     /// Renders a minimal valid document given its parts.

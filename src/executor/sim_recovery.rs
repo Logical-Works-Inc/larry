@@ -15,8 +15,7 @@ use larry_runtime::journal::Journal;
 use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
-use super::super::env::{policy, task_settings};
-use super::super::gate::finish;
+use super::super::gate::{finish, policy, task_settings};
 use super::{
     JOURNALS_DIR, RunLock, journal_live, journal_path, recover, recovered_evidence, run_held,
 };
