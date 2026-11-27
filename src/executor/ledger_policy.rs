@@ -135,6 +135,21 @@ impl Ledger {
         }
         Ok(canonical)
     }
+
+    /// Authorizes an evaluator-owned origin: the canonical path must sit under
+    /// the evaluator's own `<state>/eval` directory. Public task execution
+    /// still refuses every state-directory path (larry#207).
+    pub(crate) fn authorized_eval_repo(state: &Path, repo: &Path) -> Result<PathBuf, ExecError> {
+        let repository = fs::canonicalize(repo).map_err(|cause| ExecError::RepoPath {
+            repo: repo.to_path_buf(),
+            cause,
+        })?;
+        let eval_root = fs::canonicalize(state.join("eval")).map_err(ExecError::StateDir)?;
+        if !repository.starts_with(eval_root) {
+            return Err(ExecError::RepoInsideState { repo: repository });
+        }
+        Ok(repository)
+    }
 }
 
 #[cfg(test)]

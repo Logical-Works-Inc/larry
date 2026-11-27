@@ -32,7 +32,7 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-use run::{Place, run_command};
+pub(crate) use run::{Place, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -46,7 +46,9 @@ pub(crate) use island::Isolation;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use session::SessionError;
-pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop, run_session};
+pub(crate) use session::{
+    Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, SessionDoor, Stop, run_session,
+};
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -325,6 +327,16 @@ impl Settings {
         Ok(())
     }
 
+    /// The `PATH` acceptance commands and git run under.
+    pub(crate) fn path_env(&self) -> &str {
+        self.path.as_str()
+    }
+
+    /// Longest an acceptance command may run before its group is killed.
+    pub(crate) const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// The route a task naming `named` (or none) sends its model calls to: the
     /// named route, else the tenant's default, else the environment's, else a
     /// refusal. Nothing is sent to resolve it.
@@ -391,15 +403,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
 /// evaluator's own `<state>/eval` directory.
 pub(crate) fn execute_eval(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let (ledger, key) = prepare(settings)?;
-    let repository = std::fs::canonicalize(task.repo()).map_err(|cause| ExecError::RepoPath {
-        repo: task.repo().to_path_buf(),
-        cause,
-    })?;
-    let eval_root =
-        std::fs::canonicalize(settings.state_dir().join("eval")).map_err(ExecError::StateDir)?;
-    if !repository.starts_with(eval_root) {
-        return Err(ExecError::RepoInsideState { repo: repository });
-    }
+    let repository = Ledger::authorized_eval_repo(settings.state_dir(), task.repo())?;
     execute_prepared(task, settings, &ledger, &key, &repository)
 }
 
