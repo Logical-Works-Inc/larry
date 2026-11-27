@@ -122,6 +122,10 @@ pub(super) fn resolve_for(
     resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
 }
 
+/// Builds the shipped ranker once, or names why it cannot.
+#[cfg(feature = "rerank")]
+type MakeScorer = Box<dyn FnMut() -> Result<Box<dyn Scorer>, RouteError>>;
+
 /// A scorer that builds the shipped local ranker on its first scored
 /// candidate, never on construction: a tenant whose choice needs no ranking
 /// never fails for a missing model or home directory, and a missing engine
@@ -130,7 +134,7 @@ pub(super) fn resolve_for(
 #[cfg(feature = "rerank")]
 struct LazyScorer {
     /// Builds the engine; taken on first use.
-    make: Option<Box<dyn FnMut() -> Result<Box<dyn Scorer>, RouteError>>>,
+    make: Option<MakeScorer>,
     /// The engine once built.
     engine: Option<Box<dyn Scorer>>,
 }
