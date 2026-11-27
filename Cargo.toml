@@ -136,11 +136,12 @@ workspace = true
 [profile.dev]
 debug = 0
 incremental = false
+# CPU-bound seeded sims dominate the suite; optimized code keeps every seed and
+# every debug assertion and overflow check on (ADR 0049, larry#246).
 opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 2
-
 
 [profile.release]
 opt-level = 3
