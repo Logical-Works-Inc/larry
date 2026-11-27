@@ -5,6 +5,7 @@ mod author;
 mod compact;
 mod confine;
 mod error;
+pub(super) mod fence_control;
 mod gate;
 mod identity;
 mod island;

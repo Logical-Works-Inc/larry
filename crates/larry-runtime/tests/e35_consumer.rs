@@ -124,7 +124,7 @@ fn expected(runtime: &Subject, scope: TenantId) -> BTreeMap<usize, JournalEntry>
 
 /// Applies one public page with idempotent sequence deduplication.
 fn read(
-    runtime: &Subject,
+    runtime: &mut Subject,
     scope: TenantId,
     consumer: &mut Consumer,
     seen: &mut BTreeMap<usize, JournalEntry>,
@@ -146,7 +146,7 @@ fn read(
 
 /// Finite drain proves progress instead of letting a broken cursor spin forever.
 fn drain(
-    runtime: &Subject,
+    runtime: &mut Subject,
     scope: TenantId,
     consumer: &mut Consumer,
     seen: &mut BTreeMap<usize, JournalEntry>,
@@ -289,7 +289,7 @@ fn e35_stale_cross_tenant_and_corrupt_cursors() -> TestResult {
         2,
         "explicit resync can recover an unchanged empty prefix"
     );
-    let empty = subject(None)?;
+    let mut empty = subject(None)?;
     assert_eq!(
         empty.resync_consumer(tenant(1), &mut consumer),
         Err(CursorError::StaleCursor),
@@ -333,14 +333,16 @@ fn e35_stale_cross_tenant_and_corrupt_cursors() -> TestResult {
     Ok(())
 }
 
-/// Recorded bytes changed under an unchanged envelope digest make a saved cursor stale. This is
-/// an observation-integrity test, not an admission-validation change.
+/// Recorded bytes changed under an unchanged envelope digest refuse restore:
+/// an accepted command whose payload no longer decodes is corrupt accepted
+/// history, never a skippable command, so no consumer ever reads past it
+/// (larry#215, ADR 0121).
 #[test]
-fn e35_changed_recorded_bytes_make_a_cursor_stale() -> TestResult {
+fn e35_changed_recorded_bytes_refuse_restore() -> TestResult {
     let original = command(91, tenant(1), 0)?;
     let mut journal = Journal::new(2)?;
     journal.accept_command(original.clone())?;
-    let recorded = subject(Some(journal))?;
+    let mut recorded = subject(Some(journal))?;
     let mut original_consumer = recorded.subscribe(tenant(1), None, ConsumerLimits::default())?;
     recorded.consumer_page(tenant(1), &mut original_consumer)?;
     let mut wire = lgwks_std::json::to_value(&original)?;
@@ -353,17 +355,16 @@ fn e35_changed_recorded_bytes_make_a_cursor_stale() -> TestResult {
     let corrupted: Command = lgwks_std::json::from_value(wire)?;
     let mut journal = Journal::new(2)?;
     journal.accept_command(corrupted)?;
-    let changed = subject(Some(journal))?;
+    let refused = subject(Some(journal));
+    let error = refused
+        .err()
+        .ok_or("corrupt accepted history refuses restore")?;
     assert!(
         matches!(
-            changed.subscribe(
-                tenant(1),
-                Some(original_consumer.cursor()),
-                ConsumerLimits::default()
-            ),
-            Err(CursorError::StaleCursor)
+            error.downcast_ref::<larry_runtime::error::RuntimeError>(),
+            Some(larry_runtime::error::RuntimeError::Codec(_))
         ),
-        "changed bytes cannot hide behind an unchanged claimed digest"
+        "changed bytes refuse restore with their codec cause: {error}"
     );
     Ok(())
 }
@@ -373,7 +374,7 @@ fn e35_changed_recorded_bytes_make_a_cursor_stale() -> TestResult {
 fn e35_oversized_entry_never_skipped() -> TestResult {
     let mut journal = Journal::new(2)?;
     journal.accept_command(command(1, tenant(1), MAX_PAGE_BYTES)?)?;
-    let runtime = subject(Some(journal))?;
+    let mut runtime = subject(Some(journal))?;
     let mut consumer = runtime.subscribe(tenant(1), None, ConsumerLimits::default())?;
     let before = consumer.cursor();
     let result = runtime.consumer_page(tenant(1), &mut consumer);
@@ -405,7 +406,7 @@ fn e35_many_consumers_and_tenants() -> TestResult {
     for identity in 1..=5_000 {
         journal.accept_command(command(identity, tenant(identity), 0)?)?;
     }
-    let runtime = subject(Some(journal))?;
+    let mut runtime = subject(Some(journal))?;
     for identity in 1..=5_000 {
         let mut consumer = runtime.subscribe(tenant(identity), None, ConsumerLimits::default())?;
         let page = runtime.consumer_page(tenant(identity), &mut consumer)?;
@@ -443,7 +444,7 @@ fn e35_concurrent_publication_and_recovery() -> TestResult {
     let runtime = std::sync::Mutex::new(subject(None)?);
     let limits = ConsumerLimits::new(3, MAX_PAGE_BYTES, 4, 4096)?;
     let mut consumers = {
-        let guard = locked(&runtime)?;
+        let mut guard = locked(&runtime)?;
         [
             guard.subscribe(tenant(1), None, limits)?,
             guard.subscribe(tenant(2), None, limits)?,
@@ -469,7 +470,7 @@ fn e35_concurrent_publication_and_recovery() -> TestResult {
             Ok(())
         });
         for () in arrivals {
-            let guard = locked(&runtime)?;
+            let mut guard = locked(&runtime)?;
             for (index, consumer) in consumers.iter_mut().enumerate() {
                 let scope = tenant(u128::try_from(index)?.saturating_add(1));
                 let saved = consumer.cursor();
@@ -486,7 +487,7 @@ fn e35_concurrent_publication_and_recovery() -> TestResult {
                     *consumer = guard.subscribe(scope, Some(saved), limits)?;
                 }
                 let seen = histories.get_mut(index).ok_or("tenant history missing")?;
-                drain(&guard, scope, consumer, seen)?;
+                drain(&mut guard, scope, consumer, seen)?;
             }
         }
         match publisher.join() {

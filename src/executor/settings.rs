@@ -20,6 +20,7 @@ use super::ExecError;
 use super::Ledger;
 use super::MAX_TIMEOUT_MS;
 use super::OBSERVATION_SECRETS;
+use super::fence_control;
 use super::gate;
 use super::routes;
 use super::state_dir;
@@ -57,6 +58,8 @@ pub struct Settings {
     local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
+    /// Optional host authority action for the next admitted task.
+    pub(crate) fence_control: Option<fence_control::FenceControl>,
 }
 
 impl fmt::Debug for Settings {
@@ -107,6 +110,7 @@ impl Settings {
         } else {
             Ledger::open(&state_dir)?.tenant_policy(&tenant_key(&state_dir))?
         };
+        let fence_control = fence_control::read(&read)?;
         let secret_text = match read(OBSERVATION_SECRETS) {
             Some(values) => values,
             None => empty_secret_snapshot(),
@@ -124,6 +128,7 @@ impl Settings {
             secrets: Arc::from(secrets.into_boxed_slice()),
             local,
             read: Arc::new(read),
+            fence_control,
         })
     }
 

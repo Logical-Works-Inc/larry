@@ -22,7 +22,7 @@ use larry_contracts::effect::{
 use larry_contracts::event::{Event, EventKind};
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use larry_contracts::replay::ReplayRecord;
-use larry_contracts::state::{RunState, TransitionEvent, transition};
+use larry_contracts::state::{RunState, transition};
 
 use crate::error::RuntimeError;
 use crate::journal::{Journal, JournalEntry};
@@ -536,11 +536,4 @@ pub fn replay_authorizations(
     projection: &impl ProjectionBackend,
 ) -> larry_contracts::replay::ReplayReport {
     larry_contracts::replay::replay_log(projection.authorizations())
-}
-
-/// The transition event that carries a run out of `Reconciling` when an
-/// effect's outcome is unknown and its strategy leaves it open.
-#[must_use]
-pub const fn unknown_outcome_event() -> TransitionEvent {
-    TransitionEvent::ObserveUnknownOutcome
 }
