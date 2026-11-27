@@ -17,6 +17,9 @@ mod coverage;
 #[path = "eval_journey/session.rs"]
 mod session;
 
+#[path = "eval_journey/priced.rs"]
+mod priced;
+
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
@@ -41,6 +44,9 @@ use std::path::Path;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 use temp_dir::TempDir;
+
+#[path = "support/route_key.rs"]
+mod route_key;
 
 /// The matched set the release ships.
 const SHIPPED_SET: &str = include_str!("../eval/matched-v1.json");
