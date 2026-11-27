@@ -24,6 +24,10 @@ are recommendations until ratified. Metrics marked TARGET
 are acceptance proposals, not measurements or promises. Source claims and source
 inspection are distinguished in the [research ledger](research-ledger.md).
 
+E35 is explicitly unshipped until `larry serve` owns a durable runtime journal
+route. The runtime consumer remains tied to its runtime until that owner exists.
+Its tenant index extends on read; journal appends never hash for catch-up.
+
 Larry is the Director-selected name; the repository began as the private Rocco,
 was renamed Larry on 2026-11-06 (ADR 0005) and is the public alpha
 `Logical-Works-Inc/larry`. Forge was the earlier scratchpad name, not a second runtime. The existing

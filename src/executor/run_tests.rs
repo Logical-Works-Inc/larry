@@ -12,6 +12,8 @@ use std::num::TryFromIntError;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -285,6 +287,46 @@ fn sim_capture_keeps_head_and_tail_and_counts_every_dropped_byte() -> TestResult
             );
         }
     }
+    Ok(())
+}
+
+/// A large socket read is split before the callback, so the live path never offers a chunk over
+/// 4 KiB while the report capture still receives the whole read.
+#[test]
+fn sim_stream_callback_splits_each_read_at_its_bound() -> TestResult {
+    let chunks = Arc::new(AtomicUsize::new(0));
+    let bytes = Arc::new(AtomicUsize::new(0));
+    let oversized = Arc::new(AtomicUsize::new(0));
+    let seen_chunks = Arc::clone(&chunks);
+    let seen_bytes = Arc::clone(&bytes);
+    let seen_oversized = Arc::clone(&oversized);
+    let callback: super::StreamCallback = Arc::new(move |chunk| {
+        seen_chunks.fetch_add(1, Ordering::Relaxed);
+        seen_bytes.fetch_add(chunk.len(), Ordering::Relaxed);
+        if chunk.len() > super::STREAM_CHUNK {
+            seen_oversized.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let settled = std::sync::atomic::AtomicBool::new(false);
+    let mut reads = 0;
+    let drained = super::drain_with_callback(
+        |buffer| {
+            reads += 1;
+            if reads == 1 {
+                buffer.fill(b'x');
+                Ok(buffer.len())
+            } else {
+                Ok(0)
+            }
+        },
+        || Duration::ZERO,
+        &settled,
+        Some(&callback),
+    )?;
+    assert_eq!(drained.captured.bytes, u64::try_from(CAPTURE_CHUNK)?);
+    assert_eq!(chunks.load(Ordering::Acquire), 2);
+    assert_eq!(bytes.load(Ordering::Acquire), CAPTURE_CHUNK);
+    assert_eq!(oversized.load(Ordering::Acquire), 0);
     Ok(())
 }
 

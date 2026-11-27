@@ -19,6 +19,9 @@ use std::time::Duration;
 use lgwks_macros::Error;
 use lgwks_std::json::{self, Value, json};
 
+use super::run::{Place, RunHooks, run_command};
+use super::{Ledger, Settings};
+
 /// Longest the probe waits for one tool's `--version` or one git or disk call.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -656,3 +659,72 @@ fn render_git(probed: &Value, text: &mut String) {
 #[cfg(test)]
 #[path = "sim_probe.rs"]
 mod sim;
+
+/// Runs the live environment probe (larry#274): `run_command` answers every spawned
+/// version, status and disk call under [`PROBE_TIMEOUT`], so timeouts,
+/// group kills and bounded capture are the tested ones. The value's rendering
+/// rides after the model's prompt prefix (ADR 0043). A section that fails is a
+/// typed field, never a refused task. The probe runs in the tree but homes in
+/// its own directory beside it, so a tool that initializes a per-user home
+/// never writes into the tree and its diff.
+pub(crate) fn probe_and_render(
+    tree: &Path,
+    settings: &Settings,
+    ledger: &Ledger,
+    task_id: &str,
+) -> (Value, String) {
+    // The workspace root this task owns (`state/ws/<task id>`): the probe's home
+    // sits beside the tree and outside it, and the workspace removes it on drop.
+    let home = settings
+        .state_dir()
+        .join("ws")
+        .join(task_id)
+        .join("probe-home");
+    // The toolchain homes stay resolved from the host's real home (read only)
+    // when it names one: without one the child keeps no host path, and with
+    // `RUSTUP_AUTO_INSTALL=0` still set a missing toolchain fails fast inside
+    // the probe's own home, never as a download into the tree (larry#274).
+    let host_home = settings.env("HOME").map(PathBuf::from);
+    let rustup_home = host_home.as_ref().map(|dir| dir.join(".rustup"));
+    let cargo_home = host_home.as_ref().map(|dir| dir.join(".cargo"));
+    // A missing home refuses the probe's first spawn; a refused spawn is a typed
+    // section, never a refused task, but the home is made here so every tool
+    // finds one.
+    if let Err(cause) = std::fs::create_dir_all(&home) {
+        let probed = probe(
+            tree,
+            &|_: &[String], _: &Path| {
+                Err::<ProbeCall, ProbeError>(ProbeError::Command(cause.to_string()))
+            },
+            &|path: &Path| std::fs::read_to_string(path).map_err(ProbeError::Unreadable),
+        );
+        return (probed.clone(), render(&probed));
+    }
+    let probe_run = |argv: &[String], cwd: &Path| -> Result<ProbeCall, ProbeError> {
+        run_command(
+            argv,
+            Place::Probe {
+                cwd,
+                home: &home,
+                rustup_home: rustup_home.as_deref(),
+                cargo_home: cargo_home.as_deref(),
+            },
+            settings.path_env(),
+            PROBE_TIMEOUT,
+            ledger,
+            task_id,
+            RunHooks::new(&|| false, None),
+        )
+        .map(|result| {
+            ProbeCall::failed(result.exit_code(), result.stdout(), result.stderr())
+                .timed(result.timed_out())
+        })
+        .map_err(|cause| ProbeError::Command(cause.to_string()))
+    };
+    let probe_read = |path: &Path| -> Result<String, ProbeError> {
+        std::fs::read_to_string(path).map_err(ProbeError::Unreadable)
+    };
+    let probed = probe(tree, &probe_run, &probe_read);
+    let rendered = render(&probed);
+    (probed, rendered)
+}

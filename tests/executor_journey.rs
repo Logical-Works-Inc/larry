@@ -18,6 +18,8 @@
 //! The busy-ledger sim proves the ledger reader's retry on its own, once, in
 //! this binary (larry#309).
 
+#[path = "executor_journey/ceiling.rs"]
+mod ceiling;
 #[path = "executor_journey/confine.rs"]
 mod confine;
 #[path = "support/exec_cli.rs"]
@@ -471,7 +473,7 @@ fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
     assert_refused(&output, "LARRY_STATE_DIR");
 
     let output = run_exec(state.path(), &task_json(empty.path(), "HEAD", quick), None)?;
-    assert_refused(&output, "could not clone");
+    assert_refused(&output, "not in the tenant allowlist");
 
     let output = run_exec(
         state.path(),

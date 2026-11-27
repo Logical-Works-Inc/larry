@@ -219,7 +219,7 @@ fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "touch ran.txt"))?;
         assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
-        let line = "gate: policy_refuses: model.command";
+        let line = "gate: policy_refuses: file.read";
         assert_eq!(said(&notes), Some(line), "the refusal names the scope");
         assert_eq!(mock.served(), 0, "no model call");
         assert!(!work.path().join("ran.txt").exists(), "nothing ran");

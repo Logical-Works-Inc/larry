@@ -15,7 +15,7 @@ use crate::projection::{EffectPhase, ProjectionBackend};
 use lgwks_bot::kernel::retry::RetryRefusal;
 
 /// What the estate retry rule left an open retry-safe effect to do this tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Retry {
     /// Admitted: reach the owner again.
     Reach,
@@ -128,7 +128,8 @@ where
                         // Authority is the fence's answer. The admission proof
                         // is checked at the reach itself, which denies a lapsed
                         // one whatever the retry rule decided (larry#77).
-                        let key = crate::fence::effect_key(&live.intent, live.dispatches)?;
+                        let attempt = live.dispatches.saturating_add(1);
+                        let key = crate::fence::effect_key(&live.intent, attempt)?;
                         let fenced = self.fence.authorize(key, &live.intent).err();
                         // Only the owner can say its endpoint deduplicates; the
                         // submitter's strategy is a claim (larry#197).

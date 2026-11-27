@@ -28,11 +28,43 @@ pub enum ExecError {
     /// `PATH` is unset: no command is looked up under an empty path (larry#213).
     #[error("exec PATH is unset; set it to the directories the commands are found in")]
     PathUnset,
+    /// `LARRY_POLICY` is required when an operator provisions a remote tenant.
+    #[error("exec LARRY_POLICY is unset; set it before provisioning a tenant")]
+    PolicyUnset,
     /// `LARRY_EXEC_TIMEOUT_MS` is not a whole number of milliseconds in 1..=86400000.
     #[error("exec LARRY_EXEC_TIMEOUT_MS is not a timeout in 1..=86400000: {value}")]
     BadTimeout {
         /// The value that was refused.
         value: String,
+    },
+    /// A tenant ceiling setting (`LARRY_EXEC_MAX_*`, `LARRY_EXEC_SHELLS`, `LARRY_EXEC_BASES`)
+    /// is not the form it must take, so no default stands in for it (larry#439).
+    #[error("exec {name} must be {expected}: {value}")]
+    BadCeiling {
+        /// The variable.
+        name: &'static str,
+        /// The form it must take.
+        expected: &'static str,
+        /// The value that was refused.
+        value: String,
+    },
+    /// The task names a shell, base, timeout or deadline past this tenant's ceiling, so
+    /// nothing was cloned and nothing ran (larry#439).
+    #[error("exec task {what} {value} is past this tenant's ceiling {ceiling}; nothing ran")]
+    PastCeiling {
+        /// What the task named: `shell`, `base`, `timeout_ms` or `deadline_ms`.
+        what: &'static str,
+        /// The value it named.
+        value: String,
+        /// The ceiling it passed.
+        ceiling: String,
+    },
+    /// The task ran past its whole-task deadline: the command running then was killed with
+    /// its group and no command after it started (larry#439).
+    #[error("exec task passed its deadline of {deadline_ms} ms; the running group was killed")]
+    DeadlinePassed {
+        /// The deadline, in milliseconds.
+        deadline_ms: u64,
     },
     /// `LARRY_POLICY` names a scope the executor does not know.
     #[error("exec LARRY_POLICY is not a scope name: {value}")]
@@ -46,6 +78,14 @@ pub enum ExecError {
     BadProbe {
         /// What the value was refused as.
         reason: String,
+    },
+    /// `LARRY_FENCE_CONTROL` is not one typed host action.
+    #[error("exec LARRY_FENCE_CONTROL is invalid: {value}: {cause}")]
+    BadFenceControl {
+        /// The refused control value.
+        value: String,
+        /// The parser's typed cause.
+        cause: String,
     },
     /// The sqlite ledger could not be opened or migrated.
     #[error("exec ledger: {0}")]
@@ -74,6 +114,50 @@ pub enum ExecError {
         step: &'static str,
         /// Git's stderr, trimmed.
         detail: String,
+    },
+    /// The repository path could not be canonicalized before authorization.
+    #[error("exec repository path could not be read {}: {cause}", repo.display())]
+    RepoPath {
+        /// The repository path that was refused.
+        repo: PathBuf,
+        /// The filesystem refusal.
+        #[source]
+        cause: std::io::Error,
+    },
+    /// The repository is inside the executor's state directory.
+    #[error("exec repository is inside the state directory: {}", repo.display())]
+    RepoInsideState {
+        /// The canonical repository path.
+        repo: PathBuf,
+    },
+    /// The repository is not below one of this tenant's durable roots. A remote
+    /// door denies when the tenant holds no root row; a local door denies once
+    /// its first root row binds it. Provision a root to allow it.
+    #[error("exec repository is not in the tenant allowlist: {}; run `larry serve provision <root>` to allow it", repo.display())]
+    RepoNotAllowed {
+        /// The canonical repository path.
+        repo: PathBuf,
+    },
+    /// A configured repository root could not be canonicalized.
+    #[error("exec repository root could not be read {}: {cause}", repo.display())]
+    RepoRoot {
+        /// The root path that was refused.
+        repo: PathBuf,
+        /// The filesystem refusal.
+        #[source]
+        cause: std::io::Error,
+    },
+    /// A repository root was not absolute.
+    #[error("exec repository root is not absolute: {repo}")]
+    RelativeRepoRoot {
+        /// The root path that was refused.
+        repo: String,
+    },
+    /// A configured repository root is already at the per-tenant bound.
+    #[error("exec tenant repository allowlist is full ({limit} roots)")]
+    RepoRootLimit {
+        /// The maximum roots per tenant.
+        limit: usize,
     },
     /// The repository could not be cloned.
     #[error("exec could not clone {}", repo.display())]

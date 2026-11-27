@@ -6,10 +6,10 @@
 //! session/update, stdio transport: one JSON-RPC message per line).
 
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 use lgwks_std::json::{self, Value, json};
 
@@ -23,6 +23,10 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 pub(crate) struct Agent {
     /// The process.
     child: Child,
+    /// The state ledger the ACP process reads.
+    state: PathBuf,
+    /// The policy to persist before opening each work root; empty means deny-all.
+    policy: OsString,
     /// The protocol stream in; `None` once closed.
     stdin: Option<ChildStdin>,
     /// The protocol stream out.
@@ -34,10 +38,23 @@ pub(crate) struct Agent {
 impl Agent {
     /// Starts `larry acp` with only PATH and `env` set.
     pub(crate) fn start(env: &[(&str, &OsStr)]) -> TestResult<Self> {
+        let state = env
+            .iter()
+            .find_map(|&(name, value)| (name == "LARRY_STATE_DIR").then(|| PathBuf::from(value)))
+            .ok_or("ACP test agent needs LARRY_STATE_DIR")?;
+        let policy = match env
+            .iter()
+            .find_map(|&(name, value)| (name == "LARRY_POLICY").then(|| value.to_os_string()))
+        {
+            Some(policy) => policy,
+            None => OsString::from(""),
+        };
         let (mut child, stdin, out) = larry_child::start("acp", env, Stdio::piped())?;
         let log = BufReader::new(child.stderr.take().ok_or("stderr was not piped")?);
         Ok(Self {
             child,
+            state,
+            policy,
             stdin: Some(stdin),
             out,
             log,
@@ -84,6 +101,25 @@ impl Agent {
 
     /// Initializes and opens one session in `cwd`, returning its id.
     pub(crate) fn open(&mut self, cwd: &Path) -> TestResult<String> {
+        let provision = Command::new(env!("CARGO_BIN_EXE_larry"))
+            .args(["serve", "provision"])
+            .arg(cwd)
+            .env_clear()
+            .env("PATH", std::env::var("PATH")?)
+            .env("LARRY_STATE_DIR", &self.state)
+            .env("LARRY_POLICY", &self.policy)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()?;
+        if !provision.status.success() {
+            return Err(format!(
+                "serve provision refused {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&provision.stderr)
+            )
+            .into());
+        }
         let (_, init) = self.call(&json!({"jsonrpc":"2.0","id":0,"method":"initialize",
             "params":{"protocolVersion":1,"clientCapabilities":{"terminal":false}}}))?;
         assert_eq!(*init.at("/result/protocolVersion")?, 1, "version 1");

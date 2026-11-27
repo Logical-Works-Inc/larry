@@ -17,9 +17,9 @@ const SEEDS: u64 = 64;
 /// Seeds whose wire the pinned digest covers.
 const PINNED_SEEDS: u64 = 96;
 
-/// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken before the cell lost
-/// its `String`.
-const PINNED: &str = "55873c95138689ed6010805d3771dc8e41fdfe8485cb66ed3906e52d934660a4";
+/// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken with the
+/// command header painted at `started` so a running command's output has its context.
+const PINNED: &str = "3b908485a09fe8e1a74648215906ff835111a0f68074a89099b3748eecf58986";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [
@@ -76,8 +76,9 @@ fn sim_a_grid_owns_no_heap_text_per_cell() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// The wire of 96 seeds of 96 hostile steps is byte for byte the one the `String` cell wrote,
-/// pinned as one digest taken on the old code.
+/// The wire of 96 seeds of 96 hostile steps, pinned as one digest: the pane paints the
+/// command header at `started` (larry#252), so a running command's rows carry their `$`
+/// context while it streams instead of only at `finished`.
 #[test]
 fn sim_the_wire_of_every_seed_is_the_pinned_one() {
     let mut hasher = Hasher::new();

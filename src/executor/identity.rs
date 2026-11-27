@@ -20,7 +20,19 @@ use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId, WorkerId};
 
 use super::ExecError;
 use super::Task;
-use super::digest_hex;
+
+/// The BLAKE3 digest of `bytes`, as 64 hex characters: the hash every
+/// reproducible identity is built from.
+pub(crate) fn digest_hex(bytes: &[u8]) -> String {
+    let mut hasher = lgwks_std::hash::Hasher::new();
+    hasher.update(bytes);
+    hasher.finalize().to_hex()
+}
+
+/// The stable text key shared by the executor's tenant-owned ledger tables.
+pub(crate) fn tenant_key(state: &Path) -> String {
+    digest_hex(tenant_of(state).as_bytes())
+}
 
 /// The domain tags separating every identity from every other, so no two
 /// derivations collide and none collides with another repository's.
@@ -130,7 +142,7 @@ mod sim;
 mod tests {
     use lgwks_std::id::Uuid;
 
-    use super::{KEY_TAG, fresh_id, identity16, run_id};
+    use super::{KEY_TAG, digest_hex, fresh_id, identity16, run_id};
 
     /// A task document over `repo` whose acceptance is `acceptance`, under `key`
     /// when it is given.
@@ -238,7 +250,7 @@ mod tests {
     #[test]
     fn a_keyed_id_is_one_function_of_its_parts() -> Result<(), Box<dyn std::error::Error>> {
         let task = document("/tmp/a", Some("abc"), "[[\"true\"]]")?;
-        let digest = super::digest_hex(task.bytes());
+        let digest = digest_hex(task.bytes());
         let tenant = [3_u8; 16];
         let forward = identity16(&[KEY_TAG, &tenant, digest.as_bytes(), b"abc"]);
         let swapped = identity16(&[KEY_TAG, b"abc", digest.as_bytes(), &tenant]);

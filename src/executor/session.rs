@@ -23,7 +23,6 @@
 //! (larry#242). The sealed report records every command as the model saw it,
 //! and what compaction did.
 
-use std::fmt;
 use std::path::Path;
 
 use lgwks_macros::Error;
@@ -33,17 +32,23 @@ use super::ExecError;
 use super::Ledger;
 use super::Report;
 use super::Settings;
-use super::author::unfenced;
 use super::backoff;
 use super::compact::{Answer, Conversation};
-use super::digest_hex;
 use super::gate::{self, Subject};
+use super::identity::digest_hex;
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::prepare;
-use super::run::{CommandResult, Place, run_command};
+use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
 use crate::model::{Completion, ModelClient, Usage};
+
+/// A terminal session's reply protocol: one JSON object per turn, parsed and
+/// refused with an exact reason the model can retry from (larry#545).
+#[path = "session_reply.rs"]
+pub(crate) mod reply;
+
+use reply::{Reply, parse_reply};
 
 /// Most commands one session runs before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
@@ -141,93 +146,33 @@ pub(crate) trait Observer {
     /// The change in full, as a unified diff of at most 1 MiB, offered once just before
     /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
     fn diff(&mut self, _text: &str) {}
+    /// A nonblocking callback for live command output, when the frontend can paint it.
+    fn stream_callback(&mut self) -> Option<StreamCallback> {
+        None
+    }
+    /// Reports callback chunks dropped at the bounded event channel.
+    fn stream_dropped(&mut self) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
-    fn handed(&mut self, line: &str, applied: bool);
+    /// An observer that records nothing leaves this alone.
+    fn handed(&mut self, _line: &str, _applied: bool) {}
     /// The model asks to run `command` as step `step`; nothing runs unless this
     /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
     /// inside the operator's isolated container under the same gate and runs it.
+    /// No default: every observer says aloud whether a command may run (larry#239).
     fn approve(&mut self, step: usize, command: &str) -> Approval;
-    /// Step `step` is about to run `command`.
-    fn started(&mut self, step: usize, command: &str);
+    /// Step `step` is about to run `command`. An observer that records nothing
+    /// leaves this alone.
+    fn started(&mut self, _step: usize, _command: &str) {}
     /// Step `step` ended; `observation` is what the model is shown, `passed` its exit 0.
-    fn finished(&mut self, step: usize, observation: &str, passed: bool);
+    /// An observer that records nothing leaves this alone.
+    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
     /// A message for the person: the model's summary or the reason the session stopped.
-    fn message(&mut self, text: &str);
-    /// Whether the client has cancelled the session.
-    fn cancelled(&self) -> bool;
-}
-
-/// One reply, parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Reply {
-    /// Run this command with `sh -c`.
-    Command(String),
-    /// The task is done; the summary for the person.
-    Done(String),
-}
-
-/// Why a reply was refused; the model is told and may try again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplyFault {
-    /// The reply is over [`MAX_REPLY_BYTES`].
-    TooLong,
-    /// The reply is not JSON; the parser's reason, so the model sees where it broke.
-    NotJson(String),
-    /// The reply is JSON but not an object.
-    NotAnObject,
-    /// The object does not hold exactly one key, `command` or `done`.
-    Keys,
-    /// The key's value is not a string.
-    NotAString,
-    /// The command is empty or blank.
-    EmptyCommand,
-    /// The command or summary is over 4 KiB.
-    FieldTooLong,
-    /// The command holds a NUL byte, which no shell argument can carry.
-    Nul,
-}
-
-impl fmt::Display for ReplyFault {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TooLong => write!(out, "the reply is over {MAX_REPLY_BYTES} bytes"),
-            Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
-            Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => out.write_str("the object must hold exactly one key, command or done"),
-            Self::NotAString => out.write_str("the value must be a string"),
-            Self::EmptyCommand => out.write_str("the command is empty"),
-            Self::FieldTooLong => write!(
-                out,
-                "the command or summary is over {MAX_COMMAND_BYTES} bytes"
-            ),
-            Self::Nul => out.write_str("the command holds a NUL byte"),
-        }
-    }
-}
-
-/// Parses one model reply: one surrounding code fence and outer whitespace are allowed.
-pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
-    if text.len() > MAX_REPLY_BYTES {
-        return Err(ReplyFault::TooLong);
-    }
-    let value: Value = json::from_str(unfenced(text).trim())
-        .map_err(|cause| ReplyFault::NotJson(cause.to_string()))?;
-    let object = value.as_object().ok_or(ReplyFault::NotAnObject)?;
-    let mut entries = object.iter();
-    let (Some((key, field)), None) = (entries.next(), entries.next()) else {
-        return Err(ReplyFault::Keys);
-    };
-    let text = field.as_str().ok_or(ReplyFault::NotAString)?;
-    if text.len() > MAX_COMMAND_BYTES {
-        return Err(ReplyFault::FieldTooLong);
-    }
-    let name: &str = key;
-    match name {
-        "command" if text.trim().is_empty() => Err(ReplyFault::EmptyCommand),
-        "command" if text.contains('\0') => Err(ReplyFault::Nul),
-        "command" => Ok(Reply::Command(text.to_owned())),
-        "done" => Ok(Reply::Done(text.to_owned())),
-        _ => Err(ReplyFault::Keys),
+    /// An observer with nobody to tell leaves this alone.
+    fn message(&mut self, _text: &str) {}
+    /// Whether the client has cancelled the session. An observer nobody can stop
+    /// leaves this alone, which never stops the session early.
+    fn cancelled(&self) -> bool {
+        false
     }
 }
 
@@ -313,6 +258,16 @@ fn denial(report: &Report) -> String {
     }
 }
 
+/// Which authorization a terminal session runs under: the tenant door or the
+/// narrower evaluator route beneath `<state>/eval` (larry#207).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionDoor {
+    /// A person's door: the tenant allowlist, open until its first root row.
+    Tenant,
+    /// An evaluator-owned origin: only beneath `<state>/eval`.
+    Eval,
+}
+
 /// Runs a terminal session on `instruction` in `cwd`, reporting through `observer`.
 /// A refusal by the gate seals a report that ran nothing; a fault outside the
 /// session's doing (the ledger, a process group) is a typed error.
@@ -322,12 +277,44 @@ pub(crate) fn run_session(
     settings: &Settings,
     isolation: Isolation,
     observer: &mut dyn Observer,
+    door: SessionDoor,
 ) -> Result<Ended, ExecError> {
     check(instruction, cwd).map_err(ExecError::Session)?;
     // A host that cannot confine refuses here, before the ledger, the model or a copy.
     isolation.check()?;
     let (ledger, key) = prepare(settings)?;
-    let route = settings.route(&ledger, None)?;
+    let repository = match door {
+        SessionDoor::Tenant => ledger.authorized_repo(
+            &super::identity::tenant_key(settings.state_dir()),
+            settings.state_dir(),
+            cwd,
+            settings.is_local(),
+        )?,
+        SessionDoor::Eval => Ledger::authorized_eval_repo(settings.state_dir(), cwd)?,
+    };
+    run_session_prepared(
+        instruction,
+        &repository,
+        settings,
+        isolation,
+        observer,
+        &ledger,
+        &key,
+    )
+}
+
+/// Runs the session in an already authorized directory: the route, the model,
+/// the gated proposal and the sealed report.
+fn run_session_prepared(
+    instruction: &str,
+    cwd: &Path,
+    settings: &Settings,
+    isolation: Isolation,
+    observer: &mut dyn Observer,
+    ledger: &Ledger,
+    key: &lgwks_std::sign::SecretKey,
+) -> Result<Ended, ExecError> {
+    let route = settings.route(ledger, None)?;
     let config = settings.model_config(&route)?;
     let document = json::to_vec(&json!({
         "session": {
@@ -345,7 +332,7 @@ pub(crate) fn run_session(
         path: cwd,
         bytes: &document,
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
+    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
         // The retry budget's timeline, built before the copy so a host whose clock refuses
         // copies nothing (larry#436).
         let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
@@ -360,7 +347,7 @@ pub(crate) fn run_session(
         let mut turn = Turn {
             client: &client,
             settings,
-            ledger: &ledger,
+            ledger,
             task_id: &task_id,
             place: match island {
                 Some(ref isle) => isle.place(),
@@ -414,7 +401,7 @@ pub(crate) fn run_session(
             }
         }
         stop = Some(done.stop);
-        Ok(Report::sealed(body, &key))
+        Ok(Report::sealed(body, key))
     })?;
     let stop = match stop {
         Some(stop) => stop,
@@ -425,6 +412,54 @@ pub(crate) fn run_session(
         }
     };
     Ok(Ended { stop, report })
+}
+
+#[cfg(test)]
+mod issue207_tests {
+    use super::{Approval, Isolation, Observer, run_session};
+    use crate::executor::gate;
+    use crate::executor::identity::tenant_key;
+    use crate::executor::sim_tree::scratch;
+    use crate::executor::{Ledger, Settings};
+
+    /// An observer that must never be reached by a refusal before model setup.
+    struct QuietObserver;
+
+    impl Observer for QuietObserver {
+        fn approve(&mut self, _step: usize, _command: &str) -> Approval {
+            Approval::Decline
+        }
+    }
+
+    /// A remote ACP session must refuse an unallowlisted cwd before route or model resolution.
+    #[test]
+    fn sim_session_refuses_an_unallowlisted_cwd_before_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch("issue207-session-state")?;
+        let work = scratch("issue207-session-work")?;
+        let policy = gate::session_scopes();
+        Ledger::open(&state)?.set_tenant_policy(&tenant_key(&state), &policy)?;
+        let state_text = state.to_string_lossy().into_owned();
+        let path = std::env::var("PATH")?;
+        let settings = Settings::remote_from_env(move |name| match name {
+            "LARRY_STATE_DIR" => Some(state_text.clone()),
+            "PATH" => Some(path.clone()),
+            _ => None,
+        })?;
+        let mut observer = QuietObserver;
+        assert!(matches!(
+            run_session(
+                "read this repository",
+                &work,
+                &settings,
+                Isolation::Host,
+                &mut observer,
+                super::super::SessionDoor::Tenant,
+            ),
+            Err(super::super::ExecError::RepoNotAllowed { .. })
+        ));
+        Ok(())
+    }
 }
 
 /// What one session's loop did.
@@ -518,30 +553,7 @@ impl Turn<'_> {
                     if self.observer.cancelled() {
                         break Stop::Cancelled;
                     }
-                    self.observer.started(step, &command);
-                    let argv = [String::from("sh"), String::from("-c"), command.clone()];
-                    // The person's cancel is polled while the command runs, so Esc
-                    // ends it and its whole group, not only the next step (larry#242).
-                    let result = run_command(
-                        &argv,
-                        self.place,
-                        &self.settings.path,
-                        self.settings.timeout,
-                        self.ledger,
-                        self.task_id,
-                        &|| self.observer.cancelled(),
-                    )?
-                    .clipped(OBSERVED_BYTES);
-                    let answer = Answer::Observed {
-                        step,
-                        command,
-                        status: status(&result),
-                        output: Some(streams(&result)),
-                    };
-                    let was_interrupted = result.interrupted();
-                    let passed =
-                        result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
-                    self.observer.finished(step, &answer.text(), passed);
+                    let (answer, was_interrupted, result) = self.run_step(step, command)?;
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
                     if was_interrupted {
@@ -569,6 +581,39 @@ impl Turn<'_> {
             declined,
             interrupted,
         })
+    }
+
+    /// Runs `command` as step `step` and observes it: live output streams while the
+    /// command runs (larry#252), and the person's cancel ends its whole group (larry#242).
+    fn run_step(
+        &mut self,
+        step: usize,
+        command: String,
+    ) -> Result<(Answer, bool, CommandResult), ExecError> {
+        self.observer.started(step, &command);
+        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let stream = self.observer.stream_callback();
+        let result = run_command(
+            &argv,
+            self.place,
+            &self.settings.path,
+            self.settings.timeout,
+            self.ledger,
+            self.task_id,
+            RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
+        );
+        self.observer.stream_dropped();
+        let result = result?.clipped(OBSERVED_BYTES);
+        let answer = Answer::Observed {
+            step,
+            command,
+            status: status(&result),
+            output: Some(streams(&result)),
+        };
+        let was_interrupted = result.interrupted();
+        let passed = result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
+        self.observer.finished(step, &answer.text(), passed);
+        Ok((answer, was_interrupted, result))
     }
 
     /// One completion over `conversation`, compacted first when it needs it and

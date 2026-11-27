@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope, SecurityEpoch};
 use larry_contracts::binding::{BindingError, BindingField};
 use larry_contracts::command::{Command, CommandContent, CommandKind};
-use larry_contracts::effect::{EffectIntent, ReconciliationStrategy};
+use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::{CommandId, EffectId, OperationId, RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
@@ -19,7 +19,8 @@ use lgwks_bot::kernel::cap::{Auth, Cap};
 use lgwks_bot::kernel::clock::Clock;
 use lgwks_bot::kernel::gate::GrantSet;
 
-use super::{ExecError, TaskOwner};
+use super::super::{Report, receipt};
+use super::{ExecError, owner::TaskOwner};
 
 /// Builds a leaseless proof that covers the first capability but not the
 /// second one: no expiry to advance, so the verdict turns on coverage alone.
@@ -84,6 +85,22 @@ fn owner_with_unrun_body(
     (owner, ran, slot)
 }
 
+/// A sealed report the test body returns, so a bound reach records an outcome.
+fn sealed_report() -> Result<Report, Box<dyn std::error::Error>> {
+    let key = lgwks_std::sign::SecretKey::from_seed([7; 32]);
+    let (sealed, _) = receipt::seal(
+        lgwks_std::json::json!({
+            "task_id": "owner-outcome",
+            "task_digest": "digest",
+            "diff": null,
+            "results": [],
+            "denied": ["gate: no covering grant"],
+        }),
+        &key,
+    );
+    Ok(Report::parse(sealed.to_string().as_bytes(), &key)?)
+}
+
 /// Asserts a refused reach left no trace: the body never ran and no result
 /// was recorded.
 fn assert_body_never_ran(ran: &Rc<Cell<bool>>, slot: &BodySlot) {
@@ -92,6 +109,77 @@ fn assert_body_never_ran(ran: &Rc<Cell<bool>>, slot: &BodySlot) {
         slot.borrow().is_none(),
         "a refused reach must not record a body result"
     );
+}
+
+/// A body that runs to success records success, and a body that fails records
+/// failure: the outcome is the body's own, never a second run or a default.
+#[test]
+fn a_run_body_records_its_own_success_or_failure() -> Result<(), Box<dyn std::error::Error>> {
+    let tenant = TenantId::from_bytes([5; 16]);
+    let operation = OperationId::from_bytes([5; 16]);
+    let first = Cap::new(String::from("larry.first"));
+    let second = Cap::new(String::from("larry.second"));
+    let proof = GrantSet::empty()
+        .grant(first.clone())
+        .grant(second.clone())
+        .issue(&[first.clone(), second.clone()])?;
+    let required = [first, second];
+    let report = sealed_report()?;
+    let slot = Rc::new(RefCell::new(None));
+    let mut owner = TaskOwner {
+        repo: Path::new("."),
+        tenant,
+        epoch: SecurityEpoch::INITIAL,
+        task_bytes: b"task",
+        run: Some(move || Ok(report)),
+        slot: Rc::clone(&slot),
+    };
+    assert_eq!(
+        owner.dispatch_bound(
+            &intent(5, tenant),
+            &proof,
+            &required,
+            SystemTime::UNIX_EPOCH
+        ),
+        Ok(EffectOutcome::Succeeded { operation }),
+        "a body that succeeds records success and runs once"
+    );
+    assert!(
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|outcome| outcome.is_ok()),
+        "a body that succeeds is kept as success"
+    );
+    let slot = Rc::new(RefCell::new(None));
+    let mut owner = TaskOwner {
+        repo: Path::new("."),
+        tenant,
+        epoch: SecurityEpoch::INITIAL,
+        task_bytes: b"task",
+        run: Some(|| {
+            Err(ExecError::Gate(RuntimeError::ClockOutOfRange {
+                elapsed: Duration::ZERO,
+            }))
+        }),
+        slot: Rc::clone(&slot),
+    };
+    assert_eq!(
+        owner.dispatch_bound(
+            &intent(5, tenant),
+            &proof,
+            &required,
+            SystemTime::UNIX_EPOCH
+        ),
+        Ok(EffectOutcome::Failed { operation }),
+        "a body that fails records failure"
+    );
+    assert!(
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|outcome| outcome.is_err()),
+        "a body that fails is kept as failure"
+    );
+    Ok(())
 }
 
 #[test]

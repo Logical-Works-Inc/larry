@@ -41,6 +41,10 @@ expiry is never consent.
     2. Pipe a task to `larry exec > report.json`, where the task is
        `{"repo":"<path>","base":"HEAD","acceptance":[["cargo","test"]]}`.
     3. Run `larry verify < report.json`.
+
+    A task may also name `shell`, `timeout_ms` and `deadline_ms`, each under its tenant's ceilings:
+    `LARRY_EXEC_MAX_TIMEOUT_MS`, `LARRY_EXEC_MAX_DEADLINE_MS`, `LARRY_EXEC_SHELLS` and `LARRY_EXEC_BASES`.
+    A task past one is refused with nothing cloned (ADR 0111).
   - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
   - `larry model`: sends one completion through the configured gateway.
   - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
