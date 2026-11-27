@@ -96,12 +96,6 @@ pub enum RouteError {
     BadTemperature,
     /// The kind is not one the client speaks.
     BadKind,
-    /// The kind names a provider the wire in this build does not speak: only
-    /// OpenAI chat is served until PR #534's adapters land (larry#539).
-    KindNotServed {
-        /// The kind name the route carries.
-        kind: String,
-    },
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
     BadResidency,
     /// The request byte bound is outside 1024 bytes to 16 MiB.
@@ -135,6 +129,36 @@ pub enum RouteError {
         /// The field check the row fails, when it is one of the route checks.
         cause: Option<Box<RouteError>>,
     },
+}
+
+impl RouteError {
+    /// Whether this refusal already opens with `route <field>`, so a door
+    /// adds no second prefix; every other refusal gets `route: ` by default,
+    /// so none reaches the user bare (larry#228, larry#295). Every variant is
+    /// listed with no wildcard, so a new refusal fails the build until it is
+    /// classified here.
+    pub(crate) const fn opens_with_route(&self) -> bool {
+        match *self {
+            Self::BadId
+            | Self::ReservedId
+            | Self::BadUrl
+            | Self::BadModel
+            | Self::BadKeyEnv
+            | Self::KeyEnvOutsideNamespace
+            | Self::KeyEnvNotThisTenants { .. }
+            | Self::BadTemperature
+            | Self::BadKind
+            | Self::BadResidency
+            | Self::BadRequestBytes
+            | Self::BadDescribe
+            | Self::BadPrice { .. } => true,
+            Self::InsecureTransport { .. }
+            | Self::NoSuchId { .. }
+            | Self::NoRoute
+            | Self::TableFull { .. }
+            | Self::Damaged { .. } => false,
+        }
+    }
 }
 
 impl fmt::Display for RouteError {
@@ -171,9 +195,6 @@ impl fmt::Display for RouteError {
             Self::BadKind => out.write_str(
                 "route kind must be one of openai-chat, anthropic-messages, openai-responses",
             ),
-            Self::KindNotServed { ref kind } => {
-                write!(out, "route kind {kind} has no adapter in this build")
-            },
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
             ),
@@ -202,30 +223,14 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Damaged {
-                cause: Some(ref inner),
-                ..
-            } => Some(inner.as_ref()),
-            Self::Damaged { cause: None, .. }
-            | Self::BadId
-            | Self::ReservedId
-            | Self::BadUrl
-            | Self::InsecureTransport { .. }
-            | Self::BadModel
-            | Self::BadKeyEnv
-            | Self::KeyEnvOutsideNamespace
-            | Self::KeyEnvNotThisTenants { .. }
-            | Self::BadTemperature
-            | Self::BadKind
-            | Self::KindNotServed { .. }
-            | Self::BadResidency
-            | Self::BadRequestBytes
-            | Self::BadDescribe
-            | Self::BadPrice { .. }
-            | Self::NoSuchId { .. }
-            | Self::NoRoute
-            | Self::TableFull { .. } => None,
+        if let Self::Damaged {
+            cause: Some(ref inner),
+            ..
+        } = *self
+        {
+            Some(inner.as_ref())
+        } else {
+            None
         }
     }
 }
