@@ -212,6 +212,76 @@ fn a_key_variable_is_bound_to_its_tenants_tag() -> Result<(), RouteError> {
     Ok(())
 }
 
+/// The refusal set is closed and classified once: every [`RouteError`]
+/// variant is built here and its [`RouteError::opens_with_route`] answer is
+/// pinned, so a resurrected refusal (larry#546, larry#551) fails the build in
+/// the classifier until it is listed there, and a reader sees the whole set
+/// in one place. `KindNotServed` is deliberately absent: all three named
+/// kinds are served, so no constructor can build it (SD-1).
+#[test]
+fn the_refusal_set_is_closed_with_no_dead_variant() {
+    let refusals = [
+        (RouteError::BadId, true),
+        (RouteError::ReservedId, true),
+        (RouteError::BadUrl, true),
+        (
+            RouteError::InsecureTransport {
+                host: String::from("closed.test"),
+            },
+            false,
+        ),
+        (RouteError::BadModel, true),
+        (RouteError::BadKeyEnv, true),
+        (RouteError::KeyEnvOutsideNamespace, true),
+        (
+            RouteError::KeyEnvNotThisTenants {
+                variable: String::from("LARRY_KEY_CLOSED"),
+                prefix: String::from("LARRY_KEY_FEDCBA9876543210_"),
+            },
+            true,
+        ),
+        (RouteError::BadTemperature, true),
+        (RouteError::BadKind, true),
+        (RouteError::BadResidency, true),
+        (RouteError::BadRequestBytes, true),
+        (RouteError::BadDescribe, true),
+        (RouteError::BadPrice { field: "input" }, true),
+        (
+            RouteError::NoSuchId {
+                id: String::from("closed-9"),
+            },
+            false,
+        ),
+        (RouteError::NoRoute, false),
+        (RouteError::TableFull { limit: 512 }, false),
+        (
+            RouteError::Damaged {
+                id: String::from("closed-1"),
+                cause: None,
+            },
+            false,
+        ),
+        (
+            RouteError::Damaged {
+                id: String::from("closed-2"),
+                cause: Some(Box::new(RouteError::BadKind)),
+            },
+            false,
+        ),
+    ];
+    for (refusal, opens) in refusals {
+        assert_eq!(
+            refusal.opens_with_route(),
+            opens,
+            "the classification is pinned"
+        );
+        assert!(
+            !refusal.to_string().is_empty(),
+            "every refusal says something"
+        );
+    }
+}
+
 /// Every named kind parses back and seals with its name (larry#205,
 /// larry#539). An unknown kind parses to nothing.
 #[test]
