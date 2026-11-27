@@ -173,6 +173,7 @@ impl<'tenant> Tenant<'tenant> {
     fn sealed_route(&self, id: &str) -> Value {
         json!({
             "id": id,
+            "kind": "openai-chat",
             "model": self.model,
             "host": host_of(self.mock),
             "residency": self.residency,
@@ -350,7 +351,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
             "add",
             "main",
             "--url",
-            "http://gateway.test:8443/v1",
+            "https://gateway.test:8443/v1",
             "--model",
             "model-a",
             "--key-env",

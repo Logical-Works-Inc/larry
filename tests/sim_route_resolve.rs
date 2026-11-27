@@ -206,14 +206,14 @@ fn sim_two_tenants_resolve_only_their_own_routes() -> TestResult {
     add(
         one.path(),
         "shared",
-        &shared("one-shared", "http://one.test:1/v1", "CA"),
+        &shared("one-shared", "https://one.test:1/v1", "CA"),
         &["--default"],
     )?;
     add(one.path(), "only-one", &[("--model", "one-private")], &[])?;
     add(
         two.path(),
         "shared",
-        &shared("two-shared", "http://two.test:2/v1", "DE"),
+        &shared("two-shared", "https://two.test:2/v1", "DE"),
         &[],
     )?;
     add(

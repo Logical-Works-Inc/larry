@@ -14,10 +14,11 @@ use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
 use super::{ExecError, Ledger, digest_hex, identity, state_dir};
+use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
 /// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | list [--json] | remove <id> | default <id> | resolve [<id>]";
+const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
@@ -42,6 +43,15 @@ pub enum RouteCliError {
         flag: &'static str,
         /// Why the text is not a number, in the parser's words.
         reason: String,
+    },
+    /// A `route price` rate the price grammar refuses.
+    #[error("route price {flag} must be dollars per million tokens like 0.30, at most 10000")]
+    Price {
+        /// The flag that named the rate.
+        flag: &'static str,
+        /// Why the grammar refused it.
+        #[source]
+        fault: PriceFault,
     },
     /// A route, a route id or a resolution was refused.
     #[error("{}{__field_0}", route_prefix(__field_0))]
@@ -68,9 +78,12 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::KeyEnvOutsideNamespace
         | RouteError::KeyEnvNotThisTenants { .. }
         | RouteError::BadTemperature
+        | RouteError::BadKind
+        | RouteError::KindNotServed { .. }
         | RouteError::BadResidency
         | RouteError::BadRequestBytes
-        | RouteError::BadDescribe => "",
+        | RouteError::BadDescribe
+        | RouteError::BadPrice { .. } => "",
         _ => "route: ",
     }
 }
@@ -128,6 +141,8 @@ struct Flags<'arg> {
     temperature: Option<&'arg str>,
     /// `--request-bytes`.
     request_bytes: Option<&'arg str>,
+    /// The provider kind: `openai-chat` unless `--kind` names another.
+    kind: Option<&'arg str>,
     /// `--describe`.
     describe: Option<&'arg str>,
     /// `--default`.
@@ -153,6 +168,7 @@ fn parse_flags<'arg>(flags: &[&'arg str]) -> Result<Flags<'arg>, RouteCliError> 
             "--residency" => &mut parsed.residency,
             "--temperature" => &mut parsed.temperature,
             "--request-bytes" => &mut parsed.request_bytes,
+            "--kind" => &mut parsed.kind,
             "--describe" => &mut parsed.describe,
             _ => return Err(RouteCliError::Usage("unknown flag")),
         };
@@ -226,14 +242,26 @@ fn add(
     out: &mut impl Write,
 ) -> Result<(), RouteCliError> {
     let parsed = parse_flags(flags)?;
-    // A route added without `--describe` has the empty description.
+    // A route added without `--describe` has the empty description, and one
+    // added without `--kind` is an OpenAI chat route.
     let mut describe = "";
     if let Some(text) = parsed.describe {
         describe = text;
     }
+    let kind = match parsed.kind {
+        Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
+        None => Kind::OpenAiChat,
+    };
+    // Until PR #534's adapters land the wire speaks OpenAI chat only, so any
+    // other kind is refused before the store opens and nothing is stored (larry#539).
+    if !kind.is_served() {
+        return Err(RouteCliError::Route(RouteError::KindNotServed {
+            kind: kind.name().to_owned(),
+        }));
+    }
     let route = Route::new(&Draft {
         id,
-        kind: Kind::OpenAiChat,
+        kind,
         base_url: required(parsed.url, "--url")?,
         model: required(parsed.model, "--model")?,
         key_env: required(parsed.key_env, "--key-env")?,
@@ -265,6 +293,64 @@ fn add(
     )
 }
 
+/// `larry route price <id> --in <dollars> --out <dollars>`: sets the route's
+/// versioned price table in micro-dollars per million tokens, bumping its
+/// revision, and prints it. Only this command writes prices; `route add`
+/// never does.
+fn price(
+    read: &impl Fn(&str) -> Option<String>,
+    id: &str,
+    flags: &[&str],
+    out: &mut impl Write,
+) -> Result<(), RouteCliError> {
+    let id = id_arg(id)?;
+    // Exactly the two rates, each with its value, nothing else.
+    let mut input: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut rest = flags.iter().copied();
+    while let Some(flag) = rest.next() {
+        let slot = match flag {
+            "--in" => &mut input,
+            "--out" => &mut output,
+            _ => return Err(RouteCliError::Usage("unknown flag")),
+        };
+        let value = rest
+            .next()
+            .ok_or(RouteCliError::Usage("a flag needs its value"))?;
+        if slot.replace(value).is_some() {
+            return Err(RouteCliError::Usage("a flag was given twice"));
+        }
+    }
+    let (Some(input), Some(output)) = (input, output) else {
+        return Err(RouteCliError::Usage("route price needs --in and --out"));
+    };
+    let input = price_rate(input, "--in")?;
+    let output = price_rate(output, "--out")?;
+    let (ledger, tenant) = open(read)?;
+    ledger
+        .set_route_price(&tenant, id, input, output)
+        .map_err(from_exec)?;
+    let table = ledger.routes(&tenant).map_err(from_exec)?;
+    let held = table
+        .lookup(Some(id))
+        .ok_or_else(|| RouteCliError::Route(RouteError::NoSuchId { id: id.to_owned() }))?;
+    say(
+        out,
+        &json!({
+            "route": id,
+            "priced": true,
+            "price_version": held.price_version(),
+            "price_input_micros": held.price_input(),
+            "price_output_micros": held.price_output(),
+        }),
+    )
+}
+
+/// `text` as micro-dollars per million tokens, or the price refusal naming `flag`.
+fn price_rate(text: &str, flag: &'static str) -> Result<u64, RouteCliError> {
+    crate::eval::parse_price(text.trim()).map_err(|fault| RouteCliError::Price { flag, fault })
+}
+
 /// One route as the JSON listing prints it.
 fn listed(route: &Route, table: &Table) -> Value {
     json!({
@@ -277,6 +363,9 @@ fn listed(route: &Route, table: &Table) -> Value {
         "temperature": route.temperature(),
         "request_bytes": route.request_bytes(),
         "residency": route.residency(),
+        "price_version": route.price_version(),
+        "price_input_micros": route.price_input(),
+        "price_output_micros": route.price_output(),
         "describe": route.describe(),
         "default": table.default_id() == Some(route.id()),
     })
@@ -315,10 +404,11 @@ fn list(
         say(
             out,
             &format_args!(
-                "{}\t{}\t{}\t{residency}{marker}",
+                "{}\t{}\t{}\t{residency}{marker}\t{}",
                 route.id(),
                 route.model(),
-                route.host()
+                route.host(),
+                route.kind().name(),
             ),
         )?;
     }
@@ -377,6 +467,7 @@ pub fn run(
 ) -> Result<(), RouteCliError> {
     match *args {
         ["add", id, ref flags @ ..] => add(&read, id, flags, out),
+        ["price", id, ref flags @ ..] => price(&read, id, flags, out),
         ["list"] => list(&read, false, out),
         ["list", "--json"] => list(&read, true, out),
         ["remove", id] => remove(&read, id, out),
@@ -389,7 +480,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::RouteCliError;
+    use super::{PriceFault, RouteCliError};
     use crate::model::RouteError;
 
     /// The `larry route` text of one refusal.
@@ -423,6 +514,28 @@ mod tests {
         let numbered = said(&RouteCliError::Route(RouteError::BadTemperature));
         assert!(numbered.starts_with("route temperature must"), "{numbered}");
         assert_eq!(numbered.matches("route").count(), 1, "{numbered}");
+        let kind = said(&RouteCliError::Route(RouteError::BadKind));
+        assert!(kind.starts_with("route kind must be one of"), "{kind}");
+        assert_eq!(kind.matches("route").count(), 1, "{kind}");
+        let unserved = said(&RouteCliError::Route(RouteError::KindNotServed {
+            kind: String::from("anthropic-messages"),
+        }));
+        assert_eq!(
+            unserved, "route kind anthropic-messages has no adapter in this build",
+            "{unserved}"
+        );
+        assert_eq!(unserved.matches("route").count(), 1, "{unserved}");
+        let priced = said(&RouteCliError::Route(RouteError::BadPrice {
+            field: "input",
+        }));
+        assert!(priced.starts_with("route input price must be"), "{priced}");
+        assert_eq!(priced.matches("route").count(), 1, "{priced}");
+        let rated = said(&RouteCliError::Price {
+            flag: "--in",
+            fault: PriceFault::Malformed,
+        });
+        assert!(rated.starts_with("route price --in must be"), "{rated}");
+        assert_eq!(rated.matches("route").count(), 1, "{rated}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [
@@ -453,7 +566,7 @@ mod tests {
             crate::model::tenant_namespace(&super::tenant_text(&state))
         );
         let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
-        let mut args = vec!["add", "main", "--url", "http://gateway.test:1/v1"];
+        let mut args = vec!["add", "main", "--url", "https://gateway.test:1/v1"];
         args.extend(["--model", "m", "--key-env", key_env.as_str()]);
         args.extend(["--residency", "CA"]);
         let mut out = Vec::new();

@@ -17,11 +17,12 @@ const SEEDS: u64 = 64;
 /// Seeds whose wire the pinned digest covers.
 const PINNED_SEEDS: u64 = 96;
 
-/// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken before the cell lost
-/// its `String`, then advanced once for the queue panel, the six slash commands and the
+/// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken with the
+/// command header painted at `started` so a running command's output has its context
+/// (larry#252), then advanced once for the queue panel, the six slash commands and the
 /// working footer (larry#262): the heap assertions above, not this digest, carry the
 /// no-heap-text rule, so a paint feature moves this digest and names its issue here.
-const PINNED: &str = "dd578d66e3f398ffa11acc56d5cbe6c7689125f2c3febcf94818280068ae44cf";
+const PINNED: &str = "ac840f7e8c01d25aa7d3225929d0015ada3bb1c26bb9ad9c129ec6f7cd880afa";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [
@@ -78,9 +79,11 @@ fn sim_a_grid_owns_no_heap_text_per_cell() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// The wire of 96 seeds of 96 hostile steps is byte for byte the pinned digest: taken on
-/// the old `String`-cell code, advanced once per paint feature with its issue named at
-/// [`PINNED`]. A paint change without an advance named here fails here, by design.
+/// The wire of 96 seeds of 96 hostile steps, pinned as one digest: the pane paints the
+/// command header at `started` (larry#252), so a running command's rows carry their `$`
+/// context while it streams instead of only at `finished`; advanced once per paint feature
+/// with its issue named at [`PINNED`]. A paint change without an advance named here fails
+/// here, by design.
 #[test]
 fn sim_the_wire_of_every_seed_is_the_pinned_one() {
     let mut hasher = Hasher::new();

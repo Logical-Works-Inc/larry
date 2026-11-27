@@ -5,6 +5,7 @@ mod author;
 mod compact;
 mod confine;
 mod error;
+pub(super) mod fence_control;
 mod gate;
 mod identity;
 mod island;
@@ -33,6 +34,7 @@ use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
 pub(crate) use run::{Place, run_command};
+pub(crate) use run::{RunHooks, StreamCallback};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -49,6 +51,7 @@ pub use session::SessionError;
 pub(crate) use session::{
     Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, SessionDoor, Stop, run_session,
 };
+pub(crate) use task::Knobs;
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -249,6 +252,8 @@ pub struct Settings {
     local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
+    /// Optional host authority action for the next admitted task.
+    pub(crate) fence_control: Option<fence_control::FenceControl>,
 }
 
 impl fmt::Debug for Settings {
@@ -299,6 +304,7 @@ impl Settings {
         } else {
             Ledger::open(&state_dir)?.tenant_policy(&tenant_key(&state_dir))?
         };
+        let fence_control = fence_control::read(&read)?;
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
@@ -306,6 +312,7 @@ impl Settings {
             policy,
             local,
             read: Arc::new(read),
+            fence_control,
         })
     }
 
@@ -593,19 +600,25 @@ fn run_task(
     let mut results = Vec::with_capacity(task.acceptance().len());
     for argv in task.acceptance() {
         // An acceptance command has no person watching it who could cancel it,
-        // so only the timeout ends it (larry#242).
+        // so only the timeout ends it (larry#242). A task that names a shell runs
+        // each command under it as `<shell> -c <command>` (larry#439); a task that
+        // names a timeout runs under it, cut to the default when it names more.
+        let timeout = match task.timeout_ms() {
+            Some(millis) => Duration::from_millis(millis).min(settings.timeout),
+            None => settings.timeout,
+        };
         let place = match confine {
             Some(ref confine) => Place::Confined(confine),
             None => Place::Open(workspace.path()),
         };
         let result = run_command(
-            argv,
+            &task.argv_for(argv),
             place,
             &settings.path,
-            settings.timeout,
+            timeout,
             ledger,
             task_id,
-            &|| false,
+            RunHooks::new(&|| false, None),
         )?;
         results.push(result.into_json());
     }

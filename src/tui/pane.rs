@@ -202,6 +202,14 @@ pub(crate) struct Pane {
     dropped: usize,
     /// The command running now, as one row of text.
     running: Option<String>,
+    /// The current live-output line, bounded before it is painted.
+    stream_line: String,
+    /// Whether this command produced a live stream event.
+    stream_seen: bool,
+    /// Live-output chunks dropped at the worker event bound.
+    stream_dropped_chunks: usize,
+    /// Whether the current command header is already in the output ring.
+    header_pushed: bool,
     /// The change, once the session offers it.
     diff: Option<DiffView>,
     /// The sealed report's receipt, once the session ends.
@@ -222,6 +230,10 @@ impl Pane {
             output: VecDeque::new(),
             dropped: 0,
             running: None,
+            stream_line: String::new(),
+            stream_seen: false,
+            stream_dropped_chunks: 0,
+            header_pushed: false,
             diff: None,
             receipt: None,
             back: 0,
@@ -243,8 +255,51 @@ impl Pane {
     /// `command` started: its first line shows as running, on the Output tab.
     pub(crate) fn started(&mut self, command: &str) {
         self.running = Some(cut(&first_line(command)));
+        self.stream_line.clear();
+        self.stream_seen = false;
+        self.stream_dropped_chunks = 0;
+        self.header_pushed = true;
+        self.push((
+            Style::ACCENT.bold(),
+            format!("$ {}", cut(&first_line(command))),
+        ));
         self.tab = Tab::Output;
         self.back = 0;
+    }
+
+    /// Adds a bounded live-output chunk. A line may span callbacks, but its retained prefix is
+    /// capped at [`ROW_CHARS`], and every completed row enters the existing output ring.
+    pub(crate) fn stream(&mut self, chunk: &str) {
+        self.stream_seen = true;
+        self.tab = Tab::Output;
+        self.back = 0;
+        for part in chunk.split_inclusive('\n') {
+            let complete = part.ends_with('\n');
+            let body = match part.strip_suffix('\n') {
+                Some(body) => body,
+                None => part,
+            };
+            let safe = sanitize(body, false);
+            let room = ROW_CHARS.saturating_sub(self.stream_line.chars().count());
+            self.stream_line.extend(safe.chars().take(room));
+            if complete {
+                let line = std::mem::take(&mut self.stream_line);
+                self.push((Style::PLAIN, line));
+            }
+        }
+    }
+
+    /// Records live-output chunks dropped by the worker event bound.
+    pub(crate) fn stream_dropped(&mut self, chunks: usize) {
+        self.stream_dropped_chunks = self.stream_dropped_chunks.saturating_add(chunks);
+        self.tab = Tab::Output;
+        self.back = 0;
+    }
+
+    /// The live-output drop count, for the seeded pane contract.
+    #[cfg(test)]
+    pub(crate) const fn stream_dropped_chunks(&self) -> usize {
+        self.stream_dropped_chunks
     }
 
     /// Adds `row`, dropping the oldest past [`OUTPUT_ROWS`].
@@ -264,25 +319,46 @@ impl Pane {
         output: &[String],
         passed: bool,
     ) {
+        if !self.stream_line.is_empty() {
+            let line = std::mem::take(&mut self.stream_line);
+            self.push((Style::PLAIN, line));
+        }
+        let streamed = self.stream_seen || self.stream_dropped_chunks > 0;
         self.running = None;
         self.tab = Tab::Output;
         self.back = 0;
-        self.push((
-            Style::ACCENT.bold(),
-            format!("$ {}", cut(&first_line(command))),
-        ));
+        if !self.header_pushed {
+            self.push((
+                Style::ACCENT.bold(),
+                format!("$ {}", cut(&first_line(command))),
+            ));
+        }
         if !passed {
             self.push((Style::BAD, cut(status)));
         }
-        // Only the newest rows can stay, so the older ones are counted, never copied.
-        let skip = output.len().saturating_sub(OUTPUT_ROWS);
-        self.dropped = self.dropped.saturating_add(skip);
-        for line in output.iter().skip(skip) {
-            self.push((Style::PLAIN, cut(line)));
+        if streamed {
+            if self.stream_dropped_chunks > 0 {
+                self.push((
+                    Style::MUTED,
+                    format!(
+                        "… {} live output chunks dropped",
+                        self.stream_dropped_chunks
+                    ),
+                ));
+            }
+        } else {
+            // Only the newest rows can stay, so the older ones are counted, never copied.
+            let skip = output.len().saturating_sub(OUTPUT_ROWS);
+            self.dropped = self.dropped.saturating_add(skip);
+            for line in output.iter().skip(skip) {
+                self.push((Style::PLAIN, cut(line)));
+            }
+            if output.is_empty() && passed {
+                self.push((Style::MUTED, String::from("(no output)")));
+            }
         }
-        if output.is_empty() && passed {
-            self.push((Style::MUTED, String::from("(no output)")));
-        }
+        self.header_pushed = false;
+        self.stream_seen = false;
     }
 
     /// The change arrived as a unified diff: parsed once, shown from its top.
