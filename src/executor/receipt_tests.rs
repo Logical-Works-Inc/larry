@@ -82,11 +82,7 @@ fn body(stream: &mut Seeded) -> Result<Value, Box<dyn std::error::Error>> {
 
 /// A signing key whose seed the stream draws.
 fn key(stream: &mut Seeded) -> SecretKey {
-    let mut seed = [0_u8; 32];
-    for byte in &mut seed {
-        *byte = stream.next_u64().to_le_bytes()[0];
-    }
-    SecretKey::from_seed(seed)
+    super::seeded_key(stream)
 }
 
 /// Sets the member `key` of the object `value` to `member`.

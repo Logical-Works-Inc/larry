@@ -37,7 +37,7 @@ use super::Ledger;
 use super::Report;
 use super::Settings;
 use super::compact::{Answer, Conversation};
-use super::run::{CommandResult, Place, run_command};
+use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::session_gate::{
     CheckProof, Fingerprint, FingerprintFault, VerificationFault, checklist, fingerprint_tree,
     first_change, has_fresh_check, invalidate_finish, kept_reply, reached_refusal_limit,
@@ -141,6 +141,12 @@ pub(crate) trait Observer {
     /// The change in full, as a unified diff of at most 1 MiB, offered once just before
     /// [`Observer::review`] so a frontend can show it while the person decides (larry#244).
     fn diff(&mut self, _text: &str) {}
+    /// A nonblocking callback for live command output, when the frontend can paint it.
+    fn stream_callback(&mut self) -> Option<StreamCallback> {
+        None
+    }
+    /// Reports callback chunks dropped at the bounded event channel.
+    fn stream_dropped(&mut self) {}
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
     /// An observer that records nothing leaves this alone.
     fn handed(&mut self, _line: &str, _applied: bool) {}
@@ -570,7 +576,8 @@ impl Turn<'_> {
         self.observer.started(step, command);
         let argv = [String::from("sh"), String::from("-c"), command.to_owned()];
         // The person's cancel is polled while the command runs, so Esc ends it and its whole
-        // group, not only the next step (larry#242).
+        // group, not only the next step (larry#242); live output streams while it runs (larry#252).
+        let stream = self.observer.stream_callback();
         let result = run_command(
             &argv,
             self.place,
@@ -578,9 +585,10 @@ impl Turn<'_> {
             self.settings.timeout,
             self.ledger,
             self.task_id,
-            &|| self.observer.cancelled(),
-        )?
-        .clipped(OBSERVED_BYTES);
+            RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
+        );
+        self.observer.stream_dropped();
+        let result = result?.clipped(OBSERVED_BYTES);
         let interrupted = result.interrupted();
         let passed = command_passed(result.exit_code(), result.timed_out(), interrupted);
         let answer = Answer::Observed {
@@ -638,6 +646,20 @@ pub(super) fn word(rng: &mut Seeded) -> Result<String, crate::sim_error::SimErro
         ));
     }
     Ok(out)
+}
+
+/// The typed finish request the seeded simulations answer with: the check
+/// `true`, one artifact, clean state and no servers. One constructor, so the
+/// two verification sims never repeat its vectors (larry#271).
+#[cfg(test)]
+pub(super) fn sim_finish_request(summary: &str, artifact: &str) -> FinishRequest {
+    FinishRequest {
+        summary: summary.to_owned(),
+        check: String::from("true"),
+        artifacts: vec![artifact.to_owned()],
+        state: vec![String::from("clean")],
+        servers: vec![String::from("none")],
+    }
 }
 
 /// Keeps a bounded model reply in the compacted conversation.

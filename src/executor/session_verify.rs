@@ -62,13 +62,7 @@ fn finish_refuses_without_fresh_passing_check() {
 }
 
 fn finish_request(summary: &str) -> FinishRequest {
-    FinishRequest {
-        summary: summary.to_owned(),
-        check: String::from("true"),
-        artifacts: vec![String::from("out")],
-        state: vec![String::from("clean")],
-        servers: vec![String::from("none")],
-    }
+    super::sim_finish_request(summary, "out")
 }
 
 #[test]
@@ -232,19 +226,28 @@ fn ref_first_change(
     None
 }
 
-/// The reference rule's own writable-path check, stated apart from the author's:
-/// non-empty, bounded, NUL-free, relative, normal components only, no `.git`.
+/// The reference rule's own writable-path check, stated apart from the author's
+/// (early returns here, one conjunction there): non-empty, bounded, NUL-free,
+/// relative, normal components only, no `.git`. The two stay independent
+/// implementations of one rule, so a shared bug cannot hide in both.
 fn ref_writable(path: &str) -> bool {
-    !path.is_empty()
-        && path.len() <= 1024
-        && !path.contains('\0')
-        && Path::new(path).components().all(|part| match part {
-            Component::Normal(name) => !name.eq_ignore_ascii_case(".git"),
-            Component::CurDir
+    if path.is_empty() || path.contains('\0') {
+        return false;
+    }
+    if path.len() > 1024 {
+        return false;
+    }
+    for part in Path::new(path).components() {
+        match part {
+            Component::Normal(name) if !name.eq_ignore_ascii_case(".git") => {}
+            Component::Normal(_)
+            | Component::CurDir
             | Component::ParentDir
             | Component::RootDir
-            | Component::Prefix(_) => false,
-        })
+            | Component::Prefix(_) => return false,
+        }
+    }
+    true
 }
 
 /// Runs `program` with `args` in `tree` and returns its exit code, `None` when a

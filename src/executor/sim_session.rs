@@ -20,11 +20,9 @@ use lgwks_macros::Error;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
-use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, clip, run_command};
+use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, RunHooks, clip, run_command};
 use super::super::session_reply::{Reply, ReplyFault, parse_reply};
-use super::{
-    ExecError, FinishRequest, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, SessionError, check,
-};
+use super::{ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, SessionError, check};
 use crate::json_at::At;
 use crate::sim_error::SimError;
 use crate::sim_lanes::{self, LaneError};
@@ -73,13 +71,7 @@ fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
                 "{{\"finish\":{{\"summary\":{0},\"check\":\"true\",\"artifacts\":[\"artifact\"],\"state\":[\"clean\"],\"servers\":[\"none\"]}}}}",
                 quoted(&body)?
             ),
-            Ok(Reply::Finish(FinishRequest {
-                summary: body,
-                check: String::from("true"),
-                artifacts: vec![String::from("artifact")],
-                state: vec![String::from("clean")],
-                servers: vec![String::from("none")],
-            })),
+            Ok(Reply::Finish(super::sim_finish_request(&body, "artifact"))),
         ),
         2 => (
             format!("```json\n{{\"command\":{}}}\n```", quoted(&body)?),
@@ -421,7 +413,7 @@ fn drive(
                     COMMAND_TIMEOUT,
                     &ledger,
                     &task_id,
-                    &|| cancel.load(Ordering::Acquire),
+                    RunHooks::new(&|| cancel.load(Ordering::Acquire), None),
                 )
             };
             finished.store(true, Ordering::Release);
@@ -548,7 +540,7 @@ fn sim_run_timeout_is_not_an_interrupt() -> TestResult {
             SHORT_TIMEOUT,
             &ledger,
             "sim-timeout",
-            &|| false,
+            RunHooks::new(&|| false, None),
         );
         let listed = ledger.live_tasks();
         let (state_path, work_path) = (state.to_path_buf(), work.to_path_buf());
@@ -633,14 +625,17 @@ fn panic_inside_run(seed: u64) -> Result<(), CancelSimError> {
                 COMMAND_TIMEOUT,
                 &ledger,
                 "sim-panic",
-                &|| {
-                    let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-                    assert!(
-                        poll > fails_at,
-                        "seed {seed}: the injected fault inside run_command"
-                    );
-                    false
-                },
+                RunHooks::new(
+                    &|| {
+                        let poll = polls.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+                        assert!(
+                            poll > fails_at,
+                            "seed {seed}: the injected fault inside run_command"
+                        );
+                        false
+                    },
+                    None,
+                ),
             )
         };
         // Only a run that never reached its cancel poll gets here: end the watcher, then say

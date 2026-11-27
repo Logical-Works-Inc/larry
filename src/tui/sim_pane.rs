@@ -717,3 +717,38 @@ fn sim_pane_keys_move_the_pane_wide_and_the_chat_narrow() {
     );
     assert!(!text.contains("Receipt"), "no pane on a narrow screen");
 }
+
+/// Stream chunks use the bounded callback contract: at most 4 KiB each, bursts past the
+/// 64-event bound counted, rows kept in the 512-row ring, hostile text sanitized.
+#[test]
+fn sim_stream_callback_bounds_and_drop_count() {
+    let mut pane = Pane::new();
+    pane.started("cat stream.fifo");
+    pane.stream(&format!("\x1b]bad\u{202e}first\n{}\n", "x".repeat(4096)));
+    pane.stream_dropped(65);
+    pane.finished("cat stream.fifo", "exit 0", &[], true);
+    assert_eq!(pane.stream_dropped_chunks(), 65);
+    assert!(pane.output.len() <= OUTPUT_ROWS);
+    assert!(
+        pane.output
+            .iter()
+            .all(|entry| entry.1.chars().count() <= ROW_CHARS)
+    );
+    assert!(
+        pane.output
+            .iter()
+            .all(|entry| !entry.1.chars().any(char::is_control))
+    );
+    assert!(
+        pane.output
+            .iter()
+            .all(|entry| !entry.1.contains('\u{202e}'))
+    );
+    // A streamed command with no drops finishes on the streamed path.
+    let mut live = Pane::new();
+    live.started("cat stream.fifo");
+    live.stream("live\n");
+    live.finished("cat stream.fifo", "exit 0", &["buffered".to_owned()], true);
+    let rows: Vec<&str> = live.output.iter().map(|entry| entry.1.as_str()).collect();
+    assert_eq!(rows, ["$ cat stream.fifo", "live"]);
+}
