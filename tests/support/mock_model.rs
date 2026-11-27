@@ -38,7 +38,7 @@ use crate::http_wire::{Refusal, Request, read_request, render};
 #[path = "mock_replies.rs"]
 mod replies;
 
-use replies::{completion, with_choice};
+use replies::{completion, with_choice, without_usage};
 
 /// Socket read and write bound for every connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -116,6 +116,10 @@ pub(crate) struct Config {
     /// Reply content for request index `n` (larry#93: a terminal session's
     /// scripted commands); indexes past the end compose words from the seed.
     pub(crate) contents: Vec<String>,
+    /// When set, every reply carries no `usage` block, the way many
+    /// OpenAI-compatible proxies answer (larry#204): the client must settle
+    /// the call at its reservation, never at zero.
+    pub(crate) omit_usage: bool,
     /// When set, a request must carry exactly one `User-Agent` header with this
     /// value or it is refused with a 400 (larry#230).
     pub(crate) user_agent: Option<String>,
@@ -131,6 +135,7 @@ impl Config {
             script: Vec::new(),
             fault_per_mille: 0,
             contents: Vec::new(),
+            omit_usage: false,
             user_agent: None,
         }
     }
@@ -344,6 +349,11 @@ impl State {
             Err((status, message)) => return reject(status, message),
         };
         let good = completion(&request.path, model, request, &mut rng, scripted)?;
+        let good = if self.config.omit_usage {
+            without_usage(&good)?
+        } else {
+            good
+        };
         apply(fault, &request.path, good)
     }
 
@@ -604,8 +614,8 @@ impl Handle {
         locked(&self.state.ledger).bodies.clone()
     }
 
-    /// The `Authorization` header of each recorded request, aligned with
-    /// [`Self::requests`].
+    /// The credential header of each recorded request, aligned with
+    /// [`Self::requests`]: the `Authorization` value, else the `x-api-key`.
     pub(crate) fn authorizations(&self) -> Vec<Option<String>> {
         locked(&self.state.ledger).authorizations.clone()
     }

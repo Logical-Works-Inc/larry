@@ -25,7 +25,7 @@ pub enum RouteCliError {
     /// this one message (larry#543): the derive renders tuple placeholders
     /// onto its extra arguments, so a `{USAGE}` tail would print twice.
     #[error(
-        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
     )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
@@ -132,6 +132,8 @@ struct Flags<'arg> {
     request_bytes: Option<&'arg str>,
     /// The provider kind: `openai-chat` unless `--kind` names another.
     kind: Option<&'arg str>,
+    /// `--prompt`.
+    prompt: Option<&'arg str>,
     /// `--describe`.
     describe: Option<&'arg str>,
     /// `--default`.
@@ -158,6 +160,7 @@ fn parse_flags<'arg>(flags: &[&'arg str]) -> Result<Flags<'arg>, RouteCliError> 
             "--temperature" => &mut parsed.temperature,
             "--request-bytes" => &mut parsed.request_bytes,
             "--kind" => &mut parsed.kind,
+            "--prompt" => &mut parsed.prompt,
             "--describe" => &mut parsed.describe,
             _ => return Err(RouteCliError::Usage("unknown flag")),
         };
@@ -250,6 +253,7 @@ fn add(
         temperature: number(parsed.temperature, "--temperature")?,
         request_bytes: number(parsed.request_bytes, "--request-bytes")?,
         residency: Some(required(parsed.residency, "--residency")?),
+        prompt: parsed.prompt,
         describe,
     })
     .map_err(RouteCliError::Route)?;
@@ -345,6 +349,7 @@ fn listed(route: &Route, table: &Table) -> Value {
         "temperature": route.temperature(),
         "request_bytes": route.request_bytes(),
         "residency": route.residency(),
+        "prompt_hash": route.prompt_hash(),
         "price_version": route.price_version(),
         "price_input_micros": route.price_input(),
         "price_output_micros": route.price_output(),
@@ -499,6 +504,9 @@ mod tests {
         let kind = said(&RouteCliError::Route(RouteError::BadKind));
         assert!(kind.starts_with("route kind must be one of"), "{kind}");
         assert_eq!(kind.matches("route").count(), 1, "{kind}");
+        let prompt = said(&RouteCliError::Route(RouteError::BadPrompt));
+        assert!(prompt.starts_with("route prompt must be"), "{prompt}");
+        assert_eq!(prompt.matches("route").count(), 1, "{prompt}");
         let priced = said(&RouteCliError::Route(RouteError::BadPrice {
             field: "input",
         }));
