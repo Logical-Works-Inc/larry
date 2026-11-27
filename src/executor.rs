@@ -35,7 +35,7 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-pub(crate) use run::{Place, run_command};
+pub(crate) use run::{Place, RunHooks, StreamCallback, run_command};
 use seal::{SealedRun, seal_run};
 use workspace::{Workspace, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
@@ -615,7 +615,7 @@ fn run_task(
             timeout,
             ledger,
             task_id,
-            &|| false,
+            RunHooks::new(&|| false, None),
         )?;
         // The group the deadline killed is already reaped: its result stays, the task ends
         // sealed, and no later command starts.
