@@ -32,7 +32,7 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
 use lgwks_std::sign::PublicKey;
-use run::{Place, run_command};
+pub(crate) use run::{Place, run_command};
 use workspace::{Workspace, report_members, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
@@ -46,7 +46,9 @@ pub(crate) use island::Isolation;
 use receipt::parse_public_key;
 pub use receipt::{MAX_REPORT_BYTES, ReceiptError, Verdict, verify};
 pub use session::SessionError;
-pub(crate) use session::{Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, Stop, run_session};
+pub(crate) use session::{
+    Approval, Handoff, MAX_INSTRUCTION_BYTES, Observer, SessionDoor, Stop, run_session,
+};
 pub use task::{Task, TaskError};
 
 /// The denial a task asking for model commands receives until Nova isolation
@@ -119,6 +121,25 @@ pub(crate) fn state_ledger(read: &impl Fn(&str) -> Option<String>) -> Result<Led
 pub fn state_public_key(read: impl Fn(&str) -> Option<String>) -> Result<PublicKey, ExecError> {
     let directory = state_dir(&read)?;
     Ok(Ledger::open(&directory)?.signing_key()?.public_key())
+}
+
+/// Provisions the tenant-owned executor ledger before a local or remote door runs.
+/// The policy text uses the same comma-separated scope names as `LARRY_POLICY`;
+/// roots are canonicalized and bounded by the ledger owner.
+pub fn provision_tenant(
+    read: impl Fn(&str) -> Option<String>,
+    policy_text: &str,
+    roots: &[&std::path::Path],
+) -> Result<(), ExecError> {
+    let state = state_dir(&read)?;
+    let ledger = Ledger::open(&state)?;
+    let tenant = tenant_key(&state);
+    let policy = gate::policy_names(Some(policy_text))?;
+    ledger.set_tenant_policy(&tenant, &policy)?;
+    for root in roots {
+        ledger.set_tenant_repo_root(&tenant, root)?;
+    }
+    Ok(())
 }
 
 /// The key a verifier trusts: `LARRY_RECEIPT_KEY` (64 hex characters) when it is
@@ -219,8 +240,13 @@ pub struct Settings {
     timeout: Duration,
     /// The PATH the acceptance commands and git run under.
     path: String,
-    /// The scopes `LARRY_POLICY` admits; what the gate authorizes tasks against.
+    /// The scopes the gate authorizes tasks against. Local settings read
+    /// `LARRY_POLICY`; remote settings read the tenant ledger.
     policy: BTreeSet<Scope>,
+    /// Whether this door is local (`larry exec`, bare `larry`): with no
+    /// provisioned root row it allows any absolute path outside the state
+    /// directory, while a remote door denies. Set once in `from_env_mode`.
+    local: bool,
     /// Where a task's route reads its key and the `LARRY_MODEL_*` knobs from.
     read: EnvReader,
 }
@@ -243,6 +269,22 @@ impl Settings {
     pub fn from_env(
         read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Result<Settings, ExecError> {
+        Self::from_env_mode(read, true)
+    }
+
+    /// Reads executor settings for a remote door. Remote policy never falls back
+    /// to `LARRY_POLICY`, and a missing ledger row is deny-all.
+    pub(crate) fn remote_from_env(
+        read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Result<Settings, ExecError> {
+        Self::from_env_mode(read, false)
+    }
+
+    /// Reads the common settings and selects the policy owner for the door.
+    fn from_env_mode(
+        read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+        local: bool,
+    ) -> Result<Settings, ExecError> {
         let state_dir = state_dir(&read)?;
         let timeout_ms = match read("LARRY_EXEC_TIMEOUT_MS") {
             None => DEFAULT_TIMEOUT_MS,
@@ -252,19 +294,47 @@ impl Settings {
             },
         };
         let path = read("PATH").ok_or(ExecError::PathUnset)?;
-        let policy = gate::policy(&read)?;
+        let policy = if local {
+            gate::policy(&read)?
+        } else {
+            Ledger::open(&state_dir)?.tenant_policy(&tenant_key(&state_dir))?
+        };
         Ok(Settings {
             state_dir,
             timeout: Duration::from_millis(timeout_ms),
             path,
             policy,
+            local,
             read: Arc::new(read),
         })
+    }
+
+    /// Whether this door is local: remote doors deny a tenant with no root row.
+    pub(crate) const fn is_local(&self) -> bool {
+        self.local
     }
 
     /// The directory holding the ledger, the workspaces and `larry eval`'s origins.
     pub(crate) fn state_dir(&self) -> &std::path::Path {
         self.state_dir.as_path()
+    }
+
+    /// Refreshes the remote door's policy from the durable tenant ledger. The process may
+    /// stay open while an operator provisions or withdraws a tenant, so a cached snapshot
+    /// must not outlive the prompt that uses it.
+    pub(crate) fn refresh_remote_policy(&mut self) -> Result<(), ExecError> {
+        self.policy = Ledger::open(&self.state_dir)?.tenant_policy(&tenant_key(&self.state_dir))?;
+        Ok(())
+    }
+
+    /// The `PATH` acceptance commands and git run under.
+    pub(crate) fn path_env(&self) -> &str {
+        self.path.as_str()
+    }
+
+    /// Longest an acceptance command may run before its group is killed.
+    pub(crate) const fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// The route a task naming `named` (or none) sends its model calls to: the
@@ -319,6 +389,32 @@ const fn backoff(wait: Duration) -> bool {
 /// runtime's one dispatched effect, and a policy refusal seals a report that ran nothing.
 pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     let (ledger, key) = prepare(settings)?;
+    let repository = ledger.authorized_repo(
+        &tenant_key(&settings.state_dir),
+        &settings.state_dir,
+        task.repo(),
+        settings.is_local(),
+    )?;
+    execute_prepared(task, settings, &ledger, &key, &repository)
+}
+
+/// Runs an evaluator-owned origin. Public task execution refuses every state-directory path;
+/// this crate-private route is narrower still, accepting only a canonical origin beneath the
+/// evaluator's own `<state>/eval` directory.
+pub(crate) fn execute_eval(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
+    let (ledger, key) = prepare(settings)?;
+    let repository = Ledger::authorized_eval_repo(settings.state_dir(), task.repo())?;
+    execute_prepared(task, settings, &ledger, &key, &repository)
+}
+
+/// Executes after the caller has supplied a repository authorized for this route.
+fn execute_prepared(
+    task: &Task,
+    settings: &Settings,
+    ledger: &Ledger,
+    key: &lgwks_std::sign::SecretKey,
+    repository: &std::path::Path,
+) -> Result<Report, ExecError> {
     let task_id = identity::run_id(task, &settings.state_dir)?;
     let task_digest = digest_hex(task.bytes());
     // A task that names an idempotency key is the client's statement that a retry
@@ -327,7 +423,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     // (larry#182 defect 3).
     let resumable = task.idempotency_key().is_some();
     if resumable && let Some(earlier) = ledger.report(&task_id, MAX_REPORT_BYTES)? {
-        return Report::parse(&earlier, &key);
+        return Report::parse(&earlier, key);
     }
     if task.has_model_commands() {
         let report = Report::sealed(
@@ -338,7 +434,7 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
                 "results": [],
                 "denied": [MODEL_COMMANDS_DENIED],
             }),
-            &key,
+            key,
         );
         if resumable {
             ledger.keep_report(&task_id, &task_digest, report.bytes())?;
@@ -347,11 +443,19 @@ pub fn execute(task: &Task, settings: &Settings) -> Result<Report, ExecError> {
     }
     let subject = gate::Subject {
         required: gate::required_scopes(task),
-        path: task.repo(),
+        path: repository,
         bytes: task.bytes(),
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, &key, || {
-        run_task(task, settings, &task_id, &task_digest, &ledger, &key)
+    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
+        run_task(
+            task,
+            repository,
+            settings,
+            &task_id,
+            &task_digest,
+            ledger,
+            key,
+        )
     })?;
     if resumable && report.carries_a_seal() {
         ledger.keep_report(&task_id, &task_digest, report.bytes())?;
@@ -426,6 +530,7 @@ fn model_step<'task>(
 /// gate's bound owner reach.
 fn run_task(
     task: &Task,
+    repository: &std::path::Path,
     settings: &Settings,
     task_id: &str,
     task_digest: &str,
@@ -444,7 +549,7 @@ fn run_task(
     let step = model_step(task, settings, ledger)?;
     let workspace = Workspace::create(
         &settings.state_dir,
-        task.repo(),
+        repository,
         task.base(),
         task_id,
         &settings.path,
@@ -534,4 +639,116 @@ fn digest_hex(bytes: &[u8]) -> String {
     let mut hasher = lgwks_std::hash::Hasher::new();
     hasher.update(bytes);
     hasher.finalize().to_hex()
+}
+
+/// The stable text key shared by the executor's tenant-owned ledger tables.
+fn tenant_key(state: &std::path::Path) -> String {
+    digest_hex(identity::tenant_of(state).as_bytes())
+}
+
+#[cfg(test)]
+mod issue207_tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use larry_contracts::authority::Scope;
+    use lgwks_std::json::json;
+
+    use super::sim_tree::{Origin, Shape, origin, scratch, settings};
+    use super::{Ledger, Settings, Task, execute, tenant_key};
+
+    fn task(repo: &Path) -> Result<Task, Box<dyn std::error::Error>> {
+        let document = json!({
+            "repo": repo.to_string_lossy(),
+            "base": "HEAD",
+            "acceptance": [["true"]]
+        });
+        Ok(Task::parse(document.to_string().as_bytes())?)
+    }
+
+    fn remote_settings(state: &Path) -> Result<Settings, Box<dyn std::error::Error>> {
+        let state = state.to_string_lossy().into_owned();
+        let path = std::env::var("PATH")?;
+        Ok(Settings::remote_from_env(move |name| match name {
+            "LARRY_STATE_DIR" => Some(state.clone()),
+            "PATH" => Some(path.clone()),
+            _ => None,
+        })?)
+    }
+
+    /// The real executor rejects the outside and state paths before workspace creation.
+    #[test]
+    fn sim_executor_authorizes_canonical_repositories_before_clone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch("issue207-state")?;
+        let root = scratch("issue207-root")?;
+        let local = settings(&state, Some("file.read,process.spawn"))?;
+        let Origin {
+            dir: repository, ..
+        } = origin(&local, &root, 1, Shape::Git)?;
+        let outside = scratch("issue207-outside")?;
+        let valid = task(&repository)?;
+        assert!(execute(&valid, &local)?.accepted());
+        let outside_task = task(&outside)?;
+        assert!(matches!(
+            execute(&outside_task, &local),
+            Err(super::ExecError::RepoNotAllowed { .. })
+        ));
+        std::fs::create_dir_all(state.join("ws"))?;
+        let state_task = task(&state.join("ws"))?;
+        assert!(matches!(
+            execute(&state_task, &local),
+            Err(super::ExecError::RepoInsideState { .. })
+        ));
+        assert!(state.join("ws").read_dir()?.next().is_none());
+        Ok(())
+    }
+
+    /// Remote settings read each tenant's durable policy, so equal tasks do not share authority.
+    #[test]
+    fn sim_remote_tenant_policies_do_not_cross() -> Result<(), Box<dyn std::error::Error>> {
+        let state_a = scratch("issue207-a")?;
+        let state_b = scratch("issue207-b")?;
+        let root = scratch("issue207-shared")?;
+        let local = settings(&state_a, Some("file.read,process.spawn"))?;
+        let Origin {
+            dir: repository, ..
+        } = origin(&local, &root, 2, Shape::Git)?;
+        let allowed = [Scope::FileRead, Scope::ProcessSpawn]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let ledger_a = Ledger::open(&state_a)?;
+        ledger_a.set_tenant_policy(&tenant_key(&state_a), &allowed)?;
+        let ledger_b = Ledger::open(&state_b)?;
+        ledger_b.set_tenant_repo_root(&tenant_key(&state_b), &root)?;
+        ledger_b.set_tenant_policy(&tenant_key(&state_b), &BTreeSet::new())?;
+        let same = task(&repository)?;
+        let first = execute(&same, &remote_settings(&state_a)?)?;
+        let second = execute(&same, &remote_settings(&state_b)?)?;
+        assert!(first.accepted(), "the allowed tenant runs the task");
+        assert!(!second.accepted(), "the denied tenant runs nothing");
+        Ok(())
+    }
+
+    /// The repository-root bound is inclusive at its last valid row and refuses the next
+    /// distinct canonical root without writing it.
+    #[test]
+    fn a_tenant_repository_root_cap_refuses_the_next_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let state = scratch("issue207-cap-state")?;
+        let roots = scratch("issue207-cap-roots")?;
+        let ledger = Ledger::open(&state)?;
+        for index in 0..64_usize {
+            let root = roots.join(format!("root-{index}"));
+            std::fs::create_dir_all(&root)?;
+            ledger.set_tenant_repo_root("tenant", &root)?;
+        }
+        let extra = roots.join("root-extra");
+        std::fs::create_dir_all(&extra)?;
+        assert!(matches!(
+            ledger.set_tenant_repo_root("tenant", &extra),
+            Err(super::ExecError::RepoRootLimit { limit: 64 })
+        ));
+        Ok(())
+    }
 }

@@ -92,13 +92,15 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            5,
+            7,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
                 TENANT_KEY_SCHEMA,
                 REPORT_SCHEMA,
                 ROUTE_SCHEMA,
+                policy::POLICY_SCHEMA,
+                policy::REPO_ROOT_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;
@@ -401,6 +403,10 @@ impl Ledger {
 #[path = "ledger_routes.rs"]
 mod routes;
 
+/// The tenant policy and repository-root records, kept apart from process rows.
+#[path = "ledger_policy.rs"]
+mod policy;
+
 /// Seeded adversarial simulations of the report rows a keyed retry answers from
 /// (larry#182 defect 3).
 #[cfg(test)]
@@ -412,6 +418,7 @@ mod sim;
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    use larry_contracts::authority::Scope;
     use lgwks_deps::storefront::rusqlite;
     use lgwks_std::process::ProcessIdentity;
 
@@ -562,6 +569,42 @@ mod tests {
                 (String::from("bo"), digest('b'))
             ],
             "the refused tenant wrote no row and the rotation replaced the digest"
+        );
+        Ok(())
+    }
+
+    /// Policy and repository roots are durable tenant records. Authorization is
+    /// component-bounded, rejects the state directory, and refuses another root.
+    #[test]
+    fn sim_tenant_policy_and_repository_roots_survive_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch_directory()?;
+        let root = scratch_directory()?;
+        let repository = root.join("repo");
+        std::fs::create_dir_all(&repository)?;
+        let policy = [Scope::FileRead, Scope::ProcessSpawn]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let ledger = Ledger::open(&state)?;
+        ledger.set_tenant_policy("tenant", &policy)?;
+        ledger.set_tenant_repo_root("tenant", &root)?;
+        assert_eq!(ledger.tenant_policy("tenant")?, policy);
+        assert!(
+            ledger
+                .authorized_repo("tenant", &state, &repository, false)
+                .is_ok()
+        );
+        assert!(matches!(
+            ledger.authorized_repo("tenant", &state, &state.join("ws"), false),
+            Err(crate::executor::ExecError::RepoPath { .. })
+        ));
+        drop(ledger);
+        let reopened = Ledger::open(&state)?;
+        assert_eq!(reopened.tenant_policy("tenant")?, policy);
+        assert!(
+            reopened
+                .authorized_repo("tenant", &state, &root, false)
+                .is_ok()
         );
         Ok(())
     }

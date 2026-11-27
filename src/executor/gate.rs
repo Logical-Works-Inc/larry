@@ -33,7 +33,7 @@ use larry_contracts::ids::{RunId, TenantId, WorkerId};
 use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
-use larry_runtime::owner::EffectOwner;
+use larry_runtime::owner::{EffectOwner, validate_proof};
 use larry_runtime::payload::WorkProposal;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
@@ -46,6 +46,7 @@ use super::Settings;
 use super::Task;
 use super::identity;
 use super::recovery::{JOURNALS_DIR, RunLock, journal_path, recovered_evidence};
+use lgwks_bot::kernel::cap::{Auth, Cap};
 
 /// The prefix every policy revision digest carries, so a revision computed here
 /// can never collide with a digest computed for another purpose.
@@ -161,7 +162,7 @@ pub(super) fn with_expiry(
 /// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
 /// estate capability name `replay::capability` gives it (larry#77), without
 /// its `larry.` prefix, so the scope-to-name mapping has one owner.
-fn scope_name(scope: Scope) -> String {
+pub(super) fn scope_name(scope: Scope) -> String {
     let capability = larry_contracts::replay::capability(scope);
     let name = capability.as_str();
     match name.strip_prefix(CAPABILITY_PREFIX) {
@@ -187,6 +188,14 @@ fn named_scope(name: &str) -> Option<Scope> {
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
     let Some(text) = read("LARRY_POLICY") else {
         return Ok(default_policy());
+    };
+    policy_names(Some(&text))
+}
+
+/// Parses a durable policy record. A missing ledger row is remote deny-all.
+pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecError> {
+    let Some(text) = text else {
+        return Ok(BTreeSet::new());
     };
     let mut scopes = BTreeSet::new();
     for name in text.split(',') {
@@ -306,7 +315,7 @@ where
     F: FnOnce() -> Result<Report, ExecError>,
 {
     /// The repository path the task binds to.
-    repo: &'a std::path::Path,
+    repo: &'a Path,
     /// The tenant the run belongs to; one state directory is one tenant.
     tenant: TenantId,
     /// The security generation the runtime's fence starts at: the epoch a
@@ -354,8 +363,16 @@ where
     fn dispatch_bound(
         &mut self,
         intent: &EffectIntent,
+        proof: &Auth,
+        required: &[Cap],
         _at: SystemTime,
     ) -> Result<EffectOutcome, BindingError> {
+        validate_proof(proof, required)?;
+        if intent.tenant != self.tenant {
+            return Err(BindingError::Changed {
+                field: larry_contracts::binding::BindingField::Command,
+            });
+        }
         if self.slot.borrow().is_some() {
             // The body ran once; a second reach never re-runs it.
             return Ok(EffectOutcome::Unknown {
@@ -378,12 +395,6 @@ where
         };
         *self.slot.borrow_mut() = Some(finished);
         Ok(outcome)
-    }
-
-    fn dispatch(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
-        EffectOutcome::Unknown {
-            operation: intent.operation,
-        }
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, _at: SystemTime) -> EffectOutcome {
@@ -698,6 +709,10 @@ where
 #[cfg(test)]
 #[path = "sim_gate_clock.rs"]
 mod sim_clock;
+
+#[cfg(test)]
+#[path = "gate_owner_tests.rs"]
+mod owner_tests;
 
 #[cfg(test)]
 mod tests {
