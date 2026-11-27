@@ -53,6 +53,8 @@ const MIN_REQUEST_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize = 16_777_216;
 /// Highest sampling temperature a route may name.
 const MAX_TEMPERATURE: f64 = 2.0;
+/// Longest prompt template, in bytes.
+const MAX_PROMPT_BYTES: usize = 8192;
 /// The first route price-table revision.
 pub(crate) const DEFAULT_PRICE_VERSION: u32 = 1;
 /// Highest price a route table may carry, in micro-dollars per million tokens:
@@ -110,12 +112,8 @@ pub enum RouteError {
     BadTemperature,
     /// The kind is not one the client speaks.
     BadKind,
-    /// The kind names a provider the wire in this build does not speak: only
-    /// OpenAI chat is served until PR #534's adapters land (larry#539).
-    KindNotServed {
-        /// The kind name the route carries.
-        kind: String,
-    },
+    /// The prompt template is over 8 KiB or holds a control byte but a newline.
+    BadPrompt,
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
     BadResidency,
     /// The request byte bound is outside 1024 bytes to 16 MiB.
@@ -149,6 +147,39 @@ pub enum RouteError {
         /// The field check the row fails, when it is one of the route checks.
         cause: Option<Box<RouteError>>,
     },
+}
+
+impl RouteError {
+    /// Whether this refusal already opens with `route <field>`, so a door
+    /// adds no second prefix; every other refusal gets `route: ` by default,
+    /// so none reaches the user bare (larry#228, larry#295). Every variant is
+    /// listed with no wildcard, so a new refusal fails the build until it is
+    /// classified here.
+    pub(crate) const fn opens_with_route(&self) -> bool {
+        match *self {
+            Self::BadId
+            | Self::ReservedId
+            | Self::BadUrl
+            | Self::BadModel
+            | Self::BadKeyEnv
+            | Self::KeyEnvOutsideNamespace
+            | Self::KeyEnvNotThisTenants { .. }
+            | Self::BadTemperature
+            | Self::BadKind
+            | Self::BadPrompt
+            | Self::BadResidency
+            | Self::ResidencyNotAllowed { .. }
+            | Self::ResidencyPolicyTooLarge { .. }
+            | Self::BadRequestBytes
+            | Self::BadDescribe
+            | Self::BadPrice { .. } => true,
+            Self::InsecureTransport { .. }
+            | Self::NoSuchId { .. }
+            | Self::NoRoute
+            | Self::TableFull { .. }
+            | Self::Damaged { .. } => false,
+        }
+    }
 }
 
 impl fmt::Display for RouteError {
@@ -196,9 +227,9 @@ impl fmt::Display for RouteError {
             Self::BadKind => out.write_str(
                 "route kind must be one of openai-chat, anthropic-messages, openai-responses",
             ),
-            Self::KindNotServed { ref kind } => {
-                write!(out, "route kind {kind} has no adapter in this build")
-            },
+            Self::BadPrompt => out.write_str(
+                "route prompt must be at most 8192 bytes with no control byte but a newline",
+            ),
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
             ),
@@ -227,39 +258,21 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Damaged {
-                cause: Some(ref inner),
-                ..
-            } => Some(inner.as_ref()),
-            Self::Damaged { cause: None, .. }
-            | Self::BadId
-            | Self::ReservedId
-            | Self::BadUrl
-            | Self::InsecureTransport { .. }
-            | Self::ResidencyNotAllowed { .. }
-            | Self::ResidencyPolicyTooLarge { .. }
-            | Self::BadModel
-            | Self::BadKeyEnv
-            | Self::KeyEnvOutsideNamespace
-            | Self::KeyEnvNotThisTenants { .. }
-            | Self::BadTemperature
-            | Self::BadKind
-            | Self::KindNotServed { .. }
-            | Self::BadResidency
-            | Self::BadRequestBytes
-            | Self::BadDescribe
-            | Self::BadPrice { .. }
-            | Self::NoSuchId { .. }
-            | Self::NoRoute
-            | Self::TableFull { .. } => None,
+        if let Self::Damaged {
+            cause: Some(ref inner),
+            ..
+        } = *self
+        {
+            Some(inner.as_ref())
+        } else {
+            None
         }
     }
 }
 
 /// What speaks at the other end of a route. One variant per provider kind
 /// (larry#205, larry#539); the client's wire adapter for a new kind plugs in
-/// at the call site.
+/// at the call site. Every named kind is served (larry#546).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Kind {
@@ -281,12 +294,6 @@ impl Kind {
         }
     }
 
-    /// Whether the wire in this build speaks this kind: OpenAI chat only until
-    /// PR #534's adapters land (larry#539).
-    pub(crate) const fn is_served(self) -> bool {
-        matches!(self, Self::OpenAiChat)
-    }
-
     /// The kind a stored name means, `None` for a name no kind has.
     pub(crate) fn parse(name: &str) -> Option<Kind> {
         match name {
@@ -294,6 +301,25 @@ impl Kind {
             "anthropic-messages" => Some(Self::AnthropicMessages),
             "openai-responses" => Some(Self::OpenAiResponses),
             _ => None,
+        }
+    }
+
+    /// Whether the kind's file replies are structured JSON (`{"content": ...}`)
+    /// rather than bare text: the Responses and Messages APIs answer in their
+    /// own envelopes, so the brief asks for the file inside one object.
+    pub(crate) const fn structured(self) -> bool {
+        match self {
+            Self::OpenAiChat => false,
+            Self::AnthropicMessages | Self::OpenAiResponses => true,
+        }
+    }
+
+    /// The request path the kind speaks, appended to the route's base URL.
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::OpenAiChat => "/chat/completions",
+            Self::AnthropicMessages => "/messages",
+            Self::OpenAiResponses => "/responses",
         }
     }
 }
@@ -317,6 +343,8 @@ pub(crate) struct Draft<'draft> {
     pub(crate) request_bytes: Option<usize>,
     /// The country where the provider processes the data, when declared.
     pub(crate) residency: Option<&'draft str>,
+    /// The prompt template prepended to the system turn, when the route names one.
+    pub(crate) prompt: Option<&'draft str>,
     /// What the route is good for, in the tenant's words.
     pub(crate) describe: &'draft str,
 }
@@ -342,6 +370,8 @@ pub(crate) struct Route {
     request_bytes: usize,
     /// The country where the provider processes the data, when declared.
     residency: Option<String>,
+    /// The prompt template prepended to the system turn, when the route names one.
+    prompt: Option<String>,
     /// What the route is good for.
     describe: String,
     /// The versioned price table revision for this route.
@@ -395,6 +425,14 @@ fn is_residency(text: &str) -> bool {
 /// Whether `text` is a description: at most 1 KiB, no control byte but a newline.
 fn is_describe(text: &str) -> bool {
     text.len() <= MAX_DESCRIBE_BYTES
+        && text
+            .chars()
+            .all(|character| character == '\n' || !character.is_control())
+}
+
+/// Whether `text` is a prompt template: at most 8 KiB, no control byte but a newline.
+fn is_prompt(text: &str) -> bool {
+    text.len() <= MAX_PROMPT_BYTES
         && text
             .chars()
             .all(|character| character == '\n' || !character.is_control())
@@ -494,6 +532,11 @@ impl Route {
         if !is_describe(draft.describe) {
             return Err(RouteError::BadDescribe);
         }
+        if let Some(prompt) = draft.prompt
+            && !is_prompt(prompt)
+        {
+            return Err(RouteError::BadPrompt);
+        }
         Ok(Route {
             id: draft.id.to_owned(),
             kind: draft.kind,
@@ -504,6 +547,7 @@ impl Route {
             temperature: draft.temperature,
             request_bytes,
             residency: draft.residency.map(str::to_owned),
+            prompt: draft.prompt.map(str::to_owned),
             describe: draft.describe.to_owned(),
             price_version: DEFAULT_PRICE_VERSION,
             price_input: 0,
@@ -579,17 +623,12 @@ pub(crate) fn resolve(
 ) -> Result<Route, RouteError> {
     let Some(route) = table.lookup(named) else {
         return match (named, environment) {
-            (Some(id), Some(route)) if id == ENV_ROUTE => served(route),
+            (Some(id), Some(route)) if id == ENV_ROUTE => Ok(route),
             (Some(id), _) => Err(RouteError::NoSuchId { id: id.to_owned() }),
-            (None, Some(route)) => served(route),
+            (None, Some(route)) => Ok(route),
             (None, None) => Err(RouteError::NoRoute),
         };
     };
-    if !route.kind().is_served() {
-        return Err(RouteError::KindNotServed {
-            kind: route.kind().name().to_owned(),
-        });
-    }
     if let Some(refusal) = route.transport_refusal() {
         return Err(refusal);
     }
@@ -598,19 +637,6 @@ pub(crate) fn resolve(
         Some(refusal) => Err(refusal),
     }
 }
-
-/// The environment route a task falls back to, refused when its kind has no
-/// adapter in this build (larry#539).
-fn served(route: Route) -> Result<Route, RouteError> {
-    if route.kind().is_served() {
-        Ok(route)
-    } else {
-        Err(RouteError::KindNotServed {
-            kind: route.kind().name().to_owned(),
-        })
-    }
-}
-
 /// Unit tests of the field checks at their boundaries and of the resolver order.
 /// They live in `route_tests.rs`: verification beside the mechanism, one file
 /// per job, as the seeded simulations live in `sim_route.rs`.

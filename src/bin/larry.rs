@@ -94,8 +94,9 @@ struct Subcommand {
 /// state directory, the policy, the command timeout and the model settings.
 const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_FENCE_CONTROL, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
 
-/// The variables `larry model` reads: one gateway, one key and the retry knobs.
-const MODEL_ENV: &str = "LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY, LARRY_MODEL_TIMEOUT_MS, LARRY_MODEL_ATTEMPTS, LARRY_MODEL_BACKOFF_MS, LARRY_MODEL_DEADLINE_MS";
+/// The variables `larry model` reads: one gateway, one key, the retry knobs, the
+/// tenant budgets and the price overrides a route without a table is priced from.
+const MODEL_ENV: &str = "LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY, LARRY_MODEL_TIMEOUT_MS, LARRY_MODEL_ATTEMPTS, LARRY_MODEL_BACKOFF_MS, LARRY_MODEL_DEADLINE_MS, LARRY_MODEL_TOKEN_BUDGET, LARRY_MODEL_MICRO_DOLLAR_BUDGET, LARRY_MODEL_PRICE_IN_MICROS, LARRY_MODEL_PRICE_OUT_MICROS";
 
 /// The phrase a command that reads no variable of its own prints.
 const NO_ENV: &str = "none";
@@ -159,7 +160,7 @@ static COMMANDS: [Subcommand; 14] = [
     },
     Subcommand {
         name: "route",
-        summary: "add, set residency, list, remove, default or resolve model routes",
+        summary: "add, price, set residency, list, remove, default or resolve model routes",
         env: "LARRY_STATE_DIR, LARRY_KEY_*, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY",
         run: |rest| ran("", route_once(rest)),
     },
