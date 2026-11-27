@@ -21,6 +21,8 @@ use larry_runtime::owner::EffectOwner;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::projection::{FoldProjection, ProjectionBackend};
 use larry_runtime::runtime::Runtime;
+use lgwks_bot::kernel::cap::Auth;
+use lgwks_bot::kernel::cap::Cap;
 
 use seed::step;
 use sim_kit::read_work;
@@ -38,8 +40,14 @@ impl EffectOwner for Undeclared {
         self.0.resolve(intent)
     }
 
-    fn dispatch(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome {
-        self.0.dispatch(intent, at)
+    fn dispatch(
+        &mut self,
+        request: &EffectIntent,
+        credential: &Auth,
+        required: &[Cap],
+        observed_at: SystemTime,
+    ) -> Result<EffectOutcome, BindingError> {
+        self.0.dispatch(request, credential, required, observed_at)
     }
 
     fn reconcile(&mut self, intent: &EffectIntent, at: SystemTime) -> EffectOutcome {
