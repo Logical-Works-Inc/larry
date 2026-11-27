@@ -20,6 +20,8 @@ mod pane;
 mod ps;
 #[path = "support/pty.rs"]
 mod pty;
+#[path = "e2e_journey/sessions.rs"]
+mod sessions;
 #[path = "support/terminal_cases.rs"]
 mod terminal_cases;
 
@@ -579,38 +581,6 @@ fn tui_journey_probe_reports_isolation_overhead_against_a_plain_copy() -> Journe
     std::io::stderr().lock().write_all(figures.as_bytes())?;
     assert_eq!((isolated.len(), plain.len()), (BULK_ROUNDS, BULK_ROUNDS));
     Ok(())
-}
-
-/// A kill -9 while Larry waits on the person leaves nothing run, and a fresh terminal starts
-/// clean and quits 0.
-#[test]
-fn tui_journey_kill9_then_fresh_start_restores() -> Journey {
-    let (state, work) = fixture()?;
-    mock_model::run(scripted(3, &[COMMAND]), |mock| -> Journey {
-        std::thread::scope(|owner| -> Journey {
-            let env = operator(state.path(), mock);
-            let mut pty = Pty::open(owner, work.path(), &env)?;
-            ask(&mut pty)?;
-            let pid = pty.pid()?;
-            let killed = Command::new("kill").args(["-9", &pid]).status()?;
-            assert!(killed.success(), "kill -9 {pid} was delivered");
-            let (status, _) = pty.finish()?;
-            assert!(!status.success(), "kill -9 left a success: {status}");
-            assert_group_gone(&pid, "the killed binary")?;
-            assert!(
-                !work.path().join("hello.txt").exists(),
-                "a killed ask runs nothing"
-            );
-            let mut fresh = Pty::open(owner, work.path(), &env)?;
-            fresh.wait_for(READY)?;
-            fresh.send(QUIT)?;
-            assert_exited(
-                &fresh.finish()?.0,
-                "a fresh terminal starts clean and quits 0",
-            );
-            Ok(())
-        })
-    })
 }
 
 /// Two terminals at once, each with its own state directory, gateway and folder: each runs

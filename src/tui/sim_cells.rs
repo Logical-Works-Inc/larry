@@ -19,7 +19,10 @@ const PINNED_SEEDS: u64 = 96;
 
 /// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken with the
 /// command header painted at `started` so a running command's output has its context.
-const PINNED: &str = "3b908485a09fe8e1a74648215906ff835111a0f68074a89099b3748eecf58986";
+/// Rotated 2026-11-27 (larry#256): `/help` lists the ten slash commands and a typed
+/// slash word dispatches with its arguments, so seeds that type them paint new rows.
+/// The row painters themselves (cells, pane, style, buffer) are unchanged.
+const PINNED: &str = "c351a21708e00f417335127e14ec5d06ea1d8beef2606d9d995abe3221f98ffa";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [

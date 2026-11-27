@@ -17,7 +17,10 @@ mod buffer;
 mod cells;
 mod composer;
 mod layout;
+mod paint;
 mod pane;
+mod session_store;
+mod sessions;
 #[cfg(test)]
 mod sim_parts;
 #[cfg(test)]
@@ -40,6 +43,7 @@ use crate::executor::{ExecError, Isolation, Settings, process_env};
 use app::{App, Effect, Input, Key};
 use buffer::{Frame, render};
 use cells::Header;
+use session_store::SessionStore;
 use worker::{Ended, Event, Worker};
 
 /// How long the loop waits for a key while a session runs: the spinner's step.
@@ -286,8 +290,15 @@ pub fn run() -> Result<(), TuiError> {
         Err(cause) => (Err(cause), None),
     };
     let (welcome, status) = header(&settings, &cwd, home.as_deref());
+    let model = match welcome.model {
+        Ok(ref name) => name.clone(),
+        Err(ref why) => format!("none ({why})"),
+    };
+    let first = welcome.clone();
     let (width, height) = terminal::size().map_err(TuiError::Terminal)?;
     let mut app = App::new(welcome, status, usize::from(width), usize::from(height));
+    let mut store = SessionStore::open(&settings, &cwd, &model, &first);
+    store.adopt(&mut app);
     let signals = Signals::register().map_err(TuiError::Signal)?;
     // Declared before the terminal, so an unwind restores the screen before the worker's
     // drop reaps the session.
@@ -305,6 +316,7 @@ pub fn run() -> Result<(), TuiError> {
             &mut worker,
             &settings,
             &cwd,
+            &mut store,
             &stopped,
         );
         done.cancel();
@@ -329,6 +341,7 @@ fn drive(
     worker: &mut Option<Worker>,
     settings: &Result<Settings, ExecError>,
     cwd: &Path,
+    store: &mut SessionStore,
     stopped: &AtomicBool,
 ) -> Result<(), TuiError> {
     let clock = Instant::now();
@@ -388,8 +401,16 @@ fn drive(
                         running.interrupt();
                     }
                 }
+                Effect::SessionNew => store.new_session(app),
+                Effect::SessionList => store.list(app),
+                Effect::SessionResume(arg) => store.resume(app, &arg),
+                Effect::SessionFork(arg) => store.fork(app, arg),
+                Effect::SessionRename(arg) => store.rename(app, &arg),
+                Effect::SessionExport => store.export(app),
+                Effect::SessionRecap => store.recap(app),
             }
         }
+        store.save_app(app);
     }
 }
 

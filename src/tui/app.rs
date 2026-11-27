@@ -15,28 +15,32 @@
 //! interrupts a task.
 
 use std::cell::Cell;
+#[cfg(test)]
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::ask::{fit, marked, offer};
-use super::buffer::{Buffer, Frame};
+use super::ask::offer;
+use super::buffer::Frame;
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
 use super::layout::split;
+use super::paint;
 use super::pane::Pane;
-use super::style::{Line, Span, Style, ellipsize, sanitize, sanitize_shown, text_width, wrap};
+use super::session_store::Transcript;
+use super::sessions::Snapshot;
+use super::style::{Style, sanitize};
 use super::worker::{Decision, Ended, Event};
 
 /// Most transcript entries kept; the oldest goes first.
 pub(crate) const MAX_ENTRIES: usize = 512;
-/// The spinner's frames, one per 100 ms.
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// What `/help` prints.
-const HELP: [&str; 4] = [
+const HELP: [&str; 6] = [
     "Enter sends the task. Ctrl+J adds a new line.",
     "Larry asks before each command: y runs it, a runs it and stops asking, n declines.",
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
+    "/resume lists this folder's sessions, /resume 1 continues one; /fork copies one.",
+    "/new starts fresh, /rename names it, /export writes Markdown, /recap summarises.",
 ];
 /// One key, already read from the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,11 +113,25 @@ pub(crate) enum Effect {
     Interrupt,
     /// Leave: restore the terminal and exit 0.
     Quit,
+    /// Start a fresh TUI session in the same process; the driver names it.
+    SessionNew,
+    /// List this folder's saved sessions; the driver prints them.
+    SessionList,
+    /// Continue the saved session this id, name prefix or listing number names.
+    SessionResume(String),
+    /// Copy a saved session (this one when empty) into a new session.
+    SessionFork(Option<String>),
+    /// Name this session.
+    SessionRename(String),
+    /// Write the transcript plus every receipt digest as Markdown.
+    SessionExport,
+    /// Summarise this session without changing it.
+    SessionRecap,
 }
 
 /// Where the machine is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Phase {
+pub(crate) enum Phase {
     /// The composer takes a task.
     Idle,
     /// A session runs; the command, while one runs.
@@ -128,8 +146,9 @@ enum Phase {
 /// The frame's whole state.
 #[derive(Debug, Clone)]
 pub(crate) struct App {
-    /// The transcript, oldest first.
-    entries: VecDeque<Entry>,
+    /// The transcript: the entries, the session they belong to and every
+    /// receipt digest seen (larry#256).
+    transcript: Transcript,
     /// The text box.
     composer: Composer,
     /// Where the machine is.
@@ -164,39 +183,6 @@ pub(crate) struct App {
     early: usize,
 }
 
-/// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
-pub(crate) fn compact(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
-    match (seconds.checked_div(60), seconds.checked_rem(60)) {
-        (Some(0) | None, _) => format!("{seconds}s"),
-        (Some(minutes), Some(rest)) if minutes < 60 => format!("{minutes}m {rest:02}s"),
-        (Some(minutes), _) => match (minutes.checked_div(60), minutes.checked_rem(60)) {
-            (Some(hours), Some(left)) => format!("{hours}h {left:02}m"),
-            _ => format!("{minutes}m"),
-        },
-    }
-}
-
-/// Footer hints joined by ` · ` to fit `width`; a hint that does not fit is
-/// dropped whole and `…` marks the cut (Codex `footer_hint.rs`).
-pub(crate) fn hints(items: &[&str], width: usize) -> Line {
-    let mut text = String::new();
-    for (index, item) in items.iter().enumerate() {
-        let sep = if index == 0 { "" } else { " · " };
-        let more = index.saturating_add(1) < items.len();
-        let next = text_width(&text)
-            .saturating_add(text_width(sep))
-            .saturating_add(text_width(item));
-        if next.saturating_add(if more { 2 } else { 0 }) > width {
-            text.push_str(if index == 0 { "…" } else { " …" });
-            break;
-        }
-        text.push_str(sep);
-        text.push_str(item);
-    }
-    vec![Span::new(text, Style::MUTED)]
-}
-
 /// `said`, or `fallback` when the session said nothing.
 fn or_said(said: Option<String>, fallback: &str) -> String {
     match said {
@@ -209,7 +195,7 @@ impl App {
     /// A fresh frame showing `header`, `/status` printing `status`.
     pub(crate) fn new(header: Header, status: Vec<String>, width: usize, height: usize) -> Self {
         Self {
-            entries: VecDeque::from([Entry::Header(header)]),
+            transcript: Transcript::new(header),
             composer: Composer::default(),
             phase: Phase::Idle,
             status,
@@ -234,23 +220,77 @@ impl App {
         self.phase != Phase::Idle
     }
 
+    /// The transcript and the session it belongs to (larry#256).
+    pub(crate) fn transcript(&mut self) -> &mut Transcript {
+        &mut self.transcript
+    }
+
+    /// What the paint reads: shared refs to the frame's state, so the update
+    /// and the render stay two jobs.
+    pub(crate) fn view(&self) -> paint::View<'_> {
+        paint::View {
+            entries: self.transcript.entries(),
+            phase: &self.phase,
+            composer: &self.composer,
+            pane: &self.pane,
+            scroll: self.scroll,
+            width: self.width,
+            height: self.height,
+            started: self.started,
+            now: self.now,
+            hint: &self.hint,
+            frames: &self.frames,
+            painted: &self.painted,
+        }
+    }
+
+    /// The frame for the current state, painted from [`App::view`].
+    pub(crate) fn draw(&self) -> Frame {
+        self.view().draw()
+    }
+
+    /// The frame as stored rows, through the transcript and the pane.
+    /// The driver holds it in the state database after every turn, so a kill
+    /// -9 loses at most the turn in flight.
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        let pane = self.pane.snapshot();
+        self.transcript.snapshot(pane)
+    }
+
+    /// Holds `snapshot`: the transcript, the pane and every receipt digest.
+    pub(crate) fn restore(&mut self, snapshot: Snapshot) {
+        let Snapshot {
+            entries,
+            pane,
+            receipts,
+        } = snapshot;
+        self.pane.restore(&pane);
+        self.transcript.restore_entries(entries, receipts);
+        self.scroll = 0;
+    }
+
+    /// Starts a fresh session showing `header`. The driver stores the snapshot
+    /// under the new row it just created.
+    pub(crate) fn begin_session(&mut self, header: Header) {
+        self.transcript.begin(header);
+        self.composer.clear();
+        self.phase = Phase::Idle;
+        self.said = None;
+        self.hint = None;
+        self.scroll = 0;
+        self.always = false;
+        self.pane.begin();
+    }
+
     /// Whether the person said to stop asking for this run.
     pub(crate) const fn always(&self) -> bool {
         self.always
     }
 
-    /// Adds `entry`, dropping the oldest past [`MAX_ENTRIES`].
-    fn push(&mut self, entry: Entry) {
-        if self.entries.len() >= MAX_ENTRIES {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(entry);
-    }
-
     /// The transcript entries, oldest first; the bound sims read it.
     #[cfg(test)]
     pub(crate) fn entries(&self) -> &VecDeque<Entry> {
-        &self.entries
+        self.transcript.entries()
     }
 
     /// Takes one input and returns what the driver must do.
@@ -308,7 +348,8 @@ impl App {
                 };
                 let (status, output) = split_observation(&observation);
                 self.pane.finished(&command, &status, &output, passed);
-                self.push(Entry::ran(command, &status, output, passed));
+                self.transcript
+                    .push(Entry::ran(command, &status, output, passed));
                 self.phase = match self.phase {
                     Phase::Stopping(_) => Phase::Stopping(false),
                     Phase::Idle | Phase::Working(_) | Phase::Asking(..) => Phase::Working(None),
@@ -317,7 +358,7 @@ impl App {
             Event::Said(text) => self.said = Some(text),
             Event::Review(summary) => {
                 // The names in a diff are the folder's, not Larry's: each line is made safe.
-                self.push(Entry::Info(
+                self.transcript.push(Entry::Info(
                     summary.iter().map(|line| sanitize(line, false)).collect(),
                 ));
                 self.phase = Phase::Asking(None, Decision::Decline);
@@ -326,10 +367,14 @@ impl App {
             }
             Event::Handed { line, applied } => {
                 let style = if applied { Style::GOOD } else { Style::WARN };
-                self.push(Entry::Notice(style, sanitize(&line, false)));
+                self.transcript
+                    .push(Entry::Notice(style, sanitize(&line, false)));
             }
             Event::Diff(text) => self.pane.set_diff(&text),
-            Event::Receipt(receipt) => self.pane.set_receipt(receipt),
+            Event::Receipt(receipt) => {
+                self.transcript.note_receipt(&receipt);
+                self.pane.set_receipt(receipt);
+            }
             Event::Ended(ended) => return self.ended(ended),
         }
         Vec::new()
@@ -350,7 +395,7 @@ impl App {
             }
             Ended::Failed(why) => Entry::Notice(Style::BAD, why),
         };
-        self.push(entry);
+        self.transcript.push(entry);
         self.phase = Phase::Idle;
         if self.quitting {
             return vec![Effect::Quit];
@@ -377,14 +422,14 @@ impl App {
         }
         match key {
             Key::PageUp => {
-                self.scroll = self
-                    .scroll
-                    .saturating_add(self.page())
-                    .min(self.max_scroll());
+                let step = self.view().page();
+                let end = self.view().max_scroll();
+                self.scroll = self.scroll.saturating_add(step).min(end);
                 return Vec::new();
             }
             Key::PageDown => {
-                self.scroll = self.scroll.saturating_sub(self.page());
+                let step = self.view().page();
+                self.scroll = self.scroll.saturating_sub(step);
                 return Vec::new();
             }
             Key::Esc | Key::Interrupt if self.phase != Phase::Idle => return self.interrupt(key),
@@ -393,8 +438,7 @@ impl App {
             Key::Interrupt | Key::EndOfInput if self.composer.is_empty() => {
                 return vec![Effect::Quit];
             }
-            Key::Enter if self.composer.selected().is_some() => return self.command(),
-            Key::Enter => return self.submit(),
+            Key::Enter => return self.enter(),
             Key::Char(character) => {
                 let mut buffer = [0_u8; 4];
                 self.composer.insert(character.encode_utf8(&mut buffer));
@@ -493,7 +537,7 @@ impl App {
         match decision {
             Decision::Decline => command
                 .into_iter()
-                .for_each(|command| self.push(Entry::Declined(command))),
+                .for_each(|command| self.transcript.push(Entry::Declined(command))),
             Decision::Always => self.always = true,
             Decision::Run => {}
         }
@@ -506,27 +550,70 @@ impl App {
         effects
     }
 
+    /// Enter on the popup's selected slash command, or on a slash word with its
     /// Enter on the popup's selected slash command.
     fn command(&mut self) -> Vec<Effect> {
         let Some(name) = self.composer.selected() else {
             return self.submit();
         };
         self.composer.take();
-        match name {
-            "/help" => self.push(Entry::Info(
+        self.dispatch(name, "")
+    }
+
+    /// Enter on typed text: a slash command however it names itself — the
+    /// whole word with arguments typed out, or the popup's highlighted row —
+    /// else the old path, where a word starting `/` that is no command falls
+    /// through to a task.
+    fn enter(&mut self) -> Vec<Effect> {
+        const KNOWN: [&str; 10] = [
+            "/help", "/status", "/clear", "/quit", "/resume", "/fork", "/rename", "/new",
+            "/export", "/recap",
+        ];
+        let raw = self.composer.text().to_owned();
+        if let Some(word) = raw.split_whitespace().next()
+            && KNOWN.contains(&word)
+        {
+            let arg: String = match raw.split_once(char::is_whitespace) {
+                Some((_, rest)) => rest.trim().to_owned(),
+                None => String::new(),
+            };
+            self.composer.take();
+            return self.dispatch(word, &arg);
+        }
+        if self.composer.selected().is_some() {
+            return self.command();
+        }
+        self.submit()
+    }
+
+    /// Runs the slash command `word` with its typed argument `arg`.
+    fn dispatch(&mut self, word: &str, arg: &str) -> Vec<Effect> {
+        match word {
+            "/help" => self.transcript.push(Entry::Info(
                 HELP.iter().map(|line| (*line).to_owned()).collect(),
             )),
-            "/status" => self.push(Entry::Info(self.status.clone())),
+            "/status" => self.transcript.push(Entry::Info(self.status.clone())),
             "/clear" => {
-                let header = self
-                    .entries
-                    .iter()
-                    .find(|entry| matches!(**entry, Entry::Header(_)))
-                    .cloned();
-                self.entries = header.into_iter().collect();
+                self.transcript.clear_keeping_header();
                 self.scroll = 0;
             }
-            _ => return vec![Effect::Quit],
+            "/new" if arg.is_empty() => return vec![Effect::SessionNew],
+            "/resume" if arg.is_empty() => return vec![Effect::SessionList],
+            "/resume" => return vec![Effect::SessionResume(arg.to_owned())],
+            "/fork" if arg.is_empty() => return vec![Effect::SessionFork(None)],
+            "/fork" => return vec![Effect::SessionFork(Some(arg.to_owned()))],
+            "/rename" if !arg.is_empty() => return vec![Effect::SessionRename(arg.to_owned())],
+            "/export" if arg.is_empty() => return vec![Effect::SessionExport],
+            "/recap" if arg.is_empty() => return vec![Effect::SessionRecap],
+            "/quit" => return vec![Effect::Quit],
+            "/rename" => self.transcript.push(Entry::Notice(
+                Style::WARN,
+                String::from("Usage: /rename <name>"),
+            )),
+            _ => self.transcript.push(Entry::Notice(
+                Style::WARN,
+                format!("{word} takes no argument"),
+            )),
         }
         Vec::new()
     }
@@ -542,206 +629,18 @@ impl App {
         }
         let text = self.composer.take();
         if text.starts_with('/') && !text.contains(char::is_whitespace) {
-            self.push(Entry::Notice(
+            self.transcript.push(Entry::Notice(
                 Style::WARN,
                 format!("Unknown command {text}. Type / to see the commands."),
             ));
             return Vec::new();
         }
-        self.push(Entry::User(text.clone()));
+        self.transcript.push(Entry::User(text.clone()));
         self.phase = Phase::Working(None);
         self.started = self.now;
         self.said = None;
         self.scroll = 0;
         self.pane.begin();
         vec![Effect::Start(text)]
-    }
-
-    /// Rows one Page Up or Page Down moves.
-    fn page(&self) -> usize {
-        self.height.checked_div(2).into_iter().sum::<usize>().max(1)
-    }
-
-    /// The chat column's inner width: one cell of margin each side.
-    fn inner(&self) -> usize {
-        split(self.width, self.height)
-            .chat
-            .width
-            .saturating_sub(2)
-            .max(1)
-    }
-
-    /// Every transcript row at the inner width, a blank row between entries.
-    fn transcript(&self) -> Vec<Line> {
-        let width = self.inner();
-        let mut rows = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if index > 0 {
-                rows.push(Vec::new());
-            }
-            rows.extend(entry.lines(width));
-        }
-        rows
-    }
-
-    /// The most rows the transcript can scroll up.
-    fn max_scroll(&self) -> usize {
-        self.transcript().len()
-    }
-
-    /// The status row while a session runs.
-    fn status_row(&self) -> Option<Line> {
-        let tick = self
-            .now
-            .as_millis()
-            .checked_div(100)
-            .and_then(|step| step.checked_rem(10))
-            .and_then(|step| usize::try_from(step).ok());
-        let spin = match tick.and_then(|step| SPINNER.get(step)) {
-            Some(frame) => *frame,
-            None => "•",
-        };
-        let elapsed = compact(self.now.saturating_sub(self.started));
-        let running = format!(" ({elapsed} • esc to interrupt)");
-        let (label, tail) = match self.phase {
-            Phase::Idle | Phase::Asking(..) => return None,
-            Phase::Working(None) => (String::from("Working"), running),
-            Phase::Working(Some(ref command)) => {
-                let first: String = command.lines().take(1).collect();
-                (format!("Running {first}"), running)
-            }
-            Phase::Stopping(true) => (
-                String::from("Stopping"),
-                String::from(" (the running command ends first)"),
-            ),
-            Phase::Stopping(false) => (String::from("Stopping"), String::new()),
-        };
-        let room = self
-            .inner()
-            .saturating_sub(2)
-            .saturating_sub(text_width(&tail));
-        Some(vec![
-            Span::new(format!("{spin} "), Style::ACCENT),
-            Span::new(
-                ellipsize(&sanitize(&label, false), room),
-                Style::PLAIN.bold(),
-            ),
-            Span::new(tail, Style::MUTED),
-        ])
-    }
-
-    /// The bottom block (status, popup or question, composer, footer), the cursor's column and
-    /// row in it, and the leading rows a crop must keep (the question's title and first row).
-    fn bottom(&self, width: usize) -> (Vec<Line>, Option<(usize, usize)>, usize) {
-        let mut rows: Vec<Line> = Vec::new();
-        if let Some(status) = self.status_row() {
-            rows.push(status);
-        }
-        // A screen too narrow for the pane keeps the change as one line (larry#244); while a
-        // question is open its title and first command row outrank that line (larry#325).
-        if !matches!(self.phase, Phase::Asking(..))
-            && split(self.width, self.height).artifact.is_none()
-            && let Some(summary) = self.pane.summary()
-        {
-            rows.push(vec![Span::new(ellipsize(&summary, width), Style::MUTED)]);
-        }
-        let mut cursor = None;
-        let mut keep = 0_usize;
-        let footer: &[&str] = if let Phase::Asking(ref command, choice) = self.phase {
-            let (title, answers, keys) = offer(command.is_some());
-            rows.push(vec![Span::new(title, Style::WARN.bold())]);
-            let body = rows.len();
-            let lead = vec![Span::new("$ ", Style::MUTED)];
-            let rest = vec![Span::new("  ", Style::PLAIN)];
-            for text in command.iter().map(|command| sanitize_shown(command)) {
-                for line in text.split_terminator('\n') {
-                    rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
-                }
-            }
-            keep = if rows.len() > body {
-                body.saturating_add(1)
-            } else {
-                body
-            };
-            rows.push(
-                answers
-                    .iter()
-                    .map(|&(decision, label)| {
-                        let (mark, style) = marked(decision == choice);
-                        Span::new(format!("{mark} {label}  "), style)
-                    })
-                    .collect(),
-            );
-            keys
-        } else {
-            if let Some(popup) = self.composer.popup() {
-                for (index, (name, about)) in popup.into_iter().enumerate() {
-                    let (mark, style) = marked(index == self.composer.selected_row());
-                    rows.push(vec![
-                        Span::new(format!("{mark} {name}  "), style),
-                        Span::new(about, Style::MUTED),
-                    ]);
-                }
-            }
-            rows.push(vec![Span::new("─".repeat(width), Style::MUTED)]);
-            let (lines, (column, row)) = self.composer.render(width, "Ask Larry to do something");
-            cursor = Some((column, rows.len().saturating_add(row)));
-            rows.extend(lines);
-            if self.phase == Phase::Idle {
-                &["enter send", "/ commands", "ctrl+j newline", "ctrl+c quit"]
-            } else {
-                &["esc interrupt", "pgup/pgdn scroll"]
-            }
-        };
-        let foot = match self.hint {
-            Some(ref hint) => vec![Span::new(ellipsize(hint, width), Style::WARN)],
-            None if self.scroll > 0 => {
-                let mut items = vec!["↓ pgdn newer"];
-                items.extend_from_slice(footer);
-                hints(&items, width)
-            }
-            None => hints(footer, width),
-        };
-        rows.push(foot);
-        (rows, cursor, keep)
-    }
-
-    /// The frame for the current state.
-    pub(crate) fn draw(&self) -> Frame {
-        if self.painted.get().is_none() && matches!(self.phase, Phase::Asking(..)) {
-            self.painted.set(Some(self.frames.get()));
-        }
-        self.frames.set(self.frames.get().saturating_add(1));
-        let mut buffer = Buffer::new(self.width, self.height);
-        let regions = split(buffer.width(), buffer.height());
-        let chat = regions.chat;
-        let left = chat.x.saturating_add(1);
-        let right = chat.right().saturating_sub(1).max(left.saturating_add(1));
-        let width = right.saturating_sub(left);
-        let (bottom, cursor, keep) = self.bottom(width);
-        let bottom = fit(bottom, keep, chat.height);
-        let bottom_rows = bottom.len().min(chat.height);
-        let area = chat.height.saturating_sub(bottom_rows);
-        let rows = self.transcript();
-        let lift = self.scroll.min(rows.len().saturating_sub(area));
-        let end = rows.len().saturating_sub(lift);
-        let start = end.saturating_sub(area);
-        for (offset, line) in rows.get(start..end).into_iter().flatten().enumerate() {
-            buffer.put_line(left, chat.y.saturating_add(offset), right, line);
-        }
-        let top = chat.y.saturating_add(area);
-        let skip = bottom.len().saturating_sub(bottom_rows);
-        for (offset, line) in bottom.iter().skip(skip).enumerate() {
-            buffer.put_line(left, top.saturating_add(offset), right, line);
-        }
-        if let Some(pane) = regions.artifact {
-            self.pane.paint(&mut buffer, pane);
-        }
-        let cursor = cursor.and_then(|(column, row)| {
-            let y = top.saturating_add(row.checked_sub(skip)?);
-            let x = left.saturating_add(column);
-            (x < buffer.width() && y < buffer.height()).then_some((x, y))
-        });
-        Frame { buffer, cursor }
     }
 }

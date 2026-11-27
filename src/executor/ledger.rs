@@ -83,7 +83,7 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            8,
+            10,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -93,6 +93,8 @@ impl Ledger {
                 policy::POLICY_SCHEMA,
                 policy::REPO_ROOT_SCHEMA,
                 routes::PRICE_SCHEMA,
+                sessions::SESSIONS_SCHEMA,
+                sessions::SESSIONS_INDEX_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;
@@ -389,6 +391,10 @@ impl Ledger {
         Ok(())
     }
 }
+
+/// The TUI session rows, kept apart from the process rows.
+#[path = "ledger_sessions.rs"]
+pub(crate) mod sessions;
 
 /// The route table's reads and writes (larry#201), a child module so the
 /// connection stays private to the ledger.

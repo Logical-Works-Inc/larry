@@ -15,11 +15,17 @@ pub(crate) const HISTORY: usize = 64;
 pub(crate) const MAX_ROWS: usize = 6;
 
 /// One slash command: its name and what it does.
-pub(crate) const COMMANDS: [(&str, &str); 4] = [
+pub(crate) const COMMANDS: [(&str, &str); 10] = [
     ("/help", "keys and commands"),
     ("/status", "model, policy and folder"),
     ("/clear", "clear the chat"),
     ("/quit", "leave Larry"),
+    ("/resume", "list sessions, /resume 1 continues one"),
+    ("/fork", "copy a session into a new one"),
+    ("/rename", "name this session"),
+    ("/new", "start fresh in the same process"),
+    ("/export", "write the transcript as Markdown"),
+    ("/recap", "summarise without compacting"),
 ];
 
 /// The composer's text, cursor, history and popup selection.

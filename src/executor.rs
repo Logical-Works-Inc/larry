@@ -32,6 +32,8 @@ use std::time::Duration;
 pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 pub(crate) use ledger::Ledger;
+pub use ledger::sessions::SessionStoreError;
+pub(crate) use ledger::sessions::{NewSession, SessionHead};
 use lgwks_std::sign::PublicKey;
 pub(crate) use run::{Place, run_command};
 pub(crate) use run::{RunHooks, StreamCallback};
