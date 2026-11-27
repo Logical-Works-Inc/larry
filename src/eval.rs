@@ -20,8 +20,8 @@ use std::time::Instant;
 use lgwks_macros::Error;
 
 use crate::executor::{
-    Approval, AuthorFault, ExecError, Isolation, Observer, Report, Settings, Stop, Task, execute,
-    run_session,
+    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, Settings, Stop,
+    Task, execute, run_command, run_session,
 };
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
@@ -292,18 +292,40 @@ impl Observer for EvalObserver {
     }
 }
 
-/// Whether a terminal session ran at least one command and every command passed:
-/// the sealed report's verdict mirrors the session's own pass rule, exit 0 with
-/// no timeout and no interruption (larry#217).
-fn session_commands_passed(results: &lgwks_std::json::Value) -> bool {
-    results.as_array().is_some_and(|results| {
-        !results.is_empty()
-            && results.iter().all(|result| {
-                result["exit_code"].as_i64() == Some(0)
-                    && result["timed_out"].as_bool() == Some(false)
-                    && result["interrupted"].as_bool() == Some(false)
-            })
-    })
+/// Runs the task's acceptance commands in the origin the session worked in, each as
+/// `sh -c` through the executor's command runner, the same way the command path runs
+/// them: the session is scored by the set's verifier, never by its own commands
+/// (larry#217).
+fn session_acceptance_passed(
+    origin: &Origin,
+    settings: &Settings,
+    task: &EvalTask,
+) -> Result<bool, EvalError> {
+    let ledger = Ledger::open(settings.state_dir()).map_err(|cause| EvalError::Exec {
+        id: task.id.clone(),
+        cause,
+    })?;
+    let run = format!("{}-acceptance", task.id);
+    for command in &task.acceptance {
+        let argv = [String::from("sh"), String::from("-c"), command.clone()];
+        let result = run_command(
+            &argv,
+            Place::Open(&origin.dir),
+            settings.path_env(),
+            settings.timeout(),
+            &ledger,
+            &run,
+            &|| false,
+        )
+        .map_err(|cause| EvalError::Exec {
+            id: task.id.clone(),
+            cause,
+        })?;
+        if result.exit_code() != Some(0) || result.timed_out() || result.interrupted() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Runs the task's brief path and classifies its sealed report.
@@ -334,7 +356,8 @@ fn command_outcome(
     }
 }
 
-/// Runs the task's terminal session path and classifies its sealed report.
+/// Runs the task's terminal session path, then its acceptance commands in the
+/// session's origin, and classifies the outcome by the set's verifier.
 fn session_outcome(
     origin: &Origin,
     settings: &Settings,
@@ -350,7 +373,7 @@ fn session_outcome(
     ) {
         Ok(ended) => {
             let ending = match ended.stop {
-                Stop::EndTurn if session_commands_passed(&ended.report.json()["results"]) => {
+                Stop::EndTurn if session_acceptance_passed(origin, settings, task)? => {
                     Ending::Accepted
                 }
                 Stop::Refusal(ref cause) => Ending::Refused(cause.clone()),

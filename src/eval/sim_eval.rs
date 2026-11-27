@@ -14,7 +14,7 @@ use lgwks_std::seeded::{DrawError, Seeded};
 use super::score::{
     Ending, Outcome, PriceFault, Prices, Scorecard, Spent, card, parse_price, percentile, usd,
 };
-use super::{EvalPath, EvalTask, Origin, finish_origin, session_commands_passed};
+use super::{EvalPath, EvalTask, Origin, finish_origin, session_acceptance_passed};
 use crate::sim_error::SimError;
 
 /// What every test returns.
@@ -667,48 +667,66 @@ fn check_silenced(seed: u64, prices: Prices, outcomes: &mut [Outcome]) {
     );
 }
 
-/// A session result counts as passed only when every command ran clean: an empty
-/// run, a nonzero or missing exit, a timeout, an interruption or a missing flag
-/// each refuses the verdict, mirroring the session's own pass rule (larry#217).
+// The session verdict belongs to the set's acceptance, not the session's own
+// commands: `session_acceptance_passed` runs each acceptance command through the
+// executor's runner, so the binary journey
+// `a_session_task_whose_commands_pass_but_miss_the_acceptance_is_rejected` holds
+// the rule (larry#217).
+
+/// The session verdict is the set's verifier, run as `sh -c` through the
+/// executor's runner in the session's origin: a passing verifier scores true, a
+/// failing one false, and a slow one still scores true because nothing cancels
+/// it (larry#217). Kills a scorer that accepts a session for its own commands,
+/// a flipped exit check, a forced false and a stuck-cancelled runner.
 #[test]
-fn session_commands_passed_names_only_clean_runs() {
-    let clean = json!([{"exit_code": 0, "timed_out": false, "interrupted": false}]);
-    assert!(session_commands_passed(&clean), "a clean run passes");
-    let pair = json!([
-        {"exit_code": 0, "timed_out": false, "interrupted": false},
-        {"exit_code": 0, "timed_out": false, "interrupted": false},
-    ]);
-    assert!(session_commands_passed(&pair), "two clean commands pass");
-    for (name, results) in [
-        ("empty", json!([])),
-        (
-            "failed",
-            json!([{"exit_code": 1, "timed_out": false, "interrupted": false}]),
-        ),
-        (
-            "signalled",
-            json!([{"exit_code": null, "timed_out": false, "interrupted": false}]),
-        ),
-        (
-            "timed_out",
-            json!([{"exit_code": 0, "timed_out": true, "interrupted": false}]),
-        ),
-        (
-            "interrupted",
-            json!([{"exit_code": 0, "timed_out": false, "interrupted": true}]),
-        ),
-        ("unflagged", json!([{"exit_code": 0, "timed_out": false}])),
-        (
-            "second_fails",
-            json!([
-                {"exit_code": 0, "timed_out": false, "interrupted": false},
-                {"exit_code": 1, "timed_out": false, "interrupted": false},
-            ]),
-        ),
-    ] {
-        assert!(
-            !session_commands_passed(&results),
-            "a {name} run never passes"
-        );
-    }
+fn sim_session_acceptance_runs_the_verifier_in_the_session_origin() -> TestResult {
+    let state = crate::executor::sim_tree::scratch("eval-session-acceptance")?;
+    let root = state.to_string_lossy().into_owned();
+    let path = std::env::var("PATH")?;
+    let settings = crate::executor::Settings::from_env(move |name| match name {
+        "LARRY_STATE_DIR" => Some(root.clone()),
+        "PATH" => Some(path.clone()),
+        _ => None,
+    })?;
+    let eval = state.join("eval");
+    std::fs::create_dir_all(&eval)?;
+    let dir = state.join("origin-0");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("session.txt"), "session\n")?;
+    let held = crate::executor::hold_origin(&eval, "origin-0")?;
+    let origin = Origin {
+        dir,
+        lock: crate::executor::origin_lock_path(&eval, "origin-0"),
+        _held: held,
+        cleaned: true,
+    };
+    let task = EvalTask {
+        id: String::from("session-path"),
+        files: Vec::new(),
+        goal: String::from("write session.txt"),
+        path: EvalPath::Session,
+        write: vec![String::from("session.txt")],
+        acceptance: vec![String::from("test -s session.txt")],
+    };
+    assert!(
+        session_acceptance_passed(&origin, &settings, &task)?,
+        "a passing verifier scores true"
+    );
+    let failing = EvalTask {
+        acceptance: vec![String::from("test -s missing.txt")],
+        ..task.clone()
+    };
+    assert!(
+        !session_acceptance_passed(&origin, &settings, &failing)?,
+        "a failing verifier scores false"
+    );
+    let slow = EvalTask {
+        acceptance: vec![String::from("sleep 1 && test -s session.txt")],
+        ..task
+    };
+    assert!(
+        session_acceptance_passed(&origin, &settings, &slow)?,
+        "a slow verifier still scores true: nothing cancels it"
+    );
+    Ok(())
 }

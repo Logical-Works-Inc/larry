@@ -12,6 +12,9 @@
 //! gateway is scored as refusals while the arm keeps going; a kill -9 leaves
 //! nothing the next run does not collect; the shipped set runs end to end.
 
+#[path = "eval_journey/session.rs"]
+mod session;
+
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
