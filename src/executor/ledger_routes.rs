@@ -61,7 +61,7 @@ impl Stored {
         let Ok(request_bytes) = usize::try_from(self.request_bytes) else {
             return Err(damaged(Some(RouteError::BadRequestBytes)));
         };
-        Route::new(&Draft {
+        Route::stored(&Draft {
             id: &self.id,
             kind,
             base_url: &self.base_url,
@@ -235,7 +235,7 @@ mod tests {
         Route::new(&Draft {
             id,
             kind: Kind::OpenAiChat,
-            base_url: "http://gateway.test:9/v1",
+            base_url: "https://gateway.test:9/v1",
             model,
             key_env: "LARRY_KEY_TEST",
             temperature: Some(0.5),

@@ -453,7 +453,7 @@ mod tests {
             crate::model::tenant_namespace(&super::tenant_text(&state))
         );
         let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
-        let mut args = vec!["add", "main", "--url", "http://gateway.test:1/v1"];
+        let mut args = vec!["add", "main", "--url", "https://gateway.test:1/v1"];
         args.extend(["--model", "m", "--key-env", key_env.as_str()]);
         args.extend(["--residency", "CA"]);
         let mut out = Vec::new();
