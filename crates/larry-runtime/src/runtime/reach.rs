@@ -86,14 +86,21 @@ where
                 // call: a grant that lapsed since is not spent (larry#77). A reach
                 // with no live witness holds no proof at all, so it is refused
                 // rather than let through unchecked (larry#197).
-                let proven = match self.live.get(&intent.operation) {
-                    Some(live) => live.proof.check(),
-                    None => Err(DenialReason::AuthorityExpired),
+                let auth = match self.live.get(&intent.operation) {
+                    Some(live) => match live.proof.checked_auth() {
+                        Ok((auth, required)) => (auth, required),
+                        Err(reason) => {
+                            report.denied.push((intent.operation, reason));
+                            return Ok(None);
+                        }
+                    },
+                    None => {
+                        report
+                            .denied
+                            .push((intent.operation, DenialReason::AuthorityExpired));
+                        return Ok(None);
+                    }
                 };
-                if let Err(reason) = proven {
-                    report.denied.push((intent.operation, reason));
-                    return Ok(None);
-                }
                 self.validate_bound_reach(&intent, at)?;
                 // Group commit (larry#75): every fact recorded so far, the
                 // intent among them, is on disk before the owner can act on
@@ -117,20 +124,22 @@ where
                     // query about it is therefore evidence.
                     live.sent = true;
                 }
+                let (auth, required) = auth;
                 let outcome = if intent.binding().is_some() {
-                    match self.owner.dispatch_bound(&intent, at) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            // Typed owner refusal guarantees no attempted effect.
-                            // Restore the witness, including a previous successful reach.
-                            if let Some(previous) = previous {
-                                self.live.insert(intent.operation, previous);
-                            }
-                            return Err(error.into());
-                        }
-                    }
+                    self.owner.dispatch_bound(&intent, &auth, &required, at)
                 } else {
-                    self.owner.dispatch(&intent, at)
+                    self.owner.dispatch(&intent, &auth, &required, at)
+                };
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        // Typed owner refusal guarantees no attempted effect.
+                        // Restore the witness, including a previous successful reach.
+                        if let Some(previous) = previous {
+                            self.live.insert(intent.operation, previous);
+                        }
+                        return Err(error.into());
+                    }
                 };
                 // The reach happened without the authority source, so it
                 // spends one unit of offline authority; a typed owner refusal
