@@ -524,7 +524,6 @@ impl Turn<'_> {
                     if self.observer.cancelled() {
                         break Stop::Cancelled;
                     }
-                    self.observer.started(step, &command);
                     let (answer, was_interrupted, result) = self.run_step(step, command)?;
                     conversation.push(kept, answer);
                     steps.push(result.into_json());
