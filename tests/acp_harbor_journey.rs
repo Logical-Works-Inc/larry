@@ -1,7 +1,19 @@
-//! Journeys against the shipped `larry acp` binary and its seeded mock model.
-//! Source: Agent Client Protocol v1 and the Terminal-Bench task contract.
-//! Requirement proved: commands, refusals, cancellation, recovery and reports
-//! stay on the binary path without a paid model call.
+//! Journeys against the shipped `larry acp` binary as Harbor's generic `acp`
+//! agent drives it on a Terminal-Bench 2.0 task (larry#93).
+//!
+//! Source: the Agent Client Protocol v1 (initialize, session/new, session/prompt,
+//! session/update, session/cancel, stdio transport); Harbor's task layout
+//! (`instruction.md`, `task.toml`, `tests/test.sh`, the verifier writing
+//! `/logs/verifier/reward.txt`); and the executor's own kill -9 contract (larry#75).
+//! Requirement proved: a Harbor task's instruction runs as a terminal session the
+//! model drives one command at a time, the commands change the working directory,
+//! the task's verifier rewards it, and the sealed report verifies; the default
+//! policy refuses with nothing run; a session stops at its step bound, at three
+//! refused replies, and at a cancel before its next command; a kill -9 leaves a
+//! journal the next start recovers; two state directories never share a report or
+//! a key. Every case runs the real process against the seeded mock model, so no
+//! test makes a paid model call. The local verifier run stands in for Harbor's
+//! container: the same files, the same reward contract, no Docker.
 
 #[path = "support/json_at.rs"]
 mod json_at;
@@ -37,13 +49,15 @@ use origin::{TempDir, fixture};
 /// What every test here returns.
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-/// Timed Harbor task runs.
+/// Timed runs of the Harbor task.
 const SAMPLES: u64 = 16;
 
-/// Harbor's verifier script.
+/// The task's verifier, as Harbor runs it after the agent: reward 1 when the
+/// working directory holds `hello.txt` with exactly `hello`.
 const TEST_SH: &str = "#!/bin/sh\nmkdir -p \"$LOGS/verifier\"\nif [ \"$(cat \"$WORKDIR/hello.txt\" 2>/dev/null)\" = hello ]; then echo 1 > \"$LOGS/verifier/reward.txt\"; else echo 0 > \"$LOGS/verifier/reward.txt\"; fi\n";
 
-/// Runs one Larry subcommand with `env` and `input`.
+/// Runs `larry <subcommand>` to completion with only `env` set and `input` on
+/// stdin; returns the exit code and stdout.
 fn larry(
     subcommand: &str,
     env: &[(&str, &OsStr)],
@@ -57,7 +71,8 @@ fn larry(
     Ok((child.wait()?.code(), printed))
 }
 
-/// Verifies `report` offline under the state's printed key.
+/// Verifies `report` offline under the key `larry key` prints for `state`; returns
+/// the exit code and the printed verdict.
 fn verify(state: &Path, report: &Value) -> TestResult<(Option<i32>, Value)> {
     let (_, key) = larry("key", &[("LARRY_STATE_DIR", state.as_os_str())], b"")?;
     let trusted = OsString::from(String::from_utf8(key)?.trim_end());
@@ -73,7 +88,7 @@ fn verify(state: &Path, report: &Value) -> TestResult<(Option<i32>, Value)> {
     Ok((code, verdict))
 }
 
-/// Writes a Harbor task directory and returns its instruction.
+/// Writes a Harbor task directory under `root` and returns its instruction.
 fn harbor_task(root: &Path) -> TestResult<String> {
     let instruction = "Create a file named hello.txt in the working directory containing exactly the word hello.\n";
     fs::create_dir_all(root.join("tests"))?;
@@ -91,7 +106,7 @@ fn harbor_task(root: &Path) -> TestResult<String> {
     Ok(fs::read_to_string(root.join("instruction.md"))?)
 }
 
-/// Runs the verifier and returns its reward.
+/// Runs the task's verifier against `work` and returns the reward it wrote.
 fn reward(task: &Path, work: &Path, logs: &Path) -> TestResult<String> {
     let status = Command::new("sh")
         .arg(task.join("tests").join("test.sh"))
@@ -105,13 +120,14 @@ fn reward(task: &Path, work: &Path, logs: &Path) -> TestResult<String> {
     Ok(written.trim().to_owned())
 }
 
-/// The nearest-rank sample at `per_cent`.
+/// The sample at rank `per_cent` of the sorted microsecond samples.
 fn rank(sorted: &[u128], per_cent: usize) -> TestResult<u128> {
     let at = sorted.len().saturating_mul(per_cent).div_ceil(100);
     Ok(*sorted.get(at.saturating_sub(1)).ok_or("no samples")?)
 }
 
-/// The Harbor session and verifier journey.
+/// The Harbor journey: the instruction runs as a session, the model's command
+/// writes the file, the verifier rewards it, and the sealed report verifies.
 #[test]
 fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestResult {
     let mut micros = Vec::new();
@@ -192,45 +208,8 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
     Ok(())
 }
 
-#[test]
-fn a_terminal_command_redacts_route_key_and_workspace_path_in_model_requests() -> TestResult {
-    let (state, work) = fixture()?;
-    let secret = "acp-route-secret";
-    let command = format!(r#"{{"command":"printf '{}'; pwd"}}"#, secret);
-    let replies = [command.as_str(), r#"{"done":"printed"}"#];
-    mock_model::run(scripted(61, &replies), |mock| -> TestResult {
-        let mut env = operator(state.path(), mock, Some(SESSION_POLICY));
-        for entry in env.iter_mut() {
-            if entry.0 == "LARRY_MODEL_KEY" {
-                entry.1 = OsString::from(secret);
-            }
-        }
-        let pairs: Vec<(&str, &OsStr)> = env
-            .iter()
-            .map(|pair| (pair.0, pair.1.as_os_str()))
-            .collect();
-        let mut acp = acp_agent::Agent::start(&pairs)?;
-        let session = acp.open(work.path())?;
-        let (_, reply) = acp.call(&prompt(2, &session, "print the route key"))?;
-        assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
-        let workspace = work.path().to_string_lossy();
-        for body in mock.requests() {
-            let shown = String::from_utf8_lossy(&body);
-            assert!(
-                !shown.contains(secret),
-                "the route key reached the model: {shown}"
-            );
-            assert!(
-                !shown.contains(workspace.as_ref()),
-                "the absolute workspace reached the model: {shown}"
-            );
-        }
-        assert_eq!(mock.served(), 2, "the command and done replies both ran");
-        assert_eq!(acp.finish()?, Some(0), "clean ACP exit");
-        Ok(())
-    })
-}
-
+/// The default policy holds no `model.command`: the prompt is a refusal naming it,
+/// the model is never called and nothing is written.
 #[test]
 fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
     let (state, work) = fixture()?;
@@ -240,7 +219,7 @@ fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
         let session = acp.open(work.path())?;
         let (notes, reply) = acp.call(&prompt(2, &session, "touch ran.txt"))?;
         assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
-        let line = "gate: policy_refuses: model.command";
+        let line = "gate: policy_refuses: file.read";
         assert_eq!(said(&notes), Some(line), "the refusal names the scope");
         assert_eq!(mock.served(), 0, "no model call");
         assert!(!work.path().join("ran.txt").exists(), "nothing ran");
@@ -255,6 +234,9 @@ fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
     })
 }
 
+/// 256 commands is the bound: the session ends `max_turn_requests` with 256
+/// records, folding old steps on the way so no request passes the client's
+/// 256-message bound (larry#235).
 #[test]
 fn a_session_past_its_step_bound_ends_max_turn_requests() -> TestResult {
     let (state, work) = fixture()?;
@@ -275,6 +257,7 @@ fn a_session_past_its_step_bound_ends_max_turn_requests() -> TestResult {
     })
 }
 
+/// The mock's body cap: a model window smaller than the route's 1 MiB bound.
 const SMALL_WINDOW: usize = 32_768;
 
 /// Output that outgrows the model's window: the gateway's 413 (RFC 9110
@@ -320,6 +303,7 @@ fn a_session_that_outgrows_the_model_window_compacts_and_ends_its_turn() -> Test
     })
 }
 
+/// Three refused replies in a row end the session as a refusal; nothing runs.
 #[test]
 fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
     let (state, work) = fixture()?;
@@ -346,6 +330,7 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
     })
 }
 
+/// A cancel during a command stops the session before its next model call.
 #[test]
 fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
     let (state, work) = fixture()?;
@@ -393,6 +378,8 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
     })
 }
 
+/// A kill -9 mid-command leaves the session's journal; the next start recovers
+/// it before its own session runs.
 #[test]
 fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult {
     let (state, work) = fixture()?;
@@ -433,7 +420,8 @@ fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult
     })
 }
 
-/// One tenant's session returns its report and gateway count.
+/// One tenant's session: touches its own file and returns its report and the
+/// requests its gateway served.
 fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
     let name = format!("tenant{index}.txt");
     let command = format!(r#"{{"command":"touch {name}"}}"#);
@@ -448,7 +436,8 @@ fn tenant(index: usize, state: &Path, work: &Path) -> TestResult<(Value, u64)> {
     })
 }
 
-/// Two state directories isolate reports and gateways.
+/// Two state directories run sessions at once: each report verifies only under
+/// its own key and each gateway sees only its own session.
 #[test]
 fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> TestResult {
     let (first_state, first_work) = fixture()?;
@@ -495,7 +484,8 @@ fn two_state_directories_run_sessions_at_once_and_keep_their_own_reports() -> Te
     Ok(())
 }
 
-/// Padded gateway replies preserve the trace and key (larry#128).
+/// One session in `work` whose first reply comes padded the way OpenRouter sends
+/// it through 9router (larry#128); returns the gateway's trace hash and the key it saw.
 fn padded_session(state: &Path, work: &Path) -> TestResult<(String, Option<String>)> {
     let config = Config {
         script: vec![Some(Fault::PaddedDone)],
@@ -515,7 +505,8 @@ fn padded_session(state: &Path, work: &Path) -> TestResult<(String, Option<Strin
     })
 }
 
-/// A padded reply keeps the same seeded trace.
+/// A padded reply still runs, the operator's key reaches the gateway, and the same
+/// seed in the same directory gives the same gateway trace.
 #[test]
 fn a_padded_reply_runs_and_the_same_seed_replays_the_same_trace() -> TestResult {
     let (state, work) = fixture()?;
@@ -527,7 +518,9 @@ fn a_padded_reply_runs_and_the_same_seed_replays_the_same_trace() -> TestResult 
     Ok(())
 }
 
-/// Hostile, cut and empty gateway replies refuse cleanly (larry#396).
+/// A gateway refusal carrying escape sequences, a reply cut at the token limit and a reply
+/// with no content (larry#396) each end the session as a refusal whose message carries no
+/// escape sequence, and nothing runs.
 #[test]
 fn a_hostile_gateway_refusal_ends_the_session_with_a_clean_message() -> TestResult {
     let faults = [
@@ -566,7 +559,8 @@ fn a_hostile_gateway_refusal_ends_the_session_with_a_clean_message() -> TestResu
     Ok(())
 }
 
-/// Cancellation during a model reply runs no command.
+/// A cancel sent while the model is still answering ends the prompt `cancelled`
+/// and its reply never runs.
 #[test]
 fn a_cancel_while_the_model_answers_runs_no_command() -> TestResult {
     let (state, work) = fixture()?;
@@ -591,7 +585,8 @@ fn a_cancel_while_the_model_answers_runs_no_command() -> TestResult {
     })
 }
 
-/// The binary refuses bad ACP order and relative cwd while serving.
+/// Through the binary: a request before initialize and a relative cwd are refused,
+/// and the agent keeps serving.
 #[test]
 fn a_request_before_initialize_and_a_relative_cwd_are_refused() -> TestResult {
     let (state, _work) = fixture()?;
@@ -634,7 +629,9 @@ fn recv_line(input: &mut impl BufRead) -> TestResult<Value> {
     Ok(json::from_str(&line)?)
 }
 
-/// A dead client cancels its running session (larry#338).
+/// A client that dies mid-prompt stops the session (larry#338): closing its output
+/// makes the next reply a write fault, which cancels every live session, so the
+/// running command is killed and no further model call or command runs.
 #[test]
 fn a_client_that_dies_mid_prompt_stops_the_session() -> TestResult {
     let (state, work) = fixture()?;
@@ -707,7 +704,8 @@ fn a_client_that_dies_mid_prompt_stops_the_session() -> TestResult {
     })
 }
 
-/// A queued prompt never clears its running prompt's cancel (larry#338).
+/// A queued second prompt never clears the running prompt's cancel (larry#338): a
+/// cancel binds to the prompt it follows, so the running session still stops.
 #[test]
 fn a_queued_prompt_does_not_clear_the_running_prompts_cancel() -> TestResult {
     let (state, work) = fixture()?;

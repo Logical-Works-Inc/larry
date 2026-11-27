@@ -327,6 +327,12 @@ where
         &self.journal
     }
 
+    /// The authoritative journal for mutation. Reads extend the tenant
+    /// catch-up index to the head first; appends never hash it (larry#215).
+    pub(crate) fn journal_mut(&mut self) -> &mut Journal {
+        &mut self.journal
+    }
+
     /// The current projection.
     #[must_use]
     pub const fn projection(&self) -> &P {

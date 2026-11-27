@@ -29,8 +29,8 @@ use larry_contracts::authority::{Budget, BudgetUnit, Grant, Scope, SecurityEpoch
 use larry_contracts::binding::{BindingError, EffectTarget, ResolvedEffect};
 use larry_contracts::command::{Command, CommandAcceptance, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
-use larry_contracts::ids::{RunId, TenantId, WorkerId};
-use larry_contracts::replay::{CapabilitySnapshot, DenialReason, PolicySnapshot, ValiditySnapshot};
+use larry_contracts::ids::{OperationId, RunId, TenantId, WorkerId};
+use larry_contracts::replay::{CapabilitySnapshot, PolicySnapshot, ValiditySnapshot};
 use larry_runtime::error::RuntimeError;
 use larry_runtime::journal::Journal;
 use larry_runtime::owner::{EffectOwner, validate_proof};
@@ -61,26 +61,24 @@ const ADAPTER_SCHEMA: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
-const EXECUTOR_CAPABILITIES: [Scope; 6] = [
+const EXECUTOR_CAPABILITIES: [Scope; 5] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
     Scope::ModelCommand,
-    Scope::NetworkEgress,
 ];
 
-/// The policy when `LARRY_POLICY` is unset: the five scopes a model task uses. A model
+/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
 /// command (larry#93) is never in it: only an operator who isolates the commands
 /// outside Larry, as a Harbor task container does, names `model.command`. A terminal
 /// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
 /// needs no such scope and runs under this policy as it is.
-const DEFAULT_POLICY: [Scope; 5] = [
+const DEFAULT_POLICY: [Scope; 4] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
-    Scope::NetworkEgress,
 ];
 
 /// The policy when `LARRY_POLICY` is unset.
@@ -88,13 +86,10 @@ fn default_policy() -> BTreeSet<Scope> {
     DEFAULT_POLICY.iter().copied().collect()
 }
 
-/// The scopes a terminal command session needs (larry#93): command execution and
-/// model-command selection. A model brief adds network egress through
-/// [`required_scopes`], so an ordinary confined session stays local by default.
+/// The scopes a terminal session needs (larry#93): everything a briefed task needs,
+/// plus the model choosing the commands.
 pub(super) fn session_scopes() -> BTreeSet<Scope> {
-    let mut scopes: BTreeSet<Scope> = EXECUTOR_CAPABILITIES.iter().copied().collect();
-    scopes.remove(&Scope::NetworkEgress);
-    scopes
+    EXECUTOR_CAPABILITIES.iter().copied().collect()
 }
 
 /// The scopes a terminal session needs when Larry itself confines each command to a
@@ -167,7 +162,7 @@ pub(super) fn with_expiry(
 /// The dotted name a scope carries in `LARRY_POLICY` and in a denial line: the
 /// estate capability name `replay::capability` gives it (larry#77), without
 /// its `larry.` prefix, so the scope-to-name mapping has one owner.
-fn scope_name(scope: Scope) -> String {
+pub(super) fn scope_name(scope: Scope) -> String {
     let capability = larry_contracts::replay::capability(scope);
     let name = capability.as_str();
     match name.strip_prefix(CAPABILITY_PREFIX) {
@@ -187,12 +182,20 @@ fn named_scope(name: &str) -> Option<Scope> {
         .find(|scope| scope_name(*scope) == name)
 }
 
-/// The `LARRY_POLICY` scopes `read` yields: unset is the five model-task scopes the
+/// The `LARRY_POLICY` scopes `read` yields: unset is the four scopes the
 /// executor uses, the empty string is no scope, names are trimmed and
 /// comma-separated, and an unknown name is a typed refusal.
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
     let Some(text) = read("LARRY_POLICY") else {
         return Ok(default_policy());
+    };
+    policy_names(Some(&text))
+}
+
+/// Parses a durable policy record. A missing ledger row is remote deny-all.
+pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecError> {
+    let Some(text) = text else {
+        return Ok(BTreeSet::new());
     };
     let mut scopes = BTreeSet::new();
     for name in text.split(',') {
@@ -215,8 +218,8 @@ pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<
 }
 
 /// The scopes one task requires: repository read and process spawn always,
-/// and file write, model invoke and network egress when the task carries a
-/// brief the model writes.
+/// and file write plus model invoke when the task carries a brief the model
+/// writes.
 pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     let mut scopes = BTreeSet::new();
     scopes.insert(Scope::FileRead);
@@ -224,7 +227,6 @@ pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     if task.brief().is_some() {
         scopes.insert(Scope::FileWrite);
         scopes.insert(Scope::ModelInvoke);
-        scopes.insert(Scope::NetworkEgress);
     }
     scopes
 }
@@ -235,24 +237,6 @@ fn first_missing(required: &BTreeSet<Scope>, policy: &BTreeSet<Scope>) -> Option
         .iter()
         .copied()
         .find(|scope| !policy.contains(scope))
-}
-
-/// The one denial line a recorded authorization reason stands for, naming the
-/// refused scope with its dotted name.
-fn denial_line(reason: &DenialReason) -> String {
-    match *reason {
-        DenialReason::PolicyRefuses { scope } => {
-            format!("gate: policy_refuses: {}", scope_name(scope))
-        }
-        DenialReason::CapabilityMissing { scope } => {
-            format!("gate: capability_missing: {}", scope_name(scope))
-        }
-        DenialReason::AuthorityExpired => String::from("gate: authority_expired"),
-        DenialReason::BudgetExhausted { .. } => String::from("gate: budget_exhausted"),
-        DenialReason::UnitMismatch { .. } => String::from("gate: unit_mismatch"),
-        DenialReason::NotApproved => String::from("gate: not_approved"),
-        _ => String::from("gate: denied"),
-    }
 }
 
 /// The sealed report a gate denial yields: nothing ran, and the report says
@@ -511,8 +495,10 @@ pub(super) fn admit_and_run(
                 required: &required,
                 task_id,
                 run_id,
+                operation,
                 task_digest,
                 key,
+                fence_control: settings.fence_control,
             };
             drive(&mut runtime, admission, policy, &slot)
         }
@@ -542,10 +528,14 @@ struct Admission<'a> {
     task_id: &'a str,
     /// The run id that identity names: what the journal records this request as.
     run_id: RunId,
+    /// The operation the fence withdraws when the host action names one.
+    operation: OperationId,
     /// The task document's digest.
     task_digest: &'a str,
     /// The receipt key a denial is sealed under.
     key: &'a lgwks_std::sign::SecretKey,
+    /// The operator's one host fence action, applied after durable admission.
+    fence_control: Option<super::fence_control::FenceControl>,
 }
 
 /// Removes a returned task's journal: its record is now the sealed report the
@@ -598,8 +588,10 @@ fn drive<O: EffectOwner>(
         required,
         task_id,
         run_id,
+        operation,
         task_digest,
         key,
+        fence_control,
     } = admission;
     let shown = match runtime.display(&command, holder, &[grant]) {
         Ok(shown) => shown,
@@ -647,6 +639,9 @@ fn drive<O: EffectOwner>(
             };
         }
     };
+    if let Some(control) = fence_control {
+        super::fence_control::apply(runtime, control, operation)?;
+    }
     // A duplicate is this request already recorded under this one run id (E28,
     // larry#182 defect 3). The body must not run again, so the caller is answered
     // from the journal's own evidence: a settled run keeps its sealed report in
@@ -678,10 +673,7 @@ fn drive<O: EffectOwner>(
         return finished;
     }
     // The gate refused at admission: the sealed report names the first reason.
-    let line = match tick.denied().first() {
-        Some(pair) => denial_line(&pair.1),
-        None => String::from("gate: denied"),
-    };
+    let line = super::fence_control::report_line(&tick);
     Ok(denied_report(task_id, task_digest, &line, key))
 }
 
@@ -784,7 +776,7 @@ mod tests {
         );
 
         let mut widened = default_policy();
-        widened.insert(Scope::ModelCommand);
+        widened.insert(Scope::NetworkEgress);
         assert_ne!(
             policy_revision(&default_policy()),
             policy_revision(&widened)

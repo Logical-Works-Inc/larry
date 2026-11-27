@@ -120,10 +120,10 @@ pub(crate) fn effect_key(intent: &EffectIntent, attempts: u8) -> Result<EffectKe
         ENVIRONMENT,
         FlowRevision::new(lgwks_std::hash::blake3(FLOW)),
     );
-    let attempt = match NonZeroU64::new(u64::from(attempts)) {
-        Some(value) => value,
-        None => NonZeroU64::MIN,
-    };
+    let attempt = NonZeroU64::new(u64::from(attempts)).ok_or(RuntimeError::EffectIdentity {
+        operation,
+        field: "attempt",
+    })?;
     let epoch = generation(intent.admission_epoch).ok_or(RuntimeError::EffectIdentity {
         operation,
         field: "admission_epoch",
@@ -146,9 +146,16 @@ pub(crate) fn effect_key(intent: &EffectIntent, attempts: u8) -> Result<EffectKe
     ))
 }
 
+/// The last security epoch: a report of it closes the fence for good (E71),
+/// because it has no broker generation to stand at.
+pub(crate) const LAST_EPOCH: u64 = u64::MAX;
+
 /// The broker generation a security epoch is: one past it, because a
-/// generation is never zero. `None` for `u64::MAX`, which has none.
+/// generation is never zero. `None` for [`LAST_EPOCH`], which has none.
 pub(crate) const fn generation(epoch: SecurityEpoch) -> Option<EnvironmentEpoch> {
+    if epoch.value() == LAST_EPOCH {
+        return None;
+    }
     match epoch.value().checked_add(1) {
         Some(next) => match NonZeroU64::new(next) {
             Some(value) => Some(EnvironmentEpoch::new(value)),
@@ -176,7 +183,7 @@ fn action(operation: OperationId) -> Option<ActionId> {
 /// deciding what to do about a fenced effect needs to know whether it was
 /// withdrawn by name, left behind by a generation change, or held back
 /// because the authority source has gone quiet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum FenceRefusal {
     /// The operation's authority was withdrawn by name.
@@ -216,10 +223,16 @@ pub enum FenceRefusal {
     /// last one it can hold, so no reach is permitted again.
     #[error("the fence is closed: its epoch space is spent")]
     Closed,
+    /// The broker returned a refusal this Larry version does not classify.
+    #[error("broker refused the reach: {cause}")]
+    Broker {
+        /// The broker's original typed refusal.
+        cause: String,
+    },
 }
 
 /// A refused change to, or read of, the fence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum FenceError {
     /// The epoch cannot advance or be represented. Refused rather than
@@ -245,6 +258,12 @@ pub enum FenceError {
     /// this build).
     #[error("the broker does not hold the fence's environment")]
     Unowned,
+    /// The broker returned a refusal this Larry version does not classify.
+    #[error("broker refused the fence change: {cause}")]
+    Broker {
+        /// The broker's original typed refusal.
+        cause: String,
+    },
 }
 
 /// The fence change a broker refusal is.
@@ -253,7 +272,9 @@ fn refused(error: &BrokerError) -> FenceError {
         BrokerError::Exhausted { .. } => FenceError::EpochExhausted,
         BrokerError::RevocationsFull { limit, .. } => FenceError::RevocationsFull { limit },
         BrokerError::Closed { .. } => FenceError::Closed,
-        _ => FenceError::Unowned,
+        _ => FenceError::Broker {
+            cause: error.to_string(),
+        },
     }
 }
 
@@ -274,7 +295,10 @@ fn fenced(error: &BrokerError, intent: &EffectIntent) -> FenceRefusal {
         BrokerError::OfflineExposureExhausted { bound, .. } => {
             FenceRefusal::OfflineExposureExhausted { bound }
         }
-        _ => FenceRefusal::Closed,
+        BrokerError::Closed { .. } => FenceRefusal::Closed,
+        _ => FenceRefusal::Broker {
+            cause: error.to_string(),
+        },
     }
 }
 
@@ -531,6 +555,30 @@ impl RevocationFence {
         self.broker
             .spend(warrant)
             .map_err(|error| self.refusal(&error, intent))
+    }
+}
+
+#[cfg(test)]
+mod attempt_zero_tests {
+    use super::*;
+
+    #[test]
+    fn effect_key_refuses_zero_attempt() {
+        let intent = EffectIntent::new(
+            larry_contracts::ids::EffectId::from_bytes([3; 16]),
+            OperationId::from_bytes([1; 16]),
+            larry_contracts::ids::RunId::from_bytes([2; 16]),
+            larry_contracts::ids::TenantId::from_bytes([4; 16]),
+            ReconciliationStrategy::RequiresHuman,
+            SecurityEpoch::INITIAL,
+        );
+        assert!(matches!(
+            effect_key(&intent, 0),
+            Err(RuntimeError::EffectIdentity {
+                field: "attempt",
+                ..
+            })
+        ));
     }
 }
 

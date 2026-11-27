@@ -6,7 +6,7 @@
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
-use crate::model::Route;
+use crate::model::{DEFAULT_PRICE_VERSION, Route};
 
 /// Highest price accepted: 10,000 dollars per million tokens, in micro-dollars.
 const MAX_PRICE_MICRO: u64 = 10_000_000_000;
@@ -24,6 +24,9 @@ pub struct Prices {
     input: u64,
     /// Price of a million completion tokens.
     output: u64,
+    /// The route table revision these prices came from; environment prices
+    /// carry the first revision, so they never read as declared.
+    version: u32,
     /// Price of a million prompt tokens read from the provider's cache; the input
     /// price when the operator declared none (larry#230).
     cached: Option<u64>,
@@ -122,14 +125,18 @@ impl Prices {
         Prices {
             input: route.price_input(),
             output: route.price_output(),
+            version: route.price_version(),
             cached: None,
             cache_write: None,
         }
     }
 
-    /// Whether the route has a non-zero table instead of a legacy empty row.
+    /// Whether the route's table was priced by `larry route price`: the command
+    /// bumps the revision from the first, so a priced route is exactly one
+    /// whose revision is past 1, even a local model priced at zero and zero
+    /// (larry#204, part of #533).
     pub(crate) const fn declared(self) -> bool {
-        self.input != 0 || self.output != 0
+        self.version != DEFAULT_PRICE_VERSION
     }
 
     /// Reads `LARRY_EVAL_PRICE_IN` and `LARRY_EVAL_PRICE_OUT` through `read`, and
@@ -153,17 +160,21 @@ impl Prices {
         Ok(Prices {
             input: one("LARRY_EVAL_PRICE_IN")?,
             output: one("LARRY_EVAL_PRICE_OUT")?,
+            version: DEFAULT_PRICE_VERSION,
             cached: optional("LARRY_EVAL_PRICE_CACHED")?,
             cache_write: optional("LARRY_EVAL_PRICE_CACHE_WRITE")?,
         })
     }
 
-    /// The prices of a test, in micro-dollars per million tokens.
+    /// The prices of a test, in micro-dollars per million tokens. Test prices
+    /// carry the first revision, so they read as undeclared, as prices read
+    /// from the environment do.
     #[cfg(test)]
     pub(crate) const fn micro(input: u64, output: u64) -> Prices {
         Prices {
             input,
             output,
+            version: DEFAULT_PRICE_VERSION,
             cached: None,
             cache_write: None,
         }

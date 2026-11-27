@@ -1,13 +1,11 @@
 //! `larry route` and the route a task resolves to (larry#201). A route is data a
 //! tenant owns in the state directory's store: `larry route add` stores one,
-//! `price` sets its versioned price table, `list` shows them, `remove` and
-//! `default` change the table, and `resolve`
+//! `list` shows them, `remove` and `default` change the table, and `resolve`
 //! shows which route a task naming an id (or none) would use. The key is never
 //! an argument and never stored: a route names the `LARRY_KEY_<TAG>_*` variable
 //! that holds it, under the tag its own tenant's digest names, and the variable
 //! is read only when a task reaches the model (larry#328).
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
@@ -19,11 +17,8 @@ use super::{ExecError, Ledger, digest_hex, identity, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
 
-/// The most country codes one tenant may allow.
-const MAX_RESIDENCY_CODES: usize = 64;
-
 /// The synopsis every usage refusal ends with.
-const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | residency <CC,...>|--clear | list [--json] | remove <id> | default <id> | resolve [<id>]";
+const USAGE: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
@@ -87,8 +82,6 @@ const fn route_prefix(cause: &RouteError) -> &'static str {
         | RouteError::BadRequestBytes
         | RouteError::BadDescribe
         | RouteError::BadPrice { .. } => "",
-        RouteError::ResidencyNotAllowed { .. } => "",
-        RouteError::ResidencyPolicyTooLarge { .. } => "",
         _ => "route: ",
     }
 }
@@ -128,13 +121,7 @@ pub(super) fn resolve_for(
     } else {
         env_route(read).map_err(ExecError::ModelConfig)?
     };
-    let route = resolve(&tenant, &table, named, environment).map_err(ExecError::Route)?;
-    if let Some(allowed) = ledger.residency(&tenant)?
-        && let Some(refusal) = route.residency_refusal(&allowed)
-    {
-        return Err(ExecError::Route(refusal));
-    }
-    Ok(route)
+    resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
 }
 
 /// The flags of `route add`, each still text.
@@ -196,26 +183,6 @@ fn required<'arg>(
     flag: &'static str,
 ) -> Result<&'arg str, RouteCliError> {
     value.ok_or(RouteCliError::Missing { flag })
-}
-
-/// Parses a tenant's comma-separated, canonical ISO country policy.
-fn residency_codes(text: &str) -> Result<Vec<String>, RouteCliError> {
-    let mut codes = BTreeSet::new();
-    for code in text.split(',').map(str::trim) {
-        if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
-            return Err(RouteCliError::Route(RouteError::BadResidency));
-        }
-        if codes.len() >= MAX_RESIDENCY_CODES && !codes.contains(code) {
-            return Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
-                limit: MAX_RESIDENCY_CODES,
-            }));
-        }
-        codes.insert(code.to_owned());
-    }
-    if codes.is_empty() {
-        return Err(RouteCliError::Route(RouteError::BadResidency));
-    }
-    Ok(codes.into_iter().collect())
 }
 
 /// `text` as a number of type `Number`, or the flag's refusal.
@@ -366,6 +333,7 @@ fn price(
 fn price_rate(text: &str, flag: &'static str) -> Result<u64, RouteCliError> {
     crate::eval::parse_price(text.trim()).map_err(|fault| RouteCliError::Price { flag, fault })
 }
+
 /// One route as the JSON listing prints it.
 fn listed(route: &Route, table: &Table) -> Value {
     json!({
@@ -394,7 +362,6 @@ fn list(
 ) -> Result<(), RouteCliError> {
     let (ledger, tenant) = open(read)?;
     let table = ledger.routes(&tenant).map_err(from_exec)?;
-    let policy = ledger.residency(&tenant).map_err(from_exec)?;
     if as_json {
         let routes: Vec<Value> = table
             .routes()
@@ -403,11 +370,8 @@ fn list(
             .collect();
         return say(
             out,
-            &json!({ "default": table.default_id(), "residency": policy, "routes": routes }),
+            &json!({ "default": table.default_id(), "routes": routes }),
         );
-    }
-    if let Some(codes) = policy.as_deref() {
-        say(out, &format_args!("residency\t{}", codes.join(",")))?;
     }
     for route in table.routes() {
         // A route that declares no residency prints a dash in its column.
@@ -431,26 +395,6 @@ fn list(
         )?;
     }
     Ok(())
-}
-
-/// `larry route residency <CC,...>` stores the tenant policy, or `--clear` removes it.
-fn residency(
-    read: &impl Fn(&str) -> Option<String>,
-    value: &str,
-    out: &mut impl Write,
-) -> Result<(), RouteCliError> {
-    let (ledger, tenant) = open(read)?;
-    match value {
-        "--clear" => {
-            ledger.clear_residency(&tenant).map_err(from_exec)?;
-            say(out, &json!({ "cleared": true, "residency": null }))
-        }
-        value => {
-            let codes = residency_codes(value)?;
-            ledger.set_residency(&tenant, &codes).map_err(from_exec)?;
-            say(out, &json!({ "residency": codes, "saved": true }))
-        }
-    }
 }
 
 /// `larry route remove <id>`: deletes the route; a removed default leaves none.
@@ -508,7 +452,6 @@ pub fn run(
         ["price", id, ref flags @ ..] => price(&read, id, flags, out),
         ["list"] => list(&read, false, out),
         ["list", "--json"] => list(&read, true, out),
-        ["residency", value] => residency(&read, value, out),
         ["remove", id] => remove(&read, id, out),
         ["default", id] => make_default(&read, id, out),
         ["resolve"] => show(&read, None, out),
@@ -603,23 +546,5 @@ mod tests {
         assert!(text.contains("\"saved\":true"), "{text}");
         assert!(text.contains(&key_env), "the exact variable: {text}");
         Ok(())
-    }
-
-    /// The tenant policy accepts 64 shaped country codes and refuses the next one typed.
-    #[test]
-    fn residency_policy_is_bounded_at_sixty_four_codes() {
-        let mut codes = Vec::new();
-        for first in b'A'..=b'C' {
-            for second in b'A'..=b'Z' {
-                codes.push(format!("{}{}", char::from(first), char::from(second)));
-            }
-        }
-        let text = codes.into_iter().take(65).collect::<Vec<_>>().join(",");
-        assert!(matches!(
-            super::residency_codes(&text),
-            Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
-                limit: 64
-            }))
-        ));
     }
 }

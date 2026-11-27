@@ -7,7 +7,7 @@
 //! when the route declares one, else by `LARRY_EVAL_PRICE_IN` and
 //! `LARRY_EVAL_PRICE_OUT`; the scorecard prints cost per accepted task, the
 //! acceptance count and p50/p95/p99 wall time, and the comparison is two arms
-//! over one set (ADR 0009). Model money is spent only by the arm an operator runs.
+//! over one set (ADR 0009, ADR 0127). Model money is spent only by the arm an operator runs.
 
 mod score;
 mod set;
@@ -21,8 +21,8 @@ use std::time::Instant;
 use lgwks_macros::Error;
 
 use crate::executor::{
-    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, Settings, Stop,
-    Task, execute, run_command, run_session,
+    Approval, AuthorFault, ExecError, Isolation, Ledger, Observer, Place, Report, SessionDoor,
+    Settings, Stop, Task, execute_eval, run_command, run_session,
 };
 use crate::executor::{hold_origin, origin_lock_path};
 use crate::model::RouteError;
@@ -283,20 +283,8 @@ fn finish_origin(origin: Origin, ran: Result<Outcome, EvalError>) -> Result<Outc
 struct EvalObserver;
 
 impl Observer for EvalObserver {
-    fn handed(&mut self, _line: &str, _applied: bool) {}
-
     fn approve(&mut self, _step: usize, _command: &str) -> Approval {
         Approval::Run
-    }
-
-    fn started(&mut self, _step: usize, _command: &str) {}
-
-    fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
-
-    fn message(&mut self, _text: &str) {}
-
-    fn cancelled(&self) -> bool {
-        false
     }
 }
 
@@ -342,7 +330,7 @@ fn command_outcome(
     document: &Task,
     settings: &Settings,
 ) -> Result<(Ending, Option<Spent>), EvalError> {
-    match execute(document, settings) {
+    match execute_eval(document, settings) {
         Ok(report) => {
             let ending = if report.accepted() {
                 Ending::Accepted
@@ -378,6 +366,7 @@ fn session_outcome(
         settings,
         Isolation::Host,
         &mut observer,
+        SessionDoor::Eval,
     ) {
         Ok(ended) => {
             let ending = match ended.stop {

@@ -28,8 +28,6 @@ mod held_group;
 mod http_wire;
 #[path = "support/mock_model.rs"]
 mod mock_model;
-#[path = "support/executor_residency_journey.rs"]
-mod residency;
 #[path = "support/tree_digest.rs"]
 mod tree_digest;
 
@@ -473,7 +471,7 @@ fn missing_state_dir_non_repo_and_bad_base_each_fail_typed() -> TestResult {
     assert_refused(&output, "LARRY_STATE_DIR");
 
     let output = run_exec(state.path(), &task_json(empty.path(), "HEAD", quick), None)?;
-    assert_refused(&output, "could not clone");
+    assert_refused(&output, "not in the tenant allowlist");
 
     let output = run_exec(
         state.path(),

@@ -89,7 +89,9 @@ pub(super) fn decide(
     let elapsed = span(live.admitted_at, at);
     let dispatched = match live.dispatched {
         Some(key) => key,
-        None => effect_key(&live.intent, live.dispatches)?,
+        // No reach warranted one yet: the first attempt is what a resend
+        // would carry, never attempt zero (larry#215, ADR 0121).
+        None => effect_key(&live.intent, live.dispatches.max(1))?,
     };
     let proposed = effect_key(&live.intent, live.dispatches.saturating_add(1))?.digest();
     let scope = match DedupScope::new(live.intent.tenant.to_string()) {
@@ -343,7 +345,10 @@ mod sim {
                 proof: crate::gate::Proof::lapsed(),
                 intent,
                 sent,
-                dispatched: Some(crate::fence::effect_key(&sent_intent, dispatches)?),
+                // The key a reach sent: attempt zero never left, so an effect
+                // with no dispatch carries the first attempt's number, as the
+                // runtime's own fallback does (larry#215, ADR 0121).
+                dispatched: Some(crate::fence::effect_key(&sent_intent, dispatches.max(1))?),
                 dispatches,
                 reconciliations: 0,
                 dispatched_at_tick: 0,

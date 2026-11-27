@@ -12,21 +12,23 @@
 //! gateway is scored as refusals while the arm keeps going; a kill -9 leaves
 //! nothing the next run does not collect; the shipped set runs end to end.
 
-#[path = "eval_journey/priced.rs"]
-mod priced;
 #[path = "eval_journey/session.rs"]
 mod session;
+
+#[path = "eval_journey/priced.rs"]
+mod priced;
 
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
 
-#[path = "support/eval_arm.rs"]
-mod eval_arm;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/mock_model.rs"]
 mod mock_model;
+
+#[path = "support/eval_arm.rs"]
+mod eval_arm;
 use eval_arm::{Arm, CLAUDE, FLASH, Ran, TestResult};
 use eval_arm::{charged_prompt_tokens, eval_entries, number, operator, origins_left, report};
 use eval_arm::{rss_tool, score_arm, spawn_arm, task, timeless};
@@ -670,18 +672,13 @@ fn the_shipped_matched_set_runs_end_to_end_against_the_mock() -> TestResult {
     let ran = mock_model::run(config, |handle: &Handle| {
         // The session task runs its model-chosen commands on the host, exactly as
         // `larry acp` runs them, so this arm grants `model.command` the way a
-        // Harbor task container's operator does; brief tasks need their five
-        // scopes, model egress among them (larry#203), since the gateway is
-        // off-host. The string repeats `support/acp_session.rs`'s
-        // SESSION_POLICY, which stays the canonical home, plus the egress a
-        // briefed task's model call needs; a drift fails the served-count
-        // assertion below.
+        // Harbor task container's operator does; brief tasks need only four scopes.
+        // The string repeats `support/acp_session.rs`'s SESSION_POLICY, which stays
+        // the canonical home; a drift fails the served-count assertion below.
         let mut env = operator(&state, handle.addr(), &FLASH, "3");
         env.push((
             "LARRY_POLICY",
-            OsString::from(
-                "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
-            ),
+            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
         ));
         let ran = score_arm(&env, SHIPPED_SET.as_bytes())?;
         assert_eq!(

@@ -8,11 +8,29 @@
 //! single statement, so there is never a moment with two defaults or a default
 //! naming a route that is gone.
 
-use lgwks_deps::storefront::rusqlite::{self, OptionalExtension, Transaction, TransactionBehavior};
+use lgwks_deps::storefront::rusqlite::{self, Transaction, TransactionBehavior};
 
 use super::Ledger;
 use crate::executor::ExecError;
 use crate::model::{Draft, Kind, MAX_ROUTES, Route, RouteError, Table};
+
+/// Schema of the route table, version 5 (larry#201): the routes a tenant owns, at
+/// most 256 each, with one default per tenant. A route holds the NAME of the
+/// variable its key is read from, never the key. `temperature` and `residency`
+/// are NULL when the route pins none. The DDL rides with the reads and writes,
+/// as the policy schemas ride with the policy module.
+pub(super) const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant TEXT NOT NULL, id TEXT NOT NULL, \
+    kind TEXT NOT NULL, base_url TEXT NOT NULL, key_env TEXT NOT NULL, model TEXT NOT NULL, \
+    temperature REAL, request_bytes INTEGER NOT NULL, residency TEXT, describe TEXT NOT NULL, \
+    is_default INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tenant, id));";
+
+/// Schema of the route price table, version 8 (larry#204, part of #533): the
+/// versioned price table `larry route price` bumps, one revision per set beside
+/// the route row. A new row carries revision 1 with no rates; only `route
+/// price` writes these columns, so `route add` never does.
+pub(super) const PRICE_SCHEMA: &str = "ALTER TABLE routes ADD COLUMN price_version INTEGER NOT NULL DEFAULT 1; \
+    ALTER TABLE routes ADD COLUMN price_input INTEGER NOT NULL DEFAULT 0; \
+    ALTER TABLE routes ADD COLUMN price_output INTEGER NOT NULL DEFAULT 0;";
 
 /// Inserts a route, or replaces the fields of the one with this id, unless the
 /// tenant holds the most routes it may and this id is new: that writes no row.
@@ -96,42 +114,6 @@ impl Stored {
 }
 
 impl Ledger {
-    /// The tenant's canonical residency policy, or none when it has not set one.
-    pub(crate) fn residency(&self, tenant: &str) -> Result<Option<Vec<String>>, ExecError> {
-        self.conn
-            .query_row(
-                "SELECT codes FROM tenant_residency WHERE tenant = ?1",
-                rusqlite::params![tenant],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(ExecError::Sql)
-            .map(|codes| codes.map(|value| value.split(',').map(str::to_owned).collect()))
-    }
-
-    /// Stores the already checked, sorted residency codes for `tenant`.
-    pub(crate) fn set_residency(&self, tenant: &str, codes: &[String]) -> Result<(), ExecError> {
-        self.conn
-            .execute(
-                "INSERT INTO tenant_residency (tenant, codes) VALUES (?1, ?2) \
-                 ON CONFLICT (tenant) DO UPDATE SET codes = excluded.codes",
-                rusqlite::params![tenant, codes.join(",")],
-            )
-            .map_err(ExecError::Sql)?;
-        Ok(())
-    }
-
-    /// Clears the tenant's residency policy.
-    pub(crate) fn clear_residency(&self, tenant: &str) -> Result<(), ExecError> {
-        self.conn
-            .execute(
-                "DELETE FROM tenant_residency WHERE tenant = ?1",
-                rusqlite::params![tenant],
-            )
-            .map_err(ExecError::Sql)?;
-        Ok(())
-    }
-
     /// Stores `route` for `tenant`, replacing the fields the route names, and
     /// makes it the tenant's default when `make_default`. A replacement keeps
     /// the default flag and the price table it found. One transaction, so a
@@ -151,11 +133,15 @@ impl Ledger {
             return Err(ExecError::Route(RouteError::BadRequestBytes));
         };
         let version = i64::from(route.price_version());
-        let (Ok(input), Ok(output)) = (
-            i64::try_from(route.price_input()),
-            i64::try_from(route.price_output()),
-        ) else {
+        // No `route price` input reaches the output arm uncaught: the grammar
+        // caps a rate at 10^10 micro-dollars, which always fits an `i64`. Each
+        // check stays typed (never a panic) for direct `u64` callers, and names
+        // the rate that failed it.
+        let Ok(input) = i64::try_from(route.price_input()) else {
             return Err(ExecError::Route(RouteError::BadPrice { field: "input" }));
+        };
+        let Ok(output) = i64::try_from(route.price_output()) else {
+            return Err(ExecError::Route(RouteError::BadPrice { field: "output" }));
         };
         let step = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
             .map_err(ExecError::Sql)?;
@@ -308,8 +294,15 @@ impl Ledger {
         input: u64,
         output: u64,
     ) -> Result<(), ExecError> {
-        let (Ok(input), Ok(output)) = (i64::try_from(input), i64::try_from(output)) else {
+        // No `route price` input reaches either arm uncaught: the grammar caps
+        // a rate at 10^10 micro-dollars, which always fits an `i64`. Each check
+        // stays typed (never a panic) for direct `u64` callers, and names the
+        // rate that failed it.
+        let Ok(input) = i64::try_from(input) else {
             return Err(ExecError::Route(RouteError::BadPrice { field: "input" }));
+        };
+        let Ok(output) = i64::try_from(output) else {
+            return Err(ExecError::Route(RouteError::BadPrice { field: "output" }));
         };
         let priced = self
             .conn
@@ -459,8 +452,8 @@ mod tests {
 
     /// Prices round trip beside the route: a new row carries revision 1 with no
     /// rates, `set_route_price` bumps the revision and sets the rates, re-adding
-    /// the route keeps the priced table, and a row edited past the bound or
-    /// negative is damaged with the rate named.
+    /// the route keeps its priced table, and a row edited past the bound or
+    /// negative is damaged with the rate named (larry#204, part of #533).
     #[test]
     fn route_prices_round_trip_bump_and_refuse_damage() -> Result<(), Box<dyn std::error::Error>> {
         let (ledger, directory) = open()?;

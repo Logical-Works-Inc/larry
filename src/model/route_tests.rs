@@ -1,5 +1,7 @@
 //! Unit tests of the route field checks at their boundaries and of the resolver
-//! order. Split from `route.rs`, which keeps the mechanism: one file per job.
+//! order. Split from `route.rs`, which keeps the mechanism: verification beside
+//! the mechanism, one file per job, as the seeded simulations live in
+//! `sim_route.rs`.
 
 use super::{Draft, ENV_ROUTE, Kind, MAX_PRICE_MICRO, Route, RouteError, tenant_namespace};
 
@@ -160,7 +162,7 @@ fn every_other_field_has_its_boundary_and_its_own_refusal() -> Result<(), RouteE
 
 /// The price table: ten thousand dollars a million tokens is kept, one
 /// micro-dollar past it is refused naming the rate, and the revision rides
-/// along untouched by the field checks.
+/// along untouched by the field checks (larry#204, part of #533).
 #[test]
 fn a_price_past_the_bound_is_refused() -> Result<(), RouteError> {
     let priced = Route::new(&accepted())?.with_price(2, MAX_PRICE_MICRO, 0)?;
@@ -169,6 +171,12 @@ fn a_price_past_the_bound_is_refused() -> Result<(), RouteError> {
         priced.price_input(),
         MAX_PRICE_MICRO,
         "the bound itself is kept"
+    );
+    let both = Route::new(&accepted())?.with_price(2, MAX_PRICE_MICRO, MAX_PRICE_MICRO)?;
+    assert_eq!(
+        both.price_output(),
+        MAX_PRICE_MICRO,
+        "the bound itself is kept on the output too"
     );
     assert_eq!(
         Route::new(&accepted())?.with_price(2, MAX_PRICE_MICRO + 1, 0),

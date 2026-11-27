@@ -41,28 +41,6 @@ const OWNER_ONLY: u32 = 0o600;
 const REPORT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS reports(task_id TEXT PRIMARY KEY, \
     task_digest TEXT NOT NULL, report BLOB NOT NULL);";
 
-/// Schema of the route table, version 5 (larry#201): the routes a tenant owns, at
-/// most 256 each, with one default per tenant. A route holds the NAME of the
-/// variable its key is read from, never the key. `temperature` and `residency`
-/// are NULL when the route pins none.
-const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant TEXT NOT NULL, id TEXT NOT NULL, \
-    kind TEXT NOT NULL, base_url TEXT NOT NULL, key_env TEXT NOT NULL, model TEXT NOT NULL, \
-    temperature REAL, request_bytes INTEGER NOT NULL, residency TEXT, describe TEXT NOT NULL, \
-    is_default INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tenant, id));";
-
-/// Schema of the tenant residency policy, version 6 (larry#203): one canonical
-/// comma-separated ISO code list per tenant, kept beside that tenant's routes.
-const RESIDENCY_SCHEMA: &str =
-    "CREATE TABLE IF NOT EXISTS tenant_residency(tenant TEXT PRIMARY KEY, codes TEXT NOT NULL);";
-
-/// Schema of the route price table, version 7 (larry#204): the versioned
-/// price-table revision and the input and output rates in micro-dollars per
-/// million tokens. Existing rows keep revision 1 with no rates, which prices
-/// nothing until `larry route price` sets them.
-const PRICE_SCHEMA: &str = "ALTER TABLE routes ADD COLUMN price_version INTEGER NOT NULL DEFAULT 1; \
-    ALTER TABLE routes ADD COLUMN price_input INTEGER NOT NULL DEFAULT 0; \
-    ALTER TABLE routes ADD COLUMN price_output INTEGER NOT NULL DEFAULT 0;";
-
 /// The store's file names under the state directory, the database first.
 const STORE_FILES: [&str; 3] = ["executor.db", "executor.db-wal", "executor.db-shm"];
 
@@ -105,15 +83,16 @@ impl Ledger {
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
         lgwks_deps::sqlite::migrate(
             &conn,
-            7,
+            8,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
                 TENANT_KEY_SCHEMA,
                 REPORT_SCHEMA,
-                ROUTE_SCHEMA,
-                RESIDENCY_SCHEMA,
-                PRICE_SCHEMA,
+                routes::ROUTE_SCHEMA,
+                policy::POLICY_SCHEMA,
+                policy::REPO_ROOT_SCHEMA,
+                routes::PRICE_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;
@@ -416,6 +395,10 @@ impl Ledger {
 #[path = "ledger_routes.rs"]
 mod routes;
 
+/// The tenant policy and repository-root records, kept apart from process rows.
+#[path = "ledger_policy.rs"]
+mod policy;
+
 /// Seeded adversarial simulations of the report rows a keyed retry answers from
 /// (larry#182 defect 3).
 #[cfg(test)]
@@ -427,6 +410,7 @@ mod sim;
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    use larry_contracts::authority::Scope;
     use lgwks_deps::storefront::rusqlite;
     use lgwks_std::process::ProcessIdentity;
 
@@ -577,6 +561,42 @@ mod tests {
                 (String::from("bo"), digest('b'))
             ],
             "the refused tenant wrote no row and the rotation replaced the digest"
+        );
+        Ok(())
+    }
+
+    /// Policy and repository roots are durable tenant records. Authorization is
+    /// component-bounded, rejects the state directory, and refuses another root.
+    #[test]
+    fn sim_tenant_policy_and_repository_roots_survive_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = scratch_directory()?;
+        let root = scratch_directory()?;
+        let repository = root.join("repo");
+        std::fs::create_dir_all(&repository)?;
+        let policy = [Scope::FileRead, Scope::ProcessSpawn]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let ledger = Ledger::open(&state)?;
+        ledger.set_tenant_policy("tenant", &policy)?;
+        ledger.set_tenant_repo_root("tenant", &root)?;
+        assert_eq!(ledger.tenant_policy("tenant")?, policy);
+        assert!(
+            ledger
+                .authorized_repo("tenant", &state, &repository, false)
+                .is_ok()
+        );
+        assert!(matches!(
+            ledger.authorized_repo("tenant", &state, &state.join("ws"), false),
+            Err(crate::executor::ExecError::RepoPath { .. })
+        ));
+        drop(ledger);
+        let reopened = Ledger::open(&state)?;
+        assert_eq!(reopened.tenant_policy("tenant")?, policy);
+        assert!(
+            reopened
+                .authorized_repo("tenant", &state, &root, false)
+                .is_ok()
         );
         Ok(())
     }

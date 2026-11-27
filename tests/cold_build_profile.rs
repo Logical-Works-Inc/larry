@@ -16,7 +16,9 @@ fn section<'a>(manifest: &'a str, name: &str) -> Result<&'a str, Box<dyn Error>>
         .0)
 }
 
-/// The suite-safe main profile keeps workspace code at opt-level one and dependencies at two.
+/// The suite-safe main profile keeps workspace code at opt-level one and dependencies at two,
+/// and the dev section cites the decision that set it (ADR 0049, SD-7): PR #530 dropped that
+/// comment in a refactor and nothing noticed.
 #[test]
 fn dev_profile_optimizes_workspace_hot_path_only() -> TestResult {
     let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))?;
@@ -24,6 +26,11 @@ fn dev_profile_optimizes_workspace_hot_path_only() -> TestResult {
     assert!(
         dev.lines().any(|line| line.trim() == "opt-level = 1"),
         "the workspace profile must use opt-level 1: {dev}"
+    );
+    assert!(
+        dev.lines()
+            .any(|line| line.trim_start().starts_with('#') && line.contains("ADR 0049")),
+        "the workspace profile cites ADR 0049 beside its opt-level: {dev}"
     );
     let dependencies = section(&manifest, "[profile.dev.package.\"*\"]")?;
     assert!(

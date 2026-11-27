@@ -92,7 +92,7 @@ struct Subcommand {
 
 /// The variables a command reads that runs a task through the executor: the
 /// state directory, the policy, the command timeout and the model settings.
-const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
+const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_FENCE_CONTROL, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
 
 /// The variables `larry model` reads: one gateway, one key, the retry knobs, the
 /// tenant budgets and the price overrides a route without a table is priced from.
@@ -160,7 +160,7 @@ static COMMANDS: [Subcommand; 14] = [
     },
     Subcommand {
         name: "route",
-        summary: "add, price, set residency, list, remove, default or resolve model routes",
+        summary: "add, price, list, remove, default or resolve model routes",
         env: "LARRY_STATE_DIR, LARRY_KEY_*, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY",
         run: |rest| ran("", route_once(rest)),
     },
@@ -200,8 +200,8 @@ static COMMANDS: [Subcommand; 14] = [
     },
     Subcommand {
         name: "serve",
-        summary: "serve the HTTP edge; `serve key <tenant>` and `serve revoke <tenant>` manage its keys",
-        env: "LARRY_SERVE_ADDR, LARRY_SERVE_PLAINTEXT, LARRY_STATE_DIR",
+        summary: "serve the HTTP edge; manage keys and provision executor roots",
+        env: "LARRY_SERVE_ADDR, LARRY_SERVE_PLAINTEXT, LARRY_STATE_DIR, LARRY_POLICY",
         run: run_serve,
     },
 ];
@@ -427,6 +427,15 @@ fn serve_revoke_once(tenant: &str) -> Result<(), Failed<larry_demo::serve::Serve
         .map_err(|cause| Failed::Run(larry_demo::serve::ServeError::Announce(cause)))
 }
 
+/// `larry serve provision <root>`: persist the current operator policy and one
+/// repository root in the executor's tenant ledger for remote doors.
+fn serve_provision_once(root: &str) -> Result<(), ExecError> {
+    let read = process_env()?;
+    let policy = read("LARRY_POLICY").ok_or(ExecError::PolicyUnset)?;
+    larry_demo::executor::provision_tenant(read, &policy, &[std::path::Path::new(root)])?;
+    print_line(&format!("provisioned executor tenant root {root}"))
+}
+
 /// The exit status of a sealed verdict.
 fn verdict_status(accepted: bool) -> ExitCode {
     if accepted {
@@ -507,9 +516,14 @@ fn bare(rest: &[OsString]) -> Result<(), Refusal> {
     }
 }
 
-/// `larry serve`, `larry serve key <tenant>` and `larry serve revoke <tenant>`; any other
-/// shape is refused before anything binds or writes.
+/// `larry serve`, `larry serve key <tenant>`, `larry serve revoke <tenant>` and
+/// `larry serve provision <root>`; any other shape is refused before anything binds or writes.
 fn run_serve(rest: &[OsString]) -> Result<ExitCode, Refusal> {
+    if let [ref sub, ref root] = *rest
+        && sub == "provision"
+    {
+        return ran("", serve_provision_once(&root.to_string_lossy()));
+    }
     let outcome = match *rest {
         [] => serve_once(),
         [ref sub, ref tenant] if sub == "key" => serve_key_once(&tenant.to_string_lossy()),

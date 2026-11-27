@@ -77,20 +77,6 @@ pub enum RouteError {
         /// The host that would receive the request.
         host: String,
     },
-    /// The route is outside the tenant's stored residency policy.
-    ResidencyNotAllowed {
-        /// The route id.
-        route: String,
-        /// The provider's declared residency, or none.
-        residency: Option<String>,
-        /// The tenant's allowed country codes.
-        allowed: Vec<String>,
-    },
-    /// The tenant policy exceeds its country-code bound.
-    ResidencyPolicyTooLarge {
-        /// The maximum number of codes.
-        limit: usize,
-    },
     /// The model id is empty, over 256 bytes, or holds whitespace or a control byte.
     BadModel,
     /// The key variable name is not `[A-Z_][A-Z0-9_]{0,63}`.
@@ -157,17 +143,6 @@ impl fmt::Display for RouteError {
             Self::InsecureTransport { ref host } => {
                 write!(out, "route host {host} requires https unless it is loopback")
             }
-            Self::ResidencyNotAllowed {
-                ref route,
-                ref residency,
-                ref allowed,
-            } => write!(
-                out,
-                "route {route} residency {residency:?} is outside the tenant residency allowlist {allowed:?}"
-            ),
-            Self::ResidencyPolicyTooLarge { limit } => {
-                write!(out, "route residency allows at most {limit} country codes")
-            }
             Self::BadModel => out
                 .write_str("route model must be 1 to 256 bytes with no whitespace or control byte"),
             Self::BadKeyEnv => out.write_str(
@@ -223,8 +198,6 @@ impl std::error::Error for RouteError {
             | Self::ReservedId
             | Self::BadUrl
             | Self::InsecureTransport { .. }
-            | Self::ResidencyNotAllowed { .. }
-            | Self::ResidencyPolicyTooLarge { .. }
             | Self::BadModel
             | Self::BadKeyEnv
             | Self::KeyEnvOutsideNamespace
@@ -511,19 +484,6 @@ impl Route {
             RouteError::InsecureTransport {
                 host: self.host.clone(),
             }
-        })
-    }
-
-    /// The residency refusal for this route under `allowed`, when a policy exists.
-    pub(crate) fn residency_refusal(&self, allowed: &[String]) -> Option<RouteError> {
-        (!allowed.is_empty()
-            && !self
-                .residency()
-                .is_some_and(|value| allowed.iter().any(|allowed| allowed == value)))
-        .then(|| RouteError::ResidencyNotAllowed {
-            route: self.id.clone(),
-            residency: self.residency.clone(),
-            allowed: allowed.to_vec(),
         })
     }
 }

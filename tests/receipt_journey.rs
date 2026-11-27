@@ -262,7 +262,7 @@ fn a_denied_run_never_reports_success() -> TestResult {
     // A task asking for model commands is denied: nothing runs, the denial is sealed.
     let (state, origin) = fixture()?;
     let denied_task = format!(
-        r#"{{"repo":"{}","base":"HEAD","acceptance":[["true"]],"model_commands":[]}}"#,
+        r#"{{"repo":"{}","base":"HEAD","acceptance":[["true"]],"model_commands":true}}"#,
         origin.path().display()
     );
     let output = run_exec(state.path(), &denied_task, None)?;
@@ -332,6 +332,12 @@ fn a_receipt_from_another_state_dir_is_untrusted() -> TestResult {
     // Two tenants run at once on one origin; each trusts only its own receipts.
     let (first_state, origin) = fixture()?;
     let second_state = TempDir::new()?;
+    let second_state_text = second_state.path().to_string_lossy().into_owned();
+    larry_demo::executor::provision_tenant(
+        move |_| Some(second_state_text.clone()),
+        "file.read,file.write,process.spawn,model.invoke,model.command",
+        &[origin.path()],
+    )?;
     let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
     let first_child = spawn_exec(Some(first_state.path()), None, &task)?;
     let second_child = spawn_exec(Some(second_state.path()), None, &task)?;

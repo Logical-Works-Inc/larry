@@ -48,12 +48,12 @@ whether to retry.
 The unset backoff is zero, like the executor, which never waits for a retry:
 a wait it is asked for stops the retry at once, so the default asks for none.
 
-The route carries its price table: revision 1 with no rates at `add`,
-`larry route price --in <dollars> --out <dollars>` setting micro-dollar
-rates and bumping the revision in the same statement (migration 7), and
-re-adding a route keeping the table it found. A declared table prices the
-calls and the scorecard; a route with none keeps the environment prices, and
-the card prints the revision it used. No price is guessed for an unset budget.
+The route's price table rides with it (migration 8, ADR 0127): revision 1 with
+no rates at `add`, `larry route price` setting micro-dollar rates and bumping
+the revision, re-adding keeping the table. A declared table prices the calls;
+a route with none keeps the environment prices. No price is guessed for an
+unset budget, and this change adds no migration: the limiter is process-local
+and the budgets are environment.
 
 ## Rejected
 
@@ -66,12 +66,10 @@ sequence. An unset backoff that waits promises retries the executor refuses.
 ## Consequences
 
 Every model call is checked against its tenant-route budget before any
-gateway byte, and every route carries a price table the operator versions with
-`larry route price` (migration 7 adds the columns; existing rows keep revision
-1 with no rates). Unset budgets stay unlimited, and a route with no rates keeps
-the environment prices, so no existing arm changes price. The scorecard names
-the revision it priced from. The unset backoff is zero, like the executor that
-never waits.
+gateway byte. Unset budgets stay unlimited, and a route with no rates keeps
+the environment prices, so no existing arm changes price. The price columns
+ride migration 8 (ADR 0127); this change adds no store migration. The unset
+backoff is zero, like the executor that never waits.
 
 ## Proof
 
@@ -82,6 +80,4 @@ fits two completions in one dollar at a million micro-dollars per million
 tokens. `sim_a_non_zero_backoff_is_waited_then_cancelled` waits one 50 ms
 backoff, cancels, and serves once. `the_unset_backoff_matches_the_executor`
 pins the zero default. The limiter sims share one limiter between two
-tenants and refuse the 257th key on both paths. The route sims version and
-type every price refusal; the journeys price an arm from a priced route with
-no eval price settings and print the table's arithmetic.
+tenants and refuse the 257th key on both paths.
