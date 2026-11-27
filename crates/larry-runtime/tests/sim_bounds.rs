@@ -356,7 +356,7 @@ fn sim_bounds_oversized_entry_never_skipped() -> Outcome {
     replay(24_u64..28, |_| -> Sim<usize> {
         let mut journal = Journal::new(2)?;
         journal.accept_command(steer_command(1, steer_tenant(1), MAX_PAGE_BYTES)?)?;
-        let runtime = steer_runtime(Some(journal))?;
+        let mut runtime = steer_runtime(Some(journal))?;
         let mut consumer = runtime.subscribe(steer_tenant(1), None, ConsumerLimits::default())?;
         let before: ConsumerCursor = consumer.cursor();
         assert!(

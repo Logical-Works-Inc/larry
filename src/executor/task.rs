@@ -8,8 +8,14 @@ use lgwks_macros::Error;
 
 mod check;
 mod confine;
+mod limits;
+mod planned;
 
+pub(crate) use self::planned::Knobs;
+
+pub(super) use self::check::is_shell;
 use self::check::{check_acceptance, check_repo_and_base, owned_argvs};
+use super::MAX_TIMEOUT_MS;
 use super::author::Brief;
 use crate::model::is_route_id;
 
@@ -35,7 +41,7 @@ const MAX_REPO_BYTES: usize = 4096;
 const MAX_KEY_BYTES: usize = 256;
 
 /// Every key a task document may carry.
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 10] = [
     "repo",
     "base",
     "acceptance",
@@ -44,6 +50,8 @@ const KEYS: [&str; 8] = [
     "files",
     "idempotency_key",
     "route",
+    "shell",
+    "timeout_ms",
 ];
 
 /// One parsed `larry exec` task document.
@@ -68,6 +76,11 @@ pub struct Task {
     route: Option<String>,
     /// Acceptance commands run confined even without a brief (larry#324).
     confine_acceptance: bool,
+    /// The shell each command runs under as `<shell> -c <argv...>`, when the document names
+    /// one; otherwise each argv runs as it is (larry#439).
+    shell: Option<String>,
+    /// The longest one command may run, in milliseconds, when the document names it.
+    timeout_ms: Option<u64>,
     /// The document bytes it was parsed from, kept to name the run.
     bytes: Vec<u8>,
 }
@@ -187,52 +200,10 @@ impl Task {
             idempotency_key,
             route,
             confine_acceptance: false,
+            shell: limits::shell_of(object)?,
+            timeout_ms: limits::millis_of(object, "timeout_ms")?,
             bytes: bytes.to_vec(),
         })
-    }
-
-    /// The task a planner hands over (`larry mcp`, `larry eval`): `repo` at `HEAD`,
-    /// the brief, and each acceptance command run as `sh -c <command>`. It renders
-    /// the one task document and parses it, so every door shares one parser and
-    /// one digest names the run (ADR 0008).
-    pub(crate) fn shell(
-        repo: &str,
-        goal: &str,
-        files: &[&str],
-        acceptance: &[&str],
-    ) -> Result<Task, TaskError> {
-        Task::shell_via(repo, goal, files, acceptance, None)
-    }
-
-    /// [`Task::shell`] over the route `route` names, when it names one: the planner
-    /// picks the route by id, and the document carries it under the run's digest.
-    pub(crate) fn shell_via(
-        repo: &str,
-        goal: &str,
-        files: &[&str],
-        acceptance: &[&str],
-        route: Option<&str>,
-    ) -> Result<Task, TaskError> {
-        let commands: Vec<lgwks_std::json::Value> = acceptance
-            .iter()
-            .map(|command| lgwks_std::json::json!(["sh", "-c", command]))
-            .collect();
-        let mut document = lgwks_std::json::json!({
-            "repo": repo,
-            "base": "HEAD",
-            "goal": goal,
-            "files": files,
-            "acceptance": commands,
-        });
-        if let Some(named) = route
-            && let Some(object) = document.as_object_mut()
-        {
-            object.insert(
-                String::from("route"),
-                lgwks_std::json::Value::String(named.to_owned().into()),
-            );
-        }
-        Task::parse(document.to_string().as_bytes())
     }
 }
 
@@ -375,6 +346,15 @@ pub enum TaskError {
     /// The route was not 1 to 64 bytes of `a-z`, `0-9`, `_` and `-`.
     #[error("task document route is not a route id: 1 to 64 bytes of a-z, 0-9, _ and -")]
     BadRoute,
+    /// The shell was empty, over 256 bytes, option-like, or held whitespace or a control byte.
+    #[error("task document shell is not a program: 1 to 256 bytes, no whitespace, no leading -")]
+    BadShell,
+    /// A timeout or deadline was not a whole number of milliseconds in 1..=86400000.
+    #[error("task document {key} is not milliseconds in 1..={}", MAX_TIMEOUT_MS)]
+    BadMillis {
+        /// The key: `timeout_ms` or `deadline_ms`.
+        key: &'static str,
+    },
 }
 
 #[cfg(test)]
