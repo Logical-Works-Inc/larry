@@ -427,7 +427,7 @@ fn a_keyed_retry_after_a_recovery_fault_runs_nothing_and_keeps_the_journal() -> 
     let damaged_state = TempDir::new()?;
     let damaged_state_text = damaged_state.path().to_string_lossy().into_owned();
     larry_demo::executor::provision_tenant(
-        move |_| Some(damaged_state_text.clone()),
+        move |name| (name == "LARRY_STATE_DIR").then(|| damaged_state_text.clone()),
         "file.read,file.write,process.spawn,model.invoke,model.command",
         &[origin.path()],
     )?;

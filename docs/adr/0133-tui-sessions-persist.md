@@ -23,7 +23,7 @@ SQLite store (`executor.db`), so session rows belong there, never in stray files
 
 A `tui_sessions` table holds one row per terminal session: id, name, folder,
 model, update stamp and the snapshot JSON (transcript, pane and every receipt
-digest seen). Migration steps 9 and 10 add the table and its folder index; the
+digest seen). Migration steps 11 and 12 add the table and its folder index; the
 folder index makes one folder's listing a scan of its own rows. A create past
 10,000 rows writes no row in one statement, and a duplicate id keeps the first
 record, so two creators racing at the bound never both land (larry#397's shape).

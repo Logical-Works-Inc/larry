@@ -16,6 +16,7 @@ mod ask;
 mod buffer;
 mod cells;
 mod composer;
+mod jobs;
 mod layout;
 mod paint;
 mod pane;

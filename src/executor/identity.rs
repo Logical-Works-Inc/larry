@@ -50,22 +50,49 @@ fn identity16(parts: &[&[u8]]) -> [u8; 16] {
     }
 }
 
-/// The tenant one state directory is: its canonical bytes hashed under
-/// [`TENANT_TAG`], so two directories never derive one tenant and no caller
-/// supplies its own.
-pub(super) fn tenant_of(state: &Path) -> TenantId {
+/// The longest tenant name `LARRY_TENANT` may carry: the edge's own bound, so an
+/// executor tenant and a serve tenant never disagree about a name (larry#211).
+const MAX_TENANT_NAME: usize = 64;
+
+/// The tenant a name selects: validated like the edge validates it, then derived
+/// from the name alone, so a named tenant never depends on a path and survives
+/// every move of the state directory (larry#211).
+///
+/// # Errors
+///
+/// [`ExecError::BadTenant`] when the name is empty, too long or carries a byte
+/// outside ascii letters, digits, `_` and `-`.
+pub(super) fn named_tenant(name: &str) -> Result<TenantId, ExecError> {
+    let valid = (1..=MAX_TENANT_NAME).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    if !valid {
+        return Err(ExecError::BadTenant {
+            value: name.to_owned(),
+        });
+    }
+    Ok(TenantId::from_bytes(identity16(&[
+        TENANT_TAG,
+        name.as_bytes(),
+    ])))
+}
+
+/// The tenant rows an old binary filed under its path-derived tenant: the
+/// legacy spelling's hash, used only to locate those rows for the one-time
+/// rename onto the stored tenant. Never an identity (larry#211).
+pub(super) fn legacy_tenant_of(state: &Path) -> TenantId {
     TenantId::from_bytes(identity16(&[
         TENANT_TAG,
         state.as_os_str().as_encoded_bytes(),
     ]))
 }
 
-/// The worker id one state directory's runs are held by.
-pub(super) fn worker_of(state: &Path) -> WorkerId {
-    WorkerId::from_bytes(identity16(&[
-        WORKER_TAG,
-        state.as_os_str().as_encoded_bytes(),
-    ]))
+/// The worker id the runs of one tenant are held by: derived from the stored
+/// tenant, so one directory holds one worker whatever the spelling, and two
+/// hosts never share one by spelling alone (larry#211).
+pub(super) fn worker_of(tenant: &TenantId) -> WorkerId {
+    WorkerId::from_bytes(identity16(&[WORKER_TAG, tenant.as_bytes()]))
 }
 
 /// The run, operation and command ids one task id names.
@@ -93,23 +120,22 @@ pub(super) fn fresh_id() -> Result<String, ExecError> {
         .map_err(ExecError::Id)
 }
 
-/// The run id of one task under one state directory.
+/// The run id of one task under one tenant.
 ///
 /// A task that names no idempotency key is a fresh identifier, so two deliberate
 /// runs of one task are two runs. A task that names one is derived from the task
-/// digest, that key and the state directory's tenant, so a client retry of the
-/// same document maps to the same run id and the runtime reports it as a
-/// duplicate instead of running the task again (larry#182 defect 3).
+/// digest, that key and the tenant, so a client retry of the same document maps
+/// to the same run id and the runtime reports it as a duplicate instead of
+/// running the task again (larry#182 defect 3).
 ///
 /// # Errors
 ///
 /// [`ExecError::Id`] when the OS entropy or the clock refuses a fresh identifier.
-pub(super) fn run_id(task: &Task, state: &Path) -> Result<String, ExecError> {
+pub(super) fn run_id(task: &Task, tenant: &TenantId) -> Result<String, ExecError> {
     let Some(key) = task.idempotency_key() else {
         return fresh_id();
     };
     let digest = digest_hex(task.bytes());
-    let tenant = tenant_of(state);
     Ok(lgwks_std::id::Uuid::from(identity16(&[
         KEY_TAG,
         tenant.as_bytes(),
@@ -130,7 +156,7 @@ mod sim;
 mod tests {
     use lgwks_std::id::Uuid;
 
-    use super::{KEY_TAG, fresh_id, identity16, run_id};
+    use super::{KEY_TAG, fresh_id, identity16, named_tenant, run_id};
 
     /// A task document over `repo` whose acceptance is `acceptance`, under `key`
     /// when it is given.
@@ -189,23 +215,23 @@ mod tests {
             "no two of 256 fresh run ids repeat"
         );
 
-        // One keyed document under one key in one state directory is one run id,
+        // One keyed document under one key in one tenant is one run id,
         // whatever the process that asks.
-        let state = std::env::temp_dir();
+        let tenant = named_tenant("state-a")?;
         let task = document("/tmp/a", Some("retry-a"), "[[\"true\"]]")?;
-        let first = run_id(&task, &state)?;
+        let first = run_id(&task, &tenant)?;
         assert_eq!(
             first,
-            run_id(&task, &state)?,
+            run_id(&task, &tenant)?,
             "one keyed request maps to one run id"
         );
 
-        // Another state directory is another tenant, so it never mints that id.
-        let other = std::path::Path::new("/tmp/other-state");
+        // Another tenant never mints that id.
+        let other = named_tenant("other-state")?;
         assert_ne!(
             first,
-            run_id(&task, other)?,
-            "two state directories never share a keyed run id"
+            run_id(&task, &other)?,
+            "two tenants never share a keyed run id"
         );
 
         // A different key, and the same key over different content, are
@@ -213,22 +239,41 @@ mod tests {
         let rekeyed = document("/tmp/a", Some("retry-b"), "[[\"true\"]]")?;
         assert_ne!(
             first,
-            run_id(&rekeyed, &state)?,
+            run_id(&rekeyed, &tenant)?,
             "a different key is a different request"
         );
         let recontented = document("/tmp/b", Some("retry-a"), "[[\"true\"]]")?;
         assert_ne!(
             first,
-            run_id(&recontented, &state)?,
+            run_id(&recontented, &tenant)?,
             "one key over different content is a different request"
         );
 
         // A document with no key is a fresh run every time.
         let unkeyed = document("/tmp/a", None, "[[\"true\"]]")?;
         assert_ne!(
-            run_id(&unkeyed, &state)?,
-            run_id(&unkeyed, &state)?,
+            run_id(&unkeyed, &tenant)?,
+            run_id(&unkeyed, &tenant)?,
             "two unkeyed submissions are two runs"
+        );
+        Ok(())
+    }
+
+    /// A tenant name follows the edge's rule at both bounds, and two names never
+    /// share a tenant (larry#211).
+    #[test]
+    fn a_tenant_name_follows_the_edge_rule() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(named_tenant("alpha-1_B").is_ok(), "dashes and bars pass");
+        for name in ["", "a".repeat(65).as_str(), "a.b", "a b", "ü"] {
+            assert!(
+                named_tenant(name).is_err(),
+                "{name:?} is refused before anything is derived"
+            );
+        }
+        assert_ne!(
+            named_tenant("alpha")?,
+            named_tenant("beta")?,
+            "two names never share a tenant"
         );
         Ok(())
     }

@@ -249,7 +249,7 @@ pub(in crate::executor) fn origin(
     shape: Shape,
 ) -> Result<Origin, SimError> {
     super::Ledger::open(settings.state_dir())?
-        .set_tenant_repo_root(&super::tenant_key(settings.state_dir()), root)?;
+        .set_tenant_repo_root(settings.tenant_text(), root)?;
     let mut rng = Seeded::from_seed(seed.wrapping_add(7 << 32));
     let dir = match shape {
         Shape::Subfolder => root.join("sub"),
