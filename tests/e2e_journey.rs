@@ -22,6 +22,8 @@ mod pane;
 mod ps;
 #[path = "support/pty.rs"]
 mod pty;
+#[path = "e2e_journey/read.rs"]
+mod read;
 #[path = "e2e_journey/sessions.rs"]
 mod sessions;
 #[path = "support/terminal_cases.rs"]
