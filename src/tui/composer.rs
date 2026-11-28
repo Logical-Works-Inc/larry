@@ -15,10 +15,14 @@ pub(crate) const HISTORY: usize = 64;
 pub(crate) const MAX_ROWS: usize = 6;
 
 /// One slash command: its name and what it does.
-pub(crate) const COMMANDS: [(&str, &str); 6] = [
+pub(crate) const COMMANDS: [(&str, &str); 10] = [
     ("/help", "keys and commands"),
     ("/status", "model, policy and folder"),
     ("/clear", "clear the chat"),
+    ("/resume", "list sessions, /resume 1 continues one"),
+    ("/new", "start a fresh session"),
+    ("/fork", "copy a session into a new one"),
+    ("/rename", "name this session"),
     ("/ps", "list background commands"),
     ("/stop", "end background commands"),
     ("/quit", "leave Larry"),

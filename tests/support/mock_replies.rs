@@ -96,6 +96,19 @@ pub(crate) fn without_usage(good: &[u8]) -> Result<Vec<u8>, Failure> {
     Ok(json::to_vec(&reply)?)
 }
 
+/// `good` (a chat reply) whose `usage` also says `cached` prompt tokens were read from the
+/// cache and `written` written to it (larry#230), the OpenAI `prompt_tokens_details` shape.
+pub(crate) fn with_cache_usage(good: &[u8], cached: u64, written: u64) -> Result<Vec<u8>, Failure> {
+    let mut reply = json::from_slice::<Value>(good)?;
+    if let Some(&mut Value::Object(ref mut usage)) = reply.get_mut("usage") {
+        usage.insert(
+            String::from("prompt_tokens_details"),
+            json!({"cached_tokens": cached, "cache_write_tokens": written}),
+        );
+    }
+    Ok(json::to_vec(&reply)?)
+}
+
 /// `good` (a reply for `path`) with the finish marker or the content set to
 /// `value`: the chat shape's first choice, the Messages shape's `stop_reason`
 /// or first text block, the Responses shape's `status` or first output text.

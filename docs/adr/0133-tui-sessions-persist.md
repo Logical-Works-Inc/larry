@@ -46,9 +46,36 @@ every tenant (a resume would list another tenant's transcripts, and one tenant
 could fill the cap). Reversed if a save is measured to push the probe journey's
 input round trip past one frame.
 
+## Reading a row back (larry#603)
+
+`/resume` lists this tenant's sessions of this folder, newest first, without the
+one the terminal holds: the newest 20 by number, the rest counted. `/resume <t>`
+continues one, where `t` is a listed number, an exact name or the start of an id;
+two matches are refused. `/new` starts an empty session, `/fork [t]` copies this
+frame or a stored one into a new row, `/rename <name>` names this one. A switch
+brings back the transcript, pane and receipt digests and nothing else: no running
+command, no `/ps` row, no queued turn and no "stop asking". While a task runs the
+commands wait in the composer and never reach the model.
+
+One row has one writer. A save and a rename name the stamp the terminal last
+wrote, and the new stamp is the clock's or one past the old one. A terminal whose
+row another one resumed is told once, writes nothing more and keeps its frame for
+`/fork`. This is the version check against a lost update (RFC 9110 section
+13.1.1); no migration is added.
+
+Rejected: a lock or owner column (a killed terminal leaves it held), last write
+wins (one terminal erases the other's turns in silence), and the first attempt's
+driver (PR #567: no tenant key, a named fork wrote the frame on screen over the
+copy, and a running task could swap its transcript). Reversed if two terminals on
+one row must merge.
+
 ## Consequences
 
-A kill -9 loses at most the turn in flight. Reading a row back in the terminal
-(`/resume` and the other session commands) lands with the next parts of larry#256.
-Proof: `tui_journey_a_killed_terminal_keeps_its_session_row` and
-`src/tui/sim_sessions.rs`.
+A kill -9 loses at most the turn in flight, and a fresh terminal continues the
+session. A listing reads the tenant's rows, at most 10,000. `/export` and
+`/recap` are still open in larry#256.
+Proof: `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
+`tui_journey_a_full_session_store_lists_and_reports_latency_and_rss` (shipped
+debug binary, 10,000 rows, 20 samples on the Oracle ARM64 box: p50 44.6 ms, p99
+49.7 ms, RSS 14,544 KiB), `tui_journey_a_killed_terminal_keeps_its_session_row`,
+`src/tui/sim_resume.rs` and `src/tui/sim_sessions.rs`.
