@@ -7,10 +7,12 @@
 use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::{BudgetUnit, Scope};
+use larry_contracts::binding::BindingError;
 use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
 use lgwks_bot::kernel::broker::Authority;
+use lgwks_bot::kernel::cap::Cap;
 
 use super::{
     Ack, Outcome, Rt, START_SECS, clock, command, ids, memory, seeded_submit, settings, work_body,
@@ -516,6 +518,51 @@ fn sim_a_count_refused_after_the_reach_is_unspent_and_never_fenced() -> Outcome 
         assert_eq!(*cause, refusal, "seed {seed}: the fence's own cause");
         assert!(report.fenced().is_empty(), "seed {seed}: never fenced");
         assert_eq!(runtime.fence.offline_spent()?, spent, "seed {seed}");
+    }
+    Ok(())
+}
+
+// Source: CWE-285 (an effect that needs more than the proof covers), E65 and larry#197 ("a typed
+// owner refusal ... spends none"). The owner refuses the handoff before any effect, so the live
+// witness is what it was before the call: the same attempt count and the same dispatched key. No
+// offline unit is counted and the refusal is the caller's typed error, never a fenced reach.
+#[test]
+fn sim_an_owner_refusal_at_the_handoff_restores_the_witness_and_counts_nothing() -> Outcome {
+    for seed in 0..32_u64 {
+        let (mut runtime, intent, warrant) = minted_after_one_send(seed)?;
+        let spent = runtime.fence.offline_spent()?;
+        let live = runtime.live.get(&intent.operation).ok_or("live")?;
+        let before = (live.dispatches, live.dispatched, live.sent);
+        let (auth, mut required) = live
+            .proof
+            .checked_auth()
+            .map_err(|reason| format!("seed {seed}: the lease holds: {reason:?}"))?;
+        required.push(Cap::new(format!("larry.missing.{seed}")));
+        let mut report = TickReport::default();
+        let key = effect_key(&intent, 2)?;
+        let at = epoch_plus(0)?;
+        let refused = runtime.hand_off(intent, key, &warrant, (auth, required), at, &mut report);
+        assert!(
+            matches!(
+                refused,
+                Err(RuntimeError::Binding(BindingError::NoCoveringGrant))
+            ),
+            "seed {seed}: the owner's typed refusal: {refused:?}"
+        );
+        let live = runtime.live.get(&intent.operation).ok_or("live")?;
+        assert_eq!(
+            (live.dispatches, live.dispatched, live.sent),
+            before,
+            "seed {seed}: the witness is restored"
+        );
+        assert_eq!(
+            runtime.owner().dispatched(),
+            [intent.operation],
+            "seed {seed}: only the first send reached the owner"
+        );
+        assert_eq!(runtime.fence.offline_spent()?, spent, "seed {seed}");
+        assert!(report.fenced().is_empty(), "seed {seed}: never fenced");
+        assert!(report.refused().is_empty(), "seed {seed}: never unspent");
     }
     Ok(())
 }
