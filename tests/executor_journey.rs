@@ -32,6 +32,8 @@ mod held_group;
 mod http_wire;
 #[path = "support/mock_model.rs"]
 mod mock_model;
+#[path = "support/executor_residency_journey.rs"]
+mod residency;
 #[path = "support/tree_digest.rs"]
 mod tree_digest;
 use std::error::Error;
