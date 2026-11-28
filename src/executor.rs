@@ -27,6 +27,8 @@ mod sim_destination;
 #[cfg(test)]
 mod sim_env;
 #[cfg(test)]
+mod sim_gateway;
+#[cfg(test)]
 pub(crate) mod sim_tree;
 mod task;
 mod workspace;

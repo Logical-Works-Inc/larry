@@ -470,3 +470,7 @@ mod issue207_tests {
 #[cfg(test)]
 #[path = "sim_session.rs"]
 pub(super) mod sim;
+
+#[cfg(test)]
+#[path = "sim_run_session.rs"]
+mod sim_run;
