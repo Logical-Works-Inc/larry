@@ -6,7 +6,6 @@
 //! check that another writer can pass between) and Codelia's three-level edit
 //! match with a content-hash precondition.
 
-use std::io::Write as _;
 use std::path::Path;
 
 use lgwks_std::seeded::Seeded;
@@ -15,7 +14,7 @@ use super::{
     Edit, EditError, EditReceipt, Window, apply_edit, apply_edit_with, digest_of, read_file,
     read_file_with,
 };
-use crate::executor::sim_tree::{Scratch, scratch};
+use crate::executor::sim_tree::{Growth, Scratch, scratch};
 use crate::sim_error::SimError;
 
 /// What every simulation returns.
@@ -148,27 +147,18 @@ fn sim_a_link_in_the_tree_is_refused() -> TestResult {
 fn sim_a_file_grown_after_the_stat_is_refused_too_large() -> TestResult {
     let root = scratch("sim-read-grown")?;
     for seed in 0..64 {
-        let mut rng = Seeded::from_seed(seed);
-        let start = rng.index(1024)?;
-        let past = seed % 2 == 0;
-        let end = if past {
-            262_145_usize.saturating_add(rng.index(4096)?)
-        } else {
-            262_144_usize.saturating_sub(rng.index(4096)?)
-        };
+        let growth = Growth::seeded(seed)?;
         let name = format!("grown-{seed}.txt");
         let target = root.join(&name);
-        std::fs::write(&target, "k".repeat(start))?;
-        let grown = read_file_with(&root, &name, &mut |_| {
-            let mut file = std::fs::OpenOptions::new().append(true).open(&target)?;
-            file.write_all("k".repeat(end.saturating_sub(start)).as_bytes())
-        });
-        match grown {
-            Err(EditError::TooLarge { len: 262_145, .. }) if past => {}
-            Ok(view) if !past => assert_eq!(view.text.len(), end, "seed {seed}: the grown file"),
+        growth.plant(&target)?;
+        match read_file_with(&root, &name, &mut |_| growth.grow(&target)) {
+            Err(EditError::TooLarge { len: 262_145, .. }) if growth.past => {}
+            Ok(view) if !growth.past => {
+                assert_eq!(view.text.len(), growth.end, "seed {seed}: the grown file");
+            }
             other => {
                 let kept = other.map(|view| view.text.len());
-                return Err(format!("seed {seed}: grown to {end} gave {kept:?}").into());
+                return Err(format!("seed {seed}: grown to {} gave {kept:?}", growth.end).into());
             }
         }
     }
