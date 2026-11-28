@@ -199,10 +199,9 @@ pub(crate) fn append(
 /// One seeded element of `items`.
 pub(crate) fn pick<'item, T>(rng: &mut Seeded, items: &'item [T]) -> Result<&'item T, SimError> {
     let index = rng.index(items.len())?;
-    match items.get(index) {
-        Some(item) => Ok(item),
-        None => Err(SimError::Absent(String::from("an item to pick"))),
-    }
+    items
+        .get(index)
+        .ok_or_else(|| SimError::Absent(String::from("an item to pick")))
 }
 
 /// Every document name of the real tree under `docs/`.
@@ -291,8 +290,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        Scratch, SimError, SimResult, count_of, docs_tree, each_seed, loaded, names_of, pick,
-        replace_all, replace_once, text_of, top_level, whole_of,
+        DrawError, Scratch, SimError, SimResult, count_of, docs_tree, each_seed, loaded, names_of,
+        pick, replace_all, replace_once, text_of, top_level, whole_of,
     };
 
     /// A leftover a dead process with this process id left at a fixture's old name is present, a
@@ -339,7 +338,11 @@ mod tests {
         }
         let mut rng = Seeded::from_seed(1);
         let empty: &[String] = &[];
-        absent(pick(&mut rng, empty).map(drop))?;
+        let drawn = pick(&mut rng, empty);
+        assert!(
+            matches!(drawn, Err(SimError::Draw(DrawError::EmptyRange))),
+            "{drawn:?}"
+        );
         assert!(names_of(&base).contains(&String::from("README.md")));
         assert!(
             docs_tree(&base)

@@ -26,7 +26,7 @@ fn sim_a_lookalike_heading_never_bounds_the_execution_section() {
     let found = |text| find_heading(text, "## Cell 11", 0);
     assert_eq!(found("## Cell 11\n"), Some(0));
     assert_eq!(found("## Cell 11"), Some(0));
-    assert_eq!(found("## Cell 110\n## Cell 11.\n"), Some(13));
+    assert_eq!(found("## Cell 110\n## Cell 11.\n"), Some(12));
     assert_eq!(found("## Cell 11x\n"), None);
     assert_eq!(found("## Cell 11_\n"), None);
     assert_eq!(found("## Cell 11é\n"), None);
