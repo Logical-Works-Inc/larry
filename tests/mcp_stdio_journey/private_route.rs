@@ -48,6 +48,7 @@ fn a_route_to_the_metadata_address_is_refused() -> TestResult<()> {
     for url in [
         format!("https://localhost:{port}/v1"),
         String::from("https://169.254.169.254/v1"),
+        String::from("https://vault.internal/v1"),
     ] {
         let (state, origin) = crate::origin::fixture()?;
         let variable = add_default_route(state.path(), &url)?;
