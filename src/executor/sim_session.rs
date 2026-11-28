@@ -57,7 +57,7 @@ fn quoted(value: &str) -> Result<String, SimError> {
 /// One generated reply and what the rule says of it.
 fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
     let mut rng = Seeded::from_seed(seed);
-    let kind = rng.below(11)?;
+    let kind = rng.below(12)?;
     let len = usize::try_from(rng.below(40)?.saturating_add(1))?;
     let body = format!("x{}", text(&mut rng, len)?);
     let pad = if rng.below(2)? == 0 { "" } else { "  \n" };
@@ -101,6 +101,10 @@ fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
         9 => (
             format!("{{\"command\":{}}}", quoted(&format!("{body}\0"))?),
             Err(ReplyFault::Nul),
+        ),
+        10 => (
+            format!("{{\"read\":{}}}", quoted(&body)?),
+            Ok(Reply::Read { path: body }),
         ),
         _ => (
             format!("{{\"command\":{}}}", quoted(&" ".repeat(len))?),

@@ -16,6 +16,11 @@ pub(crate) enum Reply {
     Command(String),
     /// The task is done; the summary for the person.
     Done(String),
+    /// Show one file of the working directory with its digest.
+    Read {
+        /// The repo-relative path to read.
+        path: String,
+    },
 }
 
 /// Why a reply was refused; the model is told and may try again.
@@ -27,15 +32,16 @@ pub(crate) enum ReplyFault {
     NotJson(String),
     /// The reply is JSON but not an object.
     NotAnObject,
-    /// The object does not hold exactly one key, `command` or `done`.
+    /// The object does not hold exactly one key, `command`, `done` or `read`.
     Keys,
     /// The key's value is not a string.
     NotAString,
     /// The command is empty or blank.
     EmptyCommand,
-    /// The command or summary is over 4 KiB.
+    /// The command, summary or path is over 4 KiB.
     FieldTooLong,
-    /// The command holds a NUL byte, which no shell argument can carry.
+    /// The command or path holds a NUL byte, which no shell argument and no
+    /// file name can carry.
     Nul,
 }
 
@@ -45,15 +51,17 @@ impl fmt::Display for ReplyFault {
             Self::TooLong => write!(out, "the reply is over {} bytes", super::MAX_REPLY_BYTES),
             Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
             Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => out.write_str("the object must hold exactly one key, command or done"),
+            Self::Keys => {
+                out.write_str("the object must hold exactly one key, command, done or read")
+            }
             Self::NotAString => out.write_str("the value must be a string"),
             Self::EmptyCommand => out.write_str("the command is empty"),
             Self::FieldTooLong => write!(
                 out,
-                "the command or summary is over {} bytes",
+                "the command, summary or path is over {} bytes",
                 super::MAX_COMMAND_BYTES
             ),
-            Self::Nul => out.write_str("the command holds a NUL byte"),
+            Self::Nul => out.write_str("the command or path holds a NUL byte"),
         }
     }
 }
@@ -77,9 +85,12 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
     let name: &str = key;
     match name {
         "command" if text.trim().is_empty() => Err(ReplyFault::EmptyCommand),
-        "command" if text.contains('\0') => Err(ReplyFault::Nul),
+        "command" | "read" if text.contains('\0') => Err(ReplyFault::Nul),
         "command" => Ok(Reply::Command(text.to_owned())),
         "done" => Ok(Reply::Done(text.to_owned())),
+        "read" => Ok(Reply::Read {
+            path: text.to_owned(),
+        }),
         _ => Err(ReplyFault::Keys),
     }
 }
@@ -104,6 +115,28 @@ mod tests {
             parse_reply(&format!("{{\"command\":{past:?}}}")),
             Err(ReplyFault::FieldTooLong),
             "one byte past the bound is refused"
+        );
+    }
+
+    /// A `read` reply carries its path; a mistyped one or a NUL is refused.
+    #[test]
+    fn a_read_reply_parses_and_a_mistyped_one_is_refused() {
+        assert_eq!(
+            parse_reply("{\"read\":\"src/lib.rs\"}"),
+            Ok(Reply::Read {
+                path: String::from("src/lib.rs"),
+            }),
+            "a read reply parses"
+        );
+        assert_eq!(
+            parse_reply("{\"read\":7}"),
+            Err(ReplyFault::NotAString),
+            "a mistyped path is refused"
+        );
+        assert_eq!(
+            parse_reply("{\"read\":\"a\\u0000b\"}"),
+            Err(ReplyFault::Nul),
+            "a path holding a NUL is refused"
         );
     }
 
