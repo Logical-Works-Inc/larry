@@ -9,6 +9,7 @@ use lgwks_std::json::{self, Value};
 
 use super::super::author::unfenced;
 use super::super::edit::Edit;
+use super::super::patch::Patch;
 
 /// One reply, parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub(crate) enum Reply {
     },
     /// Apply one anchored edit to a file of the working directory.
     Edit(Edit),
+    /// Apply a patch to files of the working directory, all or none.
+    Patch(Patch),
 }
 
 /// Why a reply was refused; the model is told and may try again.
@@ -35,20 +38,22 @@ pub(crate) enum ReplyFault {
     NotJson(String),
     /// The reply is JSON but not an object.
     NotAnObject,
-    /// The object does not hold exactly one key, `command`, `done`, `read` or
-    /// `edit`.
+    /// The object does not hold exactly one key, `command`, `done`, `read`,
+    /// `edit` or `patch`.
     Keys,
-    /// The key's value, or an edit's member, is not a string.
+    /// The key's value, or an edit's or a patch's member, is not a string.
     NotAString,
     /// The command is empty or blank.
     EmptyCommand,
     /// The command, summary, path or edit text is over 4 KiB.
     FieldTooLong,
-    /// The command, path or edit text holds a NUL byte, which no shell argument,
-    /// file name or text file can carry.
+    /// The command, path, edit or patch text holds a NUL byte, which no shell
+    /// argument, file name or text file can carry.
     Nul,
     /// The edit is not an object of `path`, `old`, `new` and `expect_digest`.
     EditShape,
+    /// The patch is not an object of `text` and the `expect_digests` object.
+    PatchShape,
 }
 
 impl fmt::Display for ReplyFault {
@@ -57,9 +62,9 @@ impl fmt::Display for ReplyFault {
             Self::TooLong => write!(out, "the reply is over {} bytes", super::MAX_REPLY_BYTES),
             Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
             Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => {
-                out.write_str("the object must hold exactly one key, command, done, read or edit")
-            }
+            Self::Keys => out.write_str(
+                "the object must hold exactly one key, command, done, read, edit or patch",
+            ),
             Self::NotAString => out.write_str("the value must be a string"),
             Self::EmptyCommand => out.write_str("the command is empty"),
             Self::FieldTooLong => write!(
@@ -67,9 +72,12 @@ impl fmt::Display for ReplyFault {
                 "the command, summary, path or edit text is over {} bytes",
                 super::MAX_COMMAND_BYTES
             ),
-            Self::Nul => out.write_str("the command, path or edit text holds a NUL byte"),
+            Self::Nul => out.write_str("the command, path, edit or patch text holds a NUL byte"),
             Self::EditShape => {
                 out.write_str("the edit must hold exactly path, old, new and expect_digest")
+            }
+            Self::PatchShape => {
+                out.write_str("the patch must hold exactly text and the expect_digests object")
             }
         }
     }
@@ -106,6 +114,36 @@ fn parse_edit(field: &Value) -> Result<Reply, ReplyFault> {
     }))
 }
 
+/// Parses a `patch` value: `text`, NUL-free and bounded by the reply alone, and
+/// `expect_digests`, each changed file's path with its digest.
+fn parse_patch(field: &Value) -> Result<Reply, ReplyFault> {
+    let object = field
+        .as_object()
+        .filter(|object| object.len() == 2)
+        .ok_or(ReplyFault::PatchShape)?;
+    let text = object.get("text").ok_or(ReplyFault::PatchShape)?;
+    let text = text.as_str().ok_or(ReplyFault::NotAString)?;
+    if text.contains('\0') {
+        return Err(ReplyFault::Nul);
+    }
+    let named = object
+        .get("expect_digests")
+        .and_then(Value::as_object)
+        .ok_or(ReplyFault::PatchShape)?;
+    let expect_digests = named
+        .iter()
+        .map(|(path, digest)| {
+            let path: &str = path;
+            let digest = digest.as_str().ok_or(ReplyFault::NotAString)?;
+            Ok((path.to_owned(), digest.to_owned()))
+        })
+        .collect::<Result<_, ReplyFault>>()?;
+    Ok(Reply::Patch(Patch {
+        text: text.to_owned(),
+        expect_digests,
+    }))
+}
+
 /// Parses one model reply: one surrounding code fence and outer whitespace are allowed.
 pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
     if text.len() > super::MAX_REPLY_BYTES {
@@ -121,6 +159,9 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
     let name: &str = key;
     if name == "edit" {
         return parse_edit(field);
+    }
+    if name == "patch" {
+        return parse_patch(field);
     }
     let text = bounded(field)?;
     match name {
@@ -138,7 +179,49 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
 #[cfg(test)]
 mod tests {
     use super::super::{MAX_COMMAND_BYTES, MAX_REPLY_BYTES};
-    use super::{Edit, Reply, ReplyFault, parse_reply};
+    use super::{Edit, Patch, Reply, ReplyFault, parse_reply};
+
+    /// A `patch` reply carries its text and digests, past the field bound; a
+    /// missing, extra, mistyped or NUL-carrying one is refused with the reason
+    /// the model retries from.
+    #[test]
+    fn a_patch_reply_parses_and_a_malformed_one_is_refused() {
+        let reply = |body: &str| parse_reply(&format!("{{\"patch\":{body}}}"));
+        let long = "x".repeat(MAX_COMMAND_BYTES.saturating_add(1));
+        for text in ["*** Begin Patch", long.as_str()] {
+            assert_eq!(
+                reply(&format!(
+                    r#"{{"text":"{text}","expect_digests":{{"a.rs":"d"}}}}"#
+                )),
+                Ok(Reply::Patch(Patch {
+                    text: text.to_owned(),
+                    expect_digests: [(String::from("a.rs"), String::from("d"))].into(),
+                })),
+                "a well-formed patch parses"
+            );
+        }
+        for shape in [
+            r#""x""#,
+            r#"{"text":"t"}"#,
+            r#"{"text":"t","expect_digests":{},"more":"z"}"#,
+            r#"{"text":"t","digests":{}}"#,
+            r#"{"more":"t","expect_digests":{}}"#,
+            r#"{"text":"t","expect_digests":[]}"#,
+        ] {
+            assert_eq!(reply(shape), Err(ReplyFault::PatchShape), "{shape}");
+        }
+        for mistyped in [
+            r#"{"text":7,"expect_digests":{}}"#,
+            r#"{"text":"t","expect_digests":{"a.rs":7}}"#,
+        ] {
+            assert_eq!(reply(mistyped), Err(ReplyFault::NotAString), "{mistyped}");
+        }
+        assert_eq!(
+            reply(r#"{"text":"a\u0000","expect_digests":{}}"#),
+            Err(ReplyFault::Nul),
+            "a NUL in the text"
+        );
+    }
 
     /// A `command` field of exactly the bound parses; one byte past it is refused.
     #[test]
