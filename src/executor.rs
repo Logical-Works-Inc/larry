@@ -16,6 +16,7 @@ mod ledger;
 mod prepared;
 mod receipt;
 mod recovery;
+mod redact;
 mod route_select;
 pub mod routes;
 mod run;
@@ -55,6 +56,7 @@ pub use confine::ConfineError;
 #[cfg(test)]
 pub(crate) use confine::Platform;
 pub use error::ExecError;
+pub use gate::admit_egress;
 pub(crate) use island::Isolation;
 pub(crate) use keys::state_ledger;
 pub use keys::{
@@ -552,27 +554,13 @@ fn run_task(
         task_id,
         &settings.path,
     )?;
-    let mut authored = match step {
-        None => None,
-        Some(author::ModelStep {
-            route,
-            selection,
-            brief,
-            client,
-        }) => {
-            // The tenant's digest, the same text a route row is keyed by, names the
-            // cache partition so no two tenants share a prompt prefix (larry#230).
-            let partition = digest_hex(tenant_text.as_bytes());
-            let mut records = author::author(brief, workspace.path(), &client, &route, &partition)?;
-            for record in &mut records {
-                if let Some(object) = record.as_object_mut() {
-                    object.insert(String::from("route"), route.seal());
-                    object.insert(String::from("route_selection"), selection.seal());
-                }
-            }
-            Some(records)
-        }
-    };
+    // The tenant's digest, the same text a route row is keyed by, names the
+    // cache partition so no two tenants share a prompt prefix (larry#230).
+    let partition = digest_hex(tenant_text.as_bytes());
+    let redactor = settings.redactor(ledger)?;
+    let mut authored = step
+        .map(|step| step.write(workspace.path(), &partition, &redactor))
+        .transpose()?;
     let confine = if confined {
         // The scratch directory sits beside the tree and outside it, so a command's scratch
         // files never enter the diff (larry#243).

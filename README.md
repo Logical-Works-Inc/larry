@@ -35,7 +35,7 @@ expiry is never consent.
   - `larry mcp`: a stateless MCP 2026-07-28 server. Its `larry_submit_task` tool runs a typed task through the
     executor and reports success only when the sealed run is accepted (ADR 0008).
   - `larry acp`: an Agent Client Protocol agent, the way Harbor runs Terminal-Bench 2.0. Each prompt is a terminal
-    session, which runs only under `LARRY_POLICY` naming `model.command` (ADR 0035).
+    session, which runs only under `LARRY_POLICY` naming `model.command` and `net.egress` (ADR 0035, 0151).
   - `larry exec`: runs one task document in a fresh clone. `acceptance` is a list of argv lists. First run:
     1. Set `LARRY_STATE_DIR` to a directory you own.
     2. Pipe a task to `larry exec > report.json`, where the task is
@@ -46,7 +46,7 @@ expiry is never consent.
     `LARRY_EXEC_MAX_TIMEOUT_MS`, `LARRY_EXEC_MAX_DEADLINE_MS`, `LARRY_EXEC_SHELLS` and `LARRY_EXEC_BASES`.
     A task past one is refused with nothing cloned (ADR 0111).
   - `larry verify` and `larry key`: check a sealed receipt offline (ADR 0006).
-  - `larry model`: sends one completion through the configured gateway.
+  - `larry model`: sends one completion through the configured gateway, if the policy holds `net.egress`.
   - `larry route`: `add`, `list`, `remove`, `default` and `resolve` the routes a tenant owns: where its model
     calls go, which `LARRY_KEY_<TAG>_*` variable holds the key, and the country where the provider processes the
     data (ADR 0039, ADR 0085).
