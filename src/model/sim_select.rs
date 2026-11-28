@@ -178,6 +178,7 @@ fn sim_a_ranker_run_with_too_few_scores_writes_no_receipt() -> Check {
                 matches!(outcome, Err(RerankError::Engine(ref detail)) if *detail == expected),
                 "{given} scores, {extra:?}: {outcome:?}"
             );
+            assert_eq!(short.calls, 1, "the answer is judged after one asking");
         }
     }
     let mut unused = Stub::scored(vec![0.5; 3]);
