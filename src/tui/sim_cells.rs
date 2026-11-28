@@ -20,10 +20,11 @@ const PINNED_SEEDS: u64 = 96;
 /// The BLAKE3 of the wire of seeds `0..PINNED_SEEDS`, 96 steps each, taken with the
 /// command header painted at `started` so a running command's output has its context
 /// (larry#252), then advanced once for the queue panel, the six slash commands and the
-/// working footer (larry#262) and once for the four session commands the popup lists
-/// (larry#603): the heap assertions above, not this digest, carry the no-heap-text
+/// working footer (larry#262), once for the four session commands the popup lists
+/// (larry#603) and once for `/export` and `/recap` in the popup and `/help`
+/// (larry#609): the heap assertions above, not this digest, carry the no-heap-text
 /// rule, so a paint feature moves this digest and names its issue here.
-const PINNED: &str = "2e3e00cebe868fc07506e1095b3869bae6be5d646d0d1141ecf0f32b5928bfb6";
+const PINNED: &str = "8ad10cef3796005ba4d9c73b43bf331adfc10ff5e19289b09232030c9403895e";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [

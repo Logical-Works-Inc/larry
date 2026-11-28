@@ -44,4 +44,7 @@ pub(crate) enum SimError {
     /// An environment variable the helper reads is unset or not text.
     #[error("environment: {0}")]
     Env(#[from] VarError),
+    /// An export the helper needs was refused (larry#609).
+    #[error("export: {0}")]
+    Export(#[from] crate::tui::ExportError),
 }

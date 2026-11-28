@@ -144,18 +144,127 @@ fn tui_journey_a_full_session_store_lists_and_reports_latency_and_rss() -> Journ
                 pty.send(CLEAR)?;
                 pty.wait_for(READY)?;
             }
-            latencies.sort();
             pty.send(QUIT)?;
             assert_exited(&pty.finish()?.0, "Ctrl+C exits 0");
-            let figures = format!(
-                "{{\"scope\":\"shipped debug binary, /resume over 10000 sessions\",\
-                 \"samples\":{ROUND_TRIPS},\"list_p50_ms\":{:.1},\"list_p95_ms\":{:.1},\
-                 \"list_p99_ms\":{:.1},\"sampled_max_rss_kib\":{peak}}}\n",
-                nearest_rank(&latencies, 50)?,
-                nearest_rank(&latencies, 95)?,
-                nearest_rank(&latencies, 99)?,
-            );
-            std::io::stderr().lock().write_all(figures.as_bytes())?;
+            print_figures("/resume over 10000 sessions", "list", &mut latencies, peak)
+        })
+    })
+}
+
+/// Runs the mock's first task to its applied change and its painted receipt.
+fn apply_a_task(pty: &mut Pty<'_>) -> Journey {
+    ask(pty)?;
+    pty.send("y")?;
+    pty.wait_for(REVIEW)?;
+    pty.send("y")?;
+    pty.wait_for(APPLIED)?;
+    pty.wait_for("digest    ")
+}
+
+/// The first receipt digest the one row under `state` holds.
+fn stored_digest(state: &Path) -> Journey<String> {
+    let (_, _, transcript) = rows(state)?.into_iter().next().ok_or("the row")?;
+    let held: lgwks_std::json::Value = lgwks_std::json::from_str(&transcript)?;
+    held.get("receipts")
+        .and_then(|receipts| receipts.get(0))
+        .and_then(|receipt| receipt.get("digest"))
+        .and_then(lgwks_std::json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("the row holds no receipt digest: {transcript}").into())
+}
+
+/// Keys to painted line of `/export`, each to a new file, and the RSS it held: printed, never a
+/// pass condition.
+fn export_figures(pty: &mut Pty<'_>) -> Journey {
+    let pid = pty.pid()?;
+    let mut latencies = Vec::with_capacity(ROUND_TRIPS);
+    let mut peak = 0;
+    for round in 0..ROUND_TRIPS {
+        let sent = Instant::now();
+        pty.send(&format!("/export round{round}.md\r"))?;
+        pty.wait_for(&format!("exported to round{round}.md"))?;
+        latencies.push(sent.elapsed());
+        peak = peak.max(sample(&pid)?.1);
+    }
+    print_figures(
+        "/export of a one task session",
+        "export",
+        &mut latencies,
+        peak,
+    )
+}
+
+/// One line of latency percentiles and the sampled peak RSS on standard error.
+fn print_figures(scope: &str, name: &str, latencies: &mut [Duration], peak: u64) -> Journey {
+    latencies.sort();
+    let figures = format!(
+        "{{\"scope\":\"shipped debug binary, {scope}\",\"samples\":{},\"{name}_p50_ms\":{:.1},\
+         \"{name}_p95_ms\":{:.1},\"{name}_p99_ms\":{:.1},\"sampled_max_rss_kib\":{peak}}}\n",
+        latencies.len(),
+        nearest_rank(latencies, 50)?,
+        nearest_rank(latencies, 95)?,
+        nearest_rank(latencies, 99)?,
+    );
+    Ok(std::io::stderr().lock().write_all(figures.as_bytes())?)
+}
+
+/// `/recap` sums the session with no further model call, `/export` writes it inside the folder
+/// as Markdown with every receipt digest, and it never overwrites a file, follows a link or
+/// leaves the folder (larry#609). Source: `CommonMark` 0.31 section 4.5 (fenced code), CWE-22
+/// (path traversal), CWE-59 (link following).
+#[test]
+fn tui_journey_export_writes_the_session_and_recap_sums_it() -> Journey {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (state, work) = fixture()?;
+    let (_, elsewhere) = fixture()?;
+    let replies = [COMMAND, r#"{"done":"wrote hello.txt"}"#];
+    against(state.path(), scripted(609, &replies), |env| -> Journey {
+        std::thread::scope(|owner| -> Journey {
+            let mut pty = Pty::open(owner, work.path(), env)?;
+            apply_a_task(&mut pty)?;
+            pty.wait_for("wrote hello.txt")?;
+            std::os::unix::fs::symlink(elsewhere.path(), work.path().join("out"))?;
+
+            pty.send("/recap\r")?;
+            pty.wait_for("recap: 1 task, 1 command")?;
+            pty.wait_for("last answer: wrote hello.txt")?;
+            pty.send("/export\r")?;
+            pty.wait_for("exported to session-1.md")?;
+            let written = work.path().join("session-1.md");
+            let exported = std::fs::read_to_string(&written)?;
+            let digest = stored_digest(state.path())?;
+            for held in [&digest, "write hello.txt", "printf 'hello", "applied"] {
+                assert!(exported.contains(held), "{held:?} is missing: {exported}");
+            }
+            let mode = std::fs::metadata(&written)?.permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a transcript is the person's alone");
+
+            pty.send("/export\r")?;
+            pty.wait_for("session-1.md already exists")?;
+            assert_eq!(std::fs::read_to_string(&written)?, exported);
+            for (typed, said) in [
+                ("../escape.md", "../escape.md is outside"),
+                ("out/escape.md", "never follows a link"),
+                (".git/escape.md", ".git/escape.md is inside"),
+            ] {
+                pty.send(&format!("/export {typed}\r"))?;
+                pty.wait_for(said)?;
+            }
+            pty.send("/export notes.md\r")?;
+            pty.wait_for("exported to notes.md")?;
+            export_figures(&mut pty)?;
+            pty.send(QUIT)?;
+            assert_exited(&pty.finish()?.0, "Ctrl+C exits 0");
+
+            assert!(work.path().join("notes.md").exists());
+            let above = work.path().parent().ok_or("the folder has a parent")?;
+            for refused in [
+                above.join("escape.md"),
+                elsewhere.path().join("escape.md"),
+                work.path().join(".git/escape.md"),
+            ] {
+                assert!(!refused.exists(), "{} was written", refused.display());
+            }
             Ok(())
         })
     })
@@ -172,12 +281,7 @@ fn tui_journey_a_killed_terminal_resumes_its_session_and_forks_it() -> Journey {
     against(state.path(), scripted(603, &replies), |env| -> Journey {
         std::thread::scope(|owner| -> Journey {
             let mut pty = Pty::open(owner, work.path(), env)?;
-            ask(&mut pty)?;
-            pty.send("y")?;
-            pty.wait_for(REVIEW)?;
-            pty.send("y")?;
-            pty.wait_for(APPLIED)?;
-            pty.wait_for("digest    ")?;
+            apply_a_task(&mut pty)?;
             kill_hard(pty)?;
 
             let mut fresh = Pty::open(owner, work.path(), env)?;

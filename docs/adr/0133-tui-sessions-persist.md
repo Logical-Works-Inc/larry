@@ -5,10 +5,10 @@ description: "Each terminal session is a row in executor.db, held after every tu
 resource: /docs/adr/0133-tui-sessions-persist.md
 tags: [larry, adr, tui, executor, ledger]
 generated: {by: claude-code, at: 2026-11-27}
-verified: {by: claude-code, method: lgwks-box cargo nextest run --locked, 2026-11-27}
+verified: {by: claude-code, method: lgwks-box cargo nextest run --locked, 2026-11-28}
 status: accepted
 stale_after: 2027-05-27
-sources: [larry#256, larry#578, INVARIANTS.md, tests/e2e_journey/sessions.rs]
+sources: [larry#256, larry#578, larry#609, INVARIANTS.md, tests/e2e_journey/sessions.rs]
 ---
 
 ## Context
@@ -69,12 +69,36 @@ driver (PR #567: no tenant key, a named fork wrote the frame on screen over the
 copy, and a running task could swap its transcript). Reversed if two terminals on
 one row must merge.
 
+## Writing it out (larry#609)
+
+`/export [file]` writes the frame on screen as Markdown inside the folder
+Larry runs in, `<session name>.md` with no file named: who and where, each entry,
+every kept receipt digest. Every person, model and command text sits in a fence
+longer than any backtick run it holds (CommonMark 0.31 section 4.5), with control
+and invisible characters shown as markers. The file is at most 4 MiB: the oldest
+entries are left out first and counted in it. It is created through held directory
+descriptors (`lgwks_std::fs::capability::Dir`), mode 0600, never over an existing
+name, never through a link, never into `.git` or outside the folder (CWE-22,
+CWE-59). A failed write removes its file. It needs no row, so a refused database
+changes nothing. It waits while a task runs. A kill -9 during the write can leave
+a part file, which the next `/export` refuses to overwrite.
+
+`/recap` answers in the frame, a task running or not: counts, the newest 5 tasks,
+the answer to the newest one and the receipts. It calls no model and compacts
+nothing.
+
+Rejected: PR #567's export (written beside the folder, following links,
+overwriting, model text as raw Markdown, no bound) and a model-written recap (a
+paid call that can fail, ADR 0044). Reversed if a person's recap must say what a
+change did in words no receipt holds.
+
 ## Consequences
 
 A kill -9 loses at most the turn in flight, and a fresh terminal continues the
-session. A listing reads the tenant's rows, at most 10,000. `/export` and
-`/recap` are still open in larry#256.
-Proof: `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
+session. A listing reads the tenant's rows, at most 10,000.
+Proof: `tui_journey_export_writes_the_session_and_recap_sums_it` (shipped debug
+binary, oracle, 20 samples: `/export` p50 111.8 ms, p99 140.8 ms, RSS 10,900 KiB),
+`src/tui/sim_export.rs`, `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
 `tui_journey_a_full_session_store_lists_and_reports_latency_and_rss` (shipped
 debug binary, 10,000 rows, 20 samples on the Oracle ARM64 box: p50 44.6 ms, p99
 49.7 ms, RSS 14,544 KiB), `tui_journey_a_killed_terminal_keeps_its_session_row`,
