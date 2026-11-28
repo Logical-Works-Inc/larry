@@ -17,6 +17,10 @@ use super::{
     sweep_origins,
 };
 
+/// Fault injection through git, the diff stream and the origin locks (larry#575).
+#[path = "sim_workspace_faults.rs"]
+mod faults;
+
 /// What every simulation here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

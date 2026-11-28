@@ -9,15 +9,29 @@
 //! are not. One seed drives every draw, so a failing seed replays exactly.
 
 use std::collections::BTreeSet;
+use std::time::SystemTime;
 
-use larry_contracts::authority::Scope;
+use larry_contracts::authority::{BudgetUnit, Scope, SecurityEpoch};
+use larry_contracts::binding::BindingError;
+use larry_contracts::command::{Command, CommandContent, CommandKind};
+use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
+use larry_contracts::ids::{EffectId, OperationId, RunId, TenantId};
+use larry_contracts::state::RunState;
 use larry_runtime::journal::Journal;
+use larry_runtime::owner::EffectOwner;
+use larry_runtime::payload::WorkProposal;
+use larry_runtime::projection::{FoldProjection, ProjectionBackend};
+use larry_runtime::protocol::{ProtocolCapability, ProtocolOffer};
+use larry_runtime::runtime::restore;
+use lgwks_bot::kernel::cap::Cap;
+use lgwks_bot::kernel::gate::GrantSet;
 use lgwks_std::seeded::Seeded;
 
 use super::super::ExecError;
-use super::super::gate::{finish, policy, task_settings};
+use super::super::gate::{finish, lease_start, policy, task_settings, with_expiry};
+use super::super::identity;
 use super::{
-    JOURNALS_DIR, KeptCause, RunLock, journal_live, journal_path, live_between, recover,
+    JOURNALS_DIR, KeptCause, Recovered, RunLock, journal_live, journal_path, live_between, recover,
     recovered_evidence, run_held,
 };
 
@@ -32,10 +46,12 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE_0031,
 ];
 
-/// A fresh state directory: empty when it is made and removed when its guard drops, so a
-/// process id the system reuses never lands a simulation in a stale tree (larry#267).
+/// A fresh state directory holding an empty journals folder, removed when its guard drops, so
+/// a process id the system reuses never lands a simulation in a stale tree (larry#267).
 fn scratch_directory() -> Result<crate::executor::sim_tree::Scratch, crate::sim_error::SimError> {
-    crate::executor::sim_tree::scratch("larry-recovery")
+    let state = crate::executor::sim_tree::scratch("larry-recovery")?;
+    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+    Ok(state)
 }
 
 /// The policy an unset `LARRY_POLICY` yields, and the journal capacity it sets.
@@ -52,7 +68,6 @@ fn settings() -> Result<(BTreeSet<Scope>, usize), ExecError> {
 fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
     let (scopes, capacity) = settings()?;
     let state = scratch_directory()?;
-    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     let id = "018f0000-0000-7000-8000-000000000001";
     assert!(
         !journal_live(&state, &scopes, id)?,
@@ -80,7 +95,6 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
 fn sim_a_held_run_lock_is_live_before_its_journal_is_locked() -> TestResult {
     let (scopes, capacity) = settings()?;
     let state = scratch_directory()?;
-    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     let mut seeded = Seeded::from_seed(SEEDS[0]);
     let starting = format!("018f0000-0000-7000-8000-{:012x}", seeded.below(1 << 40)?);
     // Sorted after the starting run, so a sweep that stopped at the skip never reaches it.
@@ -126,7 +140,6 @@ fn sim_an_unopenable_run_lock_reads_as_held_and_keeps_its_journal() -> TestResul
     let (scopes, capacity) = settings()?;
     for seed in SEEDS {
         let state = scratch_directory()?;
-        std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
         let mut seeded = Seeded::from_seed(seed);
         let tag = seeded.below(1 << 40)?;
         let ids = ["directory", "closed", "fifo", "free"].map(|kind| format!("{kind}-{tag}"));
@@ -232,7 +245,6 @@ fn sim_a_dead_journal_directory_is_set_aside_exactly_for_every_seed() -> TestRes
         let (scopes, capacity) = settings()?;
         let state = scratch_directory()?;
         let journals = state.join(JOURNALS_DIR);
-        std::fs::create_dir_all(&journals)?;
         let mut seeded = Seeded::from_seed(seed);
         let count = 1_usize.saturating_add(seeded.index(4)?);
         let note = journals.join("0000.note");
@@ -285,8 +297,6 @@ fn sim_two_state_directories_never_set_aside_each_others_journals() -> TestResul
     for seed in SEEDS {
         let left = scratch_directory()?;
         let right = scratch_directory()?;
-        std::fs::create_dir_all(left.join(JOURNALS_DIR))?;
-        std::fs::create_dir_all(right.join(JOURNALS_DIR))?;
         let mut seeded = Seeded::from_seed(seed);
         let left_count = 1_usize.saturating_add(seeded.index(3)?);
         let right_count = 1_usize.saturating_add(seeded.index(3)?);
@@ -335,7 +345,6 @@ fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult
     let (scopes, capacity) = settings()?;
     for seed in SEEDS {
         let state = scratch_directory()?;
-        std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
         let mut seeded = Seeded::from_seed(seed);
         let sound = format!("sound-{seed}");
         let damaged = format!("damaged-{seed}");
@@ -412,7 +421,6 @@ fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult
 fn sim_a_run_finishing_as_the_sweep_probes_it_leaves_no_journal() -> TestResult {
     let (scopes, capacity) = settings()?;
     let state = scratch_directory()?;
-    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     for seed in SEEDS {
         let mut rng = Seeded::from_seed(seed);
         let id = format!("018f0000-0000-7000-8000-{:012x}", rng.below(1 << 40)?);
@@ -455,17 +463,241 @@ fn sim_a_run_finishing_as_the_sweep_probes_it_leaves_no_journal() -> TestResult 
 #[test]
 fn the_gate_keeps_a_leftover_journal_on_any_failed_retry() -> TestResult {
     let state = scratch_directory()?;
-    std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
     let path = journal_path(&state, "018f0000-0000-7000-8000-000000000394");
     let injected = || ExecError::Journals(std::io::Error::other("injected"));
     std::fs::write(&path, b"evidence")?;
-    assert!(finish(&path, Err(injected()), true).is_err());
-    assert!(path.exists(), "a failed retry keeps the leftover journal");
-    assert!(finish(&path, Err(injected()), false).is_err());
-    assert!(
-        !path.exists(),
-        "a run's own journal goes with a failure the store did not cause"
+    for leftover in [true, false] {
+        std::fs::write(&path, b"evidence")?;
+        let outcome = finish(&path, Err(injected()), leftover);
+        assert!(
+            matches!(&outcome, Err(ExecError::Journals(cause)) if cause.to_string() == "injected"),
+            "leftover={leftover}: the retry's own failure is the answer"
+        );
+        assert_eq!(
+            path.exists(),
+            leftover,
+            "leftover={leftover}: only a dead run's journal outlives the failure"
+        );
+    }
+    Ok(())
+}
+
+/// A recovered run's body died with its executor, so its owner claims nothing it cannot observe:
+/// it resolves no target, both reaches read the proof before they answer unknown, a proof that
+/// does not cover what the reach requires is refused typed, and a status query is unknown too.
+/// Source: larry#461 (every reach re-checks the proof) and larry#75 (recovery never runs a body).
+#[test]
+fn sim_the_recovery_owner_answers_unknown_only_for_a_full_proof() -> TestResult {
+    for seed in SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let byte = u8::try_from(rng.below(200)?)?.saturating_add(1);
+        let operation = OperationId::from_bytes([byte; 16]);
+        let intent = EffectIntent::new(
+            EffectId::from_bytes([byte; 16]),
+            operation,
+            RunId::from_bytes([byte; 16]),
+            TenantId::from_bytes([byte; 16]),
+            ReconciliationStrategy::RequiresHuman,
+            SecurityEpoch::INITIAL,
+        );
+        let held = Cap::new(format!("larry.held.{seed}"));
+        let missing = Cap::new(format!("larry.missing.{seed}"));
+        let proof = GrantSet::empty()
+            .grant(held.clone())
+            .issue(std::slice::from_ref(&held))?;
+        let covered = [held.clone()];
+        let wider = [held, missing];
+        let at = SystemTime::UNIX_EPOCH;
+        let unknown = EffectOutcome::Unknown { operation };
+        let mut owner = Recovered;
+        assert!(
+            matches!(owner.resolve(&intent), Ok(None)),
+            "seed {seed:#x}: recovery binds no target"
+        );
+        assert_eq!(
+            owner.dispatch(&intent, &proof, &covered, at),
+            Ok(unknown),
+            "seed {seed:#x}: an unbound reach never claims success"
+        );
+        assert_eq!(
+            owner.dispatch_bound(&intent, &proof, &covered, at),
+            Ok(unknown),
+            "seed {seed:#x}: a bound reach never claims success"
+        );
+        assert_eq!(
+            owner.dispatch(&intent, &proof, &wider, at),
+            Err(BindingError::NoCoveringGrant),
+            "seed {seed:#x}: an unbound reach refuses a proof that does not cover it"
+        );
+        assert_eq!(
+            owner.dispatch_bound(&intent, &proof, &wider, at),
+            Err(BindingError::NoCoveringGrant),
+            "seed {seed:#x}: a bound reach refuses a proof that does not cover it"
+        );
+        assert_eq!(
+            owner.reconcile(&intent, at),
+            unknown,
+            "seed {seed:#x}: a status query is unknown"
+        );
+    }
+    Ok(())
+}
+
+/// The error kind of a journals fault, or a failure naming what came back instead.
+fn journals_kind<T: std::fmt::Debug>(
+    answer: Result<T, ExecError>,
+) -> Result<std::io::ErrorKind, Box<dyn std::error::Error>> {
+    match answer {
+        Err(ExecError::Journals(cause)) => Ok(cause.kind()),
+        other => Err(format!("expected a journals fault, got {other:?}").into()),
+    }
+}
+
+/// The saboteur at the paths themselves: a run lock that is a directory, a run lock replaced by
+/// one while the run holds it, and a journals folder that is a file. Each is a typed journals
+/// fault, never "no live run" and never "released"; a lock already gone releases cleanly.
+/// Source: CWE-703 (a fault read as an answer) and larry#334.
+#[test]
+fn sim_every_lock_path_fault_is_a_typed_journals_error() -> TestResult {
+    use std::io::ErrorKind;
+
+    let (scopes, _capacity) = settings()?;
+    for seed in SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let id = format!("018f0000-0000-7000-8000-{:012x}", rng.below(1 << 40)?);
+        let state = scratch_directory()?;
+        let lock_path = journal_path(&state, &id).with_extension("lock");
+
+        let held = RunLock::take(&state, &id)?.ok_or("a fresh run takes its lock")?;
+        std::fs::remove_file(&lock_path)?;
+        held.release()?;
+
+        let replaced = RunLock::take(&state, &id)?.ok_or("a fresh run takes its lock")?;
+        std::fs::remove_file(&lock_path)?;
+        std::fs::create_dir(&lock_path)?;
+        let release = journals_kind(replaced.release())?;
+        assert!(
+            matches!(
+                release,
+                ErrorKind::IsADirectory | ErrorKind::PermissionDenied
+            ),
+            "seed {seed:#x}: a lock that cannot be removed is named, {release:?}"
+        );
+        assert_eq!(
+            journals_kind(RunLock::take(&state, &id).map(|lock| lock.is_some()))?,
+            ErrorKind::IsADirectory,
+            "seed {seed:#x}: a run cannot take a lock that is a directory"
+        );
+        assert!(
+            run_held(&state, &id),
+            "seed {seed:#x}: an unopenable lock is never no live run"
+        );
+        assert_eq!(
+            journals_kind(journal_live(&state, &scopes, &id))?,
+            ErrorKind::IsADirectory,
+            "seed {seed:#x}: the sweep's probe is typed too"
+        );
+
+        let flat = crate::executor::sim_tree::scratch("larry-recovery")?;
+        std::fs::write(flat.join(JOURNALS_DIR), b"a file where the journals go")?;
+        assert_eq!(
+            journals_kind(recover(&flat, &scopes))?,
+            ErrorKind::NotADirectory,
+            "seed {seed:#x}: an unlistable journals folder is never an empty one"
+        );
+        assert!(
+            run_held(&flat, &id),
+            "seed {seed:#x}: a lock beneath a file is a fault, not no live run"
+        );
+    }
+    Ok(())
+}
+
+/// Admits `id`'s command into its durable journal under `scopes` and stops there, as a run killed
+/// right after the acknowledgement leaves it. The command is submitted without a display, so its
+/// reduce reaches the owner recovery hands it. Returns the run the command names.
+fn admitted_but_never_ticked(
+    state: &std::path::Path,
+    scopes: &BTreeSet<Scope>,
+    id: &str,
+) -> Result<RunId, Box<dyn std::error::Error>> {
+    let tenant = TenantId::from_bytes([9; 16]);
+    let holder = identity::worker_of(&tenant);
+    let (run_id, operation, command_id) = identity::ids_of(id);
+    let clock = larry_runtime::live_clock()?;
+    let run_settings = with_expiry(task_settings(scopes), lease_start(&clock)?)?;
+    let proposal = WorkProposal::new(
+        run_id,
+        tenant,
+        operation,
+        scopes.clone(),
+        1,
+        BudgetUnit::Requests,
+        ReconciliationStrategy::RequiresHuman,
     );
+    let payload = lgwks_std::json::to_vec(&proposal)?;
+    let command = Command::new(
+        command_id,
+        tenant,
+        Vec::new(),
+        CommandContent::new(CommandKind::Submit, payload.into_boxed_slice()),
+    )?;
+    let journal = Journal::open(&journal_path(state, id), run_settings.journal_capacity)?;
+    let mut runtime = restore::<FoldProjection, _>(run_settings, Recovered, clock, journal)?;
+    let offer = ProtocolOffer::new(
+        tenant,
+        runtime.settings().protocol_range(),
+        BTreeSet::from([ProtocolCapability::SubmitCommand]),
+        true,
+        false,
+    )
+    .authenticated(holder);
+    runtime.submit_protocol(&offer, command, None)?;
+    Ok(run_id)
+}
+
+/// The kill right after the acknowledgement: for every seed a run admitted its command and died
+/// before any tick. Recovery sets the journal aside as recovered evidence, a keyed retry reads
+/// that line, and replaying what was kept shows the run never succeeded. Source: larry#100 (an
+/// acknowledged command survives) and larry#75 (recovery never runs a dead run's body).
+#[test]
+fn sim_a_command_a_dead_run_never_reduced_is_recovered_without_success() -> TestResult {
+    let (scopes, capacity) = settings()?;
+    for seed in SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let id = format!("018f0000-0000-7000-8000-{:012x}", rng.below(1 << 40)?);
+        let state = scratch_directory()?;
+        let run = admitted_but_never_ticked(&state, &scopes, &id)?;
+
+        let swept = recover(&state, &scopes)?;
+        assert_eq!(
+            swept.set_aside, 1,
+            "seed {seed:#x}: the dead run is set aside"
+        );
+        assert!(
+            swept.kept.is_empty(),
+            "seed {seed:#x}: nothing is left over"
+        );
+        assert_eq!(
+            recovered_evidence(&state, &id)?,
+            Some("gate: the run was recovered from its journal as unknown"),
+            "seed {seed:#x}: a keyed retry is answered from the evidence"
+        );
+        let kept = journal_path(&state, &id).with_extension("recovered");
+        let clock = larry_runtime::live_clock()?;
+        let replay_settings = with_expiry(task_settings(&scopes), lease_start(&clock)?)?;
+        let runtime = restore::<FoldProjection, _>(
+            replay_settings,
+            Recovered,
+            clock,
+            Journal::open(&kept, capacity)?,
+        )?;
+        assert_eq!(
+            runtime.projection().run_state(run),
+            Some(RunState::Reconciling),
+            "seed {seed:#x}: an unproven effect waits to be reconciled and never reads as success"
+        );
+    }
     Ok(())
 }
 
