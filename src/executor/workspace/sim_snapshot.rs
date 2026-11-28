@@ -21,6 +21,10 @@ use crate::executor::workspace::{DiffSink, Workspace, sweep};
 use crate::executor::{AuthorFault, ExecError};
 use crate::sim_error::SimError;
 
+/// Fault injection through the snapshot, its apply and its summary (larry#575).
+#[path = "sim_snapshot_faults.rs"]
+mod faults;
+
 /// What every simulation returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
