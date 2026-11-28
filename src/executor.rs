@@ -15,6 +15,7 @@ mod ledger;
 mod prepared;
 mod receipt;
 mod recovery;
+mod route_select;
 pub mod routes;
 mod run;
 mod seal;
