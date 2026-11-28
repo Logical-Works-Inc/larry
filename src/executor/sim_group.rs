@@ -10,15 +10,18 @@
 
 use std::io;
 use std::os::unix::process::ExitStatusExt;
-use std::process::ExitStatus;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use lgwks_bot::kernel::clock::{Clock, ClockError};
 use lgwks_macros::Error;
+use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
+use super::super::{Ledger, Place, RunHooks, abandon, run_command};
 use super::{ExecError, GROUP_PROBE_DEADLINE, await_gone, settle_with, status_after_kill};
+use crate::executor::sim_tree::{path_env, scratch};
 
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -449,6 +452,70 @@ fn sim_a_leader_whose_waiter_ended_reports_the_fault_and_signals_nothing() -> Te
     })?;
     assert!(outcome.is_err(), "a closed channel is the waiter's fault");
     assert_eq!(calls, 0, "nothing is signalled for a waiter that is gone");
+    Ok(())
+}
+
+/// A child that must be dropped is killed itself, not only its group: before `setsid` has made
+/// the group, `killpg` finds nothing, and waiting then would last as long as the command
+/// (larry#590, `setsid(2)`, CWE-404). The child here leads no group, which is that window. It
+/// ends by itself, so a drop that waits on it is seen as its own exit and never hangs the test.
+#[test]
+fn sim_an_abandoned_child_dies_before_its_group_exists() -> TestResult {
+    let clock = larry_runtime::live_clock()?;
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()?;
+    let pid = i32::try_from(child.id())?;
+    let why = ExecError::Workspace(io::Error::other("why it was dropped"));
+    match abandon(&clock, &mut child, pid, why) {
+        ExecError::Workspace(cause) => assert_eq!(cause.to_string(), "why it was dropped"),
+        other => return Err(format!("expected the first refusal, got {other}").into()),
+    }
+    let status = child.try_wait()?.ok_or("the child was not reaped")?;
+    assert_eq!(status.signal(), Some(KILLED), "killed, not outlived");
+    Ok(())
+}
+
+/// A group the ledger cannot record is never left running untracked: the command with no end of
+/// its own is killed and reaped, and the store's refusal is what the run answers (CWE-404, a
+/// full disk, larry#590).
+#[test]
+fn sim_a_group_the_ledger_cannot_record_is_killed() -> TestResult {
+    let dir = scratch("run-untracked")?;
+    let ledger = Ledger::open(&dir)?;
+    let conn = lgwks_deps::sqlite::open(&dir.join("executor.db"))?;
+    // FAIL keeps the row the trigger refused, so the test reads which group it was.
+    conn.execute_batch(
+        "CREATE TRIGGER refuse AFTER INSERT ON live_groups \
+         BEGIN SELECT RAISE(FAIL, 'ledger refused'); END;",
+    )?;
+    let words: Vec<String> = ["tail", "-f", "/dev/null"].map(String::from).into();
+    let never = || false;
+    let outcome = run_command(
+        &words,
+        Place::Open(&dir),
+        &path_env()?,
+        Duration::from_secs(120),
+        &ledger,
+        "task",
+        RunHooks::new(&never, None),
+    );
+    match outcome {
+        Err(ExecError::Sql(cause)) => {
+            assert!(cause.to_string().contains("ledger refused"), "{cause}");
+        }
+        Err(other) => return Err(format!("expected the store's refusal, got {other}").into()),
+        Ok(_) => return Err("a command the ledger refused was run to its end".into()),
+    }
+    let pid = conn.query_row("SELECT pid FROM live_groups", [], |row| {
+        row.get::<_, i32>(0)
+    })?;
+    assert!(
+        !process_group_exists(pid)?,
+        "group {pid} outlived the refusal"
+    );
     Ok(())
 }
 

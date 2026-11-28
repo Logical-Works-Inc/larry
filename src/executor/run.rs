@@ -703,11 +703,23 @@ fn spawn_failure(argv0: &str, source: io::Error) -> ExecError {
     }
 }
 
-/// Kills the group and the leader of a child that could not be tracked, then returns the
+/// Kills the leader and the group of a child that could not be tracked, then returns the
 /// error, or the reap failure that names it when the group or the leader could not be ended.
+///
+/// The leader is killed itself, and first: until `setsid` has made its group, `killpg` finds
+/// nothing and reads as gone, so the wait below would last as long as the command (larry#442,
+/// larry#590). A dead leader forks no more, and its unreaped pid keeps the group id its own.
 fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
+    let killed = child.kill();
     let settled = settle_group(clock, pgid);
     let waited = child.wait();
+    if let Err(fault) = killed {
+        return ExecError::cleanup(
+            error,
+            "the leader could not be killed",
+            ExecError::Reap(fault),
+        );
+    }
     if let Err(fault) = settled {
         return ExecError::cleanup(error, "the group could not be settled", fault);
     }
