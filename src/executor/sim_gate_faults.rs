@@ -2,14 +2,14 @@
 //! action, every denial reason a real tick records, and the task owner's refusal to run its body
 //! twice. Each answer is asserted as its exact typed value or line.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::{BudgetUnit, Scope, SecurityEpoch};
-use larry_contracts::binding::{BindingError, EffectTarget, ResolvedEffect};
+use larry_contracts::binding::{BindingError, BindingField, EffectTarget, ResolvedEffect};
 use larry_contracts::command::{Command, CommandContent, CommandKind};
 use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
 use larry_contracts::error::OrderingError;
@@ -25,9 +25,11 @@ use lgwks_bot::kernel::cap::{Auth, Cap};
 use lgwks_bot::kernel::clock::Clock;
 use lgwks_bot::kernel::gate::GrantSet;
 use lgwks_macros::Error;
+use lgwks_std::seeded::Seeded;
 
 use super::super::owner::TaskOwner;
 use crate::executor::fence_control::{FenceControl, read, report_line};
+use crate::executor::receipt::seeded_key;
 use crate::executor::{ExecError, Report};
 
 /// What every simulation here returns.
@@ -37,9 +39,9 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const NOW: u64 = 1_700_000_000;
 
 /// What the host's fence action reads as, spelled for comparison.
-fn spelled(value: &str) -> String {
-    let owned = value.to_owned();
-    let environment = move |name: &str| (name == "LARRY_FENCE_CONTROL").then(|| owned.clone());
+fn spelled(value: Option<&str>) -> String {
+    let owned = value.map(str::to_owned);
+    let environment = move |name: &str| owned.clone().filter(|_| name == "LARRY_FENCE_CONTROL");
     match read(&environment) {
         Ok(None) => "none".to_owned(),
         Ok(Some(FenceControl::Revoke)) => "revoke".to_owned(),
@@ -57,6 +59,7 @@ fn sim_every_spelling_of_the_fence_action_reads_or_fails_closed() {
     const EXPECTED: &str = "expected revoke, advance or authenticate:<epoch>";
     for (value, want) in [
         ("revoke", "revoke".to_owned()),
+        ("advance", "advance".to_owned()),
         ("revoke:", "revoke".to_owned()),
         ("advance:", "advance".to_owned()),
         ("authenticate:0", "authenticate 0".to_owned()),
@@ -78,8 +81,9 @@ fn sim_every_spelling_of_the_fence_action_reads_or_fails_closed() {
                 .to_owned(),
         ),
     ] {
-        assert_eq!(spelled(value), want, "{value:?}");
+        assert_eq!(spelled(Some(value)), want, "{value:?}");
     }
+    assert_eq!(spelled(None), "none", "an unset action applies nothing");
 }
 
 /// One admission the gate must deny: what the policy and the capabilities cover, how long the
@@ -255,9 +259,23 @@ fn intent(byte: u8, tenant: TenantId) -> EffectIntent {
     )
 }
 
-/// The task body runs at most once: a second reach, a reach with no body left and a
-/// reconciliation each answer unknown, never a second run or an invented success (CWE-837,
-/// larry#76).
+/// A task body that counts its runs and succeeds or fails as asked. One closure type serves
+/// every owner here, so one instantiation of the owner is driven through every arm.
+fn body(succeeds: bool, runs: Rc<Cell<u32>>) -> impl FnOnce() -> Result<Report, ExecError> {
+    move || {
+        runs.set(runs.get().saturating_add(1));
+        if !succeeds {
+            return Err(ExecError::PathUnset);
+        }
+        let key = seeded_key(&mut Seeded::from_seed(0x5EED_0000_0000_0061));
+        Ok(Report::sealed(lgwks_std::json::json!({}), &key, 1))
+    }
+}
+
+/// The task body runs at most once and only for its own tenant: a foreign tenant is refused
+/// with nothing run, the first reach records success or failure as the body answered, and a
+/// second reach, a reach with no body left and a reconciliation each answer unknown, never a
+/// second run or an invented success (CWE-639, CWE-837, larry#76).
 #[test]
 fn sim_a_task_body_never_runs_twice_and_unseen_reaches_are_unknown() -> TestResult {
     let tenant = TenantId::from_bytes([4; 16]);
@@ -266,44 +284,62 @@ fn sim_a_task_body_never_runs_twice_and_unseen_reaches_are_unknown() -> TestResu
         .grant(granted.clone())
         .issue(std::slice::from_ref(&granted))?;
     let required = [granted];
-    let runs = Rc::new(std::cell::Cell::new(0_u32));
-    let slot = Rc::new(RefCell::new(None));
-    let counted = Rc::clone(&runs);
-    let mut owner = TaskOwner {
-        repo: Path::new("."),
-        tenant,
-        epoch: SecurityEpoch::INITIAL,
-        task_bytes: b"task",
-        run: Some(move || -> Result<Report, ExecError> {
-            counted.set(counted.get().saturating_add(1));
-            Err(ExecError::PathUnset)
-        }),
-        slot: Rc::clone(&slot),
-    };
-    let asked = intent(4, tenant);
-    let unknown = EffectOutcome::Unknown {
-        operation: asked.operation,
-    };
     let at = SystemTime::UNIX_EPOCH;
-    assert_eq!(
-        owner.dispatch_bound(&asked, &proof, &required, at),
-        Ok(EffectOutcome::Failed {
-            operation: asked.operation
-        })
-    );
-    assert_eq!(
-        owner.dispatch_bound(&asked, &proof, &required, at),
-        Ok(unknown)
-    );
-    slot.borrow_mut().take();
-    assert_eq!(
-        owner.dispatch_bound(&asked, &proof, &required, at),
-        Ok(unknown),
-        "with no body left there is nothing to run"
-    );
-    assert_eq!(owner.reconcile(&asked, at), unknown);
-    assert_eq!(runs.get(), 1, "the body ran once");
-    assert!(slot.borrow().is_none(), "no second result was recorded");
+    for succeeds in [true, false] {
+        let runs = Rc::new(Cell::new(0_u32));
+        let slot = Rc::new(RefCell::new(None));
+        let mut owner = TaskOwner {
+            repo: Path::new("."),
+            tenant,
+            epoch: SecurityEpoch::INITIAL,
+            task_bytes: b"task",
+            run: Some(body(succeeds, Rc::clone(&runs))),
+            slot: Rc::clone(&slot),
+        };
+        let asked = intent(4, tenant);
+        let operation = asked.operation;
+        let unknown = EffectOutcome::Unknown { operation };
+        assert_eq!(
+            owner.dispatch_bound(
+                &intent(4, TenantId::from_bytes([5; 16])),
+                &proof,
+                &required,
+                at
+            ),
+            Err(BindingError::Changed {
+                field: BindingField::Command
+            })
+        );
+        assert_eq!(runs.get(), 0, "a foreign tenant runs nothing");
+        let finished = if succeeds {
+            EffectOutcome::Succeeded { operation }
+        } else {
+            EffectOutcome::Failed { operation }
+        };
+        assert_eq!(
+            owner.dispatch_bound(&asked, &proof, &required, at),
+            Ok(finished)
+        );
+        assert_eq!(
+            slot.borrow().as_ref().map(Result::is_ok),
+            Some(succeeds),
+            "the body's own answer is kept"
+        );
+        assert_eq!(
+            owner.dispatch_bound(&asked, &proof, &required, at),
+            Ok(unknown)
+        );
+        slot.borrow_mut().take();
+        assert_eq!(
+            owner.dispatch_bound(&asked, &proof, &required, at),
+            Ok(unknown),
+            "with no body left there is nothing to run"
+        );
+        assert_eq!(owner.reconcile(&asked, at), unknown);
+        assert!(owner.resolve(&asked)?.is_some(), "a real folder binds");
+        assert_eq!(runs.get(), 1, "the body ran once");
+        assert!(slot.borrow().is_none(), "no second result was recorded");
+    }
     Ok(())
 }
 
@@ -319,7 +355,7 @@ fn sim_a_repository_that_cannot_be_resolved_binds_to_its_own_bytes() -> TestResu
         tenant,
         epoch: SecurityEpoch::new(3),
         task_bytes: b"task",
-        run: Some(|| -> Result<Report, ExecError> { Err(ExecError::PathUnset) }),
+        run: Some(body(false, Rc::new(Cell::new(0)))),
         slot: Rc::new(RefCell::new(None)),
     };
     let want = ResolvedEffect::new(
