@@ -10,7 +10,7 @@ use lgwks_macros::Error;
 
 use super::ExecError;
 
-/// Schema of the TUI session table, migration step 11 (larry#256): one row per
+/// Schema of the TUI session table, migration step 12 (larry#256): one row per
 /// terminal session, keyed by tenant and id so no tenant reads or writes
 /// another's. The transcript column holds the snapshot JSON
 /// `crate::tui::sessions` writes, bounded there before it is stored.

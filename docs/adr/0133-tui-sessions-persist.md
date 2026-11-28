@@ -23,7 +23,7 @@ database).
 
 A `tui_sessions` table holds one row per terminal session, keyed by tenant and
 id: name, folder, model, update stamp and the snapshot JSON (transcript, pane and
-receipt digests). Migration step 11 adds it. The tenant is the one the run
+receipt digests). Migration step 12 adds it. The tenant is the one the run
 executes as (`LARRY_TENANT`, else the store's default, ADR 0132), and every write
 names it. A create past a tenant's 10,000 rows writes no row in one statement,
 and a duplicate id keeps the first record, so two creators racing at the bound
