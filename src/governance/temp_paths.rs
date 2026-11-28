@@ -688,3 +688,16 @@ fn read_source(root: &Path, relative: &str) -> io::Result<SourceRead> {
         Err(ReadFault::NotRegular { .. }) => Err(io::Error::other("not a regular file")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::string_items;
+
+    /// TOML 1.0.0: a comment runs to the end of its line and opens no string, whatever it
+    /// quotes, while a `#` inside a string stays part of it (larry#611).
+    #[test]
+    fn sim_a_comment_opens_no_string_in_the_members_array() {
+        let body = "\n  # it's \"x\" and ] \n  \"a\", # 'b'\n  'c#d',\n#\"e\"";
+        assert_eq!(string_items(body), ["a", "c#d"]);
+    }
+}

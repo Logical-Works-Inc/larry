@@ -4,7 +4,8 @@
 //! final component is opened no-follow and non-blocking through the held descriptor, so a link
 //! or FIFO swapped in between the check and the open is refused too. Source: CWE-59 (link
 //! following), CWE-367 (TOCTOU) and CWE-400 (uncontrolled resource consumption). The four
-//! readers of the governor call this one, so the rule has one home.
+//! readers of the governor and a session's file read (`executor::edit`, larry#606) call this
+//! one, so the rule has one home.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -58,6 +59,21 @@ pub(crate) fn read_bounded_with(
     limit: u64,
     after_check: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<Vec<u8>, ReadFault> {
+    let (_, file) = open_regular(root, relative, after_check)?;
+    read_open(&file, limit, || Ok(()))
+}
+
+/// The regular file at `relative` under `root`, opened by the walk [`read_bounded`] describes,
+/// with the directory that holds it, held open.
+///
+/// # Errors
+///
+/// As [`read_bounded_with`], less the length bound, which [`read_open`] holds.
+pub(crate) fn open_regular(
+    root: &Path,
+    relative: &Path,
+    after_check: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(Dir, File), ReadFault> {
     let mut directory = Dir::open(root).map_err(missing_or_unreadable)?;
     let mut current = root.to_path_buf();
     let mut parts = relative.components().peekable();
@@ -79,7 +95,7 @@ pub(crate) fn read_bounded_with(
             check_final(&directory, name)?;
             after_check(&current).map_err(ReadFault::Unreadable)?;
             let file = open_final(&directory, name)?;
-            return read_open(file, limit);
+            return Ok((directory, file));
         }
         match directory.kind(name).map_err(missing_or_unreadable)? {
             FileKind::Directory => {}
@@ -130,14 +146,24 @@ fn final_fault(directory: &Dir, name: &str, cause: io::Error) -> ReadFault {
 /// Judges the file the reader opened by its descriptor's metadata. `open_entry` has already
 /// refused every kind but a regular file from that descriptor's own `fstat`; this reads the
 /// length from the same descriptor and then reads at most `limit` bytes plus the one that proves
-/// the bound was passed.
-fn read_open(file: File, limit: u64) -> Result<Vec<u8>, ReadFault> {
+/// the bound was passed, so a file that grows after the length check is still refused.
+/// `after_stat` is the window between the two, for a simulation; production passes a no-op.
+///
+/// # Errors
+///
+/// `TooLarge` past `limit`, `Unreadable` when the metadata call, the window or the read fails.
+pub(crate) fn read_open(
+    file: &File,
+    limit: u64,
+    after_stat: impl FnOnce() -> io::Result<()>,
+) -> Result<Vec<u8>, ReadFault> {
     let metadata = file.metadata().map_err(ReadFault::Unreadable)?;
     if metadata.len() > limit {
         return Err(ReadFault::TooLarge {
             bytes: metadata.len(),
         });
     }
+    after_stat().map_err(ReadFault::Unreadable)?;
     let mut read = Vec::new();
     file.take(limit.saturating_add(1))
         .read_to_end(&mut read)
