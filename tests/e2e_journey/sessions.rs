@@ -270,6 +270,125 @@ fn tui_journey_export_writes_the_session_and_recap_sums_it() -> Journey {
     })
 }
 
+/// Answers of the large session a mid-export kill writes.
+const BIG_ANSWERS: u32 = 64;
+/// Lines of 60 bytes in one answer, so the session is just under 4 MiB.
+const BIG_LINES: usize = 1_000;
+/// Kills tried before the journey gives up on landing one ahead of the publication.
+const KILL_ROUNDS: u32 = 10;
+
+/// Names the one row under `state` `big` and gives it [`BIG_ANSWERS`] answers of [`BIG_LINES`].
+fn enlarge(state: &Path) -> Journey {
+    use lgwks_std::json::{Value, from_str, json, to_string};
+    let (_, _, transcript) = rows(state)?.into_iter().next().ok_or("the row")?;
+    let mut held: Value = from_str(&transcript)?;
+    let lines = format!("{}\n", "x".repeat(59)).repeat(BIG_LINES);
+    let answers = (0..BIG_ANSWERS)
+        .map(|at| json!({ "Said": format!("answer {at:04} \n{lines}") }))
+        .collect();
+    *held.get_mut("entries").ok_or("the row holds no entries")? = Value::Array(answers);
+    let renamed = Connection::open(state.join("executor.db"))?.execute(
+        "UPDATE tui_sessions SET name = 'big', transcript = ?1",
+        [to_string(&held)?],
+    )?;
+    assert_eq!(renamed, 1, "the one row");
+    Ok(())
+}
+
+/// Every name in `folder`.
+fn names(folder: &Path) -> Journey<std::collections::BTreeSet<std::ffi::OsString>> {
+    Ok(std::fs::read_dir(folder)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()?)
+}
+
+/// `path` is the whole export of the large session, first answer to receipts.
+fn assert_whole_export(path: &Path) -> Journey {
+    let text = std::fs::read_to_string(path)?;
+    let last = format!("answer {:04} ", BIG_ANSWERS.saturating_sub(1));
+    assert!(
+        text.starts_with("# Larry session\n")
+            && text.contains("answer 0000 ")
+            && text.contains(&last)
+            && text.ends_with("## receipts\n\n```text\nnone\n```\n\n"),
+        "a part file stands under the name: {} bytes",
+        text.len()
+    );
+    Ok(())
+}
+
+/// A fresh terminal that has resumed the large session.
+fn resumed_big<'scope, 'env>(
+    owner: &'scope std::thread::Scope<'scope, 'env>,
+    work: &Path,
+    env: &[(&'static str, std::ffi::OsString)],
+) -> Journey<Pty<'scope>> {
+    let mut pty = Pty::open(owner, work, env)?;
+    pty.wait_for(READY)?;
+    pty.send("/resume big\r")?;
+    pty.wait_for("resumed big.")?;
+    Ok(pty)
+}
+
+/// kill -9 while `/export` is writing a large session (larry#609): the target is absent or whole,
+/// never a part, and the next `/export` of the same name succeeds and leaves no other file.
+/// The kill is sent the moment the folder changes, and the journey holds until one lands before
+/// the file takes its name. Source: POSIX `kill(2)`, `link(2)`, `fsync(2)`.
+#[test]
+fn tui_journey_a_kill_mid_export_leaves_no_part_file_and_the_next_export_succeeds() -> Journey {
+    let (state, work) = fixture()?;
+    against(state.path(), scripted(613, &[]), |env| -> Journey {
+        std::thread::scope(|owner| -> Journey {
+            let mut first = Pty::open(owner, work.path(), env)?;
+            first.wait_for(READY)?;
+            first.send(QUIT)?;
+            assert_exited(&first.finish()?.0, "Ctrl+C exits 0");
+            enlarge(state.path())?;
+            let before = names(work.path())?;
+            let target = work.path().join("big.md");
+            let mut after = before.clone();
+            after.insert(std::ffi::OsString::from("big.md"));
+            for round in 0..KILL_ROUNDS {
+                let mut pty = resumed_big(owner, work.path(), env)?;
+                let pid = pty.pid()?;
+                // A shell already waiting, so the kill costs a pipe wake and no process start.
+                let mut killer = Command::new("sh")
+                    .args(["-c", &format!("read go; kill -9 {pid}")])
+                    .stdin(Stdio::piped())
+                    .spawn()?;
+                let mut go = killer.stdin.take().ok_or("the killer has no input")?;
+                pty.send("/export big.md\r")?;
+                await_event("the export reaches the folder", || {
+                    Ok((names(work.path())? != before).then_some(()))
+                })?;
+                go.write_all(b"go\n")?;
+                assert!(killer.wait()?.success(), "kill -9 {pid} was delivered");
+                let (status, _) = pty.finish()?;
+                assert!(!status.success(), "kill -9 left a success: {status}");
+                let early = !target.exists();
+                if !early {
+                    assert_whole_export(&target)?;
+                    std::fs::remove_file(&target)?;
+                }
+
+                let mut next = resumed_big(owner, work.path(), env)?;
+                next.send("/export big.md\r")?;
+                next.wait_for("exported to big.md")?;
+                next.send(QUIT)?;
+                assert_exited(&next.finish()?.0, "Ctrl+C exits 0");
+                assert_whole_export(&target)?;
+                assert_eq!(names(work.path())?, after, "no other file stays");
+                std::fs::remove_file(&target)?;
+                if early {
+                    let figure = format!("{{\"kill_landed_before_publish_in_round\":{round}}}\n");
+                    return Ok(std::io::stderr().lock().write_all(figure.as_bytes())?);
+                }
+            }
+            Err("no kill landed before the file took its name".into())
+        })
+    })
+}
+
 /// The issue's proof (larry#256, larry#603): a task runs, the terminal is killed with
 /// kill -9, and a fresh `larry` lists the session under `/resume`, brings its transcript
 /// and pane back, and forks it: the fork takes the later turns and the original row keeps

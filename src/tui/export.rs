@@ -3,15 +3,19 @@
 //!
 //! Every text a person, a model or a command wrote goes into a fenced block longer than any
 //! backtick run it holds (`CommonMark` 0.31 section 4.5), each control or invisible character
-//! shown as a marker. The file is created through held directory descriptors, never through a
-//! link and never over a name that exists (CWE-22, CWE-59).
+//! shown as a marker. The file is made through held directory descriptors, never through a
+//! link and never over a name that exists (CWE-22, CWE-59), and it takes its name only once it
+//! is whole: a killed process leaves at most a part file, which the next export of that folder
+//! sweeps. [`crate::replace_file`] is not this write: its rename replaces what is there.
 
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Component, Path};
 
 use lgwks_macros::Error;
-use lgwks_std::fs::capability::Dir;
+use lgwks_std::fs::capability::{Dir, OpenFlags};
+use lgwks_std::id::Uuid;
+use rustix::fs::{AtFlags, fsync, linkat};
 
 use super::cells::Entry;
 use super::sessions::{MAX_STORED_BYTES, Snapshot};
@@ -24,6 +28,14 @@ const NOTE_BYTES: usize = 128;
 const RECAP_ASKS: usize = 5;
 /// Columns of a task or an answer `/recap` shows.
 const RECAP_COLUMNS: usize = 80;
+/// How the name of a part file starts: it holds an export until the export takes its own name.
+const PART_PREFIX: &str = ".larry-export-";
+/// How the name of a part file ends.
+const PART_SUFFIX: &str = ".part";
+/// Most entries of a folder one sweep reads.
+const SWEEP_ENTRIES: usize = 65_536;
+/// Tries at a write whose part file another terminal's sweep took before it was locked.
+const PUBLISH_TRIES: u8 = 3;
 
 /// Why `/export` wrote nothing. Each text opens with what the person has to know, so it is
 /// read before the chat column wraps it.
@@ -38,6 +50,9 @@ pub(crate) enum ExportError {
     /// A file, a folder or a link already has the name.
     #[error("{0} already exists; /export never overwrites. Name another: /export <file>.")]
     Exists(String),
+    /// The name is one a part file takes, which a later export would sweep.
+    #[error("{0} is a name /export keeps for its part files. Name another: /export <file>.")]
+    Part(String),
     /// A folder on the way is missing, is no folder, or is a link.
     #[error("/export never follows a link; the folder of {path} cannot be opened: {cause}")]
     Folder {
@@ -47,7 +62,7 @@ pub(crate) enum ExportError {
         #[source]
         cause: io::Error,
     },
-    /// The file was not created or not written whole.
+    /// The file was not written whole, so nothing has its name.
     #[error("{path} was not written: {cause}")]
     Write {
         /// The path asked for.
@@ -63,7 +78,7 @@ pub(crate) enum ExportError {
 ///
 /// # Errors
 ///
-/// [`ExportError`]; nothing is left behind unless its text says so.
+/// [`ExportError`]; nothing has the target's name that did not have it before.
 pub(crate) fn export(
     folder: &Path,
     target: &str,
@@ -78,7 +93,7 @@ pub(crate) fn export(
     };
     let about = format!("name: {name}\nfolder: {}\nmodel: {model}", folder.display());
     let (text, held, left_out) = markdown(&about, snapshot);
-    create(folder, &target, text.as_bytes(), store)?;
+    let untidied = create(folder, &target, text.as_bytes(), store)?;
     let mut lines = vec![format!(
         "exported to {target} ({held} entries, {} receipts).",
         snapshot.receipts.len()
@@ -86,6 +101,11 @@ pub(crate) fn export(
     if left_out > 0 {
         lines.push(format!(
             "{left_out} older entries did not fit in 4 MiB and are left out."
+        ));
+    }
+    if let Some(cause) = untidied {
+        lines.push(format!(
+            "the folder may keep a {PART_PREFIX}*{PART_SUFFIX} file: {cause}"
         ));
     }
     Ok(lines)
@@ -205,15 +225,16 @@ fn receipts(held: &[Receipt]) -> String {
     lines.join("\n")
 }
 
-/// Creates `target` beneath `folder` holding `bytes`. Each folder on the way is opened from the
-/// one before it and never through a link, and the name must be new. `fill` writes the bytes; a
-/// write that fails removes the file it made.
+/// Creates `target` beneath `folder` holding `bytes`, whole or not at all, after sweeping the
+/// part files its folder was left with. Each folder on the way is opened from the one before it
+/// and never through a link, and the name must be new. `fill` writes the bytes. Returns why a
+/// part file or the folder's sync was left undone.
 fn create(
     folder: &Path,
     target: &str,
     bytes: &[u8],
-    fill: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
-) -> Result<(), ExportError> {
+    mut fill: impl FnMut(&mut File, &[u8]) -> io::Result<()>,
+) -> Result<Option<io::Error>, ExportError> {
     let path = || target.to_owned();
     let mut names = parts(target)?;
     let Some(name) = names.pop() else {
@@ -227,27 +248,95 @@ fn create(
     for part in names {
         directory = directory.open_subdir(part).map_err(closed)?;
     }
-    let mut file = directory.create_new(name).map_err(|cause| {
-        if cause.kind() == io::ErrorKind::AlreadyExists {
-            ExportError::Exists(path())
-        } else {
-            ExportError::Write {
-                path: path(),
-                cause,
-            }
+    if is_part(name) {
+        return Err(ExportError::Part(path()));
+    }
+    let swept = sweep(&directory);
+    match written(&directory, name, bytes, &mut fill) {
+        Ok(untidied) => Ok(untidied.or(swept.err())),
+        Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
+            Err(ExportError::Exists(path()))
         }
-    })?;
-    let Err(cause) = fill(&mut file, bytes) else {
-        return Ok(());
-    };
-    let cause = match directory.remove_file(name) {
-        Ok(()) => cause,
-        Err(left) => io::Error::new(left.kind(), format!("{cause}; a part file stays: {left}")),
-    };
-    Err(ExportError::Write {
-        path: path(),
-        cause,
-    })
+        Err(cause) => Err(ExportError::Write {
+            path: path(),
+            cause,
+        }),
+    }
+}
+
+/// Whether `name` is the name of a part file.
+fn is_part(name: &str) -> bool {
+    name.starts_with(PART_PREFIX) && name.ends_with(PART_SUFFIX)
+}
+
+/// Removes the part files killed exports left in `directory`: regular files with a part name
+/// that no running export holds locked. A link, a folder and every other name stay.
+fn sweep(directory: &Dir) -> io::Result<()> {
+    for entry in rustix::fs::Dir::read_from(directory.as_fd())?.take(SWEEP_ENTRIES) {
+        let entry = entry?;
+        // A name that is not UTF-8 is none this module made.
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !is_part(name) {
+            continue;
+        }
+        // The open refuses a link and anything but a regular file.
+        if let Ok(file) = directory.open_entry(name, OpenFlags::read())
+            && file.try_lock().is_ok()
+        {
+            directory.remove_file(name)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`publish`], again while another terminal's sweep takes the part file between its creation
+/// and its lock.
+fn written(
+    directory: &Dir,
+    name: &str,
+    bytes: &[u8],
+    fill: &mut impl FnMut(&mut File, &[u8]) -> io::Result<()>,
+) -> io::Result<Option<io::Error>> {
+    for _ in 1..PUBLISH_TRIES {
+        match publish(directory, name, bytes, fill) {
+            Err(cause)
+                if matches!(
+                    cause.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::WouldBlock
+                ) => {}
+            outcome => return outcome,
+        }
+    }
+    publish(directory, name, bytes, fill)
+}
+
+/// One try: `bytes` into a new part file held locked while it is filled, then a hard link of it
+/// to `name`, which fails when the name is taken and so never replaces (POSIX `link(2)`). The
+/// part file goes either way. Returns why that removal or the folder's sync failed once the
+/// name was published.
+fn publish(
+    directory: &Dir,
+    name: &str,
+    bytes: &[u8],
+    fill: &mut impl FnMut(&mut File, &[u8]) -> io::Result<()>,
+) -> io::Result<Option<io::Error>> {
+    let id = Uuid::new_v7().map_err(io::Error::other)?;
+    let part = format!("{PART_PREFIX}{id}{PART_SUFFIX}");
+    let mut file = directory.create_new(&part)?;
+    let linked = file
+        .try_lock()
+        .map_err(io::Error::from)
+        .and_then(|()| fill(&mut file, bytes))
+        .and_then(|()| {
+            let held = directory.as_fd();
+            Ok(linkat(held, &part, held, name, AtFlags::empty())?)
+        });
+    let tidied = directory
+        .remove_file(&part)
+        .and_then(|()| Ok(fsync(directory.as_fd())?));
+    linked.map(|()| tidied.err())
 }
 
 /// The names of `target` beneath the folder: every part a plain name, none of them `.git` in

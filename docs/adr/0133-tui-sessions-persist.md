@@ -76,21 +76,33 @@ Larry runs in, `<session name>.md` with no file named: who and where, each entry
 every kept receipt digest. Every person, model and command text sits in a fence
 longer than any backtick run it holds (CommonMark 0.31 section 4.5), with control
 and invisible characters shown as markers. The file is at most 4 MiB: the oldest
-entries are left out first and counted in it. It is created through held directory
+entries are left out first and counted in it. It is made through held directory
 descriptors (`lgwks_std::fs::capability::Dir`), mode 0600, never over an existing
 name, never through a link, never into `.git` or outside the folder (CWE-22,
-CWE-59). A failed write removes its file. It needs no row, so a refused database
-changes nothing. It waits while a task runs. A kill -9 during the write can leave
-a part file, which the next `/export` refuses to overwrite.
+CWE-59). It needs no row, so a refused database changes nothing. It waits while a
+task runs.
+
+The name holds the whole file or nothing. The bytes go to a new part file
+`.larry-export-<UUIDv7>.part` beside the target, are synced, and take the name by
+`linkat`, which never replaces (POSIX `link(2)`); the part file is then removed
+and the folder synced. A failed or killed write leaves nothing under the name, so
+the next `/export` succeeds. Each export first sweeps its target's folder: a
+regular file with a part name that no running export holds locked is removed, from
+the first 65,536 entries. A name of that shape is refused as a target. A part
+file another terminal sweeps before its lock is made again, at most 3 tries. A
+file system with no hard links refuses the export and writes nothing.
 
 `/recap` answers in the frame, a task running or not: counts, the newest 5 tasks,
 the answer to the newest one and the receipts. It calls no model and compacts
 nothing.
 
 Rejected: PR #567's export (written beside the folder, following links,
-overwriting, model text as raw Markdown, no bound) and a model-written recap (a
-paid call that can fail, ADR 0044). Reversed if a person's recap must say what a
-change did in words no receipt holds.
+overwriting, model text as raw Markdown, no bound); `replace_file` (its rename
+replaces, and it resolves paths through links); `std::fs::hard_link` (it resolves
+the folders again, so a link swapped in after the walk is followed); one fixed
+part name (two terminals would publish each other's bytes); and a model-written
+recap (a paid call that can fail, ADR 0044). Reversed if a folder with no hard
+links must take an export, or a recap must say what no receipt holds.
 
 ## Consequences
 
@@ -98,6 +110,7 @@ A kill -9 loses at most the turn in flight, and a fresh terminal continues the
 session. A listing reads the tenant's rows, at most 10,000.
 Proof: `tui_journey_export_writes_the_session_and_recap_sums_it` (shipped debug
 binary, oracle, 20 samples: `/export` p50 111.8 ms, p99 140.8 ms, RSS 10,900 KiB),
+`tui_journey_a_kill_mid_export_leaves_no_part_file_and_the_next_export_succeeds`,
 `src/tui/sim_export.rs`, `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
 `tui_journey_a_full_session_store_lists_and_reports_latency_and_rss` (shipped
 debug binary, 10,000 rows, 20 samples on the Oracle ARM64 box: p50 44.6 ms, p99

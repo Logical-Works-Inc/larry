@@ -3,13 +3,17 @@
 //! file is read back from the disk. Source: `CommonMark` 0.31 section 4.5 (fenced code),
 //! CWE-22 (path traversal), CWE-59 (link following), POSIX `ENOSPC`.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::symlink;
+use std::path::Path;
 
 use lgwks_std::seeded::Seeded;
 
-use super::{ExportError, NOTE_BYTES, block, create, file_name, markdown, recap, store};
+use super::{
+    ExportError, NOTE_BYTES, PUBLISH_TRIES, block, create, file_name, markdown, recap, store,
+};
 use crate::executor::{ExecError, sim_tree};
 use crate::sim_error::SimError;
 use crate::tui::app::{App, Effect, Input, Key};
@@ -57,12 +61,13 @@ fn ran(passed: bool) -> Entry {
 }
 
 /// Which refusal `outcome` is.
-fn kind(outcome: &Result<(), ExportError>) -> &'static str {
+fn kind<T>(outcome: &Result<T, ExportError>) -> &'static str {
     match *outcome {
-        Ok(()) => "written",
+        Ok(_) => "written",
         Err(ExportError::Outside(_)) => "outside",
         Err(ExportError::Git(_)) => "git",
         Err(ExportError::Exists(_)) => "exists",
+        Err(ExportError::Part(_)) => "part",
         Err(ExportError::Folder { .. }) => "folder",
         Err(ExportError::Write { .. }) => "write",
     }
@@ -99,6 +104,10 @@ fn sim_export_is_refused_outside_the_folder() -> Outcome {
         ("none/missing.md", "folder"),
         ("kept.md/under.md", "folder"),
         (long.as_str(), "write"),
+        (".larry-export-mine.part", "part"),
+        ("sub/.larry-export-mine.part", "part"),
+        (".larry-export-notes.md", "written"),
+        ("notes.part", "written"),
         ("./top.md", "written"),
         ("sub/deep.md", "written"),
     ];
@@ -119,24 +128,175 @@ fn sim_export_is_refused_outside_the_folder() -> Outcome {
     Ok(())
 }
 
-/// A write the device refuses leaves no part file, so the same name works once there is room.
+/// A write the device refuses is tried once and leaves no part file, so the same name works once
+/// there is room.
 #[test]
 fn sim_a_failed_write_leaves_no_file() -> Outcome {
     let folder = sim_tree::scratch("tui-export-full")?;
+    let mut tried = 0_u8;
     let full = create(
         &folder,
         "notes.md",
         b"half",
         |file: &mut File, bytes: &[u8]| {
+            tried = tried.saturating_add(1);
             file.write_all(bytes)?;
             Err(io::Error::from(io::ErrorKind::StorageFull))
         },
     );
     assert_eq!(kind(&full), "write", "{full:?}");
-    assert!(!folder.join("notes.md").exists(), "a part file stayed");
+    assert_eq!(tried, 1, "a full disk is not another terminal's sweep");
+    assert_eq!(disk(&folder)?, [], "a part file stayed");
     let again = create(&folder, "notes.md", b"whole", store);
     assert_eq!(kind(&again), "written", "{again:?}");
     assert_eq!(fs::read_to_string(folder.join("notes.md"))?, "whole");
+    Ok(())
+}
+
+/// Every file of `folder` and its bytes: the disk a kill -9 at this instant leaves behind.
+fn disk(folder: &Path) -> io::Result<Vec<(OsString, Vec<u8>)>> {
+    let mut held = Vec::new();
+    for entry in fs::read_dir(folder)? {
+        let name = entry?.file_name();
+        let bytes = fs::read(folder.join(&name))?;
+        held.push((name, bytes));
+    }
+    held.sort();
+    Ok(held)
+}
+
+/// A writer killed after any number of bytes, none to all of them, leaves no file under the
+/// target's name, and the next `/export` of that name succeeds and sweeps what was left.
+/// Source: POSIX `kill(2)`, `link(2)`.
+#[test]
+fn sim_export_killed_at_any_byte_never_shows_a_part_file() -> Outcome {
+    let folder = sim_tree::scratch("tui-export-killed")?;
+    let whole = b"# Larry session\n\n## larry\n\n```text\ndone\n```\n\n";
+    let target = folder.join("notes.md");
+    for cut in 0..=whole.len() {
+        let mut left = Vec::new();
+        let stopped = create(
+            &folder,
+            "notes.md",
+            whole,
+            |file: &mut File, bytes: &[u8]| {
+                file.write_all(bytes.get(..cut).ok_or(io::ErrorKind::UnexpectedEof)?)?;
+                left = disk(&folder)?;
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            },
+        );
+        assert_eq!(kind(&stopped), "write", "{cut}: {stopped:?}");
+        // The process died at `left`: no clean-up ran, so the disk goes back to that instant.
+        for (name, bytes) in left {
+            fs::write(folder.join(name), bytes)?;
+        }
+        assert!(!target.exists(), "{cut}: a part file stands under the name");
+        let again = create(&folder, "notes.md", whole, store);
+        assert_eq!(kind(&again), "written", "{cut}: {again:?}");
+        assert_eq!(
+            disk(&folder)?,
+            [(OsString::from("notes.md"), whole.to_vec())],
+            "{cut}: the part file is swept"
+        );
+        fs::remove_file(&target)?;
+    }
+    Ok(())
+}
+
+/// A part file a dead export left goes with the next export of its folder. A locked one, which
+/// a running export holds, a link, a folder, another folder's and a person's file of nearly the
+/// name stay, and a file published just before its writer died keeps its bytes.
+#[test]
+fn sim_export_sweeps_only_dead_part_files() -> Outcome {
+    let root = sim_tree::scratch("tui-export-sweep")?;
+    let folder = root.join("work");
+    let sub = folder.join("sub");
+    fs::create_dir_all(&sub)?;
+    let outside = root.join("outside");
+    fs::write(&outside, "mine")?;
+    for made in [
+        ".larry-export-dead.part",
+        ".larry-export-live.part",
+        ".larry-export-notes.md",
+        "notes.part",
+        "sub/.larry-export-deeper.part",
+        "before.md",
+    ] {
+        fs::write(folder.join(made), "whole")?;
+    }
+    symlink(&outside, folder.join(".larry-export-link.part"))?;
+    fs::create_dir(folder.join(".larry-export-folder.part"))?;
+    // Killed between the publication and the removal of the part file.
+    fs::hard_link(
+        folder.join("before.md"),
+        folder.join(".larry-export-linked.part"),
+    )?;
+    let running = File::open(folder.join(".larry-export-live.part"))?;
+    running.try_lock().map_err(io::Error::from)?;
+
+    let next = create(&folder, "next.md", b"x", store);
+    assert!(matches!(next, Ok(None)), "{next:?}");
+    let mut names: Vec<OsString> = fs::read_dir(&folder)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<_>>()?;
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ".larry-export-folder.part",
+            ".larry-export-link.part",
+            ".larry-export-live.part",
+            ".larry-export-notes.md",
+            "before.md",
+            "next.md",
+            "notes.part",
+            "sub",
+        ]
+    );
+    assert_eq!(fs::read_to_string(folder.join("before.md"))?, "whole");
+    assert_eq!(fs::read_to_string(&outside)?, "mine");
+    assert!(sub.join(".larry-export-deeper.part").exists());
+    let deeper = create(&folder, "sub/next.md", b"x", store);
+    assert!(matches!(deeper, Ok(None)), "{deeper:?}");
+    assert!(!sub.join(".larry-export-deeper.part").exists());
+    Ok(())
+}
+
+/// Another terminal's sweep that takes a part file before its writer locked it costs one more
+/// try; one that takes every try ends typed and leaves nothing.
+#[test]
+fn sim_export_tries_again_when_another_sweep_takes_the_part_file() -> Outcome {
+    let folder = sim_tree::scratch("tui-export-taken")?;
+    for takes in 0..=PUBLISH_TRIES {
+        let mut tried = 0_u8;
+        let outcome = create(
+            &folder,
+            "notes.md",
+            b"whole",
+            |file: &mut File, bytes: &[u8]| {
+                if tried < takes {
+                    for (name, _) in disk(&folder)? {
+                        fs::remove_file(folder.join(name))?;
+                    }
+                }
+                tried = tried.saturating_add(1);
+                store(file, bytes)
+            },
+        );
+        if takes < PUBLISH_TRIES {
+            assert_eq!(kind(&outcome), "written", "{takes}: {outcome:?}");
+            assert_eq!(tried, takes.saturating_add(1), "{takes}");
+            assert_eq!(
+                disk(&folder)?,
+                [(OsString::from("notes.md"), b"whole".to_vec())]
+            );
+            fs::remove_file(folder.join("notes.md"))?;
+        } else {
+            assert_eq!(kind(&outcome), "write", "{takes}: {outcome:?}");
+            assert_eq!(tried, PUBLISH_TRIES, "the tries are bounded");
+            assert_eq!(disk(&folder)?, []);
+        }
+    }
     Ok(())
 }
 
