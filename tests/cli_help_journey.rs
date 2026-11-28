@@ -214,7 +214,7 @@ fn route_usage_ends_with_one_newline() -> TestResult {
 
     /// The synopsis every route usage refusal ends with, as
     /// `executor::routes` prints it.
-    const SYNOPSIS: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
+    const SYNOPSIS: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | residency <CC,...> | residency --clear | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
     /// The refusal for arguments no row of the help table describes.
     const UNKNOWN: &str = "larry: unknown arguments; run `larry help` for every subcommand and its LARRY_* variables\n";
     /// The shared `governance`/`tracker` usage refusal for `--bogus`.
