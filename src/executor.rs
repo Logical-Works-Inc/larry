@@ -5,6 +5,7 @@ mod author;
 mod ceiling;
 mod compact;
 mod confine;
+mod edit;
 mod error;
 pub(super) mod fence_control;
 mod gate;
@@ -20,6 +21,7 @@ pub mod routes;
 mod run;
 mod seal;
 mod session;
+mod session_turn;
 #[cfg(test)]
 mod sim_env;
 #[cfg(test)]
@@ -45,7 +47,7 @@ use seal::{SealedRun, seal_run};
 use workspace::{Workspace, sweep};
 pub(crate) use workspace::{hold_origin, origin_lock_path};
 
-use crate::model::{ModelConfig, Route};
+use crate::model::{ModelConfig, Route, is_proxy_variable};
 pub use author::AuthorFault;
 pub use confine::ConfineError;
 #[cfg(test)]
@@ -77,9 +79,10 @@ const DEFAULT_TIMEOUT_MS: u64 = 600_000;
 /// Largest accepted command timeout, in milliseconds (one day).
 pub(crate) const MAX_TIMEOUT_MS: u64 = 86_400_000;
 
-/// Whether Larry reads the variable `name`: `PATH`, `HOME` and every `LARRY_` one.
+/// Whether Larry reads the variable `name`: `PATH`, `HOME`, every `LARRY_` one and
+/// the proxy variables a model call would obey (larry#602).
 fn read_by_larry(name: &str) -> bool {
-    name == "PATH" || name == "HOME" || name.starts_with("LARRY_")
+    name == "PATH" || name == "HOME" || name.starts_with("LARRY_") || is_proxy_variable(name)
 }
 
 /// The process environment as one snapshot every setting reads from: a

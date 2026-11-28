@@ -322,7 +322,7 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
         assert_eq!(
             said(&notes),
             Some(
-                "model: 3 replies in a row refused: the object must hold exactly one key, command or done"
+                "model: 3 replies in a row refused: the object must hold exactly one key, command, done, read or edit"
             ),
             "the last refusal is named"
         );

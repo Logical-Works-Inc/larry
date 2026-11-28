@@ -20,6 +20,7 @@ use lgwks_macros::Error;
 use lgwks_std::process::process_group_exists;
 use lgwks_std::seeded::{DrawError, Seeded};
 
+use super::super::edit::Edit;
 use super::super::run::{CommandResult, GROUP_PROBE_DEADLINE, Place, RunHooks, clip, run_command};
 use super::reply::{Reply, ReplyFault, parse_reply};
 use super::{ExecError, Ledger, MAX_INSTRUCTION_BYTES, OBSERVED_BYTES, SessionError, check};
@@ -57,7 +58,7 @@ fn quoted(value: &str) -> Result<String, SimError> {
 /// One generated reply and what the rule says of it.
 fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
     let mut rng = Seeded::from_seed(seed);
-    let kind = rng.below(11)?;
+    let kind = rng.below(14)?;
     let len = usize::try_from(rng.below(40)?.saturating_add(1))?;
     let body = format!("x{}", text(&mut rng, len)?);
     let pad = if rng.below(2)? == 0 { "" } else { "  \n" };
@@ -101,6 +102,26 @@ fn case(seed: u64) -> Result<(String, Result<Reply, ReplyFault>), SimError> {
         9 => (
             format!("{{\"command\":{}}}", quoted(&format!("{body}\0"))?),
             Err(ReplyFault::Nul),
+        ),
+        10 => (
+            format!("{{\"read\":{}}}", quoted(&body)?),
+            Ok(Reply::Read { path: body }),
+        ),
+        11 => (
+            format!(
+                "{{\"edit\":{{\"path\":\"f\",\"old\":{0},\"new\":{0},\"expect_digest\":\"d\"}}}}",
+                quoted(&body)?
+            ),
+            Ok(Reply::Edit(Edit {
+                path: String::from("f"),
+                old: body.clone(),
+                new: body,
+                expect_digest: String::from("d"),
+            })),
+        ),
+        12 => (
+            format!("{{\"edit\":{}}}", quoted(&body)?),
+            Err(ReplyFault::EditShape),
         ),
         _ => (
             format!("{{\"command\":{}}}", quoted(&" ".repeat(len))?),

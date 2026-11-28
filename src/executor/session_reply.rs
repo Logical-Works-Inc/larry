@@ -8,6 +8,7 @@ use std::fmt;
 use lgwks_std::json::{self, Value};
 
 use super::super::author::unfenced;
+use super::super::edit::Edit;
 
 /// One reply, parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,13 @@ pub(crate) enum Reply {
     Command(String),
     /// The task is done; the summary for the person.
     Done(String),
+    /// Show one file of the working directory with its digest.
+    Read {
+        /// The repo-relative path to read.
+        path: String,
+    },
+    /// Apply one anchored edit to a file of the working directory.
+    Edit(Edit),
 }
 
 /// Why a reply was refused; the model is told and may try again.
@@ -27,16 +35,20 @@ pub(crate) enum ReplyFault {
     NotJson(String),
     /// The reply is JSON but not an object.
     NotAnObject,
-    /// The object does not hold exactly one key, `command` or `done`.
+    /// The object does not hold exactly one key, `command`, `done`, `read` or
+    /// `edit`.
     Keys,
-    /// The key's value is not a string.
+    /// The key's value, or an edit's member, is not a string.
     NotAString,
     /// The command is empty or blank.
     EmptyCommand,
-    /// The command or summary is over 4 KiB.
+    /// The command, summary, path or edit text is over 4 KiB.
     FieldTooLong,
-    /// The command holds a NUL byte, which no shell argument can carry.
+    /// The command, path or edit text holds a NUL byte, which no shell argument,
+    /// file name or text file can carry.
     Nul,
+    /// The edit is not an object of `path`, `old`, `new` and `expect_digest`.
+    EditShape,
 }
 
 impl fmt::Display for ReplyFault {
@@ -45,17 +57,53 @@ impl fmt::Display for ReplyFault {
             Self::TooLong => write!(out, "the reply is over {} bytes", super::MAX_REPLY_BYTES),
             Self::NotJson(ref cause) => write!(out, "the reply is not JSON ({cause})"),
             Self::NotAnObject => out.write_str("the reply is not a JSON object"),
-            Self::Keys => out.write_str("the object must hold exactly one key, command or done"),
+            Self::Keys => {
+                out.write_str("the object must hold exactly one key, command, done, read or edit")
+            }
             Self::NotAString => out.write_str("the value must be a string"),
             Self::EmptyCommand => out.write_str("the command is empty"),
             Self::FieldTooLong => write!(
                 out,
-                "the command or summary is over {} bytes",
+                "the command, summary, path or edit text is over {} bytes",
                 super::MAX_COMMAND_BYTES
             ),
-            Self::Nul => out.write_str("the command holds a NUL byte"),
+            Self::Nul => out.write_str("the command, path or edit text holds a NUL byte"),
+            Self::EditShape => {
+                out.write_str("the edit must hold exactly path, old, new and expect_digest")
+            }
         }
     }
+}
+
+/// A string no longer than one field may be.
+fn bounded(field: &Value) -> Result<&str, ReplyFault> {
+    let text = field.as_str().ok_or(ReplyFault::NotAString)?;
+    if text.len() > super::MAX_COMMAND_BYTES {
+        return Err(ReplyFault::FieldTooLong);
+    }
+    Ok(text)
+}
+
+/// Parses an `edit` value: exactly `path`, `old`, `new` and `expect_digest`,
+/// each a bounded NUL-free string.
+fn parse_edit(field: &Value) -> Result<Reply, ReplyFault> {
+    let object = field
+        .as_object()
+        .filter(|object| object.len() == 4)
+        .ok_or(ReplyFault::EditShape)?;
+    let member = |key: &str| {
+        let text = bounded(object.get(key).ok_or(ReplyFault::EditShape)?)?;
+        if text.contains('\0') {
+            return Err(ReplyFault::Nul);
+        }
+        Ok(text.to_owned())
+    };
+    Ok(Reply::Edit(Edit {
+        path: member("path")?,
+        old: member("old")?,
+        new: member("new")?,
+        expect_digest: member("expect_digest")?,
+    }))
 }
 
 /// Parses one model reply: one surrounding code fence and outer whitespace are allowed.
@@ -70,16 +118,19 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
     let (Some((key, field)), None) = (entries.next(), entries.next()) else {
         return Err(ReplyFault::Keys);
     };
-    let text = field.as_str().ok_or(ReplyFault::NotAString)?;
-    if text.len() > super::MAX_COMMAND_BYTES {
-        return Err(ReplyFault::FieldTooLong);
-    }
     let name: &str = key;
+    if name == "edit" {
+        return parse_edit(field);
+    }
+    let text = bounded(field)?;
     match name {
         "command" if text.trim().is_empty() => Err(ReplyFault::EmptyCommand),
-        "command" if text.contains('\0') => Err(ReplyFault::Nul),
+        "command" | "read" if text.contains('\0') => Err(ReplyFault::Nul),
         "command" => Ok(Reply::Command(text.to_owned())),
         "done" => Ok(Reply::Done(text.to_owned())),
+        "read" => Ok(Reply::Read {
+            path: text.to_owned(),
+        }),
         _ => Err(ReplyFault::Keys),
     }
 }
@@ -87,7 +138,7 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ReplyFault> {
 #[cfg(test)]
 mod tests {
     use super::super::{MAX_COMMAND_BYTES, MAX_REPLY_BYTES};
-    use super::{Reply, ReplyFault, parse_reply};
+    use super::{Edit, Reply, ReplyFault, parse_reply};
 
     /// A `command` field of exactly the bound parses; one byte past it is refused.
     #[test]
@@ -104,6 +155,72 @@ mod tests {
             parse_reply(&format!("{{\"command\":{past:?}}}")),
             Err(ReplyFault::FieldTooLong),
             "one byte past the bound is refused"
+        );
+    }
+
+    /// A `read` reply carries its path; a mistyped one or a NUL is refused.
+    #[test]
+    fn a_read_reply_parses_and_a_mistyped_one_is_refused() {
+        assert_eq!(
+            parse_reply("{\"read\":\"src/lib.rs\"}"),
+            Ok(Reply::Read {
+                path: String::from("src/lib.rs"),
+            }),
+            "a read reply parses"
+        );
+        assert_eq!(
+            parse_reply("{\"read\":7}"),
+            Err(ReplyFault::NotAString),
+            "a mistyped path is refused"
+        );
+        assert_eq!(
+            parse_reply("{\"read\":\"a\\u0000b\"}"),
+            Err(ReplyFault::Nul),
+            "a path holding a NUL is refused"
+        );
+    }
+
+    /// An `edit` reply carries its four fields; a missing, extra, mistyped,
+    /// over-long or NUL-carrying one is refused with the reason the model
+    /// retries from.
+    #[test]
+    fn an_edit_reply_parses_and_a_malformed_one_is_refused() {
+        let reply = |body: &str| parse_reply(&format!("{{\"edit\":{body}}}"));
+        assert_eq!(
+            reply(r#"{"path":"a.rs","old":"x","new":"y","expect_digest":"d"}"#),
+            Ok(Reply::Edit(Edit {
+                path: String::from("a.rs"),
+                old: String::from("x"),
+                new: String::from("y"),
+                expect_digest: String::from("d"),
+            })),
+            "a well-formed edit parses"
+        );
+        for shape in [
+            r#""x""#,
+            r#"{"path":"a.rs","old":"x","new":"y"}"#,
+            r#"{"path":"a.rs","old":"x","new":"y","expect_digest":"d","more":"z"}"#,
+            r#"{"path":"a.rs","old":"x","new":"y","digest":"d"}"#,
+        ] {
+            assert_eq!(reply(shape), Err(ReplyFault::EditShape), "{shape}");
+        }
+        assert_eq!(
+            reply(r#"{"path":"a.rs","old":7,"new":"y","expect_digest":"d"}"#),
+            Err(ReplyFault::NotAString),
+            "a mistyped member"
+        );
+        assert_eq!(
+            reply(r#"{"path":"a.rs","old":"x","new":"a\u0000","expect_digest":"d"}"#),
+            Err(ReplyFault::Nul),
+            "a NUL in a member"
+        );
+        let long = "x".repeat(MAX_COMMAND_BYTES.saturating_add(1));
+        assert_eq!(
+            reply(&format!(
+                r#"{{"path":"a.rs","old":"{long}","new":"y","expect_digest":"d"}}"#
+            )),
+            Err(ReplyFault::FieldTooLong),
+            "a member past the bound"
         );
     }
 

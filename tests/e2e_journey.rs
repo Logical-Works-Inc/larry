@@ -8,8 +8,12 @@
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "e2e_journey/edit.rs"]
+mod edit;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "e2e_journey/input.rs"]
+mod input;
 #[path = "support/journey.rs"]
 mod journey;
 #[path = "support/mock_model.rs"]
@@ -22,6 +26,8 @@ mod pane;
 mod ps;
 #[path = "support/pty.rs"]
 mod pty;
+#[path = "e2e_journey/read.rs"]
+mod read;
 #[path = "e2e_journey/sessions.rs"]
 mod sessions;
 #[path = "support/terminal_cases.rs"]
