@@ -123,12 +123,6 @@ impl WorkProposal {
         self.unit
     }
 
-    /// The declared reconciliation strategy (R72).
-    #[must_use]
-    pub const fn strategy(&self) -> ReconciliationStrategy {
-        self.strategy
-    }
-
     /// The intent this proposal reserves, for `tenant`, admitted under
     /// `admission_epoch`.
     ///

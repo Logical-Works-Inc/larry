@@ -201,7 +201,7 @@ where
         kind: CommandKind,
         run: RunId,
     ) -> Result<(), RuntimeError> {
-        let payload = CommandAcceptedPayload { command, run, kind };
+        let payload = CommandAcceptedPayload::new(command, run, kind);
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::CommandAccepted, bytes)
     }
@@ -236,7 +236,7 @@ where
         to: RunState,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
-        let payload = TransitionPayload { event, from, to };
+        let payload = TransitionPayload::new(event, from, to);
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::StateTransition, bytes)
     }
@@ -249,10 +249,7 @@ where
         authorization: larry_contracts::replay::ReplayRecord,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
-        let payload = IntentPayload {
-            intent,
-            authorization,
-        };
+        let payload = IntentPayload::new(intent, authorization);
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::EffectIntentRecorded, bytes)
     }
@@ -266,11 +263,7 @@ where
         dispatches: u8,
     ) -> Result<(), RuntimeError> {
         let tenant = self.tenant_of(run)?;
-        let payload = OutcomePayload {
-            intent,
-            outcome,
-            dispatches,
-        };
+        let payload = OutcomePayload::new(intent, outcome, dispatches);
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(tenant, run, EventKind::EffectOutcomeRecorded, bytes)
     }
@@ -290,7 +283,7 @@ where
         }
         let receipt =
             TerminalReceipt::publish(intent.operation, run, self.tenant_of(run)?, disposition);
-        let payload = ReceiptPayload { receipt };
+        let payload = ReceiptPayload::new(receipt);
         let bytes = lgwks_std::json::to_vec(&payload)?;
         self.record_event(
             self.tenant_of(run)?,

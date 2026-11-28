@@ -29,7 +29,6 @@ use larry_runtime::journal::Journal;
 use larry_runtime::owner::fixture::ScriptedOwner;
 use larry_runtime::payload::{
     CommandAcceptedPayload, IntentPayload, OutcomePayload, ReceiptPayload, TransitionPayload,
-    WorkProposal,
 };
 use larry_runtime::projection::{
     EffectPhase, FoldProjection, ProjectionBackend, RunView, replay_authorizations,
@@ -436,8 +435,8 @@ fn sim_payload_constructors_and_old_records() -> Outcome {
     );
     assert_eq!(new_receipt(receipt).receipt, receipt);
 
-    // The declared strategy reads back; it decides the reconciliation path.
-    let strategy_of: fn(&WorkProposal) -> ReconciliationStrategy = outlined(WorkProposal::strategy);
+    // The declared strategy reaches the reserved intent; it decides the
+    // reconciliation path.
     let body = support::proposal(
         run(1),
         tenant(1),
@@ -446,7 +445,11 @@ fn sim_payload_constructors_and_old_records() -> Outcome {
         1,
         ReconciliationStrategy::AlwaysCompensate,
     );
-    assert_eq!(strategy_of(&body), ReconciliationStrategy::AlwaysCompensate);
+    let reserved = body.intent(
+        tenant(1),
+        larry_contracts::authority::SecurityEpoch::INITIAL,
+    );
+    assert_eq!(reserved.strategy, ReconciliationStrategy::AlwaysCompensate);
 
     // A record without an attempt number decodes with the whole budget spent.
     let full = lgwks_std::json::to_vec(&observed)?;
