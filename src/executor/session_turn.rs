@@ -303,6 +303,7 @@ impl Turn<'_> {
         // The model's view is redacted from the whole capture and cut after, so
         // a cut never leaves the head of a key; the report keeps the real bytes.
         let shown = result
+            .clone()
             .rewritten(|stream| self.redactor.observed(stream))
             .clipped(OBSERVED_BYTES);
         let result = result.clipped(OBSERVED_BYTES);

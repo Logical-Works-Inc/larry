@@ -139,7 +139,7 @@ impl Captured {
 }
 
 /// What one acceptance command did, as the report records it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub(crate) struct CommandResult {
     /// The argv that ran.
@@ -212,15 +212,11 @@ impl CommandResult {
         self
     }
 
-    /// This result with each kept stream passed through `rewrite` and everything
-    /// else as it was: the copy a model is shown (larry#589).
-    pub(crate) fn rewritten(&self, rewrite: impl Fn(&str) -> String) -> CommandResult {
-        CommandResult {
-            argv: self.argv.clone(),
-            stdout: rewrite(&self.stdout),
-            stderr: rewrite(&self.stderr),
-            ..*self
-        }
+    /// This result with each kept stream passed through `rewrite` (larry#589).
+    pub(crate) fn rewritten(mut self, rewrite: impl Fn(&str) -> String) -> CommandResult {
+        self.stdout = rewrite(&self.stdout);
+        self.stderr = rewrite(&self.stderr);
+        self
     }
 
     /// The report object for this command.
@@ -380,15 +376,19 @@ pub(crate) fn run_command(
 /// own (a session too where the host has `setsid`) with the environment cleared to PATH, HOME
 /// (the workspace) and LANG=C. A confined command is the platform's wrapper plus the model's argv,
 /// so the kernel confines it and everything it forks; the result still names the model's argv.
+///
+/// A wrapper reports a program it cannot start as an exit code of its own, which reads as the
+/// command's judgement (larry#598), so a program the host lacks is refused here, before any
+/// wrapper; `program::startable` says which names are looked up.
 pub(super) fn command_for(
     argv: &[String],
     place: Place<'_>,
     path_env: &str,
 ) -> Result<(Command, String), ExecError> {
     let empty = || spawn_failure("", io::Error::other("acceptance command is empty"));
-    if argv.is_empty() {
+    let Some(named) = argv.first() else {
         return Err(empty());
-    }
+    };
     let (workspace, scratch, wrapped) = match place {
         Place::Open(path) => (path, None, None),
         Place::Confined(confine) => (
@@ -397,6 +397,8 @@ pub(super) fn command_for(
             Some(confine.wrap(argv)),
         ),
     };
+    program::startable(named, scratch, workspace, path_env)
+        .map_err(|source| spawn_failure(named, source))?;
     // util-linux `setsid` gives the command a session of its own, with no controlling terminal.
     // A confined command takes it from its wrapper, which on Linux always starts with it
     // (larry#386); macOS has none and its profile refuses `/dev/tty` (larry#323). Exactly one:
@@ -768,6 +770,10 @@ fn discard(child: &mut Child, error: ExecError) -> ExecError {
 /// Settling a command's process group, bounded by one clock reading (larry#268, larry#427).
 #[path = "group.rs"]
 mod group;
+
+/// Looking a command's program up before it is wrapped (larry#598).
+#[path = "program.rs"]
+mod program;
 
 /// Seeded simulations of the bounded capture (larry#206).
 #[cfg(test)]
