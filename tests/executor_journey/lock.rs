@@ -128,7 +128,13 @@ fn an_unopenable_run_lock_never_refuses_the_next_run() -> TestResult {
         assert_eq!(ledger_rows(&db)?, 1, "{fault:?}: its ledger row stays");
 
         heal(&lock, fault)?;
-        report_of(&next_run(state.path(), origin.path())?)?;
+        let healed = next_run(state.path(), origin.path())?;
+        report_of(&healed)?;
+        assert_eq!(
+            kept_lines(&healed),
+            Vec::<String>::new(),
+            "{fault:?}: a healed lock is not reported again"
+        );
         await_group_exit(pid)?;
         assert_eq!(ledger_rows(&db)?, 0, "{fault:?}: the healed run is reaped");
         assert!(

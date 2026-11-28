@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0148: an unopenable run lock reads as a live run"
+title: "ADR 0149: an unopenable run lock reads as a live run"
 description: "A run lock that cannot be opened proves nothing: its groups are left alone, its journal is kept and the next run starts."
-resource: /docs/adr/0148-unopenable-run-lock.md
+resource: /docs/adr/0149-unopenable-run-lock.md
 tags: [larry, adr, executor, recovery]
 generated: {by: claude-code, at: 2026-11-28}
 verified: {by: claude-code, method: lgwks-box cargo nextest run, 2026-11-28}
@@ -13,7 +13,7 @@ sources: [larry#591, larry#334, larry#456, larry#394, INVARIANTS.md]
 
 ## Status
 
-Accepted.
+Accepted. Number 0149: `main` took 0148 for larry#620 while this change was open.
 
 ## Context
 
