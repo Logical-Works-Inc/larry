@@ -160,7 +160,7 @@ static COMMANDS: [Subcommand; 14] = [
     },
     Subcommand {
         name: "route",
-        summary: "add, price, list, remove, default or resolve model routes",
+        summary: "add, price, set residency, list, remove, default or resolve model routes",
         env: "LARRY_STATE_DIR, LARRY_KEY_*, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY",
         run: |rest| ran("", route_once(rest)),
     },

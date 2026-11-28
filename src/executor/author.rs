@@ -17,7 +17,7 @@ use crate::model::{
     Completion, Kind, Message, ModelClient, ModelError, Role, Route, Selection, structured_content,
 };
 
-use super::routes::task_select;
+use super::route_select::task_select;
 use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex};
 
 /// Longest goal, in bytes.
