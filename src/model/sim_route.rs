@@ -67,6 +67,20 @@ fn sim_plaintext_loopback_is_allowed() -> Result<(), RouteError> {
     Route::new(&draft).map(|_| ())
 }
 
+/// A declared residency inside the allowlist passes; one outside it is refused typed.
+#[test]
+fn sim_residency_allows_a_matching_country_only() -> Result<(), RouteError> {
+    let route = Route::new(&accepted())?;
+    let allowed = vec![String::from("CA")];
+    assert!(route.residency_refusal(&allowed).is_none());
+    let refused = route.residency_refusal(&[String::from("DE")]);
+    assert!(matches!(
+        refused,
+        Some(RouteError::ResidencyNotAllowed { .. })
+    ));
+    Ok(())
+}
+
 /// The resolver's order: named, else default, else environment, else none;
 /// a name nothing has never falls through.
 #[test]
