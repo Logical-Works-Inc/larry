@@ -27,7 +27,7 @@ use larry_guard::Larry;
 
 use std::error::Error;
 use std::io::{self, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv6Addr, TcpListener, TcpStream};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -310,6 +310,85 @@ fn a_proxy_variable_never_carries_a_loopback_call() -> TestResult {
         assert_eq!(handle.served(), 1, "the gateway was reached itself");
         Ok(())
     })
+}
+
+/// ureq 3.5.1 matches `NO_PROXY` against the host as the URL writes it, an IPv6
+/// literal with its brackets (RFC 3986 section 3.2.2, larry#615). Each list
+/// either reaches the `[::1]` gateway itself or is refused with nothing sent,
+/// and no plaintext call ever reaches the proxy. The https route, which Larry
+/// leaves to ureq, shows what ureq itself does with the two spellings.
+#[test]
+fn a_proxy_never_carries_a_bracketed_loopback_call() -> TestResult {
+    let proxy = TcpListener::bind(("127.0.0.1", 0))?;
+    proxy.set_nonblocking(true)?;
+    let through = format!("http://{}", proxy.local_addr()?);
+    let reached = || match proxy.accept() {
+        Ok(_) => Ok(true),
+        Err(cause) if cause.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(cause) => Err(cause),
+    };
+    let bracketed = || Config {
+        host: Ipv6Addr::LOCALHOST.into(),
+        ..Config::seeded(20)
+    };
+    // Each list, and whether the plaintext call runs past it.
+    let lists = [
+        ("[::1]", true),
+        ("example.test,[::1]", true),
+        ("*", true),
+        ("::1", false),
+        ("::1/128", false),
+        ("[::1]:{port}", false),
+        ("[0:0:0:0:0:0:0:1]", false),
+        ("example.test, [::1]", false),
+        ("localhost,127.0.0.1", false),
+        ("", false),
+    ];
+    for bypass in ["NO_PROXY", "no_proxy"] {
+        for (list, runs) in lists {
+            mock_model::run(bracketed(), |handle| {
+                let list = list.replace("{port}", &handle.addr().port().to_string());
+                let mut env = operator(handle.addr());
+                env.push(("LARRY_MODEL_ATTEMPTS", String::from("1")));
+                env.push(("HTTP_PROXY", through.clone()));
+                env.push((bypass, list.clone()));
+                let output = larry_model(&env, b"direct")?;
+                let said = stderr_of(&output);
+                assert!(
+                    !reached()?,
+                    "{bypass}={list}: the proxy was reached: {said}"
+                );
+                assert_eq!(output.status.success(), runs, "{bypass}={list}: {said}");
+                assert_eq!(handle.served(), u64::from(runs), "{bypass}={list}");
+                assert_eq!(
+                    said.contains("name [::1] in NO_PROXY"),
+                    !runs,
+                    "{bypass}={list}: the refusal names the form that works: {said}"
+                );
+                Ok::<_, Box<dyn Error>>(())
+            })?;
+        }
+    }
+    for (list, proxied) in [("::1", true), ("[::1]", false)] {
+        mock_model::run(bracketed(), |handle| {
+            let mut env = operator(handle.addr());
+            env.retain(|entry| entry.0 != "LARRY_MODEL_URL");
+            env.push(("LARRY_MODEL_URL", format!("https://{}/v1", handle.addr())));
+            env.push(("LARRY_MODEL_ATTEMPTS", String::from("1")));
+            env.push(("LARRY_MODEL_TIMEOUT_MS", String::from("1000")));
+            env.push(("HTTPS_PROXY", through.clone()));
+            env.push(("NO_PROXY", String::from(list)));
+            let output = larry_model(&env, b"direct")?;
+            assert_eq!(
+                reached()?,
+                proxied,
+                "ureq with NO_PROXY={list}: {}",
+                stderr_of(&output)
+            );
+            Ok::<_, Box<dyn Error>>(())
+        })?;
+    }
+    Ok(())
 }
 
 #[test]

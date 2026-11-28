@@ -14,14 +14,15 @@
 //! sleep), HTTP 429 with `Retry-After`, an unparseable 200 body, a body
 //! truncated against its declared length, and 5xx. Bounds: a request-body cap
 //! (413) and a concurrent-connection cap (503). The server runs inside the
-//! caller's `std::thread::scope` on `127.0.0.1:0`, so every thread is joined.
+//! caller's `std::thread::scope` on port 0 of a loopback address
+//! (`Config::host`, `127.0.0.1` unless set), so every thread is joined.
 //!
 //! Use from a test target with `#[path = "support/http_wire.rs"] mod http_wire;`
 //! and `#[path = "support/mock_model.rs"] mod mock_model;` (no `mod.rs`, so
 //! cargo never mistakes the support directory for a test target).
 
 use std::io::{self, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::num::TryFromIntError;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -104,6 +105,8 @@ pub(crate) fn hostile_message() -> String {
 pub(crate) struct Config {
     /// The seed that fixes every response and the trace hash.
     pub(crate) seed: u64,
+    /// The loopback address the server binds (larry#615: `::1` too).
+    pub(crate) host: IpAddr,
     /// Largest accepted request body, in bytes; more is refused with 413.
     pub(crate) max_body_bytes: usize,
     /// Most concurrently handled connections; more is refused with 503.
@@ -134,6 +137,7 @@ impl Config {
     pub(crate) fn seeded(seed: u64) -> Self {
         Self {
             seed,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             max_body_bytes: 65_536,
             max_connections: 8,
             script: Vec::new(),
@@ -643,9 +647,9 @@ impl Drop for Handle {
     }
 }
 
-/// Bind `127.0.0.1:0`, serve inside `scope`, and return the handle.
+/// Bind port 0 of `config.host`, serve inside `scope`, and return the handle.
 fn start<'scope, 'env>(scope: &'scope Scope<'scope, 'env>, config: Config) -> io::Result<Handle> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let listener = TcpListener::bind((config.host, 0))?;
     let addr = listener.local_addr()?;
     let (gate_tx, gate_rx) = sync_channel(64);
     let base = Seeded::from_seed(config.seed).next_u64();
