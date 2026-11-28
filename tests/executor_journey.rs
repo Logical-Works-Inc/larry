@@ -36,6 +36,8 @@ mod larry_guard;
 mod mock_model;
 #[path = "support/executor_residency_journey.rs"]
 mod residency;
+#[path = "executor_journey/run_lock.rs"]
+mod run_lock;
 #[path = "support/tree_digest.rs"]
 mod tree_digest;
 use std::error::Error;

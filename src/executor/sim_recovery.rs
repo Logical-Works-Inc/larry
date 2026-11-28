@@ -72,6 +72,45 @@ fn sim_a_journal_is_live_only_while_its_lock_is_held() -> TestResult {
     Ok(())
 }
 
+/// The unopenable lock (larry#619, CWE-755): a directory where one run's lock belongs. That run
+/// reads as held and its journal is kept with the lock's own fault; the sweep goes on past it
+/// and sets the next, dead run's journal aside.
+#[test]
+fn sim_an_unprobeable_lock_keeps_its_run_and_the_sweep_goes_on() -> TestResult {
+    let (scopes, capacity) = settings()?;
+    for seed in SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let state = scratch_directory()?;
+        std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+        // Sorted before the dead run, so a sweep that stopped here never reaches it.
+        let wedged = format!("018f0000-0000-7000-8000-{:012x}", rng.below(1 << 40)?);
+        let dead = "ffff0000-0000-7000-8000-000000000002";
+        drop(Journal::open(&journal_path(&state, &wedged), capacity)?);
+        drop(Journal::open(&journal_path(&state, dead), capacity)?);
+        std::fs::create_dir(journal_path(&state, &wedged).with_extension("lock"))?;
+
+        assert!(run_held(&state, &wedged), "seed {seed:#x}: unknown is held");
+        assert!(!run_held(&state, dead), "seed {seed:#x}: no lock is dead");
+        let swept = recover(&state, &scopes)?;
+        assert_eq!(swept.set_aside, 1, "seed {seed:#x}: the dead run");
+        assert!(
+            matches!(
+                swept.kept.as_slice(),
+                [kept] if kept.path == journal_path(&state, &wedged)
+                    && matches!(kept.cause, super::KeptCause::Lock(ExecError::Journals(_)))
+            ),
+            "seed {seed:#x}: {:?}",
+            swept.kept
+        );
+        assert!(journal_path(&state, &wedged).is_file(), "seed {seed:#x}");
+        assert!(
+            recovered_evidence(&state, dead)?.is_some(),
+            "seed {seed:#x}"
+        );
+    }
+    Ok(())
+}
+
 /// The starting run (larry#456): a run holds its `<task>.lock` before its journal is locked,
 /// so between the two its journal is unlocked. A run lock held is live for the reap
 /// (`run_held`), for the workspace sweep (`journal_live`) and for recovery, which skips that
@@ -85,15 +124,12 @@ fn sim_a_held_run_lock_is_live_before_its_journal_is_locked() -> TestResult {
     let starting = format!("018f0000-0000-7000-8000-{:012x}", seeded.below(1 << 40)?);
     // Sorted after the starting run, so a sweep that stopped at the skip never reaches it.
     let dead = "ffff0000-0000-7000-8000-000000000002";
-    assert!(!run_held(&state, &starting)?, "no lock file is no live run");
+    assert!(!run_held(&state, &starting), "no lock file is no live run");
     let lock = RunLock::take(&state, &starting)?.ok_or("the first take holds the lock")?;
     // The journal exists and is unlocked, as it is between a run's create and its lock.
     drop(Journal::open(&journal_path(&state, &starting), capacity)?);
     drop(Journal::open(&journal_path(&state, dead), capacity)?);
-    assert!(
-        run_held(&state, &starting)?,
-        "a held run lock is a live run"
-    );
+    assert!(run_held(&state, &starting), "a held run lock is a live run");
     assert!(
         journal_live(&state, &scopes, &starting)?,
         "the workspace sweep reads a held run lock as live"
@@ -110,7 +146,7 @@ fn sim_a_held_run_lock_is_live_before_its_journal_is_locked() -> TestResult {
     );
     lock.release()?;
     assert!(
-        !run_held(&state, &starting)?,
+        !run_held(&state, &starting),
         "a released run lock is not live"
     );
     Ok(())
@@ -299,11 +335,11 @@ fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult
             "seed {seed}: only the faulted journal is kept"
         );
         assert!(
-            first
-                .kept
-                .iter()
-                .all(|kept| !kept.cause.refuses_the_record()),
-            "seed {seed}: a kept journal's cause never refuses its bytes"
+            first.kept.iter().all(|kept| matches!(
+                kept.cause,
+                super::KeptCause::Replay(ref cause) if !cause.refuses_the_record()
+            )),
+            "seed {seed}: a kept journal's cause is a replay that never refuses its bytes"
         );
         assert!(faulted_path.exists(), "seed {seed}: it stays a journal");
         assert!(

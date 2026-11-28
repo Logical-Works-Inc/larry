@@ -29,6 +29,7 @@ use larry_runtime::projection::FoldProjection;
 use larry_runtime::runtime::restore;
 use lgwks_bot::kernel::cap::{Auth, Cap};
 use lgwks_bot::kernel::journal::JournalError;
+use lgwks_macros::Error;
 
 use super::ExecError;
 use super::gate::{lease_start, task_settings, with_expiry};
@@ -115,14 +116,19 @@ impl RunLock {
     }
 }
 
-/// Whether a live run still holds `task_id`'s run lock: its recorded process groups are its own
-/// and no start-up reap may signal them (larry#456).
-///
-/// # Errors
-///
-/// [`ExecError::Journals`] when the lock cannot be probed.
-pub(super) fn run_held(state: &Path, task_id: &str) -> Result<bool, ExecError> {
-    Ok(RunLock::probe(&journal_path(state, task_id))?.is_none())
+/// Whether a live run may still hold `task_id`'s run lock: its recorded process groups are its
+/// own and no start-up reap may signal them (larry#456). A lock that cannot be probed is
+/// reported and read as held, so an unknown liveness signals nothing and the start goes on
+/// (larry#334, larry#619).
+pub(super) fn run_held(state: &Path, task_id: &str) -> bool {
+    let journal = journal_path(state, task_id);
+    match RunLock::probe(&journal) {
+        Ok(probe) => probe.is_none(),
+        Err(cause) => {
+            report_kept("reap", &journal, &cause);
+            true
+        }
+    }
 }
 
 /// Whether another executor still holds `task_id`'s journal, so its evidence is
@@ -278,6 +284,17 @@ fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError
     Ok(())
 }
 
+/// Why a journal was left in place.
+#[derive(Debug, Error)]
+pub(super) enum KeptCause {
+    /// Replaying it failed for a reason other than its bytes.
+    #[error("{0}")]
+    Replay(#[source] RuntimeError),
+    /// Its run lock could not be probed, so whether its run is live is unknown (larry#619).
+    #[error("{0}")]
+    Lock(#[source] ExecError),
+}
+
 /// One journal the recovery left as `<task>.journal`: recovering it failed for a reason
 /// other than its bytes, so the next start tries again (larry#394).
 #[derive(Debug)]
@@ -285,22 +302,20 @@ pub(super) struct KeptJournal {
     /// The journal left in place.
     pub(super) path: PathBuf,
     /// Why it could not be recovered now.
-    pub(super) cause: RuntimeError,
+    pub(super) cause: KeptCause,
 }
 
-impl KeptJournal {
-    /// Reports the journal as one typed JSON line on standard error, the operator's channel,
-    /// in the shape the workspace sweep reports a kept entry (larry#334).
-    fn report(&self) {
-        let event = lgwks_std::json::json!({
-            "recovery": "kept",
-            "entry": format!("{}", self.path.display()),
-            "refused": self.cause.to_string(),
-        });
-        let mut err = std::io::stderr().lock();
-        let written = writeln!(err, "{event}");
-        drop(written);
-    }
+/// Reports what `step` left alone as one typed JSON line on standard error, the operator's
+/// channel, in the shape the workspace sweep reports a kept entry (larry#334).
+fn report_kept(step: &str, entry: &Path, refused: &dyn std::fmt::Display) {
+    let event = lgwks_std::json::json!({
+        (step): "kept",
+        "entry": format!("{}", entry.display()),
+        "refused": refused.to_string(),
+    });
+    let mut err = std::io::stderr().lock();
+    let written = writeln!(err, "{event}");
+    drop(written);
 }
 
 /// What one recovery sweep did: how many journals it set aside, and the ones it kept.
@@ -310,6 +325,15 @@ pub(super) struct Recovery {
     pub(super) set_aside: usize,
     /// Journals left as `<task>.journal`, each reported once, for the next start.
     pub(super) kept: Vec<KeptJournal>,
+}
+
+impl Recovery {
+    /// Leaves `path` a journal for the next start and reports why, once.
+    fn keep(&mut self, path: PathBuf, cause: KeptCause) {
+        let kept = KeptJournal { path, cause };
+        report_kept("recovery", &kept.path, &kept.cause);
+        self.kept.push(kept);
+    }
 }
 
 /// Recovers every task journal a killed executor left under `state`, at most
@@ -346,8 +370,15 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery
     for path in paths {
         // A live run holds its lock for its whole life; one that finished removed its journal
         // before its lock, so a journal gone once the lock is held settled on its own (larry#456).
-        let Some(guard) = RunLock::probe(&path)? else {
-            continue;
+        // A lock that cannot be probed keeps its own journal: one bad file never stops every
+        // later run (larry#619).
+        let guard = match RunLock::probe(&path) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => continue,
+            Err(cause) => {
+                recovery.keep(path, KeptCause::Lock(cause));
+                continue;
+            }
         };
         if !path.try_exists().map_err(ExecError::Journals)? {
             continue;
@@ -357,9 +388,7 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery
             Err(RuntimeError::Durable(JournalError::Locked { .. })) => continue,
             Err(refusal) if refusal.refuses_the_record() => REFUSED_EXT,
             Err(cause) => {
-                let kept = KeptJournal { path, cause };
-                kept.report();
-                recovery.kept.push(kept);
+                recovery.keep(path, KeptCause::Replay(cause));
                 continue;
             }
         };
