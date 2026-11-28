@@ -8,10 +8,12 @@
 //! lost it (SGR 0 sent after the colour). Widths are Unicode display widths
 //! (UAX #11), so CJK and emoji take two cells and combining marks none.
 
+use lgwks_std::json::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthChar as _;
 
 /// What a run of text means to the person reading it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) enum Tone {
     /// Body text in the terminal's default colour.
     #[default]
@@ -29,7 +31,8 @@ pub(crate) enum Tone {
 }
 
 /// How one cell is painted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) struct Style {
     /// The cell's meaning.
     tone: Tone,

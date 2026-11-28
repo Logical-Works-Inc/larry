@@ -38,6 +38,8 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 use larry_contracts::ids::TenantId;
 pub(crate) use ledger::Ledger;
+pub(crate) use ledger::sessions::NewSession;
+pub use ledger::sessions::SessionStoreError;
 pub(crate) use run::{Place, RunHooks, StreamCallback, run_command};
 use seal::{SealedRun, seal_run};
 use workspace::{Workspace, sweep};
