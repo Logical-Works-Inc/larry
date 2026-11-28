@@ -32,6 +32,8 @@ mod held_group;
 mod http_wire;
 #[path = "support/larry_guard.rs"]
 mod larry_guard;
+#[path = "executor_journey/lock.rs"]
+mod lock;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 #[path = "support/executor_residency_journey.rs"]

@@ -254,6 +254,12 @@ fn the_refusal_set_is_closed_with_no_dead_variant() {
             },
             false,
         ),
+        (
+            RouteError::PrivateDestination {
+                host: String::from("closed.internal"),
+            },
+            false,
+        ),
         (RouteError::NoRoute, false),
         (RouteError::TableFull { limit: 512 }, false),
         (
