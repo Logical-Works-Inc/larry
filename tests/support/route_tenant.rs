@@ -11,8 +11,9 @@
 
 use std::error::Error;
 use std::ffi::OsStr;
-use std::process::{Child, Output};
+use std::process::Output;
 
+use crate::larry_guard::Larry;
 use crate::route_journey::json_at::At;
 use crate::route_journey::larry_cli::stderr_of;
 use crate::route_journey::mock_model::Handle;
@@ -105,7 +106,7 @@ impl<'tenant> Tenant<'tenant> {
         &self,
         task: &str,
         extra: &[(&str, &OsStr)],
-    ) -> Result<Child, Box<dyn Error>> {
+    ) -> Result<Larry, Box<dyn Error>> {
         let variable = key_env(self.state.path(), self.suffix)?;
         start_with_key(
             self.state.path(),

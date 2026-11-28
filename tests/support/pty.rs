@@ -323,6 +323,31 @@ pub(crate) fn replied(before: Option<&str>, now: &str, text: &str) -> Result<boo
     Ok(now.contains(text))
 }
 
+/// How the shell inside the terminal starts the binary.
+pub(crate) enum Launch<'path> {
+    /// Bare `larry`, the terminal its stdin and its controlling terminal.
+    Bare,
+    /// Bare `larry` with its stdin redirected from a file, the terminal still controlling it.
+    StdinFrom(&'path Path),
+    /// Bare `larry` in a session of its own (util-linux `setsid`): the terminal is its stdin
+    /// but not its controlling terminal, so closing it sends no `SIGHUP`.
+    #[cfg(target_os = "linux")]
+    NewSession,
+}
+
+/// The shell line that sizes the terminal, prints the binary's PID and execs it as `launch` says.
+fn shell_line(launch: &Launch<'_>) -> String {
+    let binary = env!("CARGO_BIN_EXE_larry");
+    let size = format!("stty rows {ROWS} cols {COLUMNS};");
+    let run = format!("printf \"LARRYPID:%s:END\" $$; exec \"{binary}\"");
+    match *launch {
+        Launch::Bare => format!("{size} {run}"),
+        Launch::StdinFrom(file) => format!("{size} {run} < \"{}\"", file.display()),
+        #[cfg(target_os = "linux")]
+        Launch::NewSession => format!("{size} exec setsid -w sh -c '{run}'"),
+    }
+}
+
 impl<'scope> Pty<'scope> {
     /// Starts the shipped binary in a fresh 32x120 terminal in `cwd`, with only the PATH its
     /// tools resolved into, TERM and `env` set. The shell prints its own PID before it execs the
@@ -332,11 +357,18 @@ impl<'scope> Pty<'scope> {
         cwd: &Path,
         env: &[(&str, OsString)],
     ) -> Journey<Self> {
+        Self::launch(owner, cwd, env, &Launch::Bare)
+    }
+
+    /// [`Pty::open`] with the binary started as `launch` says.
+    pub(crate) fn launch<'env>(
+        owner: &'scope Scope<'scope, 'env>,
+        cwd: &Path,
+        env: &[(&str, OsString)],
+        launch: &Launch<'_>,
+    ) -> Journey<Self> {
         let path = test_path()?;
-        let inner = format!(
-            "stty rows {ROWS} cols {COLUMNS}; printf 'LARRYPID:%s:END' $$; exec '{}'",
-            env!("CARGO_BIN_EXE_larry")
-        );
+        let inner = shell_line(launch);
         let mut command = Command::new("script");
         if cfg!(target_os = "linux") {
             command.args(["-qec", &inner, "/dev/null"]);
@@ -444,6 +476,39 @@ impl<'scope> Pty<'scope> {
         Ok(digits.parse::<u32>()?.to_string())
     }
 
+    /// Closes the terminal under the binary as a closed window or a killed supervisor does:
+    /// `script` is killed and reaped, the binary is left to notice. Returns the binary's PID.
+    /// The caller owns what is left: it waits for the binary to leave, or kills it.
+    pub(crate) fn hang_up(mut self) -> Journey<String> {
+        let pid = self.pid()?;
+        // `script` dies before its stdin closes: an end of input it saw first could reach the
+        // binary as a typed Ctrl-D and end it for the wrong reason.
+        self.child.kill()?;
+        self.child.wait()?;
+        self.stdin = None;
+        Ok(pid)
+    }
+
+    /// Kills the binary this terminal holds. `script` is its parent, so while `script` runs the
+    /// PID still names the binary; once `script` has been reaped there is nothing to kill.
+    fn kill_binary(&mut self) -> Journey {
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        // The PID marker is the first thing the shell prints; wait for it if a test failed
+        // before reading anything.
+        while self.pid().is_err() && self.take(deadline::PATIENCE)? {}
+        let pid = self.pid()?;
+        let killed = Command::new("kill")
+            .args(["-9", &pid])
+            .stderr(Stdio::null())
+            .status()?;
+        if !killed.success() && alive(&pid)? {
+            return Err(format!("larry {pid} would not die: kill answered {killed}").into());
+        }
+        Ok(())
+    }
+
     /// Reads to the end of the output, then reaps the terminal and its reader; returns the
     /// exit status and the whole transcript.
     pub(crate) fn finish(mut self) -> Journey<(ExitStatus, Vec<u8>)> {
@@ -476,8 +541,24 @@ impl<'scope> Pty<'scope> {
     }
 }
 
+/// Whether `pid` names a process that can still be signalled.
+pub(crate) fn alive(pid: &str) -> Journey<bool> {
+    Ok(Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()?
+        .success())
+}
+
 impl Drop for Pty<'_> {
     fn drop(&mut self) {
+        // The binary first, on an early return or an unwind too: killing `script` alone left
+        // `larry` running on a closed terminal (larry#573).
+        let binary = self.kill_binary();
+        assert!(
+            std::thread::panicking() || binary.is_ok(),
+            "the binary dies with its terminal guard: {binary:?}"
+        );
         // Best effort on an early return: kill and reap so no terminal outlives the test.
         self.stdin = None;
         let stopped = match self.child.try_wait() {

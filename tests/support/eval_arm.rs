@@ -10,13 +10,14 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 
 #[path = "stdin_feed.rs"]
 mod stdin_feed;
 use stdin_feed::feed_stdin;
 
 use crate::coverage::forward;
+use crate::larry_guard::Larry;
 
 /// What every journey returns.
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -88,7 +89,7 @@ pub(super) fn rss_tool() -> Option<(&'static str, &'static str)> {
 
 /// Starts `larry eval` under `env` with only PATH besides, under `rss_tool` when `timed`
 /// and present; untimed, the child is `larry` itself, so a kill reaches it.
-pub(super) fn spawn_arm(env: &[(&'static str, OsString)], timed: bool) -> TestResult<Child> {
+pub(super) fn spawn_arm(env: &[(&'static str, OsString)], timed: bool) -> TestResult<Larry> {
     let binary = env!("CARGO_BIN_EXE_larry");
     let mut command = match rss_tool().filter(|_| timed) {
         Some((tool, flag)) => {
@@ -107,7 +108,7 @@ pub(super) fn spawn_arm(env: &[(&'static str, OsString)], timed: bool) -> TestRe
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     forward(&mut *child);
-    Ok(child.spawn()?)
+    Ok(Larry::spawn(child)?)
 }
 
 /// What one `larry eval` printed.

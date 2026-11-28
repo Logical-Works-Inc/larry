@@ -7,6 +7,8 @@
 mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/origin.rs"]
 mod origin;
 #[path = "support/sealed_report.rs"]
@@ -17,9 +19,10 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::process::{Child, Output};
+use std::process::Output;
 
 use larry_cli::{spawn_larry_args, stderr_of};
+use larry_guard::Larry;
 use lgwks_std::json::Value;
 use origin::{TempDir, fixture};
 use sealed_report::{denial_lines, flag_of, report_of};
@@ -38,7 +41,7 @@ fn task_json(repo: &Path, base: &str, acceptance: &str) -> String {
 }
 
 /// Runs `larry exec` with `env` set, pipes `task` in and closes stdin.
-fn spawn_exec(env: &[(&str, &OsStr)], task: &str) -> Result<Child, Box<dyn Error>> {
+fn spawn_exec(env: &[(&str, &OsStr)], task: &str) -> Result<Larry, Box<dyn Error>> {
     spawn_larry_args(&["exec"], env, task.as_bytes())
 }
 
@@ -122,7 +125,7 @@ fn run_where(
         .stderr(Stdio::piped())
         .current_dir(cwd);
     coverage::forward(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = Larry::spawn(&mut command)?;
     child
         .stdin
         .take()

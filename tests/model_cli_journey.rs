@@ -21,6 +21,9 @@ mod mock_model;
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
+use larry_guard::Larry;
 
 use std::error::Error;
 use std::io::{self, Write};
@@ -48,7 +51,7 @@ fn larry_model(env: &[(&str, String)], prompt: &[u8]) -> Result<Output, Box<dyn 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     coverage::forward(&mut command);
-    let mut child = command.spawn()?;
+    let mut child = Larry::spawn(&mut command)?;
     let mut stdin = child.stdin.take().ok_or("child stdin was not piped")?;
     stdin.write_all(prompt)?;
     drop(stdin);
