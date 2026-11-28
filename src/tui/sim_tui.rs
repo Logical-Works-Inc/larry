@@ -25,6 +25,9 @@ use super::worker::{Ended, Event};
 #[path = "sim_worker.rs"]
 mod worker_panics;
 
+#[path = "sim_driver.rs"]
+mod driver;
+
 #[cfg(test)]
 #[path = "sim_cells.rs"]
 mod cells;
