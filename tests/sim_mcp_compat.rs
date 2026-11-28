@@ -112,6 +112,57 @@ fn sim_old_client_initialize_fallback_serves_every_legacy_revision() -> TestResu
     Ok(())
 }
 
+/// An `initialize` with no string `protocolVersion` is refused as invalid params and opens
+/// no session: a legacy request is still refused, and a correct `initialize` then opens it.
+/// Source: MCP 2025-11-25 Lifecycle (the client sends the version it supports) and CWE-20.
+#[test]
+fn sim_an_initialize_without_a_string_version_is_refused_and_opens_nothing() -> TestResult<()> {
+    let legacy = Schema::vendored(LEGACY)?;
+    let bad = [
+        None,
+        Some(json!({})),
+        Some(json!({"protocolVersion": 20_250_618})),
+        Some(json!({"protocolVersion": null})),
+        Some(json!({"protocolVersion": ["2025-06-18"]})),
+        Some(json!({"protocolVersion": {"version": "2025-06-18"}})),
+        Some(json!({"protocolVersion": true})),
+        Some(json!({"capabilities": {}, "version": "2025-06-18"})),
+    ];
+    for seed in 0..8 {
+        let mut rng = Rng(seed);
+        let mut session = Session::start()?;
+        let start = rng.index(8)?;
+        for offset in 0..bad.len() {
+            let params = bad
+                .get(offset.saturating_add(start) % bad.len())
+                .ok_or("params index")?;
+            let mut frame = json!({"jsonrpc": "2.0", "id": offset, "method": "initialize"});
+            if let (Some(params), Some(members)) = (params.as_ref(), frame.as_object_mut()) {
+                members.insert("params", params.clone());
+            }
+            let case = format!("seed {seed} {frame}");
+            let (_, refused) = ask(&mut session, &legacy, &frame)?;
+            assert_eq!(*refused.at("/error/code")?, -32602, "{case}");
+            assert_eq!(
+                *refused.at("/error/message")?,
+                "initialize requires params.protocolVersion as a string",
+                "{case}"
+            );
+            let list = legacy_frame(&json!("list"), "tools/list", &json!({}));
+            let (_, closed) = ask(&mut session, &legacy, &list)?;
+            assert_eq!(*closed.at("/error/code")?, -32602, "{case}: still closed");
+        }
+        let opened = open(&mut session, &legacy, "2025-06-18")?;
+        assert_eq!(
+            *opened.at("/result/protocolVersion")?,
+            "2025-06-18",
+            "seed {seed}: a refusal is not an initialize"
+        );
+        assert_eq!(session.finish()?.code(), Some(0), "seed {seed}: clean exit");
+    }
+    Ok(())
+}
+
 /// One process serves both eras at once (2026-07-28 Versioning): before
 /// `initialize` only stateless requests work; after it both do, each in its own
 /// shape, in any order, and the era is chosen by how each request opens.
