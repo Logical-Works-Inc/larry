@@ -40,7 +40,8 @@ fn tui_journey_approved_read_shows_the_digest() -> Journey {
             .get(3)
             .ok_or("the model was not told of the refusal")?;
         assert!(
-            String::from_utf8_lossy(fourth).contains("exactly one key, command, done or read"),
+            String::from_utf8_lossy(fourth)
+                .contains("exactly one key, command, done, read or edit"),
             "a step the session does not offer is refused by name, never asked"
         );
         assert_eq!(tree_hash(work)?, unread, "a read changes nothing");

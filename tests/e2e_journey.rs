@@ -8,6 +8,8 @@
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "e2e_journey/edit.rs"]
+mod edit;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/journey.rs"]
