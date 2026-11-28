@@ -277,8 +277,9 @@ const BIG_LINES: usize = 1_000;
 /// Kills tried before the journey gives up on landing one ahead of the publication.
 const KILL_ROUNDS: u32 = 10;
 
-/// Names the one row under `state` `big` and gives it [`BIG_ANSWERS`] answers of [`BIG_LINES`].
-fn enlarge(state: &Path) -> Journey {
+/// Names the one row under `state` `big`, gives it [`BIG_ANSWERS`] answers of [`BIG_LINES`] and
+/// returns that transcript.
+fn enlarge(state: &Path) -> Journey<String> {
     use lgwks_std::json::{Value, from_str, json, to_string};
     let (_, _, transcript) = rows(state)?.into_iter().next().ok_or("the row")?;
     let mut held: Value = from_str(&transcript)?;
@@ -287,12 +288,13 @@ fn enlarge(state: &Path) -> Journey {
         .map(|at| json!({ "Said": format!("answer {at:04} \n{lines}") }))
         .collect();
     *held.get_mut("entries").ok_or("the row holds no entries")? = Value::Array(answers);
+    let big = to_string(&held)?;
     let renamed = Connection::open(state.join("executor.db"))?.execute(
         "UPDATE tui_sessions SET name = 'big', transcript = ?1",
-        [to_string(&held)?],
+        [&big],
     )?;
     assert_eq!(renamed, 1, "the one row");
-    Ok(())
+    Ok(big)
 }
 
 /// Every name in `folder`.
@@ -317,12 +319,20 @@ fn assert_whole_export(path: &Path) -> Journey {
     Ok(())
 }
 
-/// A fresh terminal that has resumed the large session.
+/// A fresh terminal that has resumed the large session `big`, first put back in its row so no
+/// line an earlier terminal printed is on screen.
 fn resumed_big<'scope, 'env>(
     owner: &'scope std::thread::Scope<'scope, 'env>,
     work: &Path,
     env: &[(&'static str, std::ffi::OsString)],
+    state: &Path,
+    big: &str,
 ) -> Journey<Pty<'scope>> {
+    let put = Connection::open(state.join("executor.db"))?.execute(
+        "UPDATE tui_sessions SET transcript = ?1 WHERE name = 'big'",
+        [big],
+    )?;
+    assert_eq!(put, 1, "the one large row");
     let mut pty = Pty::open(owner, work, env)?;
     pty.wait_for(READY)?;
     pty.send("/resume big\r")?;
@@ -343,13 +353,13 @@ fn tui_journey_a_kill_mid_export_leaves_no_part_file_and_the_next_export_succeed
             first.wait_for(READY)?;
             first.send(QUIT)?;
             assert_exited(&first.finish()?.0, "Ctrl+C exits 0");
-            enlarge(state.path())?;
-            let before = names(work.path())?;
+            let big = enlarge(state.path())?;
+            let mut after = names(work.path())?;
             let target = work.path().join("big.md");
-            let mut after = before.clone();
             after.insert(std::ffi::OsString::from("big.md"));
             for round in 0..KILL_ROUNDS {
-                let mut pty = resumed_big(owner, work.path(), env)?;
+                let mut pty = resumed_big(owner, work.path(), env, state.path(), &big)?;
+                let folder = names(work.path())?;
                 let pid = pty.pid()?;
                 // A shell already waiting, so the kill costs a pipe wake and no process start.
                 let mut killer = Command::new("sh")
@@ -359,30 +369,28 @@ fn tui_journey_a_kill_mid_export_leaves_no_part_file_and_the_next_export_succeed
                 let mut go = killer.stdin.take().ok_or("the killer has no input")?;
                 pty.send("/export big.md\r")?;
                 await_event("the export reaches the folder", || {
-                    Ok((names(work.path())? != before).then_some(()))
+                    Ok((names(work.path())? != folder).then_some(()))
                 })?;
                 go.write_all(b"go\n")?;
                 assert!(killer.wait()?.success(), "kill -9 {pid} was delivered");
                 let (status, _) = pty.finish()?;
                 assert!(!status.success(), "kill -9 left a success: {status}");
-                let early = !target.exists();
-                if !early {
+                if target.exists() {
+                    // The kill came after the publication: the name holds the whole file.
                     assert_whole_export(&target)?;
                     std::fs::remove_file(&target)?;
+                    continue;
                 }
 
-                let mut next = resumed_big(owner, work.path(), env)?;
+                let mut next = resumed_big(owner, work.path(), env, state.path(), &big)?;
                 next.send("/export big.md\r")?;
                 next.wait_for("exported to big.md")?;
                 next.send(QUIT)?;
                 assert_exited(&next.finish()?.0, "Ctrl+C exits 0");
                 assert_whole_export(&target)?;
                 assert_eq!(names(work.path())?, after, "no other file stays");
-                std::fs::remove_file(&target)?;
-                if early {
-                    let figure = format!("{{\"kill_landed_before_publish_in_round\":{round}}}\n");
-                    return Ok(std::io::stderr().lock().write_all(figure.as_bytes())?);
-                }
+                let figure = format!("{{\"kill_landed_before_publish_in_round\":{round}}}\n");
+                return Ok(std::io::stderr().lock().write_all(figure.as_bytes())?);
             }
             Err("no kill landed before the file took its name".into())
         })
