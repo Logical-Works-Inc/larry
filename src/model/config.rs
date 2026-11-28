@@ -13,6 +13,7 @@ use lgwks_std::retry::RetryPolicy;
 
 use super::ModelError;
 use super::route::{Draft, ENV_ROUTE, Kind, Route};
+use super::route_transport::plaintext_proxy;
 
 /// The variable the environment route reads its gateway URL from.
 const URL_VARIABLE: &str = "LARRY_MODEL_URL";
@@ -202,12 +203,20 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// [`ModelError::KeyUnset`] naming the route's key variable when it is unset
-    /// or empty, and the integer and range errors of the `LARRY_MODEL_*` knobs.
+    /// [`ModelError::PlaintextProxy`] when a proxy variable would carry a
+    /// plaintext call, before the key is read; [`ModelError::KeyUnset`] naming
+    /// the route's key variable when it is unset or empty, and the integer and
+    /// range errors of the `LARRY_MODEL_*` knobs.
     pub(crate) fn for_route(
         route: &Route,
         read: &impl Fn(&str) -> Option<String>,
     ) -> Result<Self, ModelError> {
+        if let Some((variable, host)) = plaintext_proxy(route.base_url(), read) {
+            return Err(ModelError::PlaintextProxy {
+                variable,
+                host: host.to_owned(),
+            });
+        }
         let api_key = present(read, route.key_env()).ok_or_else(|| ModelError::KeyUnset {
             variable: route.key_env().to_owned(),
         })?;

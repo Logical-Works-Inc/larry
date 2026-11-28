@@ -11,11 +11,12 @@
 //! is told its directory is `.`, and the folder changes only when the person
 //! approves the diff the session ends with; the default policy suffices.
 //! Each reply is exactly one JSON object: `{"command": "<sh -c text>"}`,
-//! `{"read": "<path>"}` or `{"done": "<summary>"}`. Each command runs in its own
-//! process group under the executor's timeout, tracked in the ledger so a kill -9
-//! is reaped by the next start; the model sees the exit status and the first
-//! 4 KiB of each stream. A read shows the file's BLAKE3 digest and its first
-//! 4 KiB (larry#586).
+//! `{"read": "<path>"}`, `{"edit": {"path", "old", "new", "expect_digest"}}` or
+//! `{"done": "<summary>"}`. Each command runs in its own process group under the
+//! executor's timeout, tracked in the ledger so a kill -9 is reaped by the next
+//! start; the model sees the exit status and the first 4 KiB of each stream. A
+//! read shows the file's BLAKE3 digest and its first 4 KiB (larry#586). An edit
+//! applies only to the file that still has that digest (larry#606).
 //! Auto-compaction (`super::compact`, larry#235) keeps every request inside the
 //! model's window, so the length of the conversation never stops a session. The
 //! loop (`super::session_turn`) stops at the model's `done`, at 256 steps, at
@@ -23,7 +24,7 @@
 //! checked before every model call and every step and polled while a command
 //! runs: the person's cancel kills the running command's process group and the
 //! report counts it interrupted (larry#242). The sealed report records every
-//! command in `results`, every read in `changes`, and what compaction did.
+//! command in `results`, every read and edit in `changes`, and what compaction did.
 
 use std::path::Path;
 
@@ -143,7 +144,7 @@ pub(crate) trait Observer {
     /// An observer that records nothing leaves this alone.
     fn handed(&mut self, _line: &str, _applied: bool) {}
     /// The model asks to take step `step`, which `command` describes: a shell
-    /// command, `read <path>`, an edit or a patch. Nothing happens unless this
+    /// command, `read <path>` or an edit with its texts. Nothing happens unless this
     /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
     /// inside the operator's isolated container under the same gate and runs it.
     /// No default: every observer says aloud whether a step may run (larry#239).
@@ -370,7 +371,6 @@ fn run_session_prepared(
                 outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
             }
             let commands = done.tally.results.len();
-            let reads = done.tally.changes.len();
             let mut body = json!({
                 "task_id": task_id,
                 "task_digest": task_digest,
@@ -382,7 +382,8 @@ fn run_session_prepared(
                 "session": {
                     "stop": done.stop.name(),
                     "commands": commands,
-                    "reads": reads,
+                    "reads": done.tally.reads,
+                    "edits": done.tally.edits,
                     "declined": done.tally.declined,
                     "interrupted": done.tally.interrupted,
                     "route": route.seal(),
