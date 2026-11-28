@@ -305,4 +305,57 @@ mod tests {
         }
         Ok(())
     }
+
+    /// Requirement: every JSON shape renders as CPython's `json.dumps` with
+    /// `sort_keys=True, ensure_ascii=True`. Source: CPython `json` module.
+    /// Adversarial: empty and nested shapes, negative and huge integers, `-0.0`,
+    /// lone control bytes and the compact separator pair (CWE-707: one rendering).
+    #[test]
+    fn sim_every_json_shape_matches_python_dumps() -> crate::governance::sim_support::SimResult {
+        use lgwks_std::json::json;
+        // Compact separators and the sorted indented layout.
+        assert_eq!(dumps(&json!([]), None), "[]");
+        assert_eq!(dumps(&json!({}), None), "{}");
+        assert_eq!(dumps(&json!([1, true]), None), "[1, true]");
+        assert_eq!(
+            dumps(&json!({"b": 1, "a": [1, 2]}), Some(2)),
+            "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": 1\n}"
+        );
+        assert_eq!(dumps(&json!({"x": null}), None), "{\"x\": null}");
+        // Numbers: unsigned, negative, float, negative zero and the exponent edge.
+        assert_eq!(dumps(&json!(-7), None), "-7");
+        assert_eq!(dumps(&json!(0.5), None), "0.5");
+        assert_eq!(float_repr(-0.0), "-0.0");
+        assert_eq!(float_repr(0.0), "0.0");
+        assert_eq!(float_repr(1000000000000000.0), "1000000000000000.0");
+        assert_eq!(float_repr(1e16), "1e+16");
+        assert_eq!(
+            float_repr(12345678901234568.0_f64),
+            "1.2345678901234568e+16"
+        );
+        assert_eq!(scientific_form("5", -324), "5e-324");
+        assert_eq!(scientific_form("15", -5), "1.5e-05");
+        assert_eq!(fixed("1", 16), "10000000000000000.0");
+        assert_eq!(fixed("123", -4), "0.000123");
+        // `python_str` and `python_repr` over every JSON kind.
+        let classes = Classes::new()?;
+        assert_eq!(python_str(&json!("hi"), &classes), "hi");
+        assert_eq!(python_str(&json!(true), &classes), "True");
+        assert_eq!(python_str(&json!(7), &classes), "7");
+        assert_eq!(python_str(&json!([1]), &classes), "[1]");
+        assert_eq!(python_str(&json!({"a": 1}), &classes), "{'a': 1}");
+        assert_eq!(python_str(&json!(null), &classes), "None");
+        assert_eq!(python_repr(&json!(false), &classes), "False");
+        assert_eq!(python_repr(&json!([true, null]), &classes), "[True, None]");
+        assert_eq!(
+            python_repr(&json!({"b": 2, "a": 1}), &classes),
+            "{'a': 1, 'b': 2}"
+        );
+        // Escapes: quote, backslash, DEL and a printable run stay exact.
+        let mut out = String::new();
+        write_string(&mut out, "\"\\\n ~\u{7f}")
+            .map_err(|cause| format!("escapes must render: {cause}"))?;
+        assert_eq!(out, "\"\\\"\\\\\\n ~\\u007f\"");
+        Ok(())
+    }
 }

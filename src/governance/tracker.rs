@@ -308,3 +308,6 @@ fn counts_equal(total: Option<&Value>, count: usize) -> bool {
         .as_f64()
         .is_some_and(|float| pyjson::float_repr(float) == format!("{count}.0"))
 }
+
+#[cfg(all(test, unix))]
+mod sim_pages;

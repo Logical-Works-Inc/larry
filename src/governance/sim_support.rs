@@ -290,7 +290,10 @@ pub(crate) fn top_level() -> Vec<String> {
 mod tests {
     use std::fs;
 
-    use super::Scratch;
+    use super::{
+        Scratch, SimError, SimResult, count_of, docs_tree, each_seed, loaded, names_of, pick,
+        replace_all, replace_once, text_of, top_level, whole_of,
+    };
 
     /// A leftover a dead process with this process id left at a fixture's old name is present, a
     /// fresh scratch is empty anyway, and the guard removes the tree when it drops (larry#267).
@@ -310,6 +313,57 @@ mod tests {
         let kept = fresh.path().to_path_buf();
         drop(fresh);
         assert!(!kept.exists(), "the scratch outlived its guard");
+        Ok(())
+    }
+
+    /// Every helper that cannot build its case says so by its own variant, so a simulation never
+    /// passes on a case it did not make (CWE-754).
+    #[test]
+    fn sim_every_simulation_helper_refusal_is_typed() -> SimResult {
+        use lgwks_std::seeded::Seeded;
+        let base = loaded()?;
+        let absent = |refused: Result<(), SimError>| match refused {
+            Err(SimError::Absent(what)) => Ok(what),
+            other => Err(SimError::Absent(format!("an absence, got {other:?}"))),
+        };
+        let mut documents = base.clone();
+        for refused in [
+            text_of(&base, "no-such.md").map(drop),
+            whole_of(&base, "no-such.md").map(drop),
+            count_of(&base, "no-such-count").map(drop),
+            replace_once(&mut documents, "README.md", "definitely absent", "x").map(drop),
+            replace_all(&mut documents, "README.md", "x", "xx"),
+        ] {
+            let what = absent(refused)?;
+            assert!(!what.is_empty(), "the refusal names what is missing");
+        }
+        let mut rng = Seeded::from_seed(1);
+        let empty: &[String] = &[];
+        absent(pick(&mut rng, empty).map(drop))?;
+        assert!(names_of(&base).contains(&String::from("README.md")));
+        assert!(
+            docs_tree(&base)
+                .iter()
+                .all(|name| name.starts_with("docs/"))
+        );
+        assert_eq!(top_level().len(), 7);
+
+        let scratch = Scratch::new("helper-roundtrip")?;
+        scratch.write("nested/file.txt", b"hello")?;
+        assert_eq!(scratch.read("nested/file.txt")?, "hello");
+        let missing = scratch.read("missing.txt");
+        assert!(
+            matches!(&missing, Err(SimError::Io(cause))
+                if cause.kind() == std::io::ErrorKind::NotFound),
+            "{missing:?}"
+        );
+        let first = each_seed(4, |seed| {
+            if seed >= 2 {
+                return Err(SimError::Absent(format!("seed {seed}")));
+            }
+            Ok(())
+        });
+        assert_eq!(absent(first)?, "seed 2", "the first failure in seed order");
         Ok(())
     }
 }

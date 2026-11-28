@@ -268,3 +268,121 @@ fn read_one(root: &Path, relative: &str) -> Result<Option<String>, GovernanceErr
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::sim_support::{Scratch, SimResult};
+    use super::*;
+
+    /// Requirement: the in-memory document set behaves as the Python `dict` did.
+    /// Source: `tools/check_governance.py` loader. Adversarial: split parts,
+    /// missing frontmatter, non-UTF-8 names and every reader refusal stay typed.
+    #[test]
+    fn sim_every_document_set_operation_is_typed() -> SimResult {
+        // Pure helpers: split routing, bodies and relative names.
+        assert_eq!(
+            parts_directory("specification.md"),
+            Some("docs/specification/")
+        );
+        assert_eq!(parts_directory("README.md"), None);
+        assert_eq!(body("---\na: b\n---\nrest"), "rest");
+        assert_eq!(body("no envelope"), "no envelope");
+        assert_eq!(
+            relative_of(Path::new("/r"), Path::new("/r/docs/a.md")),
+            "docs/a.md"
+        );
+        assert_eq!(
+            relative_of(Path::new("/r"), Path::new("/elsewhere")),
+            "//elsewhere"
+        );
+        // In-memory set/get/text/iter/sorted/whole/holder/last/set/remove.
+        let mut documents = Documents {
+            order: Vec::new(),
+            texts: BTreeMap::new(),
+        };
+        assert_eq!(documents.get("missing"), None);
+        assert_eq!(documents.text("missing"), "");
+        assert!(documents.whole("specification.md").is_empty());
+        documents.set("README.md", String::from("hello"));
+        documents.set(
+            "docs/specification/part-01.md",
+            String::from("---\nf: v\n---\nbody"),
+        );
+        assert_eq!(documents.get("README.md"), Some("hello"));
+        assert!(documents.whole("specification.md").contains("body"));
+        assert_eq!(
+            documents.holder("specification.md", "body"),
+            Some(String::from("docs/specification/part-01.md"))
+        );
+        assert_eq!(
+            documents.last_of("specification.md"),
+            "docs/specification/part-01.md"
+        );
+        assert_eq!(documents.last_of("README.md"), "README.md");
+        assert_eq!(documents.sorted().count(), 2);
+        assert_eq!(documents.iter().count(), 2);
+        assert_eq!(documents.whole("README.md"), "hello");
+        documents.remove("README.md");
+        assert_eq!(documents.get("README.md"), None);
+        // Load faults: a symlink, a directory, an over-bound file and bad UTF-8.
+        let scratch = Scratch::new("documents-faults")?;
+        scratch.write("README.md", b"plain")?;
+        assert_eq!(load(scratch.path())?.get("README.md"), Some("plain"));
+        std::fs::create_dir_all(scratch.path().join("index.md"))?;
+        assert!(matches!(
+            load(scratch.path()),
+            Err(GovernanceError::IsDirectory { .. })
+        ));
+        std::fs::remove_dir_all(scratch.path().join("index.md"))?;
+        #[cfg(unix)]
+        {
+            let target = scratch.path().join("README.md");
+            std::os::unix::fs::symlink(&target, scratch.path().join("index.md"))?;
+            assert!(matches!(
+                load(scratch.path()),
+                Err(GovernanceError::Symlink { .. })
+            ));
+            std::fs::remove_file(scratch.path().join("index.md"))?;
+        }
+        scratch.write("index.md", &[0xff, 0xfe])?;
+        assert!(matches!(
+            load(scratch.path()),
+            Err(GovernanceError::NotUtf8 { .. })
+        ));
+        std::fs::remove_file(scratch.path().join("index.md"))?;
+        // A FIFO where a document belongs is not a regular file.
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("mkfifo")
+                .arg(scratch.path().join("index.md"))
+                .status()?;
+            assert!(status.success(), "mkfifo refused: {status}");
+            assert!(matches!(
+                load(scratch.path()),
+                Err(GovernanceError::NotRegular { .. })
+            ));
+            std::fs::remove_file(scratch.path().join("index.md"))?;
+        }
+        // A missing tree loads with no documents; an unreadable root refuses typed.
+        let absent = scratch.path().join("no-such-root");
+        assert_eq!(load(&absent)?.iter().count(), 0);
+        assert!(matches!(is_symlink(&absent.join("x"), "x"), Ok(false)));
+        // A root that is a file refuses before any document is read.
+        assert!(matches!(
+            load(&scratch.path().join("README.md")),
+            Err(GovernanceError::Unreadable { .. })
+        ));
+        // An entry the reader cannot stat refuses typed, never silently.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let blocked = scratch.path().join("blocked");
+            std::fs::create_dir_all(&blocked)?;
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))?;
+            let refused = is_symlink(&blocked.join("child"), "blocked/child");
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755))?;
+            assert!(matches!(refused, Err(GovernanceError::Unreadable { .. })));
+        }
+        Ok(())
+    }
+}

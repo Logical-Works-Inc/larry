@@ -22,6 +22,8 @@
 //! workspaces; POSIX `mkstemp(3)`; CWE-377 (insecure temporary file) and CWE-59 (link following).
 
 mod follow;
+#[cfg(all(test, unix))]
+mod sim_manifest;
 mod snapshot;
 mod syntax;
 mod uses;
@@ -238,11 +240,16 @@ fn array_items(text: &str) -> Result<Vec<String>, GovernanceError> {
     Ok(string_items(inside))
 }
 
-/// Every quoted string of a TOML array body, in order.
+/// Every quoted string of a TOML array body, in order. A comment runs to the end of its line and
+/// opens no string, whatever it quotes (TOML 1.0.0, larry#611).
 fn string_items(text: &str) -> Vec<String> {
     let mut items = Vec::new();
     let mut characters = text.chars();
     while let Some(character) = characters.next() {
+        if character == '#' {
+            characters.find(|next| *next == '\n');
+            continue;
+        }
         if character != '"' && character != '\'' {
             continue;
         }

@@ -26,6 +26,8 @@ mod sim_parsers;
 #[cfg(all(test, unix))]
 mod sim_read;
 #[cfg(test)]
+mod sim_sections;
+#[cfg(test)]
 pub(crate) mod sim_support;
 #[cfg(test)]
 mod sim_temp_paths;

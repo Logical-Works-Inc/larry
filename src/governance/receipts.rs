@@ -273,3 +273,6 @@ fn result_shape_holds(result: &Value) -> bool {
     let score_ok = result.get("score").and_then(Value::as_f64).is_some();
     id_ok && score_ok
 }
+
+#[cfg(all(test, unix))]
+mod sim_receipts;
