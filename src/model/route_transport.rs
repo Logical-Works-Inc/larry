@@ -66,6 +66,74 @@ fn is_loopback_host(host: &str) -> bool {
         || matches!(bare.parse::<Ipv4Addr>(), Ok(v4) if v4.is_loopback())
 }
 
+/// Whether `authority` names a destination a remote door never sends to (larry#627): an
+/// address that is not public, a numeric spelling of an address, or a name only this host
+/// or its own network answers. A public name that resolves inward is not caught here; the
+/// connected peer check is larry#510.
+pub(super) fn is_private_destination(authority: &str) -> bool {
+    match authority.strip_prefix('[') {
+        Some(rest) => !rest.split_once(']').is_some_and(
+            |(literal, _)| matches!(literal.parse::<Ipv6Addr>(), Ok(v6) if is_public_v6(v6)),
+        ),
+        None => !is_public_host(host_of(authority)),
+    }
+}
+
+/// Whether an unbracketed `host` is a public address or a public DNS name.
+fn is_public_host(host: &str) -> bool {
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(v4) = name.parse::<Ipv4Addr>() {
+        return is_public_v4(v4);
+    }
+    // One label is answered by the host's own search list, never by public DNS.
+    name.rsplit_once('.').is_some_and(|(_, last)| {
+        !ends_in_a_number(last)
+            && !matches!(last, "localhost" | "local" | "internal")
+            && !name.ends_with(".home.arpa")
+    })
+}
+
+/// Whether a last label makes `inet_aton` read the whole host as an address, as the
+/// WHATWG URL rule "ends in a number" reads it: `127.1`, `0177.0.0.1`, `0x7f.0.0.0x1`.
+fn ends_in_a_number(label: &str) -> bool {
+    match label.strip_prefix("0x") {
+        Some(hex) => hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        None => label.bytes().all(|byte| byte.is_ascii_digit()),
+    }
+}
+
+/// Whether `address` is outside every special-purpose IPv4 block (RFC 6890).
+fn is_public_v4(address: Ipv4Addr) -> bool {
+    let [first, second, third, _] = address.octets();
+    let reserved = first == 0
+        || first >= 240
+        || (first == 100 && (64..128).contains(&second))
+        || (first == 192 && second == 0 && third == 0)
+        || (first == 198 && (18..20).contains(&second));
+    !(reserved
+        || address.is_loopback()
+        || address.is_private()
+        || address.is_link_local()
+        || address.is_multicast()
+        || address.is_documentation())
+}
+
+/// Whether `address` is global unicast (2000::/3, RFC 4291). A mapped or 6to4 address
+/// answers for the IPv4 address it carries; loopback, unique local, link local, site
+/// local, multicast and the unspecified address are all outside the block.
+fn is_public_v6(address: Ipv6Addr) -> bool {
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return is_public_v4(mapped);
+    }
+    let [first, second, third, ..] = address.segments();
+    if first == 0x2002 {
+        let [high, upper] = second.to_be_bytes();
+        let [lower, low] = third.to_be_bytes();
+        return is_public_v4(Ipv4Addr::new(high, upper, lower, low));
+    }
+    (first & 0xe000) == 0x2000 && !(first == 0x2001 && second == 0x0db8)
+}
+
 /// Whether `text` is a port number.
 fn is_port(text: &str) -> bool {
     text.parse::<u16>().is_ok()
@@ -131,7 +199,127 @@ pub(super) fn plaintext_proxy<'url>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PROXY_VARIABLES, authority_of, is_loopback, is_proxy_variable, plaintext_proxy};
+    use super::{
+        PROXY_VARIABLES, authority_of, is_loopback, is_private_destination, is_proxy_variable,
+        plaintext_proxy,
+    };
+
+    /// Every block RFC 6890 and RFC 4291 set aside at both of its edges, each spelling a
+    /// resolver reads as an address, and the names only this network answers.
+    const PRIVATE: &[&str] = &[
+        "0.0.0.0",
+        "0.255.255.255",
+        "10.0.0.0",
+        "10.255.255.255",
+        "100.64.0.0",
+        "100.127.255.255",
+        "127.0.0.1",
+        "127.255.255.255",
+        "169.254.0.0",
+        "169.254.169.254",
+        "172.16.0.0",
+        "172.31.255.255",
+        "192.0.0.1",
+        "192.0.2.1",
+        "192.168.0.1",
+        "198.18.0.0",
+        "198.19.255.255",
+        "198.51.100.1",
+        "203.0.113.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "255.255.255.255",
+        "127.0.0.1.",
+        "127.1",
+        "2130706433",
+        "0x7f000001",
+        "0177.0.0.1",
+        "010.0.0.1",
+        "1.2.3.0x4",
+        "8.8.8.8.8",
+        "localhost",
+        "LOCALHOST.",
+        "gateway.localhost",
+        "printer.local",
+        "vault.internal",
+        "Metadata.Google.INTERNAL",
+        "nas.home.arpa",
+        "metadata",
+        "",
+        "[::]",
+        "[::1]",
+        "[::ffff:127.0.0.1]",
+        "[::ffff:169.254.169.254]",
+        "[fc00::1]",
+        "[fdff::1]",
+        "[fe80::1]",
+        "[fec0::1]",
+        "[ff02::1]",
+        "[64:ff9b::a00:1]",
+        "[2001:db8::1]",
+        "[2002:a00:1::1]",
+        "[2002:7f00:1::]",
+        "[fe80::1%eth0]",
+        "[not-v6]",
+        "[::1",
+    ];
+
+    /// The addresses one step outside each block, and ordinary public names.
+    const PUBLIC: &[&str] = &[
+        "1.0.0.0",
+        "8.8.8.8",
+        "9.255.255.255",
+        "11.0.0.0",
+        "100.63.255.255",
+        "100.128.0.0",
+        "126.255.255.255",
+        "128.0.0.0",
+        "169.253.255.255",
+        "169.255.0.0",
+        "172.15.255.255",
+        "172.32.0.0",
+        "192.0.1.1",
+        "192.167.255.255",
+        "192.169.0.0",
+        "198.17.255.255",
+        "198.20.0.0",
+        "223.255.255.255",
+        "gateway.test",
+        "api.example.com.",
+        "internal.example.com",
+        "local.example.com",
+        "localhost.example.com",
+        "9router.example.com",
+        "xn--fsq.example",
+        "[2000::1]",
+        "[2606:4700::1111]",
+        "[3fff:ffff::1]",
+        "[2001:db9::1]",
+        "[2002:808:808::1]",
+        "[::ffff:8.8.8.8]",
+    ];
+
+    /// Every private spelling is refused and every public one passes, with and without a
+    /// port.
+    #[test]
+    fn sim_every_private_destination_is_refused_and_public_hosts_pass() {
+        for &host in PRIVATE {
+            for authority in [String::from(host), format!("{host}:443")] {
+                assert!(
+                    is_private_destination(&authority),
+                    "{authority:?} is private"
+                );
+            }
+        }
+        for &host in PUBLIC {
+            for authority in [String::from(host), format!("{host}:8443")] {
+                assert!(
+                    !is_private_destination(&authority),
+                    "{authority:?} is public"
+                );
+            }
+        }
+    }
 
     /// Every proxy variable, bypass spelling, list shape and loopback host: a
     /// plaintext call is allowed only past a list that holds its host or `*`.
@@ -204,12 +392,17 @@ mod tests {
         assert_eq!(authority_of("https://gateway.test?token=secret"), None);
     }
 
+    /// The authority of `host` on `port`, as a route URL spells it.
+    fn at(host: &str, port: &str) -> String {
+        format!("{host}:{port}")
+    }
+
     #[test]
     fn loopback_identifies_local_plaintext_only() {
-        assert!(is_loopback("localhost:8080"));
-        assert!(is_loopback("[::1]:8080"));
-        assert!(is_loopback("127.0.0.1:8080"));
-        assert!(!is_loopback("gateway.test:8080"));
+        for host in ["localhost", "[::1]", "127.0.0.1"] {
+            assert!(is_loopback(&at(host, "8080")), "{host} is loopback");
+        }
+        assert!(!is_loopback(&at("gateway.test", "8080")));
     }
 
     /// Every hostile host answers exactly, from RFC 6761 section 6.3 (only
@@ -222,14 +415,18 @@ mod tests {
         // uppercase still names the special `localhost` itself, and a trailing
         // dot is the same name in fully-qualified form.
         for allowed in [
-            "LOCALHOST:1",
-            "localhost.",
-            "127.0.0.1.",
-            "127.255.255.254:65535",
-            "[::1]",
-            "[0:0:0:0:0:0:0:1]:8080",
+            at("LOCALHOST", "1"),
+            String::from("localhost."),
+            String::from("127.0.0.1."),
+            at("127.255.255.254", "65535"),
+            String::from("[::1]"),
+            at("[0:0:0:0:0:0:0:1]", "8080"),
         ] {
-            assert!(is_loopback(allowed), "{allowed} is loopback");
+            assert!(is_loopback(&allowed), "{allowed} is loopback");
+        }
+        // A port past 65,535 and a second port are no port at all.
+        for hostile in [at("[::1]", "65536"), at("127.0.0.1", "80:80")] {
+            assert!(!is_loopback(&hostile), "{hostile:?} is not loopback");
         }
         // Anything else fails closed to HTTPS: a suffixed special name, a
         // non-quad form, a malformed literal, a routed IPv4-mapped address,
@@ -244,13 +441,11 @@ mod tests {
             "[::1].evil.test",
             "[::1]8080",
             "[::1]:",
-            "[::1]:65536",
             "[localhost]",
             "[127.0.0.1]",
             "localhost:",
             "localhost:evil.test",
             "127.0.0.1:80.evil.test",
-            "127.0.0.1:80:80",
             "127.000.000.001",
             "128.0.0.1",
             "127.0.0.256",

@@ -23,6 +23,8 @@ mod seal;
 mod session;
 mod session_turn;
 #[cfg(test)]
+mod sim_destination;
+#[cfg(test)]
 mod sim_env;
 #[cfg(test)]
 pub(crate) mod sim_tree;
@@ -374,8 +376,14 @@ impl Settings {
     }
 
     /// The model configuration for calls over `route`: its key is read now, from
-    /// the variable the route names.
+    /// the variable the route names. A remote door is refused a stored route that
+    /// points inside this host's network before the key is read (larry#627).
     pub(crate) fn model_config(&self, route: &Route) -> Result<ModelConfig, ExecError> {
+        if !self.local
+            && let Some(refusal) = route.destination_refusal()
+        {
+            return Err(ExecError::Route(refusal));
+        }
         ModelConfig::for_route(route, &|name: &str| (self.read)(name))
             .map_err(ExecError::ModelConfig)
     }
