@@ -18,6 +18,56 @@ use temp_dir::TempDir;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// Plaintext goes only to loopback (RFC 6761 section 6.3, RFC 3986 section
+/// 3.2.2): an unbracketed IPv6 literal is no host and port pair and is refused,
+/// while `localhost.` is `localhost` in fully-qualified form.
+#[test]
+fn an_unbracketed_loopback_literal_is_refused_plaintext() -> TestResult {
+    let state = TempDir::new()?;
+    let key_env = route_key::key_env(state.path(), "LOCAL")?;
+    let add = |id: &str, url: &str| {
+        larry_route(
+            state.path(),
+            &[
+                "add",
+                id,
+                "--url",
+                url,
+                "--model",
+                "model-a",
+                "--key-env",
+                &key_env,
+                "--residency",
+                "CA",
+            ],
+        )
+    };
+    // Only a port may follow a bracketed literal, and brackets hold IPv6 alone,
+    // so none of these names this machine.
+    for (id, url) in [
+        ("bare", "http://::1:8080/v1"),
+        ("suffixed", "http://[::1].evil.test:8080/v1"),
+        ("named", "http://[localhost]:8080/v1"),
+        ("ported", "http://127.0.0.1:80.evil.test/v1"),
+    ] {
+        let refused = add(id, url)?;
+        assert!(!refused.status.success(), "{url} is refused");
+        assert!(
+            stderr_of(&refused).contains("requires https"),
+            "{url}: typed transport refusal: {}",
+            stderr_of(&refused)
+        );
+    }
+    for (id, url) in [
+        ("rooted", "http://localhost.:8080/v1"),
+        ("bracketed", "http://[::1]:8080/v1"),
+    ] {
+        let added = add(id, url)?;
+        assert!(added.status.success(), "{url}: {}", stderr_of(&added));
+    }
+    Ok(())
+}
+
 /// A route written before the transport rule remains inspectable and removable,
 /// but resolution refuses it before any key read or network attempt.
 #[test]
