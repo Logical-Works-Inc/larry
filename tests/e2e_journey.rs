@@ -6,6 +6,8 @@
 //! Requirement: the frame paints, asks before every command, never runs a declined one,
 //! survives kill -9 with a clean next start, writes nothing while idle, and exits 0 on Ctrl+C.
 
+#[path = "e2e_journey/ask.rs"]
+mod asking;
 #[path = "support/coverage.rs"]
 mod coverage;
 #[path = "e2e_journey/edit.rs"]

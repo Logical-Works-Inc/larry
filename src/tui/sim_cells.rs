@@ -22,10 +22,12 @@ const PINNED_SEEDS: u64 = 96;
 /// (larry#252), then advanced once for the queue panel, the six slash commands and the
 /// working footer (larry#262), once for the four session commands the popup lists
 /// (larry#603), once for a pasted CR kept as a line break, which the seeded pastes
-/// hold (larry#605), and once for `/export` and `/recap` in the popup and `/help`
-/// (larry#609): the heap assertions above, not this digest, carry the no-heap-text
-/// rule, so a paint feature moves this digest and names its issue here.
-const PINNED: &str = "916fadde9c4c5aa1400195c82838ac46d4dae8fb79eda556f7ae785246edf2de";
+/// hold (larry#605), once for `/export` and `/recap` in the popup and `/help`
+/// (larry#609), and once for the question's own view, which cuts a command by
+/// character and scrolls one too tall for the screen (larry#521): the heap
+/// assertions above, not this digest, carry the no-heap-text rule, so a paint
+/// feature moves this digest and names its issue here.
+const PINNED: &str = "cdcfb96978c90ce5756bd024bd729b4cd05144215664979357479a4ca594b492";
 
 /// One piece of a seeded line: its text, the columns it takes and whether a mark joins its cell.
 const PIECES: [(&str, usize, bool); 6] = [

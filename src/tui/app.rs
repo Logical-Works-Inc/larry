@@ -19,7 +19,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::ask::answer;
+use super::ask::{Reading, answer};
 use super::buffer::Frame;
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
@@ -208,6 +208,8 @@ pub(crate) struct App {
     painted: Cell<Option<u64>>,
     /// Keys dropped because they were read before the question's frame was painted.
     early: usize,
+    /// What of the command asked about has been on screen (larry#521).
+    pub(super) reading: Cell<Reading>,
 }
 
 /// `said`, or `fallback` when the session said nothing.
@@ -241,6 +243,7 @@ impl App {
             frames: Cell::new(0),
             painted: Cell::new(None),
             early: 0,
+            reading: Cell::default(),
         }
     }
 
@@ -266,6 +269,7 @@ impl App {
             hint: &self.hint,
             frames: &self.frames,
             painted: &self.painted,
+            reading: &self.reading,
         }
     }
 
@@ -353,11 +357,7 @@ impl App {
     /// One session event.
     fn event(&mut self, event: Event) -> Vec<Effect> {
         match event {
-            Event::Ask(command) => {
-                self.phase = Phase::Asking(Some(command), Decision::Decline);
-                self.painted.set(None);
-                self.scroll = 0;
-            }
+            Event::Ask(command) => self.asking(Some(command)),
             Event::Started(command) => {
                 self.pane.started(&command);
                 self.pending.push_job(&command);
@@ -395,9 +395,7 @@ impl App {
                 self.push(Entry::Info(
                     summary.iter().map(|line| sanitize(line, false)).collect(),
                 ));
-                self.phase = Phase::Asking(None, Decision::Decline);
-                self.painted.set(None);
-                self.scroll = 0;
+                self.asking(None);
             }
             Event::Handed { line, applied } => {
                 let style = if applied { Style::GOOD } else { Style::WARN };
@@ -411,6 +409,15 @@ impl App {
             Event::Ended(ended) => return self.ended(ended),
         }
         Vec::new()
+    }
+
+    /// Opens a question: about `command`, or the review of the session's change. Nothing of
+    /// it has been painted or read yet.
+    fn asking(&mut self, command: Option<String>) {
+        self.phase = Phase::Asking(command, Decision::Decline);
+        self.painted.set(None);
+        self.reading.set(Reading::default());
+        self.scroll = 0;
     }
 
     /// The session ended.
@@ -449,6 +456,15 @@ impl App {
 
     /// One key.
     fn key(&mut self, key: Key) -> Vec<Effect> {
+        // A command taller than the screen takes the scroll keys; one that fits leaves them to
+        // the pane.
+        if matches!(self.phase, Phase::Asking(..)) {
+            let mut reading = self.reading.get();
+            if reading.scroll(key) {
+                self.reading.set(reading);
+                return Vec::new();
+            }
+        }
         if self.pane_key(key) {
             return Vec::new();
         }
