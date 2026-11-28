@@ -24,12 +24,14 @@ pub(super) struct SealedRun<'a> {
     pub(super) deadline_ms: Option<u64>,
 }
 
-/// Seals `seal` under `key`: the results, the diff as it stands and, when the deadline spent the
+/// Seals `seal` under the tenant's key: the results, the diff as it stands and, when the deadline spent the
 /// run, the spent deadline beside the results, so a run that already wrote is accounted for
 /// (larry#439). `accepted` derives false whenever the deadline member is present, and `larry
-/// verify` re-derives it.
+/// verify` re-derives it. The receipt names the key id that sealed it, so a rotated key
+/// verifies old receipts by id (larry#211).
 pub(super) fn seal_run(
     seal: SealedRun<'_>,
+    id: i64,
     key: &lgwks_std::sign::SecretKey,
 ) -> Result<Report, ExecError> {
     let diff = seal.workspace.diff(seal.base)?;
@@ -62,5 +64,5 @@ pub(super) fn seal_run(
             lgwks_std::json::Value::Array(records),
         );
     }
-    Ok(Report::sealed(body, key))
+    Ok(Report::sealed(body, key, id))
 }

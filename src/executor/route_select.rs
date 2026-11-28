@@ -109,7 +109,7 @@ pub(super) fn select_for(
     query: Option<&str>,
     read: &impl Fn(&str) -> Option<String>,
 ) -> Result<Selection, ExecError> {
-    let tenant = tenant_text(state);
+    let tenant = tenant_text(ledger, state, read)?;
     let table = ledger.routes(&tenant)?;
     let environment = if table.lookup(named).is_some() {
         None
@@ -202,7 +202,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = crate::executor::sim_tree::scratch("larry-route-select-policy")?;
         let ledger = Ledger::open(&directory)?;
-        let tenant = tenant_text(&directory);
+        let read = |_: &str| -> Option<String> { None };
+        let tenant = tenant_text(&ledger, &directory, &read)?;
         let namespace = crate::model::tenant_namespace(&tenant);
         let key_env = format!("{namespace}MAIN");
         let route = Route::new(&Draft {
@@ -220,7 +221,6 @@ mod tests {
         .map_err(ExecError::Route)?;
         ledger.put_route(&tenant, &route, true)?;
         ledger.set_residency(&tenant, &["CA".to_owned()])?;
-        let read = |_: &str| -> Option<String> { None };
         let refusal = select_for(&ledger, &directory, None, None, &read);
         assert!(
             matches!(

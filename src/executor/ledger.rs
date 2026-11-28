@@ -9,7 +9,6 @@ use std::path::Path;
 use lgwks_bot::kernel::clock::Clock;
 use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
 use lgwks_std::process::{ProcessIdentity, reap_orphaned_group};
-use lgwks_std::sign::SecretKey;
 
 use super::ExecError;
 use super::run::await_gone;
@@ -81,9 +80,16 @@ impl Ledger {
             .open(&database)
             .map_err(ExecError::KeyStore)?;
         let conn = lgwks_deps::sqlite::open(&database).map_err(ExecError::Ledger)?;
+        // The steps are positional: the migrator runs the statements past the
+        // file's version in order, so a shipped step never moves. Main's price
+        // step claimed 8 first (larry#204) and its route-prompts step 9
+        // (larry#205, #534); the tenant key step appends as 10
+        // (larry#211 part B) and the residency step as 11 (larry#203).
+        // Reports and live groups keep their shape here;
+        // their tenant columns land in part C.
         lgwks_deps::sqlite::migrate(
             &conn,
-            10,
+            11,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -94,6 +100,7 @@ impl Ledger {
                 policy::REPO_ROOT_SCHEMA,
                 routes::PRICE_SCHEMA,
                 routes::ROUTE_PROMPT_SCHEMA,
+                tenant::STEP_TEN,
                 routes::RESIDENCY_SCHEMA,
             ],
         )
@@ -108,42 +115,10 @@ impl Ledger {
                 Err(error) => return Err(ExecError::KeyStore(error)),
             }
         }
-        Ok(Ledger { conn })
-    }
-
-    /// The receipt signing key, created from OS entropy on first use.
-    ///
-    /// Executors racing on a fresh store each draw a seed, and `INSERT OR IGNORE`
-    /// into the one-row table keeps the first; every racer then reads that row back,
-    /// so one state directory signs under one key.
-    pub(crate) fn signing_key(&self) -> Result<SecretKey, ExecError> {
-        if let Some(key) = self.stored_key()? {
-            return Ok(key);
-        }
-        let seed = lgwks_std::random::bytes::<32>().map_err(ExecError::Entropy)?;
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO receipt_key (id, seed) VALUES (1, ?1)",
-                rusqlite::params![seed.as_slice()],
-            )
-            .map_err(ExecError::Sql)?;
-        self.stored_key()?.ok_or(ExecError::KeyMissing)
-    }
-
-    /// The stored key, if a row exists; a row whose seed is not 32 bytes is damage.
-    fn stored_key(&self) -> Result<Option<SecretKey>, ExecError> {
-        let row = self
-            .conn
-            .query_row("SELECT seed FROM receipt_key WHERE id = 1", [], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })
-            .optional()
-            .map_err(ExecError::Sql)?;
-        let Some(stored) = row else {
-            return Ok(None);
-        };
-        let seed = <[u8; 32]>::try_from(stored.as_slice()).map_err(ExecError::KeySeedLength)?;
-        Ok(Some(SecretKey::from_seed(seed)))
+        let ledger = Ledger { conn };
+        let tenant = ledger.dir_tenant(state_dir)?;
+        ledger.backfill_tenant(&lgwks_std::hex::encode(tenant.as_bytes()))?;
+        Ok(ledger)
     }
 
     /// Stores `digest` as `tenant`'s one key digest, replacing an earlier one, so
@@ -400,6 +375,11 @@ mod routes;
 /// The tenant policy and repository-root records, kept apart from process rows.
 #[path = "ledger_policy.rs"]
 mod policy;
+
+/// The stored default tenant, the tenant selection and the per-tenant receipt
+/// keys (larry#211 part B), a child module so the connection stays private.
+#[path = "ledger_tenant.rs"]
+mod tenant;
 
 /// Seeded adversarial simulations of the report rows a keyed retry answers from
 /// (larry#182 defect 3).
@@ -683,8 +663,8 @@ mod tests {
     }
 
     /// Executors racing their first receipt on one fresh state directory all sign
-    /// under one key, a reopen keeps it, the store is owner-only, and another
-    /// directory (another tenant) holds another key (larry#86).
+    /// under the tenant's key id 1, a reopen keeps it, the store is owner-only, and another
+    /// directory (another tenant) holds another key (larry#86, larry#211).
     #[test]
     fn sim_racing_first_uses_share_one_signing_key() -> Result<(), Box<dyn std::error::Error>> {
         /// Racers per round: past the two executors the journeys start together.
@@ -701,8 +681,13 @@ mod tests {
                         scope.spawn(|| {
                             barrier.wait();
                             Ledger::open(&directory)
-                                .and_then(|ledger| ledger.signing_key())
-                                .map(|key| key.public_key().to_bytes())
+                                .and_then(|ledger| {
+                                    let tenant = ledger.dir_tenant(&directory)?;
+                                    let tenant = lgwks_std::hex::encode(tenant.as_bytes());
+                                    ledger
+                                        .signing_key_for(&tenant)
+                                        .map(|(_, key)| key.public_key().to_bytes())
+                                })
                                 .map_err(|error| error.to_string())
                         })
                     })
@@ -720,11 +705,13 @@ mod tests {
                 drawn.iter().all(|key| *key == first),
                 "every racer on one directory signs under one key"
             );
-            let reopened = Ledger::open(&directory)?
-                .signing_key()?
-                .public_key()
-                .to_bytes();
-            assert_eq!(reopened, first, "a reopen keeps the stored key");
+            let reopened = Ledger::open(&directory)?;
+            let tenant = reopened.dir_tenant(&directory)?;
+            let tenant = lgwks_std::hex::encode(tenant.as_bytes());
+            let (id, _) = reopened.signing_key_for(&tenant)?;
+            assert_eq!(id, 1, "the first seal mints key id 1");
+            let kept = reopened.signing_key_for(&tenant)?.1.public_key().to_bytes();
+            assert_eq!(kept, first, "a reopen keeps the stored key");
             let mode = std::fs::metadata(directory.join("executor.db"))?
                 .permissions()
                 .mode();

@@ -35,12 +35,13 @@ pub(crate) const MAX_ENTRIES: usize = 512;
 /// The spinner's frames, one per 100 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// What `/help` prints.
-const HELP: [&str; 5] = [
+const HELP: [&str; 6] = [
     "Enter sends the task. Ctrl+J adds a new line. Enter while working queues the next turn (8).",
     "Larry asks before each command: y runs it, a runs it and stops asking, n declines.",
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
-    "/quit leaves Larry.",
+    "/ps lists background commands with their last lines. /stop ends them.",
+    "/quit leaves Larry; with background commands running it asks first.",
 ];
 /// One key, already read from the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,11 +136,11 @@ pub(crate) struct App {
     /// The transcript, oldest first.
     pub(super) entries: VecDeque<Entry>,
     /// The text box.
-    composer: Composer,
+    pub(super) composer: Composer,
     /// Where the machine is.
     pub(super) phase: Phase,
-    /// Turns queued while a session runs (larry#262).
-    pending: Pending,
+    /// Turns queued while a session runs and the background commands it started (larry#262).
+    pub(super) pending: Pending,
     /// Lines `/status` prints.
     status: Vec<String>,
     /// When the running task started.
@@ -155,11 +156,11 @@ pub(crate) struct App {
     /// Whether the person said to stop asking for this run.
     pub(super) always: bool,
     /// Whether Ctrl+C asked to leave once the running session ends.
-    quitting: bool,
+    pub(super) quitting: bool,
     /// The session's last message, shown as its summary or its refusal.
     said: Option<String>,
     /// A one-line hint over the footer until the next key.
-    hint: Option<String>,
+    pub(super) hint: Option<String>,
     /// The artifact pane's state: the task's output, diff and receipt (larry#244).
     pane: Pane,
     /// Frames painted since the frame started (larry#325).
@@ -296,6 +297,7 @@ impl App {
             }
             Event::Started(command) => {
                 self.pane.started(&command);
+                self.pending.push_job(&command);
                 self.phase = if matches!(self.phase, Phase::Working(_)) {
                     Phase::Working(Some(command))
                 } else {
@@ -310,10 +312,13 @@ impl App {
             } => {
                 let command = if let Phase::Working(Some(ref command)) = self.phase {
                     command.clone()
+                } else if let Some(running) = self.pending.running_command() {
+                    running
                 } else {
                     String::from("(command)")
                 };
                 let (status, output) = split_observation(&observation);
+                self.pending.finish_job(&command, &output, passed);
                 self.pane.finished(&command, &status, &output, passed);
                 self.push(Entry::ran(command, &status, output, passed));
                 self.phase = match self.phase {
@@ -344,6 +349,7 @@ impl App {
 
     /// The session ended.
     fn ended(&mut self, ended: Ended) -> Vec<Effect> {
+        self.pending.mark_all_done();
         let said = self.said.take();
         let entry = match ended {
             Ended::Done => Entry::Said(or_said(said, "Done.")),
@@ -454,7 +460,7 @@ impl App {
     }
 
     /// Esc or Ctrl+C while a session runs.
-    fn interrupt(&mut self, key: Key) -> Vec<Effect> {
+    pub(super) fn interrupt(&mut self, key: Key) -> Vec<Effect> {
         match self.phase {
             Phase::Working(ref command) => {
                 self.phase = Phase::Stopping(command.is_some());
@@ -462,7 +468,7 @@ impl App {
             }
             Phase::Stopping(_) if key == Key::Interrupt => {
                 self.quitting = true;
-                self.hint = Some(String::from("Larry quits when the session ends."));
+                self.hint = Some(self.quit_hint());
                 Vec::new()
             }
             Phase::Idle | Phase::Asking(..) | Phase::Stopping(_) => Vec::new(),
@@ -489,7 +495,9 @@ impl App {
                 self.entries = header.into_iter().collect();
                 self.scroll = 0;
             }
-            _ => return vec![Effect::Quit],
+            "/ps" => self.push(Entry::Info(self.pending.ps_rows())),
+            "/stop" => return self.stop(),
+            _ => return self.quit_or_leave(),
         }
         Vec::new()
     }

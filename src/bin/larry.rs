@@ -22,7 +22,7 @@ use std::time::Duration;
 use larry_demo::executor::routes::{RouteCliError, run as route_run};
 use larry_demo::executor::{
     ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, process_env,
-    state_public_key, trusted_key, verify,
+    rotate_receipt_key, state_public_key, trusted_key, verify, verify_state_report,
 };
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
 use lgwks_macros::Error;
@@ -91,8 +91,8 @@ struct Subcommand {
 }
 
 /// The variables a command reads that runs a task through the executor: the
-/// state directory, the policy, the command timeout and the model settings.
-const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_FENCE_CONTROL, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
+/// state directory, the tenant, the policy, the command timeout, the fence control and the model settings.
+const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_TENANT, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_FENCE_CONTROL, LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_*, LARRY_KEY_*";
 
 /// The variables `larry model` reads: one gateway, one key, the retry knobs, the
 /// tenant budgets and the price overrides a route without a table is priced from.
@@ -149,14 +149,14 @@ static COMMANDS: [Subcommand; 14] = [
     Subcommand {
         name: "verify",
         summary: "check a sealed report from stdin",
-        env: "LARRY_RECEIPT_KEY, LARRY_STATE_DIR",
+        env: "LARRY_RECEIPT_KEY, LARRY_STATE_DIR, LARRY_TENANT",
         run: |rest| bare(rest).and_then(|()| judged(verify_once())),
     },
     Subcommand {
         name: "key",
-        summary: "print the receipt public key",
-        env: "LARRY_STATE_DIR",
-        run: |rest| bare(rest).and_then(|()| ran("", key_once())),
+        summary: "print or rotate the receipt public key",
+        env: "LARRY_STATE_DIR, LARRY_TENANT",
+        run: key_run,
     },
     Subcommand {
         name: "route",
@@ -215,7 +215,7 @@ fn help_text() -> String {
          usage: larry [<subcommand> [args...]]\n\
          \n\
          With no subcommand, larry runs the terminal session and asks before every command\n\
-         (env: LARRY_STATE_DIR, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_*, LARRY_KEY_*).\n\
+         (env: LARRY_STATE_DIR, LARRY_TENANT, LARRY_POLICY, LARRY_EXEC_TIMEOUT_MS, LARRY_MODEL_*, LARRY_KEY_*).\n\
          \n\
          subcommands:\n",
     );
@@ -336,12 +336,20 @@ fn exec_once() -> Result<bool, ExecError> {
 }
 
 /// `larry verify`: check the report on standard input against the trusted key
-/// (`LARRY_RECEIPT_KEY`, else the state directory's) and print its verdict.
-/// Returns whether the verified run was accepted.
+/// (`LARRY_RECEIPT_KEY`, else the selected tenant's key in the state directory)
+/// and print its verdict. Returns whether the verified run was accepted.
 fn verify_once() -> Result<bool, ExecError> {
-    let trusted = trusted_key(process_env()?)?;
+    let read = process_env()?;
     let bytes = read_stdin(REPORT_LIMIT)?;
-    let verdict: Verdict = verify(&bytes, &trusted).map_err(ExecError::Receipt)?;
+    let inline = read("LARRY_RECEIPT_KEY")
+        .filter(|value| !value.is_empty())
+        .is_some();
+    let verdict: Verdict = if inline {
+        let trusted = trusted_key(process_env()?)?;
+        verify(&bytes, &trusted).map_err(ExecError::Receipt)?
+    } else {
+        verify_state_report(process_env()?, &bytes)?
+    };
     print_line(&lgwks_std::json::json!({
         "verified": true,
         "accepted": verdict.accepted(),
@@ -370,11 +378,36 @@ enum Failed<E: std::error::Error + 'static> {
     Run(#[source] E),
 }
 
-/// `larry key`: print the state directory's receipt public key as 64 hex characters,
-/// the value an offline verifier sets as `LARRY_RECEIPT_KEY`.
+/// `larry key`: print the selected tenant's active receipt public key as 64 hex
+/// characters, the value an offline verifier sets as `LARRY_RECEIPT_KEY`.
+/// Read-only: a tenant with no key is refused, and nothing is minted.
 fn key_once() -> Result<(), ExecError> {
     let public = state_public_key(process_env()?)?;
     print_line(&lgwks_std::hex::encode(public.to_bytes()))
+}
+
+/// `larry key rotate`: append the selected tenant's next receipt key id and
+/// print the new public key with its id, as JSON. Old receipts verify by id.
+fn key_rotate_once() -> Result<(), ExecError> {
+    let (key_id, public) = rotate_receipt_key(process_env()?)?;
+    print_line(&lgwks_std::json::json!({
+        "key": lgwks_std::hex::encode(public.to_bytes()),
+        "key_id": key_id,
+    }))
+}
+
+/// `larry key` with no word prints the key; `larry key rotate` rotates it; any
+/// other shape is refused before anything is minted.
+fn key_run(rest: &[OsString]) -> Result<ExitCode, Refusal> {
+    let words: Option<Vec<&str>> = rest.iter().map(|word| word.to_str()).collect();
+    let words = words.ok_or(Refusal::Unknown)?;
+    if words.is_empty() {
+        ran("", key_once())
+    } else if words.as_slice() == ["rotate"] {
+        ran("", key_rotate_once())
+    } else {
+        Err(Refusal::Unknown)
+    }
 }
 
 /// `larry serve`: bind `LARRY_SERVE_ADDR` (loopback by default), print one JSON line naming

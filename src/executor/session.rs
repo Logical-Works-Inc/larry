@@ -39,10 +39,9 @@ use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
 use super::observation::redact_observation;
-use super::prepare;
 use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
 use super::workspace::report_members;
-use crate::model::{Completion, ModelClient, Usage};
+use crate::model::{Completion, ModelClient, Route, Usage};
 
 /// A terminal session's reply protocol: one JSON object per turn, parsed and
 /// refused with an exact reason the model can retry from (larry#545).
@@ -306,10 +305,10 @@ pub(crate) fn run_session(
     check(instruction, cwd).map_err(ExecError::Session)?;
     // A host that cannot confine refuses here, before the ledger, the model or a copy.
     isolation.check()?;
-    let (ledger, key) = prepare(settings)?;
+    let prepared = super::prepared::prepare(settings)?;
     let repository = match door {
-        SessionDoor::Tenant => ledger.authorized_repo(
-            &super::tenant_key(settings.state_dir()),
+        SessionDoor::Tenant => prepared.ledger.authorized_repo(
+            prepared.tenant_text.as_str(),
             settings.state_dir(),
             cwd,
             settings.is_local(),
@@ -322,9 +321,27 @@ pub(crate) fn run_session(
         settings,
         isolation,
         observer,
-        &ledger,
-        &key,
+        &prepared,
     )
+}
+
+/// The system prompt a turn sends: the route's template, when it names one,
+/// rides before the standing instruction, so a tenant's session prompts carry
+/// its route's words (larry#205).
+fn session_system(route: &Route) -> String {
+    match route.prompt() {
+        Some(template) => format!("{template}\n{SYSTEM}"),
+        None => String::from(SYSTEM),
+    }
+}
+
+/// The seal a session's report carries: the selected tenant's active key, so
+/// a remote caller verifies under the tenant that ran it (larry#211).
+fn session_seal(prepared: &super::prepared::Prepared) -> super::Seal<'_> {
+    super::Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    }
 }
 
 /// Runs the session in an already authorized directory: the route, the model,
@@ -335,19 +352,12 @@ fn run_session_prepared(
     settings: &Settings,
     isolation: Isolation,
     observer: &mut dyn Observer,
-    ledger: &Ledger,
-    key: &lgwks_std::sign::SecretKey,
+    prepared: &super::prepared::Prepared,
 ) -> Result<Ended, ExecError> {
+    let ledger = &prepared.ledger;
     let route = settings.route(ledger, None)?;
     let config = settings.model_config(&route)?;
-    let document = json::to_vec(&json!({
-        "session": {
-            "cwd": cwd.to_string_lossy(),
-            "instruction": instruction,
-            "isolation": isolation.name(),
-        }
-    }))
-    .map_err(|cause| ExecError::Gate(cause.into()))?;
+    let document = json::to_vec(&json!({"session": {"cwd": cwd.to_string_lossy(), "instruction": instruction, "isolation": isolation.name()}})).map_err(|cause| ExecError::Gate(cause.into()))?;
     let task_id = fresh_id()?;
     let task_digest = digest_hex(&document);
     let mut redactions = settings.secrets().to_vec();
@@ -361,82 +371,86 @@ fn run_session_prepared(
         path: cwd,
         bytes: &document,
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
-        // The retry budget's timeline, built before the copy so a host whose clock refuses
-        // copies nothing (larry#436).
-        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-        // Opened inside the gate: a denied session copies nothing.
-        let island = match isolation {
-            Isolation::Host => None,
-            Isolation::Workspace(platform) => {
-                Some(Island::open(platform, settings, &task_id, cwd)?)
-            }
-        };
-        let client = ModelClient::new(config, clock, backoff);
-        // The route's template rides before the standing instruction, so a
-        // tenant's session prompts carry its route's words (larry#205).
-        let system = match route.prompt() {
-            Some(template) => format!("{template}\n{SYSTEM}"),
-            None => String::from(SYSTEM),
-        };
-        let mut turn = Turn {
-            client: &client,
-            settings,
-            ledger,
-            task_id: &task_id,
-            place: match island {
-                Some(ref isle) => isle.place(),
-                None => Place::Open(cwd),
-            },
-            // The model sees a relative directory in every isolation mode, so the
-            // request carries no host path or account name.
-            shown: String::from("."),
-            redactions: &redactions,
-            system,
-            observer: &mut *observer,
-        };
-        let done = turn.run(instruction)?;
-        let authored = authored_usage(&done.usage);
-        let mut outcome = Outcome::None;
-        let mut diff = None;
-        if let Some(ref isle) = island
-            && done.stop == Stop::EndTurn
-        {
-            diff = isle.diff()?;
-            outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
-        }
-        let mut body = json!({
-            "task_id": task_id,
-            "task_digest": task_digest,
-            "diff": null,
-            "results": done.records,
-            "authored": authored,
-            "denied": [],
-            "session": {
-                "stop": done.stop.name(),
-                "commands": done.records.len(),
-                "declined": done.declined,
-                "interrupted": done.interrupted,
-                "route": route.seal(),
-                "compaction": done.compaction,
-                "isolation": match island {
-                    Some(ref isle) => isle.describe(),
-                    None => json!({ "mode": isolation.name() }),
+    let seal = session_seal(prepared);
+    let report = gate::admit_and_run(
+        subject,
+        settings,
+        &task_id,
+        &task_digest,
+        prepared.tenant,
+        seal,
+        || {
+            // The retry budget's timeline, built before the copy so a host whose clock refuses
+            // copies nothing (larry#436).
+            let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+            // Opened inside the gate: a denied session copies nothing.
+            let island = match isolation {
+                Isolation::Host => None,
+                Isolation::Workspace(platform) => {
+                    Some(Island::open(platform, settings, &task_id, cwd)?)
+                }
+            };
+            let client = ModelClient::new(config, clock, backoff);
+            let system = session_system(&route);
+            let mut turn = Turn {
+                client: &client,
+                settings,
+                ledger,
+                task_id: &task_id,
+                place: match island {
+                    Some(ref isle) => isle.place(),
+                    None => Place::Open(cwd),
                 },
-                "handoff": outcome.name(),
-            },
-        });
-        // An isolated session records the change it made, whole or cut (larry#206).
-        if island.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            for (name, member) in report_members(diff) {
-                object.insert(name.to_owned(), member);
+                // The model sees a relative directory in every isolation mode, so the
+                // request carries no host path or account name.
+                shown: String::from("."),
+                redactions: &redactions,
+                system,
+                observer: &mut *observer,
+            };
+            let done = turn.run(instruction)?;
+            let authored = authored_usage(&done.usage);
+            let mut outcome = Outcome::None;
+            let mut diff = None;
+            if let Some(ref isle) = island
+                && done.stop == Stop::EndTurn
+            {
+                diff = isle.diff()?;
+                outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
             }
-        }
-        stop = Some(done.stop);
-        Ok(Report::sealed(body, key))
-    })?;
+            let mut body = json!({
+                "task_id": task_id,
+                "task_digest": task_digest,
+                "diff": null,
+                "results": done.records,
+                "authored": authored,
+                "denied": [],
+                "session": {
+                    "stop": done.stop.name(),
+                    "commands": done.records.len(),
+                    "declined": done.declined,
+                    "interrupted": done.interrupted,
+                    "route": route.seal(),
+                    "compaction": done.compaction,
+                    "isolation": match island {
+                        Some(ref isle) => isle.describe(),
+                        None => json!({ "mode": isolation.name() }),
+                    },
+                    "handoff": outcome.name(),
+                },
+            });
+            // An isolated session records the change it made, whole or cut (larry#206).
+            if island.is_some()
+                && let Some(object) = body.as_object_mut()
+            {
+                for (name, member) in report_members(diff) {
+                    object.insert(name.to_owned(), member);
+                }
+            }
+            stop = Some(done.stop);
+            Ok(Report::sealed(body, &prepared.seal_key, prepared.seal_id))
+        },
+    )?;
     let stop = match stop {
         Some(stop) => stop,
         None => {
@@ -453,7 +467,7 @@ mod issue207_tests {
     use super::{Approval, Isolation, Observer, run_session};
     use crate::executor::gate;
     use crate::executor::sim_tree::scratch;
-    use crate::executor::{Ledger, Settings, tenant_key};
+    use crate::executor::{Ledger, Settings};
 
     /// An observer that must never be reached by a refusal before model setup.
     struct QuietObserver;
@@ -471,14 +485,16 @@ mod issue207_tests {
         let state = scratch("issue207-session-state")?;
         let work = scratch("issue207-session-work")?;
         let policy = gate::session_scopes();
-        Ledger::open(&state)?.set_tenant_policy(&tenant_key(&state), &policy)?;
         let state_text = state.to_string_lossy().into_owned();
         let path = std::env::var("PATH")?;
-        let settings = Settings::remote_from_env(move |name| match name {
-            "LARRY_STATE_DIR" => Some(state_text.clone()),
-            "PATH" => Some(path.clone()),
-            _ => None,
+        let settings = Settings::remote_from_env({
+            move |name| match name {
+                "LARRY_STATE_DIR" => Some(state_text.clone()),
+                "PATH" => Some(path.clone()),
+                _ => None,
+            }
         })?;
+        Ledger::open(&state)?.set_tenant_policy(settings.tenant_text(), &policy)?;
         let mut observer = QuietObserver;
         assert!(matches!(
             run_session(

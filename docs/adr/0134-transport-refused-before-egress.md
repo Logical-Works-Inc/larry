@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0132: Transport is refused before model egress"
+title: "ADR 0134: Transport is refused before model egress"
 description: Why a model route requires HTTPS unless its host is loopback, and why pre-rule stored rows fail closed at resolve.
-resource: /docs/adr/0132-transport-refused-before-egress.md
+resource: /docs/adr/0134-transport-refused-before-egress.md
 tags: [larry, adr, model, transport]
 generated: {by: opencode, at: 2026-11-27}
 verified: {by: cargo nextest, method: focused box run, 2026-11-27}
@@ -11,7 +11,7 @@ stale_after: 2027-05-27
 sources: [larry#203, larry#531, ADR 0039]
 ---
 
-# ADR 0132: Transport is refused before model egress
+# ADR 0134: Transport is refused before model egress
 
 ## Context
 

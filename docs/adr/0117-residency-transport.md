@@ -17,7 +17,7 @@ sources: [larry#203, ADR 0039, OWASP ASVS 4.0.3]
 
 The model route is the last local owner before a request body and bearer key
 reach a gateway. A route could still use plaintext for a remote host. A brief
-could also pass the executor gate without `network.egress`. Session prompts
+could also pass the executor gate without `net.egress`. Session prompts
 showed an absolute working directory. Command observations could carry tokens
 and key-shaped values into the next model request.
 
