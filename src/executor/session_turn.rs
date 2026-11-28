@@ -1,10 +1,10 @@
-//! A terminal session's turn loop (larry#93, larry#586): one model reply after
-//! another, each a command, a read or done, until the model says it is done.
-//! Every step runs only after the person approves it. Every command runs in its
-//! own process group under the executor's timeout and is recorded in `results`,
-//! which the session's verdict reads; every read is recorded in `changes`. The
-//! loop stops at the model's `done`, at 256 steps, at three refused replies in a
-//! row, at a model refusal, or at a cancellation.
+//! A terminal session's turn loop (larry#93, larry#586, larry#606): one model
+//! reply after another, each a command, a read, an edit or done, until the model
+//! says it is done. Every step runs only after the person approves it. Every
+//! command runs in its own process group under the executor's timeout and is
+//! recorded in `results`, which the session's verdict reads; every read and edit
+//! is recorded in `changes`. The loop stops at the model's `done`, at 256 steps,
+//! at three refused replies in a row, at a model refusal, or at a cancellation.
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use super::ExecError;
 use super::Ledger;
 use super::Settings;
 use super::compact::{Answer, Conversation};
-use super::edit::{FileView, read_file};
+use super::edit::{Edit, EditError, FileView, apply_edit, read_file};
 use super::run::{CommandResult, Place, RunHooks, clip, run_command};
 use super::session::reply::{Reply, parse_reply};
 use super::session::{Approval, MAX_REPLY_BYTES, OBSERVED_BYTES, Observer, Stop};
@@ -22,14 +22,14 @@ use crate::model::{Completion, ModelClient, Usage};
 
 /// Most steps one session takes before it stops with `MaxTurnRequests`. The
 /// conversation is bounded by compaction, not by this; it bounds the report, whose
-/// records are at most 256 times 12 KiB.
+/// records are at most 256 times 12 KiB (a record holds no file and no edit text).
 const MAX_STEPS: usize = 256;
 
 /// Most replies in a row the session refuses before it stops.
 const MAX_REFUSED: usize = 3;
 
 /// The standing instruction of every session.
-pub(super) const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"read\": \"<repo-relative path>\"} shows you that file and its digest; {\"done\": \"<one-line summary>\"} ends the task. Every command and read runs only after the person approves. Send one object per reply.";
+pub(super) const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"read\": \"<repo-relative path>\"} shows you that file and its digest; {\"edit\": {\"path\": \"<repo-relative path>\", \"old\": \"<text in the file>\", \"new\": \"<its replacement>\", \"expect_digest\": \"<the digest your last read or edit of the file showed>\"}} replaces the one place old matches, and is refused when the digest is stale or the match is missing or ambiguous; {\"done\": \"<one-line summary>\"} ends the task. Read a file before you edit it. Every command, read and edit runs only after the person approves. Send one object per reply.";
 
 /// What the model is shown for a command the person declined.
 const DECLINED: &str = "not run: the person declined this command";
@@ -37,13 +37,20 @@ const DECLINED: &str = "not run: the person declined this command";
 /// What the model is shown for a read the person declined.
 const DECLINED_READ: &str = "not run: the person declined this read";
 
+/// What the model is shown for an edit the person declined.
+const DECLINED_EDIT: &str = "not run: the person declined this edit";
+
 /// What the session's steps did, as the report records it.
 #[derive(Default)]
 pub(super) struct Tally {
     /// Each command's record, in order.
     pub(super) results: Vec<Value>,
-    /// Each read's record, in order.
+    /// Each read's and edit's record, in order.
     pub(super) changes: Vec<Value>,
+    /// Reads that ran, refused ones included.
+    pub(super) reads: usize,
+    /// Edits that ran, refused ones included.
+    pub(super) edits: usize,
     /// Steps the person declined; none of them ran.
     pub(super) declined: usize,
     /// Commands the person interrupted; each had its process group killed (larry#242).
@@ -125,6 +132,15 @@ fn kept_reply(reply: &str) -> String {
     } else {
         reply.to_owned()
     }
+}
+
+/// What the person approves for an edit: the path first, so a frontend's title
+/// names it, then the digest and the two texts the yes covers.
+fn proposal(edit: &Edit) -> String {
+    format!(
+        "edit {}\nat digest {}\n--- old\n{}\n+++ new\n{}",
+        edit.path, edit.expect_digest, edit.old, edit.new
+    )
 }
 
 /// What the model is shown for a file it read: the digest of the whole file,
@@ -223,6 +239,12 @@ impl Turn<'_> {
                 }
                 Ok((Some(self.run_read(tally, step, summary, &path)), None))
             }
+            Reply::Edit(edit) => {
+                if let Some(withheld) = self.consent(tally, step, &proposal(&edit), DECLINED_EDIT) {
+                    return Ok(withheld);
+                }
+                Ok((Some(self.run_edit(tally, step, &edit)), None))
+            }
         }
     }
 
@@ -283,7 +305,7 @@ impl Turn<'_> {
         Ok((answer, result))
     }
 
-    /// The directory reads happen in: the folder itself, or its confined copy.
+    /// The directory reads and edits happen in: the folder itself, or its confined copy.
     fn tree(&self) -> &Path {
         match self.place {
             Place::Open(path) => path,
@@ -292,36 +314,69 @@ impl Turn<'_> {
     }
 
     /// Reads one approved file and shows the model its digest and text, or the
-    /// typed refusal. The observer hears the step end once, and the report keeps
-    /// the digest and length, never the file.
+    /// typed refusal. The report keeps the digest and length, never the file.
     fn run_read(&mut self, tally: &mut Tally, step: usize, command: String, path: &str) -> Answer {
         self.observer.started(step, &command);
-        let (record, status, output, passed) = match read_file(self.tree(), path) {
-            Ok(view) => (
-                json!({
-                    "step": step,
-                    "kind": "read",
-                    "path": path,
-                    "digest": view.digest.as_str(),
-                    "bytes": view.text.len(),
-                }),
-                "read",
-                render_view(view),
-                true,
-            ),
+        tally.reads = tally.reads.saturating_add(1);
+        let outcome = read_file(self.tree(), path).map(|view| {
+            let record = json!({
+                "step": step,
+                "kind": "read",
+                "path": path,
+                "digest": view.digest.as_str(),
+                "bytes": view.text.len(),
+            });
+            (record, "read", render_view(view))
+        });
+        let refused = json!({"step": step, "kind": "read", "path": path});
+        self.close(tally, step, command, outcome, refused)
+    }
+
+    /// Applies one approved edit to the session tree and shows the model the
+    /// digest it left, or the typed refusal, which wrote nothing. The report
+    /// keeps both digests, never the texts.
+    fn run_edit(&mut self, tally: &mut Tally, step: usize, edit: &Edit) -> Answer {
+        let path = edit.path.as_str();
+        let command = format!("edit {path}");
+        self.observer.started(step, &command);
+        tally.edits = tally.edits.saturating_add(1);
+        let outcome = apply_edit(self.tree(), edit).map(|receipt| {
+            let record = json!({
+                "step": step,
+                "kind": "edit",
+                "path": path,
+                "before_digest": receipt.before_digest.as_str(),
+                "after_digest": receipt.after_digest.as_str(),
+            });
+            let shown = format!(
+                "digest {} -> {}",
+                receipt.before_digest, receipt.after_digest
+            );
+            (record, "edited", shown)
+        });
+        let refused = json!({"step": step, "kind": "edit", "path": path});
+        self.close(tally, step, command, outcome, refused)
+    }
+
+    /// Ends a read's or an edit's step: its record is kept, `refused` with the
+    /// reason when it was refused, and the observer hears the step end once.
+    fn close(
+        &mut self,
+        tally: &mut Tally,
+        step: usize,
+        command: String,
+        outcome: Result<(Value, &str, String), EditError>,
+        mut refused: Value,
+    ) -> Answer {
+        let passed = outcome.is_ok();
+        let (record, status, output) = match outcome {
+            Ok(done) => done,
             Err(cause) => {
                 let refusal = cause.to_string();
-                (
-                    json!({
-                        "step": step,
-                        "kind": "read",
-                        "path": path,
-                        "refusal": refusal.as_str(),
-                    }),
-                    "refused",
-                    refusal,
-                    false,
-                )
+                if let Some(record) = refused.as_object_mut() {
+                    record.insert(String::from("refusal"), json!(refusal.as_str()));
+                }
+                (refused, "refused", refusal)
             }
         };
         tally.changes.push(record);

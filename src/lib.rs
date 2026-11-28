@@ -51,10 +51,33 @@ pub fn replace_file(
     name: &str,
     bytes: &[u8],
 ) -> Result<(), (PathBuf, io::Error)> {
+    replace_created(directory, name, bytes, |temporary| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(temporary))
+    })
+}
+
+/// [`replace_file`] whose new temporary sibling `create` makes from its name. A session's edit
+/// makes it through the directory descriptor it holds and gives it the file's mode, so a
+/// directory swapped for a link before the rename holds nothing to rename (larry#606).
+pub(crate) fn replace_created(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    create: impl FnOnce(&str) -> io::Result<fs::File>,
+) -> Result<(), (PathBuf, io::Error)> {
     let output = directory.join(name);
     let sequence = REPLACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = directory.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
-    let written = write_new(&temporary, bytes).and_then(|()| fs::rename(&temporary, &output));
+    let made = format!(".{name}.{}.{sequence}.tmp", std::process::id());
+    let temporary = directory.join(&made);
+    let written = create(&made)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&temporary, &output));
     if let Err(cause) = written {
         // A temporary never created is clean too; only one left on disk is named.
         let path = match fs::remove_file(&temporary) {
@@ -70,16 +93,6 @@ pub fn replace_file(
 /// Syncs `directory` itself, so the entries a rename changed in it are on the device.
 fn sync_directory(directory: &Path) -> io::Result<()> {
     fs::File::open(directory)?.sync_all()
-}
-
-/// Creates `path`, refusing one that already exists, and writes and syncs `bytes` into it.
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
 }
 
 /// Writes `program: message` and a newline to standard error: the one diagnostic line the

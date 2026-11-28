@@ -36,6 +36,7 @@ pub(crate) use route::tenant_namespace;
 pub(crate) use route::{
     DEFAULT_PRICE_VERSION, Draft, Kind, MAX_ROUTES, Route, Table, is_route_id, resolve,
 };
+pub(crate) use route_transport::is_proxy_variable;
 pub(crate) use select::{Policy, Selection, query_of, select};
 pub(crate) use wire::structured_content;
 
@@ -108,6 +109,17 @@ pub enum ModelError {
         status: u16,
         /// The gateway's own reason, at most 512 characters, control characters replaced.
         detail: String,
+    },
+    /// A proxy variable would carry this plaintext call, and its key, off this
+    /// machine (larry#602). Nothing was sent.
+    #[error(
+        "the plaintext model call to {host} is refused: {variable} would send it to a proxy; name {host} in NO_PROXY or unset {variable}"
+    )]
+    PlaintextProxy {
+        /// The proxy variable that is set.
+        variable: &'static str,
+        /// The route's host, as `NO_PROXY` has to name it.
+        host: String,
     },
     /// The reply is not a completion document. The reason names what is missing.
     #[error("malformed model reply: {0}")]
