@@ -4,8 +4,12 @@
 //! shows which route a task naming an id (or none) would use. The key is never
 //! an argument and never stored: a route names the `LARRY_KEY_<TAG>_*` variable
 //! that holds it, under the tag its own tenant's digest names, and the variable
-//! is read only when a task reaches the model (larry#328).
+//! is read only when a task reaches the model (larry#328). A briefed task's
+//! route is chosen by the sibling `route_select` module, which checks the
+//! tenant's stored residency policy after its choice exactly as `resolve_for`
+//! does here (larry#203).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
@@ -13,9 +17,12 @@ use std::path::Path;
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
-use super::{ExecError, Ledger, digest_hex, identity, state_dir};
+use super::{ExecError, Ledger, state_dir};
 use crate::eval::PriceFault;
 use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
+
+/// The most country codes one tenant may allow.
+const MAX_RESIDENCY_CODES: usize = 64;
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
@@ -25,7 +32,7 @@ pub enum RouteCliError {
     /// this one message (larry#543): the derive renders tuple placeholders
     /// onto its extra arguments, so a `{USAGE}` tail would print twice.
     #[error(
-        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | residency <CC,...> | residency --clear | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
     )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
@@ -65,27 +72,15 @@ pub enum RouteCliError {
     Output(#[source] io::Error),
 }
 
-/// What a route refusal is prefixed with. A field refusal already opens with
-/// `route <field>`, so this door adds no second prefix (larry#228); every other
-/// refusal, a new variant included, gets the prefix by default, so none reaches
-/// the user bare (larry#295).
+/// What a route refusal is prefixed with: nothing when the refusal already
+/// opens with `route <field>`, else `route: `, so none reaches the user bare.
+/// The classification lives on the refusal itself
+/// ([`RouteError::opens_with_route`]), listed once with no wildcard.
 const fn route_prefix(cause: &RouteError) -> &'static str {
-    match *cause {
-        RouteError::BadId
-        | RouteError::ReservedId
-        | RouteError::BadUrl
-        | RouteError::BadModel
-        | RouteError::BadKeyEnv
-        | RouteError::KeyEnvOutsideNamespace
-        | RouteError::KeyEnvNotThisTenants { .. }
-        | RouteError::BadTemperature
-        | RouteError::BadKind
-        | RouteError::KindNotServed { .. }
-        | RouteError::BadResidency
-        | RouteError::BadRequestBytes
-        | RouteError::BadDescribe
-        | RouteError::BadPrice { .. } => "",
-        _ => "route: ",
+    if cause.opens_with_route() {
+        ""
+    } else {
+        "route: "
     }
 }
 
@@ -97,9 +92,14 @@ fn from_exec(error: ExecError) -> RouteCliError {
     }
 }
 
-/// The tenant a state directory is, as the text every route row is keyed by.
-fn tenant_text(state: &Path) -> String {
-    digest_hex(identity::tenant_of(state).as_bytes())
+/// The tenant the caller selected, as the text every route row is keyed by:
+/// `LARRY_TENANT` when it names one, else the store's default (larry#211).
+pub(super) fn tenant_text(
+    ledger: &Ledger,
+    state: &Path,
+    read: &impl Fn(&str) -> Option<String>,
+) -> Result<String, ExecError> {
+    ledger.selected_tenant(state, read).map(|(_, text)| text)
 }
 
 /// The route a task naming `named` (or none) sends its model calls to under the
@@ -117,14 +117,20 @@ pub(super) fn resolve_for(
     named: Option<&str>,
     read: &impl Fn(&str) -> Option<String>,
 ) -> Result<Route, ExecError> {
-    let tenant = tenant_text(state);
+    let tenant = tenant_text(ledger, state, read)?;
     let table = ledger.routes(&tenant)?;
     let environment = if table.lookup(named).is_some() {
         None
     } else {
         env_route(read).map_err(ExecError::ModelConfig)?
     };
-    resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
+    let route = resolve(&tenant, &table, named, environment).map_err(ExecError::Route)?;
+    if let Some(allowed) = ledger.residency(&tenant)?
+        && let Some(refusal) = route.residency_refusal(&allowed)
+    {
+        return Err(ExecError::Route(refusal));
+    }
+    Ok(route)
 }
 
 /// The flags of `route add`, each still text.
@@ -144,6 +150,8 @@ struct Flags<'arg> {
     request_bytes: Option<&'arg str>,
     /// The provider kind: `openai-chat` unless `--kind` names another.
     kind: Option<&'arg str>,
+    /// `--prompt`.
+    prompt: Option<&'arg str>,
     /// `--describe`.
     describe: Option<&'arg str>,
     /// `--default`.
@@ -170,6 +178,7 @@ fn parse_flags<'arg>(flags: &[&'arg str]) -> Result<Flags<'arg>, RouteCliError> 
             "--temperature" => &mut parsed.temperature,
             "--request-bytes" => &mut parsed.request_bytes,
             "--kind" => &mut parsed.kind,
+            "--prompt" => &mut parsed.prompt,
             "--describe" => &mut parsed.describe,
             _ => return Err(RouteCliError::Usage("unknown flag")),
         };
@@ -189,6 +198,26 @@ fn required<'arg>(
     flag: &'static str,
 ) -> Result<&'arg str, RouteCliError> {
     value.ok_or(RouteCliError::Missing { flag })
+}
+
+/// Parses a tenant's comma-separated, canonical ISO country policy.
+fn residency_codes(text: &str) -> Result<Vec<String>, RouteCliError> {
+    let mut codes = BTreeSet::new();
+    for code in text.split(',').map(str::trim) {
+        if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return Err(RouteCliError::Route(RouteError::BadResidency));
+        }
+        if codes.len() >= MAX_RESIDENCY_CODES && !codes.contains(code) {
+            return Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
+                limit: MAX_RESIDENCY_CODES,
+            }));
+        }
+        codes.insert(code.to_owned());
+    }
+    if codes.is_empty() {
+        return Err(RouteCliError::Route(RouteError::BadResidency));
+    }
+    Ok(codes.into_iter().collect())
 }
 
 /// `text` as a number of type `Number`, or the flag's refusal.
@@ -230,7 +259,8 @@ fn id_arg(id: &str) -> Result<&str, RouteCliError> {
 fn open(read: &impl Fn(&str) -> Option<String>) -> Result<(Ledger, String), RouteCliError> {
     let state = state_dir(read).map_err(from_exec)?;
     let ledger = Ledger::open(&state).map_err(from_exec)?;
-    Ok((ledger, tenant_text(&state)))
+    let tenant = tenant_text(&ledger, &state, read).map_err(from_exec)?;
+    Ok((ledger, tenant))
 }
 
 /// `larry route add <id> ...`: checks every field, refuses a key variable that
@@ -253,13 +283,6 @@ fn add(
         Some(name) => Kind::parse(name).ok_or(RouteCliError::Route(RouteError::BadKind))?,
         None => Kind::OpenAiChat,
     };
-    // Until PR #534's adapters land the wire speaks OpenAI chat only, so any
-    // other kind is refused before the store opens and nothing is stored (larry#539).
-    if !kind.is_served() {
-        return Err(RouteCliError::Route(RouteError::KindNotServed {
-            kind: kind.name().to_owned(),
-        }));
-    }
     let route = Route::new(&Draft {
         id,
         kind,
@@ -269,17 +292,18 @@ fn add(
         temperature: number(parsed.temperature, "--temperature")?,
         request_bytes: number(parsed.request_bytes, "--request-bytes")?,
         residency: Some(required(parsed.residency, "--residency")?),
+        prompt: parsed.prompt,
         describe,
     })
     .map_err(RouteCliError::Route)?;
     // The binding is checked before the store opens, so a refused add writes
     // nothing (larry#328).
     let state = state_dir(read).map_err(from_exec)?;
-    let tenant = tenant_text(&state);
+    let ledger = Ledger::open(&state).map_err(from_exec)?;
+    let tenant = tenant_text(&ledger, &state, read).map_err(from_exec)?;
     if let Some(refusal) = route.key_env_refusal(&tenant) {
         return Err(RouteCliError::Route(refusal));
     }
-    let ledger = Ledger::open(&state).map_err(from_exec)?;
     ledger
         .put_route(&tenant, &route, parsed.make_default)
         .map_err(from_exec)?;
@@ -364,6 +388,7 @@ fn listed(route: &Route, table: &Table) -> Value {
         "temperature": route.temperature(),
         "request_bytes": route.request_bytes(),
         "residency": route.residency(),
+        "prompt_hash": route.prompt_hash(),
         "price_version": route.price_version(),
         "price_input_micros": route.price_input(),
         "price_output_micros": route.price_output(),
@@ -380,6 +405,7 @@ fn list(
 ) -> Result<(), RouteCliError> {
     let (ledger, tenant) = open(read)?;
     let table = ledger.routes(&tenant).map_err(from_exec)?;
+    let policy = ledger.residency(&tenant).map_err(from_exec)?;
     if as_json {
         let routes: Vec<Value> = table
             .routes()
@@ -388,8 +414,11 @@ fn list(
             .collect();
         return say(
             out,
-            &json!({ "default": table.default_id(), "routes": routes }),
+            &json!({ "default": table.default_id(), "residency": policy, "routes": routes }),
         );
+    }
+    if let Some(codes) = policy.as_deref() {
+        say(out, &format_args!("residency\t{}", codes.join(",")))?;
     }
     for route in table.routes() {
         // A route that declares no residency prints a dash in its column.
@@ -414,6 +443,26 @@ fn list(
         )?;
     }
     Ok(())
+}
+
+/// `larry route residency <CC,...>` stores the tenant policy, or `--clear` removes it.
+fn residency(
+    read: &impl Fn(&str) -> Option<String>,
+    value: &str,
+    out: &mut impl Write,
+) -> Result<(), RouteCliError> {
+    let (ledger, tenant) = open(read)?;
+    match value {
+        "--clear" => {
+            ledger.clear_residency(&tenant).map_err(from_exec)?;
+            say(out, &json!({ "cleared": true, "residency": null }))
+        }
+        value => {
+            let codes = residency_codes(value)?;
+            ledger.set_residency(&tenant, &codes).map_err(from_exec)?;
+            say(out, &json!({ "residency": codes, "saved": true }))
+        }
+    }
 }
 
 /// `larry route remove <id>`: deletes the route; a removed default leaves none.
@@ -441,7 +490,9 @@ fn make_default(
 }
 
 /// `larry route resolve [<id>]`: the route a task naming `id` (or none) would
-/// use, as the sealed report would record it.
+/// use from configuration alone, as the sealed report would record it. A
+/// briefed task that names none ranks its eligible routes by meaning instead
+/// (larry#202), which needs the task and is not shown here.
 fn show(
     read: &impl Fn(&str) -> Option<String>,
     named: Option<&str>,
@@ -471,6 +522,7 @@ pub fn run(
         ["price", id, ref flags @ ..] => price(&read, id, flags, out),
         ["list"] => list(&read, false, out),
         ["list", "--json"] => list(&read, true, out),
+        ["residency", value] => residency(&read, value, out),
         ["remove", id] => remove(&read, id, out),
         ["default", id] => make_default(&read, id, out),
         ["resolve"] => show(&read, None, out),
@@ -518,14 +570,9 @@ mod tests {
         let kind = said(&RouteCliError::Route(RouteError::BadKind));
         assert!(kind.starts_with("route kind must be one of"), "{kind}");
         assert_eq!(kind.matches("route").count(), 1, "{kind}");
-        let unserved = said(&RouteCliError::Route(RouteError::KindNotServed {
-            kind: String::from("anthropic-messages"),
-        }));
-        assert_eq!(
-            unserved, "route kind anthropic-messages has no adapter in this build",
-            "{unserved}"
-        );
-        assert_eq!(unserved.matches("route").count(), 1, "{unserved}");
+        let prompt = said(&RouteCliError::Route(RouteError::BadPrompt));
+        assert!(prompt.starts_with("route prompt must be"), "{prompt}");
+        assert_eq!(prompt.matches("route").count(), 1, "{prompt}");
         let priced = said(&RouteCliError::Route(RouteError::BadPrice {
             field: "input",
         }));
@@ -537,6 +584,19 @@ mod tests {
         });
         assert!(rated.starts_with("route price --in must be"), "{rated}");
         assert_eq!(rated.matches("route").count(), 1, "{rated}");
+        // larry#202: the selection knobs refuse as fields too.
+        let rule = said(&RouteCliError::Route(RouteError::BadResidencyRule));
+        assert!(
+            rule.starts_with("route residency rule (LARRY_RESIDENCY) must be"),
+            "{rule}"
+        );
+        assert_eq!(rule.matches("route").count(), 1, "{rule}");
+        let seconds = said(&RouteCliError::Route(RouteError::BadRankSeconds));
+        assert!(
+            seconds.starts_with("route rank seconds (LARRY_ROUTE_RANK_SECONDS) must be"),
+            "{seconds}"
+        );
+        assert_eq!(seconds.matches("route").count(), 1, "{seconds}");
         // larry#295: a refusal that names no field, such as `route remove r9` on an
         // unknown id, carries the `route` word by default.
         for row in [
@@ -544,6 +604,10 @@ mod tests {
                 id: String::from("r9"),
             },
             RouteError::NoRoute,
+            RouteError::NoEligibleRoute,
+            RouteError::NoRanker {
+                detail: String::from("the pinned model is missing"),
+            },
             RouteError::TableFull { limit: 256 },
             RouteError::Damaged {
                 id: String::from("r1"),
@@ -562,11 +626,11 @@ mod tests {
     fn a_saved_route_prints_its_key_variable() -> Result<(), Box<dyn std::error::Error>> {
         let state = crate::executor::sim_tree::scratch("larry-route-add")?;
         let dir = state.to_string_lossy().into_owned();
-        let key_env = format!(
-            "{}MAIN",
-            crate::model::tenant_namespace(&super::tenant_text(&state))
-        );
+        let ledger = super::Ledger::open(&state)?;
         let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
+        let tenant = super::tenant_text(&ledger, &state, &read)
+            .map_err(|error| format!("tenant: {error}"))?;
+        let key_env = format!("{}MAIN", crate::model::tenant_namespace(&tenant));
         let mut args = vec!["add", "main", "--url", "https://gateway.test:1/v1"];
         args.extend(["--model", "m", "--key-env", key_env.as_str()]);
         args.extend(["--residency", "CA"]);
@@ -575,6 +639,66 @@ mod tests {
         let text = String::from_utf8(out)?;
         assert!(text.contains("\"saved\":true"), "{text}");
         assert!(text.contains(&key_env), "the exact variable: {text}");
+        Ok(())
+    }
+
+    /// The tenant policy accepts 64 shaped country codes and refuses the next one typed.
+    #[test]
+    fn residency_policy_is_bounded_at_sixty_four_codes() {
+        let mut codes = Vec::new();
+        for first in b'A'..=b'C' {
+            for second in b'A'..=b'Z' {
+                codes.push(format!("{}{}", char::from(first), char::from(second)));
+            }
+        }
+        let text = codes.into_iter().take(65).collect::<Vec<_>>().join(",");
+        assert!(matches!(
+            super::residency_codes(&text),
+            Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
+                limit: 64
+            }))
+        ));
+    }
+
+    /// The fat-finger fool at the country-code parser: lowercase, short, long
+    /// and empty codes are refused typed, and a trailing malformed code poisons
+    /// the whole policy. An `&&` for the `||` would admit `ca` and the empty
+    /// string.
+    #[test]
+    fn residency_codes_refuses_malformed_country_codes() -> Result<(), Box<dyn std::error::Error>> {
+        for bad in ["", "C", "CAA", "ca", "cA", "12", "C1", "CA,ca", "CA,,US"] {
+            assert!(
+                matches!(
+                    super::residency_codes(bad),
+                    Err(RouteCliError::Route(RouteError::BadResidency))
+                ),
+                "{bad:?} must be refused"
+            );
+        }
+        assert_eq!(
+            super::residency_codes("CA,US")?,
+            vec![String::from("CA"), String::from("US")]
+        );
+        Ok(())
+    }
+
+    /// Storing the tenant policy says `saved` and clearing it says `cleared`:
+    /// the exact words the operator scripts on. A flipped literal would print
+    /// `false` and break them.
+    #[test]
+    fn route_residency_store_and_clear_say_saved_and_cleared()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = crate::executor::sim_tree::scratch("larry-route-residency-words")?;
+        let dir = state.to_string_lossy().into_owned();
+        let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
+        let mut stored = Vec::new();
+        super::residency(&read, "CA,US", &mut stored)?;
+        let text = String::from_utf8(stored)?;
+        assert!(text.contains("\"saved\":true"), "{text}");
+        let mut cleared = Vec::new();
+        super::residency(&read, "--clear", &mut cleared)?;
+        let text = String::from_utf8(cleared)?;
+        assert!(text.contains("\"cleared\":true"), "{text}");
         Ok(())
     }
 }

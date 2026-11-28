@@ -7,10 +7,14 @@
 //! Requirement: larry#84. Each test is one protocol property driven by one
 //! seed through the public stdio interface; the same seed gives the same run.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
 
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 
 use lgwks_std::json::{self, Value, json};

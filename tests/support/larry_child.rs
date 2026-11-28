@@ -6,24 +6,31 @@
 use std::error::Error;
 use std::ffi::OsStr;
 use std::io::BufReader;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+
+use crate::coverage::forward;
+use crate::larry_guard::Larry;
 
 /// Starts `larry <subcommand>` with only PATH and `env` set, stdin and stdout
-/// piped and stderr as given; returns the child with both protocol pipes taken.
+/// piped and stderr as given; returns the guarded child with both protocol pipes
+/// taken.
 pub(super) fn start(
     subcommand: &str,
     env: &[(&str, &OsStr)],
     stderr: Stdio,
-) -> Result<(Child, ChildStdin, BufReader<ChildStdout>), Box<dyn Error>> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+) -> Result<(Larry, ChildStdin, BufReader<ChildStdout>), Box<dyn Error>> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"));
+    child
         .arg(subcommand)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
-        .envs(env.iter().copied())
+        .envs(env.iter().copied());
+    forward(&mut child);
+    child
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(stderr)
-        .spawn()?;
+        .stderr(stderr);
+    let mut child = Larry::spawn(&mut child)?;
     let stdin = child.stdin.take().ok_or("child stdin was not piped")?;
     let stdout = child.stdout.take().ok_or("child stdout was not piped")?;
     Ok((child, stdin, BufReader::new(stdout)))

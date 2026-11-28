@@ -7,10 +7,14 @@
 //! replies to a notification, and stays isolated per session. One seed drives
 //! every generated frame; the same seed must give the same reply bytes.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
 
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 
 use lgwks_std::json::{self, Value, json};

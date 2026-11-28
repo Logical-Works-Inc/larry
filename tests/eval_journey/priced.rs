@@ -26,6 +26,7 @@ fn larry_route(
     env: &[(&str, OsString)],
     args: &[&str],
 ) -> TestResult<std::process::Output> {
+    use crate::coverage::forward;
     use std::process::Command;
     let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
     command
@@ -35,6 +36,7 @@ fn larry_route(
         .env("PATH", std::env::var("PATH")?)
         .env("LARRY_STATE_DIR", state)
         .envs(env.iter().map(|entry| (entry.0, entry.1.as_os_str())));
+    forward(&mut command);
     Ok(command.output()?)
 }
 

@@ -10,12 +10,16 @@
 //! server emits is valid for its era. One seed drives each run; the same seed
 //! must give the same reply bytes.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
 
 #[path = "mcp_support/eras.rs"]
 mod eras;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 #[path = "mcp_support/schema.rs"]
 mod schema;

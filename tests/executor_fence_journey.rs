@@ -2,8 +2,12 @@
 
 use std::ffi::OsStr;
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/origin.rs"]
 mod origin;
 #[path = "support/sealed_report.rs"]

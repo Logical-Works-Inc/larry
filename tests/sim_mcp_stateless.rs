@@ -9,12 +9,16 @@
 //! same seed must give the same reply bytes. Every test drives the binary
 //! through its public interface; nothing here calls server code.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
 
 #[path = "mcp_support/eras.rs"]
 mod eras;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 #[path = "mcp_support/schema.rs"]
 mod schema;

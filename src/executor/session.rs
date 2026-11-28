@@ -1,5 +1,5 @@
 //! A terminal session (larry#93): the model works in one directory by choosing
-//! shell commands, one per reply, until it says it is done. This is what a
+//! one step per reply, until it says it is done. This is what a
 //! Terminal-Bench task asks of an agent, and what `larry acp` runs for Harbor.
 //!
 //! The session is one displayed `WorkProposal` through the executor's admission
@@ -10,18 +10,20 @@
 //! command runs in a confined copy of the folder (`super::island`), the model
 //! is told its directory is `.`, and the folder changes only when the person
 //! approves the diff the session ends with; the default policy suffices.
-//! Each reply is exactly one JSON object, `{"command": "<sh -c text>"}` or
-//! `{"done": "<summary>"}`; each command runs in its own process group under the
-//! executor's timeout, tracked in the ledger so a kill -9 is reaped by the next
-//! start; the model sees the exit status and the first 4 KiB of each stream.
+//! Each reply is exactly one JSON object: `{"command": "<sh -c text>"}`,
+//! `{"read": "<path>"}` or `{"done": "<summary>"}`. Each command runs in its own
+//! process group under the executor's timeout, tracked in the ledger so a kill -9
+//! is reaped by the next start; the model sees the exit status and the first
+//! 4 KiB of each stream. A read shows the file's BLAKE3 digest and its first
+//! 4 KiB (larry#586).
 //! Auto-compaction (`super::compact`, larry#235) keeps every request inside the
 //! model's window, so the length of the conversation never stops a session. The
-//! loop stops at the model's `done`, at 256 steps, at three refused replies in a
-//! row, at a model refusal, or at a cancellation checked before every model call
-//! and every command and polled while one runs: the person's cancel kills the
-//! running command's process group and the report counts it interrupted
-//! (larry#242). The sealed report records every command as the model saw it,
-//! and what compaction did.
+//! loop (`super::session_turn`) stops at the model's `done`, at 256 steps, at
+//! three refused replies in a row, at a model refusal, or at a cancellation
+//! checked before every model call and every step and polled while a command
+//! runs: the person's cancel kills the running command's process group and the
+//! report counts it interrupted (larry#242). The sealed report records every
+//! command in `results`, every read in `changes`, and what compaction did.
 
 use std::path::Path;
 
@@ -33,39 +35,27 @@ use super::Ledger;
 use super::Report;
 use super::Settings;
 use super::backoff;
-use super::compact::{Answer, Conversation};
 use super::digest_hex;
 use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
-use super::prepare;
-use super::run::{CommandResult, Place, RunHooks, StreamCallback, run_command};
+use super::run::{Place, StreamCallback};
+use super::session_turn::{SYSTEM, Turn};
 use super::workspace::report_members;
-use crate::model::{Completion, ModelClient, Usage};
+use crate::model::{ModelClient, Route, Usage};
 
 /// A terminal session's reply protocol: one JSON object per turn, parsed and
 /// refused with an exact reason the model can retry from (larry#545).
 #[path = "session_reply.rs"]
 pub(crate) mod reply;
-
-use reply::{Reply, parse_reply};
-
-/// Most commands one session runs before it stops with `MaxTurnRequests`. The
-/// conversation is bounded by compaction, not by this; it bounds the report, whose
-/// records are at most 256 times 12 KiB.
-pub(crate) const MAX_STEPS: usize = 256;
-/// Most replies in a row the session refuses before it stops.
-const MAX_REFUSED: usize = 3;
 /// Largest instruction a session takes, in bytes.
 pub(crate) const MAX_INSTRUCTION_BYTES: usize = 65_536;
 /// Largest model reply the session parses or keeps in the conversation, in bytes.
-const MAX_REPLY_BYTES: usize = 8192;
+pub(super) const MAX_REPLY_BYTES: usize = 8192;
 /// Largest command or summary one reply may carry, in bytes.
 const MAX_COMMAND_BYTES: usize = 4096;
 /// Bytes of each output stream the model sees and the report keeps.
 pub(crate) const OBSERVED_BYTES: usize = 4096;
-/// The standing instruction of every session.
-const SYSTEM: &str = "You are Larry, a terminal agent. You work in the directory named below by running shell commands. Reply with exactly one JSON object and nothing else: {\"command\": \"<one shell command>\"} runs it with sh -c in that directory and shows you its exit status and output; {\"done\": \"<one-line summary>\"} ends the task. Run one command per reply.";
 
 /// Why a session was refused before anything ran.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -94,7 +84,7 @@ pub enum SessionError {
 pub(crate) enum Stop {
     /// The model said it was done.
     EndTurn,
-    /// The session ran [`MAX_STEPS`] commands.
+    /// The session took 256 steps.
     MaxTurnRequests,
     /// The gate, the model gateway or the replies refused; the reason says which.
     Refusal(String),
@@ -122,9 +112,6 @@ pub(crate) enum Approval {
     /// Do not run it; the model is told and may choose another.
     Decline,
 }
-
-/// What the model is shown for a command the person declined.
-const DECLINED: &str = "not run: the person declined this command";
 
 /// The person's answer to the change a session made in its copy of their folder (larry#243).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,15 +142,17 @@ pub(crate) trait Observer {
     /// What became of that change: `line` says so, and `applied` whether it is in the folder.
     /// An observer that records nothing leaves this alone.
     fn handed(&mut self, _line: &str, _applied: bool) {}
-    /// The model asks to run `command` as step `step`; nothing runs unless this
+    /// The model asks to take step `step`, which `command` describes: a shell
+    /// command, `read <path>`, an edit or a patch. Nothing happens unless this
     /// answers [`Approval::Run`]. A frontend asks the person; `larry acp` runs
     /// inside the operator's isolated container under the same gate and runs it.
-    /// No default: every observer says aloud whether a command may run (larry#239).
+    /// No default: every observer says aloud whether a step may run (larry#239).
     fn approve(&mut self, step: usize, command: &str) -> Approval;
     /// Step `step` is about to run `command`. An observer that records nothing
     /// leaves this alone.
     fn started(&mut self, _step: usize, _command: &str) {}
-    /// Step `step` ended; `observation` is what the model is shown, `passed` its exit 0.
+    /// Step `step` ended; `observation` is what the model is shown, `passed` its
+    /// exit 0, or that the read or change was not refused. Called once per step.
     /// An observer that records nothing leaves this alone.
     fn finished(&mut self, _step: usize, _observation: &str, _passed: bool) {}
     /// A message for the person: the model's summary or the reason the session stopped.
@@ -174,26 +163,6 @@ pub(crate) trait Observer {
     fn cancelled(&self) -> bool {
         false
     }
-}
-
-/// The status line the model is shown for one clipped command result.
-fn status(result: &CommandResult) -> String {
-    let ended = match (result.timed_out(), result.interrupted(), result.exit_code()) {
-        (false, false, Some(code)) => format!("exit status {code}"),
-        (false, false, None) => String::from("ended by a signal"),
-        (true, false, _) => String::from("timed out; its process group was killed"),
-        (_, true, _) => String::from("interrupted by the person; its process group was killed"),
-    };
-    if result.truncated() {
-        format!("{ended} (output past {OBSERVED_BYTES} bytes of a stream was cut)")
-    } else {
-        ended
-    }
-}
-
-/// The streams the model is shown for one clipped command result, under its status.
-fn streams(result: &CommandResult) -> String {
-    format!("stdout:\n{}\nstderr:\n{}", result.stdout(), result.stderr())
 }
 
 /// Checks a session's instruction and directory before anything runs.
@@ -282,10 +251,10 @@ pub(crate) fn run_session(
     check(instruction, cwd).map_err(ExecError::Session)?;
     // A host that cannot confine refuses here, before the ledger, the model or a copy.
     isolation.check()?;
-    let (ledger, key) = prepare(settings)?;
+    let prepared = super::prepared::prepare(settings)?;
     let repository = match door {
-        SessionDoor::Tenant => ledger.authorized_repo(
-            &super::tenant_key(settings.state_dir()),
+        SessionDoor::Tenant => prepared.ledger.authorized_repo(
+            prepared.tenant_text.as_str(),
             settings.state_dir(),
             cwd,
             settings.is_local(),
@@ -298,9 +267,40 @@ pub(crate) fn run_session(
         settings,
         isolation,
         observer,
-        &ledger,
-        &key,
+        &prepared,
     )
+}
+
+/// The system prompt a turn sends: the route's template, when it names one,
+/// rides before the standing instruction, so a tenant's session prompts carry
+/// its route's words (larry#205).
+fn session_system(route: &Route) -> String {
+    match route.prompt() {
+        Some(template) => format!("{template}\n{SYSTEM}"),
+        None => String::from(SYSTEM),
+    }
+}
+
+/// The seal a session's report carries: the selected tenant's active key, so
+/// a remote caller verifies under the tenant that ran it (larry#211).
+fn session_seal(prepared: &super::prepared::Prepared) -> super::Seal<'_> {
+    super::Seal {
+        id: prepared.seal_id,
+        key: &prepared.seal_key,
+    }
+}
+
+/// The confined copy an isolated session works in; `None` on the host.
+fn open_island(
+    isolation: Isolation,
+    settings: &Settings,
+    task_id: &str,
+    cwd: &Path,
+) -> Result<Option<Island>, ExecError> {
+    match isolation {
+        Isolation::Host => Ok(None),
+        Isolation::Workspace(platform) => Island::open(platform, settings, task_id, cwd).map(Some),
+    }
 }
 
 /// Runs the session in an already authorized directory: the route, the model,
@@ -311,19 +311,12 @@ fn run_session_prepared(
     settings: &Settings,
     isolation: Isolation,
     observer: &mut dyn Observer,
-    ledger: &Ledger,
-    key: &lgwks_std::sign::SecretKey,
+    prepared: &super::prepared::Prepared,
 ) -> Result<Ended, ExecError> {
+    let ledger = &prepared.ledger;
     let route = settings.route(ledger, None)?;
     let config = settings.model_config(&route)?;
-    let document = json::to_vec(&json!({
-        "session": {
-            "cwd": cwd.to_string_lossy(),
-            "instruction": instruction,
-            "isolation": isolation.name(),
-        }
-    }))
-    .map_err(|cause| ExecError::Gate(cause.into()))?;
+    let document = json::to_vec(&json!({"session": {"cwd": cwd.to_string_lossy(), "instruction": instruction, "isolation": isolation.name()}})).map_err(|cause| ExecError::Gate(cause.into()))?;
     let task_id = fresh_id()?;
     let task_digest = digest_hex(&document);
     let mut stop = None;
@@ -332,77 +325,87 @@ fn run_session_prepared(
         path: cwd,
         bytes: &document,
     };
-    let report = gate::admit_and_run(subject, settings, &task_id, &task_digest, key, || {
-        // The retry budget's timeline, built before the copy so a host whose clock refuses
-        // copies nothing (larry#436).
-        let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
-        // Opened inside the gate: a denied session copies nothing.
-        let island = match isolation {
-            Isolation::Host => None,
-            Isolation::Workspace(platform) => {
-                Some(Island::open(platform, settings, &task_id, cwd)?)
-            }
-        };
-        let client = ModelClient::new(config, clock, backoff);
-        let mut turn = Turn {
-            client: &client,
-            settings,
-            ledger,
-            task_id: &task_id,
-            place: match island {
-                Some(ref isle) => isle.place(),
-                None => Place::Open(cwd),
-            },
-            // The model is told its directory is `.` in a copy, so the request carries
-            // no run id and no path of the person's.
-            shown: match island {
-                Some(_) => String::from("."),
-                None => cwd.display().to_string(),
-            },
-            observer: &mut *observer,
-        };
-        let done = turn.run(instruction)?;
-        let authored = authored_usage(&done.usage);
-        let mut outcome = Outcome::None;
-        let mut diff = None;
-        if let Some(ref isle) = island
-            && done.stop == Stop::EndTurn
-        {
-            diff = isle.diff()?;
-            outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
-        }
-        let mut body = json!({
-            "task_id": task_id,
-            "task_digest": task_digest,
-            "diff": null,
-            "results": done.records,
-            "authored": authored,
-            "denied": [],
-            "session": {
-                "stop": done.stop.name(),
-                "commands": done.records.len(),
-                "declined": done.declined,
-                "interrupted": done.interrupted,
-                "route": route.seal(),
-                "compaction": done.compaction,
-                "isolation": match island {
-                    Some(ref isle) => isle.describe(),
-                    None => json!({ "mode": isolation.name() }),
+    let seal = session_seal(prepared);
+    let report = gate::admit_and_run(
+        subject,
+        settings,
+        &task_id,
+        &task_digest,
+        prepared.tenant,
+        seal,
+        || {
+            // The retry budget's timeline, built before the copy so a host whose clock refuses
+            // copies nothing (larry#436).
+            let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
+            // Opened inside the gate: a denied session copies nothing.
+            let island = open_island(isolation, settings, &task_id, cwd)?;
+            let client = ModelClient::new(config, clock, backoff);
+            let system = session_system(&route);
+            let mut turn = Turn {
+                client: &client,
+                settings,
+                ledger,
+                task_id: &task_id,
+                place: match island {
+                    Some(ref isle) => isle.place(),
+                    None => Place::Open(cwd),
                 },
-                "handoff": outcome.name(),
-            },
-        });
-        // An isolated session records the change it made, whole or cut (larry#206).
-        if island.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            for (name, member) in report_members(diff) {
-                object.insert(name.to_owned(), member);
+                // The model is told its directory is `.` in a copy, so the request carries
+                // no run id and no path of the person's.
+                shown: match island {
+                    Some(_) => String::from("."),
+                    None => cwd.display().to_string(),
+                },
+                system,
+                observer: &mut *observer,
+            };
+            let done = turn.run(instruction)?;
+            let authored = authored_usage(&done.usage);
+            let mut outcome = Outcome::None;
+            let mut diff = None;
+            if let Some(ref isle) = island
+                && done.stop == Stop::EndTurn
+            {
+                diff = isle.diff()?;
+                outcome = isle.hand_off(cwd, diff.as_ref(), &mut *observer);
             }
-        }
-        stop = Some(done.stop);
-        Ok(Report::sealed(body, key))
-    })?;
+            let commands = done.tally.results.len();
+            let reads = done.tally.changes.len();
+            let mut body = json!({
+                "task_id": task_id,
+                "task_digest": task_digest,
+                "diff": null,
+                "results": done.tally.results,
+                "changes": done.tally.changes,
+                "authored": authored,
+                "denied": [],
+                "session": {
+                    "stop": done.stop.name(),
+                    "commands": commands,
+                    "reads": reads,
+                    "declined": done.tally.declined,
+                    "interrupted": done.tally.interrupted,
+                    "route": route.seal(),
+                    "compaction": done.compaction,
+                    "isolation": match island {
+                        Some(ref isle) => isle.describe(),
+                        None => json!({ "mode": isolation.name() }),
+                    },
+                    "handoff": outcome.name(),
+                },
+            });
+            // An isolated session records the change it made, whole or cut (larry#206).
+            if island.is_some()
+                && let Some(object) = body.as_object_mut()
+            {
+                for (name, member) in report_members(diff) {
+                    object.insert(name.to_owned(), member);
+                }
+            }
+            stop = Some(done.stop);
+            Ok(Report::sealed(body, &prepared.seal_key, prepared.seal_id))
+        },
+    )?;
     let stop = match stop {
         Some(stop) => stop,
         None => {
@@ -419,7 +422,7 @@ mod issue207_tests {
     use super::{Approval, Isolation, Observer, run_session};
     use crate::executor::gate;
     use crate::executor::sim_tree::scratch;
-    use crate::executor::{Ledger, Settings, tenant_key};
+    use crate::executor::{Ledger, Settings};
 
     /// An observer that must never be reached by a refusal before model setup.
     struct QuietObserver;
@@ -437,14 +440,16 @@ mod issue207_tests {
         let state = scratch("issue207-session-state")?;
         let work = scratch("issue207-session-work")?;
         let policy = gate::session_scopes();
-        Ledger::open(&state)?.set_tenant_policy(&tenant_key(&state), &policy)?;
         let state_text = state.to_string_lossy().into_owned();
         let path = std::env::var("PATH")?;
-        let settings = Settings::remote_from_env(move |name| match name {
-            "LARRY_STATE_DIR" => Some(state_text.clone()),
-            "PATH" => Some(path.clone()),
-            _ => None,
+        let settings = Settings::remote_from_env({
+            move |name| match name {
+                "LARRY_STATE_DIR" => Some(state_text.clone()),
+                "PATH" => Some(path.clone()),
+                _ => None,
+            }
         })?;
+        Ledger::open(&state)?.set_tenant_policy(settings.tenant_text(), &policy)?;
         let mut observer = QuietObserver;
         assert!(matches!(
             run_session(
@@ -458,188 +463,6 @@ mod issue207_tests {
             Err(super::super::ExecError::RepoNotAllowed { .. })
         ));
         Ok(())
-    }
-}
-
-/// What one session's loop did.
-struct Steps {
-    /// Why it stopped.
-    stop: Stop,
-    /// Each command's record, in order.
-    records: Vec<Value>,
-    /// Usage reported by each model completion, in order.
-    usage: Vec<Option<Usage>>,
-    /// What compaction did.
-    compaction: Value,
-    /// Commands the person declined; none of them ran.
-    declined: usize,
-    /// Commands the person interrupted; each had its process group killed (larry#242).
-    interrupted: usize,
-}
-
-/// One session's loop state.
-struct Turn<'a> {
-    /// The model gateway.
-    client: &'a ModelClient,
-    /// The executor's settings: the PATH and the command timeout.
-    settings: &'a Settings,
-    /// The ledger every command group is recorded in.
-    ledger: &'a Ledger,
-    /// The run's identity.
-    task_id: &'a str,
-    /// Where every command runs: the directory itself, or its confined copy.
-    place: Place<'a>,
-    /// The directory the model is told it works in.
-    shown: String,
-    /// Who hears the session's progress.
-    observer: &'a mut dyn Observer,
-}
-
-impl Turn<'_> {
-    /// Asks, runs and observes until a stop, and returns it with each command's
-    /// record, what compaction did and how many commands the person declined
-    /// or interrupted.
-    fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
-        let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
-        let mut conversation = Conversation::new(SYSTEM, task, self.client.request_bound());
-        let mut steps: Vec<Value> = Vec::new();
-        let mut usage = Vec::new();
-        let mut refused = 0_usize;
-        let mut declined = 0_usize;
-        let mut interrupted = 0_usize;
-        let stop = loop {
-            if steps.len().saturating_add(declined) >= MAX_STEPS {
-                break Stop::MaxTurnRequests;
-            }
-            let completion = match self.ask(&mut conversation) {
-                Ok(completion) => completion,
-                Err(stop) => break stop,
-            };
-            usage.push(completion.usage());
-            if self.observer.cancelled() {
-                break Stop::Cancelled;
-            }
-            let reply = completion.content();
-            // A reply past the bound is refused below; only its length enters the
-            // conversation, so it cannot grow the next request.
-            let kept = if reply.len() > MAX_REPLY_BYTES {
-                format!(
-                    "(a reply of {} bytes, over the bound, was dropped)",
-                    reply.len()
-                )
-            } else {
-                reply.to_owned()
-            };
-            match parse_reply(reply) {
-                Ok(Reply::Done(summary)) => {
-                    self.observer.message(&summary);
-                    break Stop::EndTurn;
-                }
-                Ok(Reply::Command(command)) => {
-                    refused = 0;
-                    let step = steps.len();
-                    if self.observer.approve(step, &command) == Approval::Decline {
-                        declined = declined.saturating_add(1);
-                        let answer = Answer::Observed {
-                            step,
-                            command,
-                            status: String::from(DECLINED),
-                            output: Some(String::new()),
-                        };
-                        conversation.push(kept, answer);
-                        continue;
-                    }
-                    if self.observer.cancelled() {
-                        break Stop::Cancelled;
-                    }
-                    let (answer, was_interrupted, result) = self.run_step(step, command)?;
-                    conversation.push(kept, answer);
-                    steps.push(result.into_json());
-                    if was_interrupted {
-                        interrupted = interrupted.saturating_add(1);
-                        break Stop::Cancelled;
-                    }
-                }
-                Err(fault) => {
-                    refused = refused.saturating_add(1);
-                    if refused >= MAX_REFUSED {
-                        break self.refuse(format!(
-                            "model: {MAX_REFUSED} replies in a row refused: {fault}"
-                        ));
-                    }
-                    let fault = fault.to_string();
-                    conversation.push(kept, Answer::Refused { fault });
-                }
-            }
-        };
-        Ok(Steps {
-            stop,
-            records: steps,
-            usage,
-            compaction: conversation.json(),
-            declined,
-            interrupted,
-        })
-    }
-
-    /// Runs `command` as step `step` and observes it: live output streams while the
-    /// command runs (larry#252), and the person's cancel ends its whole group (larry#242).
-    fn run_step(
-        &mut self,
-        step: usize,
-        command: String,
-    ) -> Result<(Answer, bool, CommandResult), ExecError> {
-        self.observer.started(step, &command);
-        let argv = [String::from("sh"), String::from("-c"), command.clone()];
-        let stream = self.observer.stream_callback();
-        let result = run_command(
-            &argv,
-            self.place,
-            &self.settings.path,
-            self.settings.timeout,
-            self.ledger,
-            self.task_id,
-            RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
-        );
-        self.observer.stream_dropped();
-        let result = result?.clipped(OBSERVED_BYTES);
-        let answer = Answer::Observed {
-            step,
-            command,
-            status: status(&result),
-            output: Some(streams(&result)),
-        };
-        let was_interrupted = result.interrupted();
-        let passed = result.exit_code() == Some(0) && !result.timed_out() && !was_interrupted;
-        self.observer.finished(step, &answer.text(), passed);
-        Ok((answer, was_interrupted, result))
-    }
-
-    /// One completion over `conversation`, compacted first when it needs it and
-    /// again each time the gateway answers that the request is past the model's
-    /// window; the stop, said to the person, when there is none.
-    fn ask(&mut self, conversation: &mut Conversation) -> Result<Completion, Stop> {
-        loop {
-            if self.observer.cancelled() {
-                return Err(Stop::Cancelled);
-            }
-            let request = conversation
-                .prepare(self.client)
-                .map_err(|overflow| self.refuse(format!("model: {overflow}")))?;
-            match self.client.send(&request) {
-                Ok(completion) => return Ok(completion),
-                Err(cause) if cause.is_context_overflow() => conversation
-                    .shrink(request.bytes(), cause.window())
-                    .map_err(|overflow| self.refuse(format!("model: {cause}; {overflow}")))?,
-                Err(cause) => return Err(self.refuse(format!("model: {cause}"))),
-            }
-        }
-    }
-
-    /// Says `line` to the person and returns it as the session's refusal.
-    fn refuse(&mut self, line: String) -> Stop {
-        self.observer.message(&line);
-        Stop::Refusal(line)
     }
 }
 

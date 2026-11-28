@@ -242,12 +242,7 @@ fn first_missing(required: &BTreeSet<Scope>, policy: &BTreeSet<Scope>) -> Option
 
 /// The sealed report a gate denial yields: nothing ran, and the report says
 /// what the gate refused, in the model-commands denial's exact shape.
-fn denied_report(
-    task_id: &str,
-    task_digest: &str,
-    reason: &str,
-    key: &lgwks_std::sign::SecretKey,
-) -> Report {
+fn denied_report(task_id: &str, task_digest: &str, reason: &str, seal: super::Seal<'_>) -> Report {
     Report::sealed(
         lgwks_std::json::json!({
             "task_id": task_id,
@@ -256,7 +251,8 @@ fn denied_report(
             "results": [],
             "denied": [reason],
         }),
-        key,
+        seal.key,
+        seal.id,
     )
 }
 
@@ -307,7 +303,8 @@ pub(super) fn admit_and_run(
     settings: &Settings,
     task_id: &str,
     task_digest: &str,
-    key: &lgwks_std::sign::SecretKey,
+    tenant: TenantId,
+    seal: super::Seal<'_>,
     run: impl FnOnce() -> Result<Report, ExecError>,
 ) -> Result<Report, ExecError> {
     if let Some(line) = recovered_evidence(&settings.state_dir, task_id)? {
@@ -315,7 +312,7 @@ pub(super) fn admit_and_run(
         // it. The journal it left is the evidence, recovered or refused; the retry
         // answers from it and nothing here reaches the world again (larry#182
         // defect 3, larry#394).
-        return Ok(denied_report(task_id, task_digest, line, key));
+        return Ok(denied_report(task_id, task_digest, line, seal));
     }
     let policy = &settings.policy;
     let required = subject.required;
@@ -335,8 +332,7 @@ pub(super) fn admit_and_run(
     // copy of any of them (larry#212).
     let run_settings = with_expiry(task_settings(policy), now).map_err(ExecError::Gate)?;
     let expiry = run_settings.validity.valid_until;
-    let tenant = identity::tenant_of(&settings.state_dir);
-    let holder = identity::worker_of(&settings.state_dir);
+    let holder = identity::worker_of(&tenant);
     let (run_id, operation, command_id) = identity::ids_of(task_id);
 
     let proposal = WorkProposal::new(
@@ -398,7 +394,7 @@ pub(super) fn admit_and_run(
                 run_id,
                 operation,
                 task_digest,
-                key,
+                seal,
                 fence_control: settings.fence_control,
             };
             drive(&mut runtime, admission, policy, &slot)
@@ -433,8 +429,8 @@ struct Admission<'a> {
     operation: OperationId,
     /// The task document's digest.
     task_digest: &'a str,
-    /// The receipt key a denial is sealed under.
-    key: &'a lgwks_std::sign::SecretKey,
+    /// What a denial is sealed under: the tenant's active key id and secret.
+    seal: super::Seal<'a>,
     /// The operator's one host fence action, applied after durable admission.
     fence_control: Option<super::fence_control::FenceControl>,
 }
@@ -491,7 +487,7 @@ fn drive<O: EffectOwner>(
         run_id,
         operation,
         task_digest,
-        key,
+        seal,
         fence_control,
     } = admission;
     let shown = match runtime.display(&command, holder, &[grant]) {
@@ -505,7 +501,7 @@ fn drive<O: EffectOwner>(
                 Some(scope) => format!("gate: policy_refuses: {}", scope_name(scope)),
                 None => String::from("gate: no covering grant"),
             };
-            return Ok(denied_report(task_id, task_digest, &line, key));
+            return Ok(denied_report(task_id, task_digest, &line, seal));
         }
         Err(other) => return Err(ExecError::Gate(other)),
     };
@@ -534,7 +530,7 @@ fn drive<O: EffectOwner>(
                     task_id,
                     task_digest,
                     &format!("gate: protocol: {refusal}"),
-                    key,
+                    seal,
                 )),
                 other => Err(ExecError::Gate(other)),
             };
@@ -549,7 +545,7 @@ fn drive<O: EffectOwner>(
     // the ledger, and one whose executor died mid-task settles as unknown here.
     if acceptance == CommandAcceptance::DuplicateReplay {
         let line = settled_line(runtime, run_id);
-        return Ok(denied_report(task_id, task_digest, &line, key));
+        return Ok(denied_report(task_id, task_digest, &line, seal));
     }
     let tick = match runtime.tick() {
         Ok(tick) => tick,
@@ -575,7 +571,7 @@ fn drive<O: EffectOwner>(
     }
     // The gate refused at admission: the sealed report names the first reason.
     let line = super::fence_control::report_line(&tick);
-    Ok(denied_report(task_id, task_digest, &line, key))
+    Ok(denied_report(task_id, task_digest, &line, seal))
 }
 
 /// The one denial line a duplicate answers with, from the journal's own evidence:

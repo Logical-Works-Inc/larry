@@ -21,6 +21,12 @@ mod ps;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
+
+use larry_guard::Larry;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -314,7 +320,8 @@ fn kill_inside_the_write(tree: &Tree, seed: u64) -> Result<Vec<u64>, Box<dyn Err
     let mut rng = Seeded::from_seed(seed);
     // 8 to 2047 blocks of at most 1 KiB is at most 2 MiB, under the 3 MiB page on every shell.
     let blocks = rng.below(2040)?.saturating_add(8);
-    let status = Command::new("/bin/sh")
+    let mut shell = Command::new("/bin/sh");
+    shell
         .arg("-c")
         .arg(format!(
             r#"ulimit -f {blocks} || exit 70; exec "$1" tracker --root "$2""#
@@ -324,8 +331,9 @@ fn kill_inside_the_write(tree: &Tree, seed: u64) -> Result<Vec<u64>, Box<dyn Err
         .arg(&*tree.path)
         .env_clear()
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+        .stderr(Stdio::null());
+    coverage::forward(&mut shell);
+    let status = shell.status()?;
     if status.signal() != Some(SIGXFSZ) {
         return Err(
             format!("the size-limited tracker write ended {status:?}, not by SIGXFSZ").into(),
@@ -350,13 +358,15 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
     grow_tracker(&tree)?;
     let mut observed = Vec::with_capacity(KILLS);
     for _ in 0..KILLS {
-        let mut child = Command::new(LARRY)
+        let mut tracker = Command::new(LARRY);
+        tracker
             .args(["tracker", "--root"])
             .arg(&*tree.path)
             .env_clear()
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        coverage::forward(&mut tracker);
+        let mut child = Larry::spawn(&mut tracker)?;
         let deadline = Instant::now()
             .checked_add(WRITE_PATIENCE)
             .ok_or("the write deadline overflowed")?;
@@ -473,15 +483,17 @@ fn sample_until_exit<E>(
 /// [`deadline::PATIENCE`] is a runaway named with that bound, not a probe count (larry#294).
 fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
     let clock = larry_runtime::live_clock()?;
-    let mut child = Command::new(LARRY)
+    let mut check = Command::new(LARRY);
+    check
         .args(["governance", "--root"])
         .arg(root)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    coverage::forward(&mut check);
+    let mut child = Larry::spawn(&mut check)?;
     let pid = child.id().to_string();
     let sampled = sample_until_exit(
         &clock,

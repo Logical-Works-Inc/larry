@@ -22,17 +22,22 @@
 mod ceiling;
 #[path = "executor_journey/confine.rs"]
 mod confine;
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
 #[path = "support/held_group.rs"]
 mod held_group;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/mock_model.rs"]
 mod mock_model;
+#[path = "support/executor_residency_journey.rs"]
+mod residency;
 #[path = "support/tree_digest.rs"]
 mod tree_digest;
-
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
@@ -779,14 +784,16 @@ fn exec_refuses_an_unset_path_typed() -> TestResult {
     let task = task_json(origin.path(), "HEAD", r#"[["true"]]"#);
     let task_file = state.path().join("task.json");
     std::fs::write(&task_file, task.as_bytes())?;
-    let output = Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
         .arg("exec")
         .env_clear()
         .env("LARRY_STATE_DIR", state.path())
         .stdin(std::fs::File::open(&task_file)?)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
+        .stderr(Stdio::piped());
+    coverage::forward(&mut command);
+    let output = command.output()?;
     assert_refused(&output, "PATH is unset");
     assert!(output.stdout.is_empty(), "a refused run seals no report");
     Ok(())

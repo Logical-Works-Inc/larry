@@ -14,6 +14,12 @@ use lgwks_std::seeded::Seeded;
 use super::Settings;
 use crate::sim_error::SimError;
 
+/// The scratch rule the integration tests hold too: one file, one owner (larry#595).
+#[path = "../../tests/support/scratch_base.rs"]
+mod scratch_base;
+pub(crate) use scratch_base::bound_git;
+use scratch_base::guard_base;
+
 /// Names scratch directories apart inside one test process.
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -126,10 +132,10 @@ fn scratch_name(label: &str, number: u64) -> String {
     format!("larry-243-{label}-{}-{number}", std::process::id())
 }
 
-/// A fresh empty directory: one already at the name is removed first.
+/// A fresh empty directory under the one scratch base: one already at the name is removed first.
 pub(crate) fn scratch(label: &str) -> Result<Scratch, SimError> {
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(scratch_name(label, number));
+    let dir = guard_base(std::env::temp_dir())?.join(scratch_name(label, number));
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
@@ -145,7 +151,8 @@ pub(crate) fn scratch(label: &str) -> Result<Scratch, SimError> {
 /// test starts, a scratch is empty, and dropping it removes the tree and counts no leftover.
 #[test]
 fn sim_tree_scratch_starts_empty_and_removes_itself() -> Result<(), SimError> {
-    let stale = std::env::temp_dir().join(scratch_name("stale", NEXT.load(Ordering::Relaxed)));
+    let stale =
+        guard_base(std::env::temp_dir())?.join(scratch_name("stale", NEXT.load(Ordering::Relaxed)));
     std::fs::create_dir_all(stale.join("old"))?;
     std::fs::write(stale.join("old").join("file"), "left by a dead run")?;
     let fresh = scratch("stale")?;
@@ -222,16 +229,18 @@ pub(in crate::executor) struct Origin {
     pub(in crate::executor) files: Vec<String>,
 }
 
-/// Runs `git` with `arguments` in `dir` under a clean environment.
+/// Runs `git` with `arguments` in `dir` under a clean environment, never above `dir`.
 fn git(state: &Path, dir: &Path, arguments: &[&str]) -> Result<(), SimError> {
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(arguments)
         .current_dir(dir)
         .env_clear()
         .env("PATH", path_env()?)
         .env("HOME", state)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .status()?;
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    bound_git(&mut command, dir);
+    let status = command.status()?;
     if status.success() {
         Ok(())
     } else {
@@ -249,7 +258,7 @@ pub(in crate::executor) fn origin(
     shape: Shape,
 ) -> Result<Origin, SimError> {
     super::Ledger::open(settings.state_dir())?
-        .set_tenant_repo_root(&super::tenant_key(settings.state_dir()), root)?;
+        .set_tenant_repo_root(settings.tenant_text(), root)?;
     let mut rng = Seeded::from_seed(seed.wrapping_add(7 << 32));
     let dir = match shape {
         Shape::Subfolder => root.join("sub"),
@@ -281,6 +290,22 @@ pub(in crate::executor) fn origin(
         dir: std::fs::canonicalize(dir)?,
         files,
     })
+}
+
+/// The crate's own test git never climbs out of its directory: inside a checkout it is refused,
+/// and at the checkout's root it is served (larry#595).
+#[test]
+fn sim_tree_git_never_sees_the_checkout_above_its_directory() -> Result<(), SimError> {
+    let checkout = scratch("ceiling")?;
+    let inner = checkout.join("inner");
+    std::fs::create_dir_all(&inner)?;
+    git(&checkout, &checkout, &["init", "--quiet"])?;
+    git(&checkout, &checkout, &["rev-parse", "--show-toplevel"])?;
+    assert!(
+        git(&checkout, &inner, &["rev-parse", "--show-toplevel"]).is_err(),
+        "git climbed out of its directory"
+    );
+    Ok(())
 }
 
 /// A digest of every entry beneath `root`: its relative path, its kind and its bytes or

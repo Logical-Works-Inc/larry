@@ -16,18 +16,23 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Child, Command, Output};
+use std::process::{Command, Output};
 use std::time::Duration;
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/deadline.rs"]
 mod deadline;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/origin.rs"]
 mod origin;
 
 use deadline::{await_fifo_writer, await_until};
 use larry_cli::{spawn_larry_args, stderr_of};
+use larry_guard::Larry;
 use origin::{TempDir, fixture};
 
 /// What every test here returns.
@@ -55,7 +60,7 @@ fn make_fifo(path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Starts `larry exec` with `task` on stdin and the state directory set.
-fn spawn_exec(state: &Path, task: &str) -> Result<Child, Box<dyn Error>> {
+fn spawn_exec(state: &Path, task: &str) -> Result<Larry, Box<dyn Error>> {
     spawn_larry_args(
         &["exec"],
         &[("LARRY_STATE_DIR", state.as_os_str())],

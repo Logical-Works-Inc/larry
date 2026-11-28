@@ -9,6 +9,8 @@
 //! case drives the real process through its public interface, against the
 //! seeded mock model endpoint, so no test makes a paid model call.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
@@ -19,6 +21,8 @@ mod accepted;
 mod confine;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 #[path = "support/mcp_task.rs"]
 mod mcp_task;

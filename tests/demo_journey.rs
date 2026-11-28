@@ -24,6 +24,12 @@ mod temp_dir;
 use json_at::At;
 use temp_dir::TempDir;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
+use larry_guard::Larry;
+
 /// Failures propagate instead of panicking.
 type Journey<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -68,16 +74,18 @@ fn entries(dir: &Path) -> Journey<Vec<String>> {
 fn driver(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_larry-demo"));
     command.args(args).current_dir(dir).env_clear();
+    coverage::forward(&mut command);
     command
 }
 
 /// Runs the driver to its end with `input` on stdin.
 fn run(dir: &Path, input: &[u8], args: &[&str]) -> Journey<Output> {
-    let mut child = driver(dir, args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = Larry::spawn(
+        driver(dir, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?;
     let mut stdin = child.stdin.take().ok_or("driver has no stdin")?;
     stdin.write_all(input)?;
     drop(stdin);
@@ -253,11 +261,12 @@ fn transport_bounds_utf8_eof_and_arguments() -> Journey {
 /// Starts the driver, sends `input`, reads `frames` lines, kills it with SIGKILL and returns
 /// the frames it printed.
 fn killed_after(dir: &Path, input: &[u8], count: usize) -> Journey<Vec<Value>> {
-    let mut child = driver(dir, &[])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let mut child = Larry::spawn(
+        driver(dir, &[])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )?;
     let mut stdin = child.stdin.take().ok_or("driver has no stdin")?;
     let stdout = child.stdout.take().ok_or("driver has no stdout")?;
     stdin.write_all(input)?;

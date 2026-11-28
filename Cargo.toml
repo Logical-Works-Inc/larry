@@ -106,7 +106,9 @@ unicode-width = "=0.2.3"  # gap: Logical-Works-Inc/logicalworks-crates#1067
 
 [target.'cfg(unix)'.dependencies]
 # The executor's workspace sweep resets directory modes through held descriptors (larry#366).
-rustix = { workspace = true }
+# `tui::stop` waits for stdin to hang up (`event`, `poll(2)`) and puts a quiet socket over it
+# (`stdio`, `dup2`), both with no `unsafe` (larry#573).
+rustix = { workspace = true, features = ["event", "stdio"] }  # gap: Logical-Works-Inc/logicalworks-crates#1113
 
 [features]
 # The local reranker (larry#150): Candle runs the pinned Qwen3 reranker and the Hugging Face

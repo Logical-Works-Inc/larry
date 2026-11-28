@@ -15,6 +15,8 @@
 //! test makes a paid model call. The local verifier run stands in for Harbor's
 //! container: the same files, the same reward contract, no Docker.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
@@ -28,6 +30,8 @@ use acp_session::{SESSION_POLICY, agent, operator, scripted};
 mod http_wire;
 #[path = "support/larry_child.rs"]
 mod larry_child;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 #[path = "support/origin.rs"]
@@ -37,11 +41,11 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{BufRead, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use acp_agent::{kinds, message_text, prompt, said};
+use acp_agent::{Agent, kinds, message_text, prompt, said};
 use lgwks_std::json::{self, Value, json};
 use mock_model::{Config, Fault};
 use origin::{TempDir, fixture};
@@ -108,13 +112,15 @@ fn harbor_task(root: &Path) -> TestResult<String> {
 
 /// Runs the task's verifier against `work` and returns the reward it wrote.
 fn reward(task: &Path, work: &Path, logs: &Path) -> TestResult<String> {
-    let status = Command::new("sh")
+    let mut verifier = Command::new("sh");
+    verifier
         .arg(task.join("tests").join("test.sh"))
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .env("WORKDIR", work)
-        .env("LOGS", logs)
-        .status()?;
+        .env("LOGS", logs);
+    coverage::forward(&mut verifier);
+    let status = verifier.status()?;
     assert!(status.success(), "the verifier runs");
     let written = fs::read_to_string(logs.join("verifier").join("reward.txt"))?;
     Ok(written.trim().to_owned())
@@ -316,7 +322,7 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
         assert_eq!(
             said(&notes),
             Some(
-                "model: 3 replies in a row refused: the object must hold exactly one key, command or done"
+                "model: 3 replies in a row refused: the object must hold exactly one key, command, done or read"
             ),
             "the last refusal is named"
         );
@@ -330,15 +336,28 @@ fn three_refused_replies_in_a_row_end_the_session() -> TestResult {
     })
 }
 
+/// Makes `gate.fifo` in `work`: a command that reads it waits until the test writes.
+fn gate_fifo(work: &Path) -> TestResult<PathBuf> {
+    let fifo = work.join("gate.fifo");
+    let made = Command::new("mkfifo").arg(&fifo).status()?;
+    assert!(made.success(), "mkfifo");
+    Ok(fifo)
+}
+
+/// Sends the prompt `wait` and reads the update that says its command is running.
+fn start_waiting(acp: &mut Agent, session: &str) -> TestResult {
+    acp.send(&prompt(2, session, "wait"))?;
+    let started = acp.recv()?;
+    let update = started.at("/params/update/sessionUpdate")?;
+    assert_eq!(update, "tool_call", "running");
+    Ok(())
+}
+
 /// A cancel during a command stops the session before its next model call.
 #[test]
 fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
     let (state, work) = fixture()?;
-    let fifo = work.path().join("gate.fifo");
-    assert!(
-        Command::new("mkfifo").arg(&fifo).status()?.success(),
-        "mkfifo"
-    );
+    let fifo = gate_fifo(work.path())?;
     let replies = [
         r#"{"command":"cat gate.fifo"}"#,
         r#"{"command":"touch after.txt"}"#,
@@ -346,13 +365,7 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
     mock_model::run(scripted(17, &replies), |mock| -> TestResult {
         let mut acp = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = acp.open(work.path())?;
-        acp.send(&prompt(2, &session, "wait"))?;
-        let started = acp.recv()?;
-        assert_eq!(
-            *started.at("/params/update/sessionUpdate")?,
-            "tool_call",
-            "running"
-        );
+        start_waiting(&mut acp, &session)?;
         acp.send(&json!({"jsonrpc":"2.0","method":"session/cancel",
             "params":{"sessionId":session}}))?;
         acp.logged("cancel requested")?;
@@ -383,22 +396,12 @@ fn a_cancel_stops_the_session_before_its_next_command() -> TestResult {
 #[test]
 fn a_kill_9_mid_session_leaves_a_journal_the_next_start_recovers() -> TestResult {
     let (state, work) = fixture()?;
-    let fifo = work.path().join("gate.fifo");
-    assert!(
-        Command::new("mkfifo").arg(&fifo).status()?.success(),
-        "mkfifo"
-    );
+    let fifo = gate_fifo(work.path())?;
     let replies = [r#"{"command":"cat gate.fifo"}"#, r#"{"done":"recovered"}"#];
     mock_model::run(scripted(19, &replies), |mock| -> TestResult {
         let mut killed = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = killed.open(work.path())?;
-        killed.send(&prompt(2, &session, "wait"))?;
-        let started = killed.recv()?;
-        assert_eq!(
-            *started.at("/params/update/sessionUpdate")?,
-            "tool_call",
-            "running"
-        );
+        start_waiting(&mut killed, &session)?;
         killed.kill_9()?;
         let mut next = agent(state.path(), mock, Some(SESSION_POLICY))?;
         let session = next.open(work.path())?;
@@ -616,8 +619,7 @@ fn send_line(out: &mut impl Write, message: &Value) -> TestResult {
     let mut line = message.to_string();
     line.push('\n');
     out.write_all(line.as_bytes())?;
-    out.flush()?;
-    Ok(())
+    Ok(out.flush()?)
 }
 
 /// Reads one protocol message from `input`.

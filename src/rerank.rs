@@ -34,8 +34,9 @@ const MODEL_PIN: &str = include_str!("rerank/model.pin");
 const REVISION_HEX: usize = 40;
 /// Most candidates one request may rank.
 const MAX_CANDIDATES: usize = 256;
-/// Largest query, in bytes.
-const MAX_QUERY_BYTES: usize = 16 * 1024;
+/// Largest query, in bytes. Route selection cuts the task text to this bound,
+/// so the ranker never refuses what the executor built (larry#202).
+pub(crate) const MAX_QUERY_BYTES: usize = 16 * 1024;
 /// Largest candidate text, in bytes.
 const MAX_CANDIDATE_BYTES: usize = 256 * 1024;
 /// Largest candidate input, in bytes.
@@ -168,6 +169,18 @@ impl fmt::Display for RerankError {
     }
 }
 
+/// The pinned ranker identity every ranked selection seals: the model id and
+/// the snapshot revision, parsed from [`MODEL_PIN`]. The pin is data, so it
+/// parses in every build, with or without the `rerank` feature (larry#202).
+///
+/// # Errors
+///
+/// [`RerankError::Pin`] when the pin is not a model id line then a 40-hex
+/// revision line.
+pub(crate) fn pin() -> Result<(&'static str, &'static str), RerankError> {
+    model_pin()
+}
+
 /// The model id and revision [`MODEL_PIN`] names, or [`RerankError::Pin`] when it is not exactly
 /// two lines, a non-empty id and a 40-hex revision.
 fn model_pin() -> Result<(&'static str, &'static str), RerankError> {
@@ -208,6 +221,13 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
+    /// A candidate with `id` scored against `text`. The caller guarantees
+    /// both are non-empty: route selection builds them from checked route
+    /// fields (larry#202).
+    pub(crate) fn new(id: String, text: String) -> Self {
+        Self { id, text }
+    }
+
     /// The passage the model judges.
     pub(crate) fn text(&self) -> &str {
         &self.text
@@ -275,6 +295,14 @@ pub(crate) struct Deadline {
 }
 
 impl Deadline {
+    /// A deadline `seconds` after now, bounding one ranking run (larry#202).
+    pub(crate) fn limit(seconds: u64) -> Self {
+        Self {
+            start: Instant::now(),
+            seconds,
+        }
+    }
+
     /// Refuses with [`RerankError::Timeout`] once the limit has passed.
     pub(crate) fn check(self) -> Result<(), RerankError> {
         if self.start.elapsed().as_secs() >= self.seconds {
@@ -527,6 +555,21 @@ impl Scorer for Unbuilt {
             "this build has no model; rebuild with --features rerank",
         )))
     }
+}
+
+/// The shipped local ranker over the pinned snapshot, feature `rerank` only:
+/// what route selection scores eligible routes with (larry#202). Resolving the
+/// snapshot path reads no model bytes; the weights load on the first score, so
+/// constructing the ranker never fails for a tenant choice that needs no
+/// ranking.
+///
+/// # Errors
+///
+/// [`RerankError`] when the snapshot directory cannot be resolved or the pin
+/// is malformed.
+#[cfg(feature = "rerank")]
+pub(crate) fn local_scorer() -> Result<impl Scorer, RerankError> {
+    qwen::Qwen::from_cache()
 }
 
 /// Runs one request end to end: validates the query, reads the candidates from the request's file

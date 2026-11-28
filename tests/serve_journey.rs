@@ -19,6 +19,11 @@
 #[path = "support/serve_cli.rs"]
 mod serve_cli;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
+
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -26,6 +31,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use larry_guard::Larry;
 use lgwks_std::json::{self, Value};
 use serve_cli::{
     Serving, exchange, fill_key_store, fresh_state_dir, get, issue_key, probe_body, revoke,
@@ -286,12 +292,14 @@ fn a_bad_tenant_name_gets_no_key() -> TestResult {
     let state = fresh_state_dir()?;
     let past = "a".repeat(65);
     for name in ["", "a.b", "a b", past.as_str()] {
-        let output = Command::new(env!("CARGO_BIN_EXE_larry"))
+        let mut keyed = Command::new(env!("CARGO_BIN_EXE_larry"));
+        keyed
             .args(["serve", "key", name])
             .env_clear()
             .env("LARRY_STATE_DIR", &*state)
-            .stdin(Stdio::null())
-            .output()?;
+            .stdin(Stdio::null());
+        coverage::forward(&mut keyed);
+        let output = keyed.output()?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{name:?} exits 1: {stderr}");
         assert!(output.stdout.is_empty(), "{name:?} prints no key");
@@ -521,7 +529,8 @@ fn a_key_store_past_the_cap_refuses_startup() -> TestResult {
 fn a_reload_whose_log_line_fails_keeps_serving_and_reports_on_stderr() -> TestResult {
     let state = fresh_state_dir()?;
     let key = issue_key(&state, "acme")?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_larry"));
+    serve
         .arg("serve")
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
@@ -530,8 +539,9 @@ fn a_reload_whose_log_line_fails_keeps_serving_and_reports_on_stderr() -> TestRe
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    coverage::forward(&mut serve);
+    let mut child = Larry::spawn(&mut serve)?;
     let stdout = child.stdout.take().ok_or("stdout was not piped")?;
     let mut serving = String::new();
     {

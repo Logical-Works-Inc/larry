@@ -24,7 +24,7 @@ pub(crate) fn fixture() -> Result<(TempDir, TempDir), Box<dyn Error>> {
     let origin = TempDir::new()?;
     origin_repo(origin.path())?;
     larry_demo::executor::provision_tenant(
-        |_| Some(state.path().to_string_lossy().into_owned()),
+        |name| (name == "LARRY_STATE_DIR").then(|| state.path().to_string_lossy().into_owned()),
         "file.read,file.write,process.spawn,model.invoke,model.command",
         &[origin.path()],
     )?;
@@ -76,6 +76,7 @@ fn git_command_over(
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t");
+    temp_dir::scratch_base::bound_git(&mut command, dir);
     command
 }
 
@@ -139,7 +140,7 @@ fn origin_repo_with(make: &dyn Fn(&Path) -> Command, dir: &Path) -> Result<(), B
 }
 
 /// Stages everything in `dir` and commits it as `message`, through [`git_command`].
-pub(super) fn commit_all(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
+pub(crate) fn commit_all(dir: &Path, message: &str) -> Result<(), Box<dyn Error>> {
     commit_all_with(&git_command, dir, message)
 }
 

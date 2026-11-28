@@ -6,6 +6,8 @@
 //! main's `larry mutants verdict`; the judged run's artifacts and job list are data read with
 //! fixed bounds, and a missing, malformed, oversized, linked or unexpected one fails closed.
 
+#[path = "support/mutants_case.rs"]
+mod mutants_case;
 #[path = "support/rng.rs"]
 mod rng;
 #[path = "support/temp_dir.rs"]
@@ -13,60 +15,12 @@ mod temp_dir;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
+use mutants_case::{
+    Check, Run, judge, larry, link, mutant, no_mutants, outcomes, published, read, write_honest,
+};
 use rng::Rng;
 use temp_dir::TempDir;
-
-/// Failures propagate instead of panicking.
-type Check<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-/// The text of a file under the repository root.
-fn read(relative: &str) -> Check<String> {
-    Ok(fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative),
-    )?)
-}
-
-/// The shipped binary with `args`, a cleared environment and nothing on stdin. Only the test
-/// runner's own names pass: nextest's `NEXTEST_*` and the mutation gate's `LGWKS_MUTANT` and
-/// `LGWKS_MUTANT_REACH`, so the child runs the mutant under test and traces it to this test.
-fn larry(args: &[&std::ffi::OsStr]) -> Check<Output> {
-    let runner = std::env::vars_os().filter(|pair| {
-        let name = pair.0.to_string_lossy();
-        name.starts_with("NEXTEST_") || name.starts_with("LGWKS_MUTANT")
-    });
-    Ok(Command::new(env!("CARGO_BIN_EXE_larry"))
-        .args(args)
-        .env_clear()
-        .envs(runner)
-        .output()?)
-}
-
-/// A symbolic link at `at` naming `target`, on each platform's own call.
-#[cfg(unix)]
-fn link(target: &Path, at: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, at)
-}
-
-/// A symbolic link at `at` naming `target`, on each platform's own call.
-#[cfg(windows)]
-fn link(target: &Path, at: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(target, at)
-}
-
-/// `larry mutants verdict` over the run written under `dir`.
-fn judge(settings: &Path, dir: &Path) -> Check<Output> {
-    let artifacts = dir.join("artifacts");
-    let jobs = dir.join("jobs.json");
-    larry(&[
-        "mutants".as_ref(),
-        "verdict".as_ref(),
-        settings.as_os_str(),
-        artifacts.as_os_str(),
-        jobs.as_os_str(),
-    ])
-}
 
 /// The verdict workflow runs on `workflow_run`, from the default branch's checkout, builds and
 /// runs main's `larry`, reads no value a pull request names, and is the lane's one verdict.
@@ -227,37 +181,6 @@ impl Fault {
     }
 }
 
-/// A setting the lane publishes, read from its own file.
-fn published(text: &str, name: &str) -> Check<usize> {
-    let prefix = format!("{name}: ");
-    let value = text
-        .lines()
-        .find_map(|line| line.trim_start().strip_prefix(prefix.as_str()))
-        .ok_or(format!("mutants.yml publishes no {name}"))?;
-    Ok(value.trim().parse()?)
-}
-
-/// One generated run: its mutants and each architecture's summaries, in plan order.
-struct Run {
-    /// The mutants' JSON, as cargo-mutants lists them.
-    mutants: Vec<String>,
-    /// x86_64's summary per mutant.
-    x86: Vec<&'static str>,
-    /// aarch64's summary per mutant.
-    arm: Vec<&'static str>,
-    /// Mutants per shard, as the plan job sizes it.
-    per: usize,
-}
-
-/// The JSON cargo-mutants writes for mutant `index`.
-fn mutant(index: usize) -> String {
-    let line = index.saturating_add(10);
-    let with = if index & 1 == 0 { "true" } else { "false" };
-    format!(
-        r#"{{"name":"src/m.rs:{line}:5: replace f -> bool with {with}","package":"larry-demo","file":"src/m.rs","function":{{"function_name":"f","return_type":"-> bool","span":{{"start":{{"line":1,"column":1}},"end":{{"line":99,"column":2}}}}}},"span":{{"start":{{"line":{line},"column":5}},"end":{{"line":{line},"column":9}}}},"replacement":"{with}","genre":"FnValue"}}"#
-    )
-}
-
 /// A summary drawn six caught, two missed, one unviable and one timeout in ten.
 fn summary(rng: &mut Rng) -> &'static str {
     match rng.below(10) {
@@ -327,103 +250,92 @@ fn reference(run: &Run, floor: usize) -> bool {
         .any(|(&left, &right)| left != right && left != "Timeout" && right != "Timeout")
 }
 
-/// One shard's outcomes file: the baseline, then each mutant it judged, then `extra`.
-fn outcomes(run: &Run, side: &[&'static str], indices: &[usize], extra: Option<&str>) -> String {
-    let mut entries = vec![r#"{"scenario":"Baseline","summary":"Success"}"#.to_owned()];
-    for &index in indices {
-        if let (Some(json), Some(drawn)) = (run.mutants.get(index), side.get(index)) {
-            entries.push(format!(
-                r#"{{"scenario":{{"Mutant":{json}}},"summary":"{drawn}","log_path":"log/m.log"}}"#
-            ));
-        }
+/// Replaces the first `from` in the file at `path` with `to`. A file that does not hold `from`
+/// is a broken fixture, never a silent no-op that leaves the run honest.
+fn rewrite(path: &Path, from: &str, to: &str) -> Check {
+    let text = fs::read_to_string(path)?;
+    if !text.contains(from) {
+        return Err(format!("{} holds no {from}", path.display()).into());
     }
-    entries.extend(extra.map(str::to_owned));
-    format!(
-        r#"{{"cargo_mutants_version":"27.1.0","outcomes":[{}],"total_mutants":{}}}"#,
-        entries.join(","),
-        indices.len()
-    )
+    Ok(fs::write(path, text.replacen(from, to, 1))?)
 }
 
-/// The judged run's job list, with the fault's job changes.
-fn job_list(fault: Fault, shards: usize) -> String {
-    let plan = if fault == Fault::PlanFailed {
-        "failure"
-    } else {
-        "success"
-    };
-    let mut jobs = vec![
-        format!(r#"{{"name":"plan","conclusion":"{plan}"}}"#),
-        r#"{"name":"warm-aarch64","conclusion":"skipped"}"#.to_owned(),
-    ];
-    if shards == 0 {
-        jobs.push(
-            r#"{"name":"shard ${{ matrix.arch }} ${{ matrix.k }}/${{ matrix.n }}","conclusion":"skipped"}"#
-                .to_owned(),
-        );
-    }
-    for arch in ["x86_64", "aarch64"] {
-        for shard in 0..shards {
-            let last = shard.saturating_add(1) == shards;
-            if fault == Fault::ShardMissing && arch == "x86_64" && last {
-                continue;
-            }
-            let failed = fault == Fault::ShardFailed && arch == "aarch64" && shard == 0;
-            let conclusion = if failed { "failure" } else { "success" };
-            jobs.push(format!(
-                r#"{{"name":"shard {arch} {shard}/{shards}","conclusion":"{conclusion}"}}"#
-            ));
-        }
-    }
-    format!("[{}]", jobs.join(","))
-}
-
-/// Writes one shard's outcomes artifact for `arch`, with the fault applied to x86_64's first.
-fn write_shard(
-    dir: &Path,
-    run: &Run,
-    fault: Fault,
-    arch: &str,
-    shard: usize,
-    chunk: &[usize],
-) -> Check {
-    let x86 = arch == "x86_64";
-    let side = if x86 { &run.x86 } else { &run.arm };
-    let last_mutant = run.mutants.len().saturating_sub(1);
-    let held: Vec<usize> = chunk
-        .iter()
-        .copied()
-        .filter(|&index| !(fault == Fault::DropOutcome && !x86 && index == last_mutant))
-        .collect();
-    let here = x86 && shard == 0;
+/// Changes the honest tree under `dir` the way `fault` says.
+fn spoil(dir: &Path, run: &Run, fault: Fault, settings: &Path) -> Check {
+    let artifacts = dir.join("artifacts");
+    let jobs = dir.join("jobs.json");
+    let per = run.per.max(1);
+    let shards = run.mutants.len().div_ceil(per);
+    let last = shards.saturating_sub(1);
+    let folder = artifacts.join("mutants-outcomes-x86_64-0");
+    let held = folder.join("outcomes.json");
+    let first_chunk: Vec<usize> = (0..per.min(run.mutants.len())).collect();
     let foreign = format!(
         r#"{{"scenario":{{"Mutant":{}}},"summary":"CaughtMutant"}}"#,
         mutant(9_000)
     );
-    let extra = match fault {
-        Fault::ForeignOutcome if here => Some(foreign.as_str()),
-        Fault::ScenarioShape if here => {
-            Some(r#"{"scenario":{"Other":{}},"summary":"CaughtMutant"}"#)
+    match fault {
+        // The summaries themselves carry these.
+        Fault::None | Fault::Apart | Fault::TimeoutOneSide | Fault::UnknownSummary => {}
+        Fault::DropOutcome => {
+            let end = run.mutants.len().saturating_sub(1);
+            let kept: Vec<usize> = (last.saturating_mul(per)..end).collect();
+            let short = artifacts.join(format!("mutants-outcomes-aarch64-{last}/outcomes.json"));
+            fs::write(short, outcomes(run, &run.arm, &kept, None))?;
         }
-        _ => None,
-    };
-    let mut text = outcomes(run, side, &held, extra);
-    if fault == Fault::Malformed && here {
-        text.truncate(text.len().saturating_sub(5));
-    }
-    if fault == Fault::Oversize && here {
-        text.push_str(&" ".repeat(4_194_305));
-    }
-    let folder = dir.join(format!("artifacts/mutants-outcomes-{arch}-{shard}"));
-    fs::create_dir_all(&folder)?;
-    if fault == Fault::Symlink && here {
-        fs::write(dir.join("elsewhere.json"), &text)?;
-        link(&dir.join("elsewhere.json"), &folder.join("outcomes.json"))?;
-    } else {
-        fs::write(folder.join("outcomes.json"), &text)?;
-    }
-    if fault == Fault::ExtraFile && here {
-        fs::write(folder.join("notes.txt"), "not an outcome")?;
+        Fault::ForeignOutcome => {
+            let text = outcomes(run, &run.x86, &first_chunk, Some(&foreign));
+            fs::write(&held, text)?;
+        }
+        Fault::ScenarioShape => {
+            let other = r#"{"scenario":{"Other":{}},"summary":"CaughtMutant"}"#;
+            fs::write(&held, outcomes(run, &run.x86, &first_chunk, Some(other)))?;
+        }
+        Fault::Malformed => {
+            let mut text = fs::read_to_string(&held)?;
+            text.truncate(text.len().saturating_sub(5));
+            fs::write(&held, text)?;
+        }
+        Fault::Oversize => {
+            let mut text = fs::read_to_string(&held)?;
+            text.push_str(&" ".repeat(4_194_305));
+            fs::write(&held, text)?;
+        }
+        Fault::Symlink => {
+            let elsewhere = dir.join("elsewhere.json");
+            fs::rename(&held, &elsewhere)?;
+            link(&elsewhere, &held)?;
+        }
+        Fault::ExtraFile => fs::write(folder.join("notes.txt"), "not an outcome")?,
+        Fault::MissingArtifact => {
+            fs::remove_dir_all(artifacts.join(format!("mutants-outcomes-aarch64-{last}")))?;
+        }
+        Fault::UnknownArtifact => {
+            fs::create_dir_all(artifacts.join("mutants-extra"))?;
+            fs::write(artifacts.join("mutants-extra/list.json"), "[]")?;
+        }
+        Fault::ShardFailed => rewrite(
+            &jobs,
+            &format!(r#"shard aarch64 0/{shards}","conclusion":"success"#),
+            &format!(r#"shard aarch64 0/{shards}","conclusion":"failure"#),
+        )?,
+        Fault::ShardMissing => rewrite(
+            &jobs,
+            &format!(r#",{{"name":"shard x86_64 {last}/{shards}","conclusion":"success"}}"#),
+            "",
+        )?,
+        Fault::PlanFailed => rewrite(
+            &jobs,
+            r#""plan","conclusion":"success"#,
+            r#""plan","conclusion":"failure"#,
+        )?,
+        Fault::PlanMalformed => {
+            fs::write(artifacts.join("mutants-plan/list.json"), r#"[{"name":"#)?;
+        }
+        Fault::Settings => {
+            let text = fs::read_to_string(settings)?;
+            fs::write(settings, format!("{text}\n      MUTANTS_FLOOR: 0\n"))?;
+        }
     }
     Ok(())
 }
@@ -431,41 +343,8 @@ fn write_shard(
 /// Writes the run's artifacts, job list and settings under `dir`, with the fault applied, and
 /// returns the settings file to judge against.
 fn write(dir: &Path, run: &Run, fault: Fault, settings: &str) -> Check<PathBuf> {
-    let artifacts = dir.join("artifacts");
-    fs::create_dir_all(artifacts.join("mutants-plan"))?;
-    let list = match fault {
-        Fault::PlanMalformed => r#"[{"name":"#.to_owned(),
-        _ if run.mutants.is_empty() => String::new(),
-        _ => format!("[{}]", run.mutants.join(",")),
-    };
-    fs::write(artifacts.join("mutants-plan/list.json"), list)?;
-    fs::create_dir_all(artifacts.join("mutants-diff"))?;
-    fs::write(
-        artifacts.join("mutants-diff/pr.diff"),
-        "diff --git a/src/m.rs b/src/m.rs\n",
-    )?;
-    let indices: Vec<usize> = (0..run.mutants.len()).collect();
-    let chunks: Vec<&[usize]> = indices.chunks(run.per.max(1)).collect();
-    for arch in ["x86_64", "aarch64"] {
-        for (shard, chunk) in chunks.iter().enumerate() {
-            let last = shard.saturating_add(1) == chunks.len();
-            if !(fault == Fault::MissingArtifact && arch == "aarch64" && last) {
-                write_shard(dir, run, fault, arch, shard, chunk)?;
-            }
-        }
-    }
-    if fault == Fault::UnknownArtifact {
-        fs::create_dir_all(artifacts.join("mutants-extra"))?;
-        fs::write(artifacts.join("mutants-extra/list.json"), "[]")?;
-    }
-    fs::write(dir.join("jobs.json"), job_list(fault, chunks.len()))?;
-    let path = dir.join("settings.yml");
-    let text = if fault == Fault::Settings {
-        format!("{settings}\n      MUTANTS_FLOOR: 0\n")
-    } else {
-        settings.to_owned()
-    };
-    fs::write(&path, text)?;
+    let path = write_honest(dir, run, settings)?;
+    spoil(dir, run, fault, &path)?;
     Ok(path)
 }
 
@@ -516,16 +395,6 @@ fn sim_every_generated_run_gets_the_reference_verdict() -> Check {
         "the same seeds give the same verdicts and reports"
     );
     Ok(())
-}
-
-/// A run whose plan lists no mutant.
-const fn no_mutants() -> Run {
-    Run {
-        mutants: Vec::new(),
-        x86: Vec::new(),
-        arm: Vec::new(),
-        per: 2,
-    }
 }
 
 /// A run with no mutant on the changed lines passes and says so; the verdict refuses a command

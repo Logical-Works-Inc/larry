@@ -21,29 +21,17 @@ mod route_key;
 mod temp_dir;
 use temp_dir::TempDir;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+#[path = "support/route_spawn.rs"]
+mod route_spawn;
+use route_spawn::{larry_route, stderr_of};
+
 use lgwks_std::json::{self, Value};
 use std::error::Error;
-use std::path::Path;
-use std::process::{Command, Output};
 
 /// What every journey returns.
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// Runs `larry route <args>` with only PATH and the state directory set.
-fn larry_route(state: &Path, args: &[&str]) -> Result<Output, Box<dyn Error>> {
-    Ok(Command::new(env!("CARGO_BIN_EXE_larry"))
-        .arg("route")
-        .args(args)
-        .env_clear()
-        .env("PATH", std::env::var("PATH")?)
-        .env("LARRY_STATE_DIR", state)
-        .output()?)
-}
-
-/// The child's stderr as text.
-fn stderr_of(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
 
 /// A route's price table is versioned through the binary: `route price` sets
 /// dollars-per-million-tokens rates, the revision bumps on every set, `list`

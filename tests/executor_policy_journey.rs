@@ -1,7 +1,11 @@
 //! The shipped executor's repository-policy journey.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
@@ -13,13 +17,15 @@ use temp_dir::TempDir;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn git(dir: &std::path::Path, args: &[&str]) -> TestResult {
-    let status = Command::new("git")
-        .args(args)
+    let mut git = Command::new("git");
+    git.args(args)
         .current_dir(dir)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .status()?;
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    temp_dir::scratch_base::bound_git(&mut git, dir);
+    coverage::forward(&mut git);
+    let status = git.status()?;
     if status.success() {
         Ok(())
     } else {
@@ -45,7 +51,7 @@ fn unprovisioned() -> TestResult<(TempDir, TempDir)> {
 fn fixture() -> TestResult<(TempDir, TempDir)> {
     let (state, origin) = unprovisioned()?;
     larry_demo::executor::provision_tenant(
-        |_| Some(state.path().to_string_lossy().into_owned()),
+        |name| (name == "LARRY_STATE_DIR").then(|| state.path().to_string_lossy().into_owned()),
         "file.read,file.write,process.spawn,model.invoke,model.command",
         &[origin.path()],
     )?;

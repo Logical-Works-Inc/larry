@@ -75,9 +75,10 @@ pub(crate) fn add(
     overrides: &[(&str, &str)],
     extra: &[&str],
 ) -> Result<String, RouteCliError> {
+    // The tag is read from the store, which the helper seeds on first use.
     let key = match overrides.iter().find(|pair| pair.0 == "--key-env") {
         Some(pair) => pair.1.to_owned(),
-        None => route_key::key_env(state, "SIM").map_err(RouteCliError::Usage)?,
+        None => route_key::key_env(state, "SIM")?,
     };
     let mut args = vec!["add", id];
     for (flag, value) in DEFAULTS {

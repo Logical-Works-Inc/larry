@@ -10,10 +10,14 @@
 //! `Scope` order, an admitted task is accepted, and the same seed replays the
 //! same verdict sequence with byte-identical model requests.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 #[path = "support/origin.rs"]

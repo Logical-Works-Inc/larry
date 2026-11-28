@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lgwks_std::json::Value;
+use lgwks_std::json::{Deserialize, Serialize};
 
 use crate::executor::{
     Approval, ExecError, Handoff, Isolation, Observer, Report, SessionDoor, Settings, Stop,
@@ -58,7 +59,8 @@ pub(crate) enum Ended {
 }
 
 /// What the sealed report says, as the artifact pane shows it (larry#244).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) struct Receipt {
     /// The first [`DIGEST_CHARS`] hex characters of the BLAKE3 digest of the report's bytes.
     pub(crate) digest: String,

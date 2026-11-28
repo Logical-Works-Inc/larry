@@ -6,8 +6,12 @@
 //! Requirement: the frame paints, asks before every command, never runs a declined one,
 //! survives kill -9 with a clean next start, writes nothing while idle, and exits 0 on Ctrl+C.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "e2e_journey/input.rs"]
+mod input;
 #[path = "support/journey.rs"]
 mod journey;
 #[path = "support/mock_model.rs"]
@@ -20,8 +24,14 @@ mod pane;
 mod ps;
 #[path = "support/pty.rs"]
 mod pty;
+#[path = "e2e_journey/read.rs"]
+mod read;
+#[path = "e2e_journey/sessions.rs"]
+mod sessions;
 #[path = "support/terminal_cases.rs"]
 mod terminal_cases;
+#[path = "support/tui_queue.rs"]
+mod tui_queue;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -29,7 +39,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use journey::{ASK, QUIT, READY, Ran, ask, frame, frame_in, operator, scripted, working};
+use journey::{
+    ASK, QUIT, READY, Ran, ask, background_kill_journey, frame, frame_in, operator, scripted,
+    working,
+};
 use mock_model::{Config, Fault};
 use origin::{fixture, git_command};
 use pty::deadline::{FifoRelease, await_event};
@@ -321,26 +334,14 @@ fn sim_tui_esc_cancels_and_joins_worker() -> Journey {
 /// MEASURED, never a pass condition, on a busy host (larry#268).
 #[test]
 fn tui_journey_esc_kills_running_command() -> Journey {
-    let replies = [r#"{"command":"sleep 30 & echo $! > bg.pid; sleep 30"}"#];
-    let (state, work) = fixture()?;
-    let workspaces = state.path().join("ws");
-    let ran = frame_in(
-        &state,
-        work,
-        scripted(31, &replies),
-        Box::new(|pty, mock, _| {
-            ask(pty)?;
-            pty.send("y")?;
-            pty.wait_for("esc to interrupt")?;
-            // Esc only after the background member is up, so its death is the group's; the pid
-            // is read from the session's copy before Esc (a missing pid fails in one deadline).
-            let pid = await_tree_text(&workspaces, "bg.pid", "the member wrote bg.pid")?;
+    let ran = background_kill_journey(
+        |pty| {
+            // Esc is pressed only once the background member is up, so its death is the
+            // group's, not a race with the shell's own start.
             let pressed = Instant::now();
             pty.send("\x1b")?;
             pty.wait_for("Interrupted")?;
             let esc_to_interrupted = pressed.elapsed();
-            assert_group_gone(&pid, "the background member")?;
-            assert_eq!(mock.served(), 1, "no second model call after the interrupt");
             let mut figure = String::new();
             writeln!(
                 figure,
@@ -349,7 +350,8 @@ fn tui_journey_esc_kills_running_command() -> Journey {
             )?;
             std::io::stderr().lock().write_all(figure.as_bytes())?;
             Ok(())
-        }),
+        },
+        "the interrupt",
     )?;
     assert_exited(&ran.status, "Ctrl+C on an empty box exits 0");
     Ok(())

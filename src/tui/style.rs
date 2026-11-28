@@ -8,10 +8,12 @@
 //! lost it (SGR 0 sent after the colour). Widths are Unicode display widths
 //! (UAX #11), so CJK and emoji take two cells and combining marks none.
 
+use lgwks_std::json::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthChar as _;
 
 /// What a run of text means to the person reading it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) enum Tone {
     /// Body text in the terminal's default colour.
     #[default]
@@ -29,7 +31,8 @@ pub(crate) enum Tone {
 }
 
 /// How one cell is painted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) struct Style {
     /// The cell's meaning.
     tone: Tone,
@@ -214,6 +217,13 @@ fn push_marker(out: &mut String, character: char) {
 /// change the title, recolour the frame or hide a character from the person.
 pub(crate) fn sanitize(text: &str, keep_newlines: bool) -> String {
     filtered(text, keep_newlines, false)
+}
+
+/// [`sanitize`] for one line that can never hold `\n`: the command's first
+/// line, a queued turn's first line, an output line already split. It takes no
+/// flag, so no dead branch is left for a mutant to flip (larry#262).
+pub(crate) fn sanitize_line(text: &str) -> String {
+    filtered(text, false, false)
 }
 
 /// [`sanitize`] for a command the person approves: each dropped character is shown as

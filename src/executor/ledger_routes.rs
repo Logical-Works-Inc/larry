@@ -7,12 +7,22 @@
 //! default, leaves the tenant with none; `set_default` moves the one flag in a
 //! single statement, so there is never a moment with two defaults or a default
 //! naming a route that is gone.
+//!
+//! A route's optional prompt template lives beside its row in `route_prompts`
+//! (larry#205), keyed by the same tenant and id.
 
-use lgwks_deps::storefront::rusqlite::{self, Transaction, TransactionBehavior};
+use lgwks_deps::storefront::rusqlite::{self, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::Ledger;
 use crate::executor::ExecError;
 use crate::model::{Draft, Kind, MAX_ROUTES, Route, RouteError, Table};
+
+/// Schema of the route prompt table, version 9 (larry#205): the optional
+/// template a route prepends to the system turn, keyed by the same tenant and
+/// id as its route. A separate table, so the routes table keeps its shape and
+/// two executors opening a fresh store race only on `IF NOT EXISTS` creates.
+pub(crate) const ROUTE_PROMPT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS route_prompts(tenant TEXT NOT NULL, \
+    id TEXT NOT NULL, prompt TEXT NOT NULL, PRIMARY KEY(tenant, id));";
 
 /// Schema of the route table, version 5 (larry#201): the routes a tenant owns, at
 /// most 256 each, with one default per tenant. A route holds the NAME of the
@@ -31,6 +41,11 @@ pub(super) const ROUTE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS routes(tenant 
 pub(super) const PRICE_SCHEMA: &str = "ALTER TABLE routes ADD COLUMN price_version INTEGER NOT NULL DEFAULT 1; \
     ALTER TABLE routes ADD COLUMN price_input INTEGER NOT NULL DEFAULT 0; \
     ALTER TABLE routes ADD COLUMN price_output INTEGER NOT NULL DEFAULT 0;";
+
+/// Schema of the tenant residency policy, version 10 (larry#203): one canonical
+/// comma-separated ISO code list per tenant, kept beside that tenant's routes.
+pub(super) const RESIDENCY_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS tenant_residency(tenant TEXT PRIMARY KEY, codes TEXT NOT NULL);";
 
 /// Inserts a route, or replaces the fields of the one with this id, unless the
 /// tenant holds the most routes it may and this id is new: that writes no row.
@@ -77,8 +92,9 @@ struct Stored {
 }
 
 impl Stored {
-    /// The checked route this row holds, or the damage refusal naming its id.
-    fn route(&self) -> Result<Route, RouteError> {
+    /// The checked route this row holds, with the template `prompt` names, or
+    /// the damage refusal naming its id.
+    fn route(&self, prompt: Option<&str>) -> Result<Route, RouteError> {
         let damaged = |cause: Option<RouteError>| RouteError::Damaged {
             id: self.id.clone(),
             cause: cause.map(Box::new),
@@ -105,6 +121,7 @@ impl Stored {
             temperature: self.temperature,
             request_bytes: Some(request_bytes),
             residency: self.residency.as_deref(),
+            prompt,
             describe: &self.describe,
         })
         .map_err(|refusal| damaged(Some(refusal)))?
@@ -114,6 +131,42 @@ impl Stored {
 }
 
 impl Ledger {
+    /// The tenant's canonical residency policy, or none when it has not set one.
+    pub(crate) fn residency(&self, tenant: &str) -> Result<Option<Vec<String>>, ExecError> {
+        self.conn
+            .query_row(
+                "SELECT codes FROM tenant_residency WHERE tenant = ?1",
+                rusqlite::params![tenant],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(ExecError::Sql)
+            .map(|codes| codes.map(|value| value.split(',').map(str::to_owned).collect()))
+    }
+
+    /// Stores the already checked, sorted residency codes for `tenant`.
+    pub(crate) fn set_residency(&self, tenant: &str, codes: &[String]) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "INSERT INTO tenant_residency (tenant, codes) VALUES (?1, ?2) \
+                 ON CONFLICT (tenant) DO UPDATE SET codes = excluded.codes",
+                rusqlite::params![tenant, codes.join(",")],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
+    /// Clears the tenant's residency policy.
+    pub(crate) fn clear_residency(&self, tenant: &str) -> Result<(), ExecError> {
+        self.conn
+            .execute(
+                "DELETE FROM tenant_residency WHERE tenant = ?1",
+                rusqlite::params![tenant],
+            )
+            .map_err(ExecError::Sql)?;
+        Ok(())
+    }
+
     /// Stores `route` for `tenant`, replacing the fields the route names, and
     /// makes it the tenant's default when `make_default`. A replacement keeps
     /// the default flag and the price table it found. One transaction, so a
@@ -171,6 +224,23 @@ impl Ledger {
                 limit: usize::from(MAX_ROUTES),
             }));
         }
+        match route.prompt() {
+            Some(template) => {
+                step.execute(
+                    "INSERT INTO route_prompts (tenant, id, prompt) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (tenant, id) DO UPDATE SET prompt = excluded.prompt",
+                    rusqlite::params![tenant, route.id(), template],
+                )
+                .map_err(ExecError::Sql)?;
+            }
+            None => {
+                step.execute(
+                    "DELETE FROM route_prompts WHERE tenant = ?1 AND id = ?2",
+                    rusqlite::params![tenant, route.id()],
+                )
+                .map_err(ExecError::Sql)?;
+            }
+        }
         if make_default {
             step.execute(
                 "UPDATE routes SET is_default = (id = ?2) WHERE tenant = ?1",
@@ -189,6 +259,7 @@ impl Ledger {
     /// that fails validation (a key variable outside `LARRY_KEY_*` included) or
     /// a second default; [`ExecError::Sql`] otherwise.
     pub(crate) fn routes(&self, tenant: &str) -> Result<Table, ExecError> {
+        let prompts = self.prompts(tenant)?;
         let mut statement = self
             .conn
             .prepare(
@@ -220,7 +291,9 @@ impl Ledger {
         let mut default: Option<String> = None;
         for row in rows {
             let stored = row.map_err(ExecError::Sql)?;
-            let route = stored.route().map_err(ExecError::Route)?;
+            let route = stored
+                .route(prompts.get(&stored.id).map(String::as_str))
+                .map_err(ExecError::Route)?;
             match stored.is_default {
                 0 => {}
                 1 if default.is_none() => default = Some(stored.id),
@@ -234,6 +307,30 @@ impl Ledger {
             routes.push(route);
         }
         Ok(Table::new(routes, default))
+    }
+
+    /// Every prompt template `tenant` holds, keyed by route id.
+    fn prompts(
+        &self,
+        tenant: &str,
+    ) -> Result<std::collections::HashMap<String, String>, ExecError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, prompt FROM route_prompts WHERE tenant = ?1")
+            .map_err(ExecError::Sql)?;
+        let rows = statement
+            .query_map(rusqlite::params![tenant], |row| {
+                let id: String = row.get(0)?;
+                let prompt: String = row.get(1)?;
+                Ok((id, prompt))
+            })
+            .map_err(ExecError::Sql)?;
+        let mut prompts = std::collections::HashMap::new();
+        for row in rows {
+            let (id, prompt) = row.map_err(ExecError::Sql)?;
+            prompts.insert(id, prompt);
+        }
+        Ok(prompts)
     }
 
     /// Removes `tenant`'s route `id`. A removed default leaves the tenant with none.
@@ -253,6 +350,12 @@ impl Ledger {
         if removed == 0 {
             return Err(ExecError::Route(RouteError::NoSuchId { id: id.to_owned() }));
         }
+        self.conn
+            .execute(
+                "DELETE FROM route_prompts WHERE tenant = ?1 AND id = ?2",
+                rusqlite::params![tenant, id],
+            )
+            .map_err(ExecError::Sql)?;
         Ok(())
     }
 
@@ -336,6 +439,7 @@ mod tests {
             temperature: Some(0.5),
             request_bytes: None,
             residency: Some("CA"),
+            prompt: None,
             describe: "a test route",
         })
     }

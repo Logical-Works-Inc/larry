@@ -12,11 +12,16 @@
 //! gateway is scored as refusals while the arm keeps going; a kill -9 leaves
 //! nothing the next run does not collect; the shipped set runs end to end.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "eval_journey/session.rs"]
 mod session;
 
 #[path = "eval_journey/priced.rs"]
 mod priced;
+
+#[path = "eval_journey/usage.rs"]
+mod usage;
 
 #[path = "support/json_at.rs"]
 mod json_at;
@@ -29,6 +34,8 @@ mod mock_model;
 
 #[path = "support/eval_arm.rs"]
 mod eval_arm;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 use eval_arm::{Arm, CLAUDE, FLASH, Ran, TestResult};
 use eval_arm::{charged_prompt_tokens, eval_entries, number, operator, origins_left, report};
 use eval_arm::{rss_tool, score_arm, spawn_arm, task, timeless};
