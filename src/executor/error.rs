@@ -248,6 +248,20 @@ pub enum ExecError {
     /// The admission gate refused to run the task.
     #[error("exec gate: {0}")]
     Gate(#[from] RuntimeError),
+    /// The policy lacks a scope a door that runs no task needs (larry#589):
+    /// nothing was read or sent.
+    #[error("gate: policy_refuses: {scope}")]
+    PolicyRefuses {
+        /// The scope's name as `LARRY_POLICY` writes it.
+        scope: String,
+    },
+    /// A brief holds a key or a token. It is sent as it stands, so nothing was
+    /// sent (larry#589).
+    #[error("exec: {part} holds a key or token, so the brief was not sent")]
+    BriefSecret {
+        /// The goal, or the repo-relative path of the file.
+        part: String,
+    },
     /// The task body ran and its report was sealed, but the runtime could not
     /// make the run's record durable, so the sealed report is not returned
     /// (larry#182). A sealed report is only a receipt for work whose record

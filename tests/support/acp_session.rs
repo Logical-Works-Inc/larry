@@ -13,7 +13,7 @@ use crate::mock_model::{Config, Handle};
 /// Every scope a session needs, `model.command` among them: what an operator
 /// sets inside a Harbor task container.
 pub(crate) const SESSION_POLICY: &str =
-    "file.read,file.write,process.spawn,model.invoke,model.command";
+    "file.read,file.write,process.spawn,model.invoke,model.command,net.egress";
 
 /// The settings an operator exports: the state directory, the mock gateway and,
 /// when given, the policy.
@@ -44,7 +44,11 @@ pub(crate) fn agent(
     mock: &Handle,
     policy: Option<&str>,
 ) -> Result<Agent, Box<dyn Error>> {
-    let env = operator(state, mock, policy);
+    start(&operator(state, mock, policy))
+}
+
+/// Starts `larry acp` under exactly `env`.
+pub(crate) fn start(env: &[(&str, OsString)]) -> Result<Agent, Box<dyn Error>> {
     let pairs: Vec<(&str, &std::ffi::OsStr)> = env
         .iter()
         .map(|pair| (pair.0, pair.1.as_os_str()))

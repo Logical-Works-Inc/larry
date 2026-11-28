@@ -17,6 +17,7 @@ use crate::model::{
     Completion, Kind, Message, ModelClient, ModelError, Role, Route, Selection, structured_content,
 };
 
+use super::redact::Redactor;
 use super::route_select::task_select;
 use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex};
 
@@ -166,12 +167,17 @@ struct Source<'brief> {
 /// holds at most 64 files of 256 KiB; past
 /// [`MAX_CONTEXT_BYTES`] of context, or when any request carrying it would pass
 /// the route's request bound, each prompt carries only its own file.
+///
+/// A file is rewritten from the model's reply, so a masked one would be written
+/// back masked: a goal or a file holding a secret refuses the whole brief before
+/// the first request (larry#589).
 pub(crate) fn author(
     brief: &Brief,
     tree: &Path,
     client: &ModelClient,
     route: &Route,
     partition: &str,
+    redactor: &Redactor,
 ) -> Result<Vec<Value>, ExecError> {
     let mut sources: Vec<Source<'_>> = Vec::with_capacity(brief.files.len());
     for path in &brief.files {
@@ -187,6 +193,15 @@ pub(crate) fn author(
         .iter()
         .map(|source| (source.path, source.before.as_deref()))
         .collect();
+    let parts = std::iter::once(("the goal", brief.goal.as_str()))
+        .chain(views.iter().filter_map(|view| Some((view.0, view.1?))));
+    for (part, text) in parts {
+        if redactor.holds_secret(text) {
+            return Err(ExecError::BriefSecret {
+                part: part.to_owned(),
+            });
+        }
+    }
     let system = system_line(route, partition);
     let paths: Vec<&str> = sources.iter().map(|source| source.path).collect();
     let shared = fitting_context(
@@ -420,13 +435,40 @@ pub(super) fn unfenced(reply: &str) -> &str {
 /// from it.
 pub(super) struct ModelStep<'task> {
     /// The route the task resolved to; the sealed report records it.
-    pub(super) route: Route,
+    route: Route,
     /// How the route was chosen; the sealed report records it beside the route.
-    pub(super) selection: Selection,
+    selection: Selection,
     /// The brief the model writes files for.
-    pub(super) brief: &'task Brief,
+    brief: &'task Brief,
     /// The client over `route`, holding the key read for this task alone.
-    pub(super) client: ModelClient,
+    client: ModelClient,
+}
+
+impl ModelStep<'_> {
+    /// [`author`] over this step's route, each record naming the route and how
+    /// it was chosen.
+    pub(super) fn write(
+        &self,
+        tree: &Path,
+        partition: &str,
+        redactor: &Redactor,
+    ) -> Result<Vec<Value>, ExecError> {
+        let mut records = author(
+            self.brief,
+            tree,
+            &self.client,
+            &self.route,
+            partition,
+            redactor,
+        )?;
+        for record in &mut records {
+            if let Some(object) = record.as_object_mut() {
+                object.insert(String::from("route"), self.route.seal());
+                object.insert(String::from("route_selection"), self.selection.seal());
+            }
+        }
+        Ok(records)
+    }
 }
 
 /// Resolves the task's route and builds its client, only when the task has a
