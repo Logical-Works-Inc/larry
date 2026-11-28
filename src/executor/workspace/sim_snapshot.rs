@@ -13,7 +13,7 @@ use std::process::Command;
 
 use super::{Copied, Limits, MAX_DEPTH, MAX_FILES, summary};
 use crate::executor::sim_tree::{
-    Shape, files_beneath, origin, path_env, scratch, settings, tree_digest,
+    Shape, bound_git, files_beneath, origin, path_env, scratch, settings, tree_digest,
 };
 use crate::executor::workspace::{DiffSink, Workspace, sweep};
 use crate::executor::{AuthorFault, ExecError};
@@ -294,14 +294,15 @@ fn sim_snapshot_folder_config_cannot_run_a_program() -> TestResult {
     let mut text = std::fs::read_to_string(&config)?;
     text = format!("{text}[core]\n\tfsmonitor = {}\n", script.display());
     std::fs::write(&config, text)?;
-    let control = Command::new("git")
+    let mut control = Command::new("git");
+    control
         .args(["status", "--porcelain"])
         .current_dir(&made.dir)
         .env_clear()
         .env("PATH", &path)
-        .env("HOME", state.as_os_str())
-        .status()?;
-    assert!(control.success());
+        .env("HOME", state.as_os_str());
+    bound_git(&mut control, &made.dir);
+    assert!(control.status()?.success());
     assert!(
         marker.exists(),
         "control: git runs the monitor the folder names"

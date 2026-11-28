@@ -23,6 +23,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> TestResult {
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
         .env("GIT_CONFIG_NOSYSTEM", "1");
+    temp_dir::scratch_base::bound_git(&mut git, dir);
     coverage::forward(&mut git);
     let status = git.status()?;
     if status.success() {
