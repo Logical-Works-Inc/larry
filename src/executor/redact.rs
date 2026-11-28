@@ -259,10 +259,50 @@ mod sim;
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::io::Write as _;
     use std::time::Instant;
 
-    use super::Redactor;
+    use super::{Ledger, Redactor, Route, Settings};
+    use crate::model::{Draft, Kind, tenant_namespace};
+
+    /// A stored route's key is masked when its variable is this tenant's, and a
+    /// variable of another tenant's namespace is never read (larry#589).
+    #[test]
+    fn a_stored_route_key_is_masked_and_a_foreign_one_is_not_read() -> Result<(), Box<dyn Error>> {
+        let directory = crate::executor::sim_tree::scratch("redact-routes")?;
+        let state = directory.to_string_lossy().into_owned();
+        let settings = Settings::from_env(move |name: &str| match name {
+            "LARRY_STATE_DIR" => Some(state.clone()),
+            "PATH" => Some(String::from("/usr/bin:/bin")),
+            "LARRY_KEY_FOREIGN" => Some(String::from("foreign-key-value")),
+            other if other.starts_with("LARRY_KEY_") => Some(String::from("stored-key-value")),
+            _ => None,
+        })?;
+        let ledger = Ledger::open(&directory)?;
+        let tenant = settings.tenant_text();
+        let own = format!("{}GATEWAY", tenant_namespace(tenant));
+        for (id, key_env) in [("own", own.as_str()), ("foreign", "LARRY_KEY_FOREIGN")] {
+            let route = Route::new(&Draft {
+                id,
+                kind: Kind::OpenAiChat,
+                base_url: "https://gateway.test:9/v1",
+                model: "test-model",
+                key_env,
+                temperature: None,
+                request_bytes: None,
+                residency: None,
+                prompt: None,
+                describe: "a test route",
+            })?;
+            ledger.put_route(tenant, &route, false)?;
+        }
+        let redactor = settings.redactor(&ledger)?;
+        assert!(redactor.holds_secret("stored-key-value"));
+        assert!(!redactor.holds_secret("foreign-key-value"));
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
 
     /// The cost of one observation at the capture bound (SD-5), printed.
     #[test]
