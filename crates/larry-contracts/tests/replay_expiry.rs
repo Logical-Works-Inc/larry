@@ -1,6 +1,7 @@
 //! The pinned expiry against the declared clock-skew bound (E30, D36, larry#74, larry#212).
-//! Sources: CWE-613 (insufficient session expiration) and `lgwks_bot::skew::lease_holds`,
-//! which refuses once the observer's reading reaches the expiry plus the bound.
+//! Sources: CWE-613 (insufficient session expiration) and
+//! `lgwks_bot::kernel::skew::lease_holds`, which refuses once the observer's reading reaches
+//! the expiry plus the bound.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime};
