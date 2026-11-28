@@ -43,7 +43,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 - [x] #177 gap: pin the ci.yml `rust` job's three actions to commit SHAs (Director 2026-11-09: not yet): fixed by #314, ee70f83; no workflow uses a mutable tag (read 2026-11-23).
 
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
-- [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds).
+- [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds). #580 a past expiry is authorized only while its lag is under the skew bound (ADR 0137): PR #584, 644 contracts and runtime tests on toronto.
 - [x] #75 journal on RecordJournal, group-committed, a dead task recovered unrerun (ADR 0023): PR #172, 775 tests; `larry exec` p50 70.0/78.1 ms, p99 96.3/98.3 ms (32 runs, debug), peak RSS 12.5/13.2 MiB.
 - [x] #76 fence on broker (ADR 0024): PR #173, 780 tests; `larry exec` p50 75.1/75.4 ms, p99 79.8/80.9 ms, 13.2/13.1 MiB.
 - [x] #77 gate on GrantSet and cap::Auth: PR #163, 729 tests; replay p50 49.9/49.7 us, p99 94.5/86.8 us (ADR 0018).

@@ -327,20 +327,17 @@ pub fn decide(
     validity: &ValiditySnapshot,
 ) -> Decision {
     let denied = |reason: DenialReason| Decision::Denied { reason };
-    // The lease is judged by its estate owner (larry#74): the expiry as a reading on the
-    // observer's own timeline, whose origin is the pinned instant, so no epoch is assumed.
-    // The pinned validity carries the deployment's skew allowance (larry#212), so a foreign
-    // clock within the bound still holds; zero is one host, where any disagreement is a defect.
-    let remaining = match validity.valid_until.duration_since(request.observed_at()) {
-        Ok(remaining) => remaining,
-        // The expiry precedes the pinned instant: nothing remains. The judge below
-        // reads that against the bound, which is a typed denial at zero and the
-        // declared allowance on an ahead clock.
-        Err(_) => Duration::ZERO,
-    };
-    let holds =
-        lgwks_bot::kernel::skew::lease_holds(remaining, Duration::ZERO, validity.skew_bound);
-    if !holds {
+    // The lease is judged by its estate owner (larry#74): the expiry and the observer on one
+    // timeline whose origin is the earlier of the two, so no epoch is assumed. An expiry still
+    // ahead is what remains; an expiry already behind is how far the observer has run past it,
+    // which the judge holds only inside the deployment's skew allowance (larry#212). Zero is
+    // one host, where any disagreement is a defect.
+    let (expires_at, observer_now) =
+        match validity.valid_until.duration_since(request.observed_at()) {
+            Ok(remaining) => (remaining, Duration::ZERO),
+            Err(past) => (Duration::ZERO, past.duration()),
+        };
+    if !lgwks_bot::kernel::skew::lease_holds(expires_at, observer_now, validity.skew_bound) {
         return denied(DenialReason::AuthorityExpired);
     }
     if let Some(scope) = first_uncovered(request.required_scopes(), policy.allowed_scopes()) {
