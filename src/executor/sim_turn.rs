@@ -238,7 +238,7 @@ fn drive(
         ledger: &ledger,
         task_id: "sim-turn",
         place: Place::Open(&work),
-        shown: String::from("."),
+        redactor: settings.redactor(&ledger)?,
         system: String::from(super::SYSTEM),
         observer: &mut observer,
     };

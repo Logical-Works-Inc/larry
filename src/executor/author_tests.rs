@@ -60,6 +60,28 @@ fn a_fenced_reply_is_written_as_its_body_with_a_final_newline() {
     assert_eq!(file_text(""), "", "an empty reply stays empty");
 }
 
+/// The settings over `state_dir` whose model is at `url`, with `extra` set too.
+fn settings_at(
+    state_dir: &std::path::Path,
+    url: String,
+    extra: Option<(&'static str, &'static str)>,
+) -> Result<Settings, ExecError> {
+    let mut table = vec![
+        ("LARRY_STATE_DIR", state_dir.to_string_lossy().into_owned()),
+        ("PATH", String::from("/usr/bin:/bin")),
+        ("LARRY_MODEL_URL", url),
+        ("LARRY_MODEL", String::from("test-model")),
+        ("LARRY_MODEL_KEY", String::from("test-key")),
+    ];
+    table.extend(extra.map(|(name, value)| (name, String::from(value))));
+    Settings::from_env(move |name: &str| {
+        table
+            .iter()
+            .find(|entry| entry.0 == name)
+            .map(|entry| entry.1.clone())
+    })
+}
+
 /// A brief task spends from the executor's shared tenant-route limiter: once
 /// its tenant's token is spent, the next completion is refused before any
 /// gateway byte. A step built on its own limiter would answer Transport from
@@ -69,20 +91,8 @@ fn a_brief_task_is_refused_once_its_tenant_spends_its_budget() -> TestResult {
     let state = scratch("brief-budget")?;
     let state_dir = state.join("state");
     fs::create_dir_all(&state_dir)?;
-    let table = [
-        ("LARRY_STATE_DIR", state_dir.to_string_lossy().into_owned()),
-        ("PATH", String::from("/usr/bin:/bin")),
-        ("LARRY_MODEL_URL", String::from("http://127.0.0.1:9/v1")),
-        ("LARRY_MODEL", String::from("spent-model")),
-        ("LARRY_MODEL_KEY", String::from("spent-key")),
-        ("LARRY_MODEL_TOKEN_BUDGET", String::from("1")),
-    ];
-    let settings = Settings::from_env(move |name: &str| {
-        table
-            .iter()
-            .find(|entry| entry.0 == name)
-            .map(|entry| entry.1.clone())
-    })?;
+    let url = String::from("http://127.0.0.1:9/v1");
+    let settings = settings_at(&state_dir, url, Some(("LARRY_MODEL_TOKEN_BUDGET", "1")))?;
     let ledger = Ledger::open(&state_dir)?;
     let task = Task::parse(
         format!(
@@ -114,6 +124,41 @@ fn a_brief_task_is_refused_once_its_tenant_spends_its_budget() -> TestResult {
         ),
         "the spent tenant is refused before any gateway byte"
     );
+    fs::remove_dir_all(&state)?;
+    Ok(())
+}
+
+/// A file the brief names that holds a token refuses the brief by that file's
+/// name before the first request, and the file is left as it was (larry#589,
+/// CWE-200).
+#[test]
+fn a_brief_file_holding_a_token_is_refused_before_any_request() -> TestResult {
+    let state = scratch("brief-secret")?;
+    let state_dir = state.join("state");
+    let tree = state.join("tree");
+    fs::create_dir_all(&state_dir)?;
+    fs::create_dir_all(&tree)?;
+    let held = format!("token ghp_{}\n", "7".repeat(36));
+    fs::write(tree.join("held.txt"), &held)?;
+    let gateway = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    gateway.set_nonblocking(true)?;
+    let url = format!("http://{}/v1", gateway.local_addr()?);
+    let settings = settings_at(&state_dir, url, None)?;
+    let ledger = Ledger::open(&state_dir)?;
+    let task = Task::parse(
+        br#"{"repo":"/","base":"HEAD","goal":"tidy","files":["new.txt","held.txt"],"acceptance":[["true"]]}"#,
+    )?;
+    let Some(step) = model_step(&task, &settings, &ledger)? else {
+        return Err("a brief task builds a model step".into());
+    };
+    let written = step.write(&tree, "tenant", &settings.redactor(&ledger)?);
+    assert!(
+        matches!(written, Err(ExecError::BriefSecret { ref part }) if part == "held.txt"),
+        "refused by the file's name: {written:?}"
+    );
+    assert!(gateway.accept().is_err(), "nothing was sent");
+    assert_eq!(fs::read_to_string(tree.join("held.txt"))?, held);
+    assert!(!tree.join("new.txt").exists(), "nothing was written");
     fs::remove_dir_all(&state)?;
     Ok(())
 }

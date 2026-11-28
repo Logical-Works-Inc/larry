@@ -47,7 +47,7 @@ pub(crate) fn provision(state: &Path, repo: &Path) -> TestResult<()> {
     let state_text = state.to_string_lossy().into_owned();
     larry_demo::executor::provision_tenant(
         |name| (name == "LARRY_STATE_DIR").then(|| state_text.clone()),
-        "file.read,file.write,process.spawn,model.invoke,model.command",
+        "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
         &[repo],
     )?;
     Ok(())

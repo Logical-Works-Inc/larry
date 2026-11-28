@@ -7,9 +7,10 @@
 //! scope, `model.command` among them, which no default policy holds, so it runs
 //! only where an operator has granted it, as for a Harbor task container that
 //! isolates the commands. Run isolated (the terminal frontend, larry#243) every
-//! command runs in a confined copy of the folder (`super::island`), the model
-//! is told its directory is `.`, and the folder changes only when the person
-//! approves the diff the session ends with; the default policy suffices.
+//! command runs in a confined copy of the folder (`super::island`), and the
+//! folder changes only when the person approves the diff the session ends with;
+//! the default policy suffices. Either way the model is told its directory is
+//! `.`, and what it observes passes `super::redact` first (larry#589).
 //! Each reply is exactly one JSON object: `{"command": "<sh -c text>"}`,
 //! `{"read": "<path>"}`, `{"edit": {"path", "old", "new", "expect_digest"}}` or
 //! `{"done": "<summary>"}`. Each command runs in its own process group under the
@@ -40,6 +41,7 @@ use super::digest_hex;
 use super::gate::{self, Subject};
 use super::identity::fresh_id;
 use super::island::{Island, Isolation, Outcome};
+use super::redact::Redactor;
 use super::run::{Place, StreamCallback};
 use super::session_turn::{SYSTEM, Turn};
 use super::workspace::report_members;
@@ -304,6 +306,23 @@ fn open_island(
     }
 }
 
+/// What a session keeps from its model: the settings' keys and host directories,
+/// the folder it works in and, in a copy, the copy's tree and scratch (larry#589).
+fn session_redactor(
+    settings: &Settings,
+    ledger: &Ledger,
+    cwd: &Path,
+    island: Option<&Island>,
+) -> Result<Redactor, ExecError> {
+    let mut redactor = settings.redactor(ledger)?;
+    redactor.hide(cwd, ".");
+    if let Some(Place::Confined(confine)) = island.map(Island::place) {
+        redactor.hide(confine.tree(), ".");
+        redactor.hide(confine.scratch(), "$TMPDIR");
+    }
+    Ok(redactor)
+}
+
 /// Runs the session in an already authorized directory: the route, the model,
 /// the gated proposal and the sealed report.
 fn run_session_prepared(
@@ -342,6 +361,7 @@ fn run_session_prepared(
             let island = open_island(isolation, settings, &task_id, cwd)?;
             let client = ModelClient::new(config, clock, backoff);
             let system = session_system(&route);
+            let redactor = session_redactor(settings, ledger, cwd, island.as_ref())?;
             let mut turn = Turn {
                 client: &client,
                 settings,
@@ -351,12 +371,7 @@ fn run_session_prepared(
                     Some(ref isle) => isle.place(),
                     None => Place::Open(cwd),
                 },
-                // The model is told its directory is `.` in a copy, so the request carries
-                // no run id and no path of the person's.
-                shown: match island {
-                    Some(_) => String::from("."),
-                    None => cwd.display().to_string(),
-                },
+                redactor,
                 system,
                 observer: &mut *observer,
             };
