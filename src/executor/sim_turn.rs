@@ -299,6 +299,58 @@ fn sim_an_approved_command_passes_its_observation_on_exit_zero() -> TestResult<(
     Ok(())
 }
 
+/// An approved edit that names the digest on disk lands and is recorded with
+/// both digests; a stale one is refused with its record and writes nothing; a
+/// declined one never runs. None of them is a command.
+#[test]
+fn sim_an_approved_edit_records_both_digests() -> TestResult<()> {
+    let before = "alpha\n";
+    let after = "beta\n";
+    let digest = lgwks_std::hash::blake3(before.as_bytes()).to_hex();
+    let next = lgwks_std::hash::blake3(after.as_bytes()).to_hex();
+    let edit = format!(
+        "{{\"edit\":{{\"path\":\"a.txt\",\"old\":\"alpha\",\"new\":\"beta\",\"expect_digest\":\"{digest}\"}}}}"
+    );
+    let replies = vec![
+        edit.clone(),
+        edit.clone(),
+        edit,
+        Reply::from("{\"done\":\"edited\"}"),
+    ];
+    let approvals = vec![Approval::Run, Approval::Run, Approval::Decline];
+    let (steps, observer, served) = drive("sim-turn-edit", replies, approvals, |work| {
+        std::fs::write(work.join("a.txt"), before)?;
+        Ok(())
+    })?;
+    assert_eq!(
+        served, 4,
+        "an edit, a stale one, a decline, then the summary"
+    );
+    assert_eq!(observer.passed, vec![true, false], "each edit ends once");
+    assert_eq!(
+        observer.observations.first(),
+        Some(&format!("edited\ndigest {digest} -> {next}")),
+        "the model is shown the digest its next edit names"
+    );
+    assert_eq!((steps.tally.edits, steps.tally.reads), (2, 0));
+    assert_eq!(steps.tally.declined, 1, "the third edit was declined");
+    assert!(steps.tally.results.is_empty(), "an edit is not a command");
+    assert_eq!(
+        steps.tally.changes,
+        vec![
+            lgwks_std::json::json!({
+                "step": 0, "kind": "edit", "path": "a.txt",
+                "before_digest": digest, "after_digest": next,
+            }),
+            lgwks_std::json::json!({
+                "step": 1, "kind": "edit", "path": "a.txt",
+                "refusal": format!("edit file a.txt changed since it was read: its digest is {next}"),
+            }),
+        ]
+    );
+    Ok(())
+}
+
 /// An approved read records the file's digest, which the model is shown; a read
 /// of a path outside the tree is a typed refusal, and a declined read runs not
 /// at all. A long file is cut for the model but digested whole.
