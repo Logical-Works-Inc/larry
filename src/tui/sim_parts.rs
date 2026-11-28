@@ -216,6 +216,11 @@ const PASTED: [(&str, &str); 7] = [
 /// joined, doubled, or sent to the model other than as the person saw them.
 #[test]
 fn sim_paste_keeps_every_line_break_as_one_newline() {
+    for ending in BREAKS {
+        let mut composer = Composer::default();
+        composer.insert(&format!("a{ending}b"));
+        assert_eq!(composer.text(), "a\nb", "{ending:?}");
+    }
     for seed in 0..SEEDS {
         let mut draw = Draw(seed);
         let mut pasted = String::from("head");
