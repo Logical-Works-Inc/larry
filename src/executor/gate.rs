@@ -62,24 +62,27 @@ const TASK_COST: u64 = 1;
 
 /// The scopes the executor is capable of. The capability snapshot pins them,
 /// so the policy alone decides what a task may do.
-const EXECUTOR_CAPABILITIES: [Scope; 5] = [
+const EXECUTOR_CAPABILITIES: [Scope; 6] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
     Scope::ModelCommand,
+    Scope::NetworkEgress,
 ];
 
-/// The policy when `LARRY_POLICY` is unset: the four scopes a task uses. A model
-/// command (larry#93) is never in it: only an operator who isolates the commands
+/// The policy when `LARRY_POLICY` is unset: the five scopes a task uses, network
+/// egress among them because a model call sends bytes off this host (larry#589). A
+/// model command (larry#93) is never in it: only an operator who isolates the commands
 /// outside Larry, as a Harbor task container does, names `model.command`. A terminal
 /// session that confines its own commands to a workspace copy (larry#243, ADR 0046)
 /// needs no such scope and runs under this policy as it is.
-const DEFAULT_POLICY: [Scope; 4] = [
+const DEFAULT_POLICY: [Scope; 5] = [
     Scope::FileRead,
     Scope::FileWrite,
     Scope::ProcessSpawn,
     Scope::ModelInvoke,
+    Scope::NetworkEgress,
 ];
 
 /// The policy when `LARRY_POLICY` is unset.
@@ -172,18 +175,15 @@ pub(super) fn scope_name(scope: Scope) -> String {
     }
 }
 
-/// The scope a policy name admits, or `None` for a name that is not one: the
-/// executor's own scopes plus network egress, which a policy may name though
-/// no executor task needs it.
+/// The scope a policy name admits, or `None` for a name that is not one.
 fn named_scope(name: &str) -> Option<Scope> {
     EXECUTOR_CAPABILITIES
         .iter()
         .copied()
-        .chain(core::iter::once(Scope::NetworkEgress))
         .find(|scope| scope_name(*scope) == name)
 }
 
-/// The `LARRY_POLICY` scopes `read` yields: unset is the four scopes the
+/// The `LARRY_POLICY` scopes `read` yields: unset is the five scopes the
 /// executor uses, the empty string is no scope, names are trimmed and
 /// comma-separated, and an unknown name is a typed refusal.
 pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<Scope>, ExecError> {
@@ -191,6 +191,22 @@ pub(super) fn policy(read: &impl Fn(&str) -> Option<String>) -> Result<BTreeSet<
         return Ok(default_policy());
     };
     policy_names(Some(&text))
+}
+
+/// Refuses unless `LARRY_POLICY` lets bytes leave for a model (larry#589): the
+/// gate of `larry model`, which runs no task and so passes no admission.
+///
+/// # Errors
+///
+/// [`ExecError::BadPolicy`] for a name that is no scope, and
+/// [`ExecError::PolicyRefuses`] when the policy lacks `net.egress`.
+pub fn admit_egress(read: &impl Fn(&str) -> Option<String>) -> Result<(), ExecError> {
+    if policy(read)?.contains(&Scope::NetworkEgress) {
+        return Ok(());
+    }
+    Err(ExecError::PolicyRefuses {
+        scope: scope_name(Scope::NetworkEgress),
+    })
 }
 
 /// Parses a durable policy record. A missing ledger row is remote deny-all.
@@ -219,8 +235,8 @@ pub(super) fn policy_names(text: Option<&str>) -> Result<BTreeSet<Scope>, ExecEr
 }
 
 /// The scopes one task requires: repository read and process spawn always,
-/// and file write plus model invoke when the task carries a brief the model
-/// writes.
+/// and file write, model invoke and network egress when the task carries a brief
+/// the model writes.
 pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     let mut scopes = BTreeSet::new();
     scopes.insert(Scope::FileRead);
@@ -228,6 +244,7 @@ pub(super) fn required_scopes(task: &Task) -> BTreeSet<Scope> {
     if task.brief().is_some() {
         scopes.insert(Scope::FileWrite);
         scopes.insert(Scope::ModelInvoke);
+        scopes.insert(Scope::NetworkEgress);
     }
     scopes
 }
@@ -673,7 +690,7 @@ mod tests {
         );
 
         let mut widened = default_policy();
-        widened.insert(Scope::NetworkEgress);
+        widened.insert(Scope::ModelCommand);
         assert_ne!(
             policy_revision(&default_policy()),
             policy_revision(&widened)

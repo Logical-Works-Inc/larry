@@ -69,7 +69,9 @@ fn a_session_the_gateway_refuses_is_scored_as_a_clean_refusal() -> TestResult {
         let mut env = operator(&state, handle.addr(), &FLASH, "1");
         env.push((
             "LARRY_POLICY",
-            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
+            OsString::from(
+                "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
+            ),
         ));
         let ran = score_arm(&env, set.as_bytes())?;
         assert_eq!(handle.served(), 1, "one refused call, never retried");

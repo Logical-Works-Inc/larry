@@ -81,10 +81,11 @@ const EVERY_FAULT: [Option<mock_model::Fault>; 9] = [
 type TestResult = Result<(), Box<dyn Error>>;
 
 /// The scopes one task requires, in `Scope` order: read and spawn always,
-/// write and model invoke when the task carries a brief.
+/// write, network egress and model invoke when the task carries a brief
+/// (larry#589).
 fn required(brief: bool) -> Vec<&'static str> {
     match brief {
-        true => Vec::from(["file.read", "file.write", "process.spawn", "model.invoke"]),
+        true => Vec::from(NAMES),
         false => Vec::from(["file.read", "process.spawn"]),
     }
 }

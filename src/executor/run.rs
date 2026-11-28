@@ -212,6 +212,17 @@ impl CommandResult {
         self
     }
 
+    /// This result with each kept stream passed through `rewrite` and everything
+    /// else as it was: the copy a model is shown (larry#589).
+    pub(crate) fn rewritten(&self, rewrite: impl Fn(&str) -> String) -> CommandResult {
+        CommandResult {
+            argv: self.argv.clone(),
+            stdout: rewrite(&self.stdout),
+            stderr: rewrite(&self.stderr),
+            ..*self
+        }
+    }
+
     /// The report object for this command.
     #[must_use]
     pub(crate) fn into_json(self) -> lgwks_std::json::Value {
