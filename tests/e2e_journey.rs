@@ -24,6 +24,8 @@ mod ps;
 mod pty;
 #[path = "e2e_journey/read.rs"]
 mod read;
+#[path = "e2e_journey/sessions.rs"]
+mod sessions;
 #[path = "support/terminal_cases.rs"]
 mod terminal_cases;
 #[path = "support/tui_queue.rs"]

@@ -15,6 +15,7 @@
 //! interrupts a task.
 
 use std::cell::Cell;
+#[cfg(test)]
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -26,6 +27,8 @@ use super::layout::split;
 use super::paint;
 use super::pane::Pane;
 use super::pending::{Pending, QUEUE_BOUND};
+use super::session_store::Transcript;
+use super::sessions::Snapshot;
 use super::style::{Style, sanitize};
 use super::worker::{Decision, Ended, Event};
 
@@ -130,8 +133,8 @@ pub(super) enum Phase {
 /// The frame's whole state.
 #[derive(Debug, Clone)]
 pub(crate) struct App {
-    /// The transcript, oldest first.
-    pub(super) entries: VecDeque<Entry>,
+    /// The transcript and every receipt digest seen (larry#256).
+    transcript: Transcript,
     /// The text box.
     pub(super) composer: Composer,
     /// Where the machine is.
@@ -180,7 +183,7 @@ impl App {
     /// A fresh frame showing `header`, `/status` printing `status`.
     pub(crate) fn new(header: Header, status: Vec<String>, width: usize, height: usize) -> Self {
         Self {
-            entries: VecDeque::from([Entry::Header(header)]),
+            transcript: Transcript::new(header),
             composer: Composer::default(),
             phase: Phase::Idle,
             pending: Pending::new(),
@@ -210,7 +213,7 @@ impl App {
     /// and the render stay two jobs.
     pub(crate) fn view(&self) -> paint::View<'_> {
         paint::View {
-            entries: &self.entries,
+            entries: self.transcript.entries(),
             phase: &self.phase,
             composer: &self.composer,
             pane: &self.pane,
@@ -236,18 +239,27 @@ impl App {
         self.always
     }
 
+    /// The transcript the session store reads and writes notices into.
+    pub(crate) fn transcript(&mut self) -> &mut Transcript {
+        &mut self.transcript
+    }
+
+    /// The frame as stored (larry#256): the transcript, the pane and every
+    /// receipt digest. The driver holds it in the state database after every
+    /// turn, so a kill -9 loses at most the turn in flight.
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        self.transcript.snapshot(self.pane.snapshot())
+    }
+
     /// Adds `entry`, dropping the oldest past [`MAX_ENTRIES`].
     pub(super) fn push(&mut self, entry: Entry) {
-        if self.entries.len() >= MAX_ENTRIES {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(entry);
+        self.transcript.push(entry);
     }
 
     /// The transcript entries, oldest first; the bound sims read it.
     #[cfg(test)]
     pub(crate) fn entries(&self) -> &VecDeque<Entry> {
-        &self.entries
+        self.transcript.entries()
     }
 
     /// Takes one input and returns what the driver must do.
@@ -330,7 +342,10 @@ impl App {
                 self.push(Entry::Notice(style, sanitize(&line, false)));
             }
             Event::Diff(text) => self.pane.set_diff(&text),
-            Event::Receipt(receipt) => self.pane.set_receipt(receipt),
+            Event::Receipt(receipt) => {
+                self.transcript.note_receipt(&receipt);
+                self.pane.set_receipt(receipt);
+            }
             Event::Ended(ended) => return self.ended(ended),
         }
         Vec::new()
@@ -476,12 +491,7 @@ impl App {
             )),
             "/status" => self.push(Entry::Info(self.status.clone())),
             "/clear" => {
-                let header = self
-                    .entries
-                    .iter()
-                    .find(|entry| matches!(**entry, Entry::Header(_)))
-                    .cloned();
-                self.entries = header.into_iter().collect();
+                self.transcript.clear_keeping_header();
                 self.scroll = 0;
             }
             "/ps" => self.push(Entry::Info(self.pending.ps_rows())),

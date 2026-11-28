@@ -38,6 +38,9 @@ pub(crate) enum SimError {
     /// The executor refused a step the helper needs (a ledger, an origin, a workspace).
     #[error("executor: {0}")]
     Exec(#[from] ExecError),
+    /// A sim could not read the state database back through `SQLite` (larry#578).
+    #[error("state database: {0}")]
+    Database(#[from] lgwks_deps::storefront::rusqlite::Error),
     /// An environment variable the helper reads is unset or not text.
     #[error("environment: {0}")]
     Env(#[from] VarError),
