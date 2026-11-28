@@ -239,3 +239,92 @@ pub(super) fn clause(node: &AstNode<'_>, base: &mut Vec<String>, items: &mut Vec
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use lgwks_ast::{Language, ParseError, try_parse};
+
+    use super::Uses;
+
+    /// The names `source` binds, read by the estate reader the rule uses.
+    fn uses_of(source: &str) -> Result<Uses, ParseError> {
+        Ok(Uses::of(&try_parse(source, Language::Rust)?.root()))
+    }
+
+    /// Whether `path`, written `a::b`, names the process id and the temp directory, in a function
+    /// that rebinds `bound`.
+    fn meaning(uses: &Uses, path: &str, bound: &[&str]) -> (bool, bool) {
+        let segments: Vec<String> = path.split("::").map(String::from).collect();
+        let bound: BTreeSet<String> = bound.iter().map(|name| String::from(*name)).collect();
+        (
+            uses.is_pid(&segments, &bound),
+            uses.is_temp(&segments, &bound),
+        )
+    }
+
+    /// The Rust Reference on use declarations: an alias, a `self` group, a glob and a plain
+    /// import each give the local name its meaning, and a rebound bare name shadows only itself.
+    #[test]
+    fn sim_every_use_spelling_gives_the_local_name_its_meaning() -> Result<(), ParseError> {
+        const PID: (bool, bool) = (true, false);
+        const TEMP: (bool, bool) = (false, true);
+        const NEITHER: (bool, bool) = (false, false);
+        let none = uses_of("fn f() {}\n")?;
+        assert_eq!(meaning(&none, "std::process::id", &[]), PID);
+        assert_eq!(meaning(&none, "std::env::temp_dir", &[]), TEMP);
+        for other in ["std::process", "other::process::id", "id", "temp_dir"] {
+            assert_eq!(meaning(&none, other, &[]), NEITHER, "{other}");
+        }
+
+        let aliased = uses_of("use std::process as p;\nuse std::env as e;\n")?;
+        assert_eq!(meaning(&aliased, "p::id", &["id"]), PID);
+        assert_eq!(meaning(&aliased, "e::temp_dir", &["temp_dir"]), TEMP);
+        assert_eq!(meaning(&aliased, "e::id", &[]), NEITHER);
+        assert_eq!(meaning(&aliased, "p::temp_dir", &[]), NEITHER);
+
+        let plain = uses_of("use std::process::id;\nuse std::env::temp_dir as td;\n")?;
+        assert_eq!(meaning(&plain, "id", &[]), PID);
+        assert_eq!(meaning(&plain, "td", &["id"]), TEMP);
+        assert_eq!(meaning(&plain, "id", &["id"]), NEITHER);
+        assert_eq!(meaning(&plain, "td", &["td"]), NEITHER);
+        assert_eq!(meaning(&plain, "temp_dir", &[]), NEITHER);
+
+        let grouped = uses_of("use std::{process::{self}, env::{self as e}};\n")?;
+        assert_eq!(meaning(&grouped, "process::id", &[]), PID);
+        assert_eq!(meaning(&grouped, "e::temp_dir", &[]), TEMP);
+
+        let glob = uses_of("use std::process::*;\nuse std::env::*;\n")?;
+        assert_eq!(meaning(&glob, "id", &[]), PID);
+        assert_eq!(meaning(&glob, "temp_dir", &[]), TEMP);
+        assert_eq!(meaning(&glob, "id", &["id"]), NEITHER);
+        assert_eq!(meaning(&glob, "temp_dir", &["temp_dir"]), NEITHER);
+        Ok(())
+    }
+
+    /// CWE-693: a path that only resembles the standard one, and a `use` inside a function, bind
+    /// no name at all.
+    #[test]
+    fn sim_a_lookalike_use_binds_nothing() -> Result<(), ParseError> {
+        for source in [
+            "fn f() { use std::process::id; }\n",
+            "use crate::process::id;\n",
+            "use other::std::process::id;\n",
+            "use super::env::temp_dir;\n",
+            "use std::process::exit;\n",
+            "use std::env::var_os;\n",
+            "use std::process::{Command, Stdio};\n",
+            "use std::collections::*;\n",
+            "use std::process::id::*;\n",
+            "use *;\n",
+        ] {
+            let uses = uses_of(source)?;
+            assert!(
+                uses.names.is_empty() && uses.globs.is_empty(),
+                "{source}: {uses:?}"
+            );
+        }
+        Ok(())
+    }
+}

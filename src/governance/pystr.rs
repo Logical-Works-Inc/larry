@@ -287,4 +287,63 @@ mod tests {
             "an absent anchor stays absent"
         );
     }
+
+    /// Requirement: every string primitive matches CPython 3.12 exactly.
+    /// Source: CPython `unicodeobject.c` (`isspace`, `split`, `splitlines`,
+    /// `repr`). Adversarial: information separators, ligatures, lone breaks and
+    /// truncated UTF-8 that must name the exact codec position (CWE-707).
+    #[test]
+    fn sim_every_string_primitive_matches_python() -> crate::governance::sim_support::SimResult {
+        let classes = Classes::new()?;
+        // `isspace`: Rust whitespace plus the four information separators, never a letter.
+        for separator in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            assert!(is_space(separator), "{separator:?} is space");
+        }
+        assert!(is_space(' ') && is_space('\t') && is_space('\u{a0}'));
+        assert!(!is_space('a') && !is_space('_'));
+        // `strip` and `split` read the same class.
+        assert_eq!(strip(" \u{1c}hi\u{1d} "), "hi");
+        assert_eq!(strip(""), "");
+        assert_eq!(split("a\u{1c} \tb\nc"), ["a", "b", "c"]);
+        assert!(split("   ").is_empty());
+        // `splitlines`: CRLF is one break, a trailing break leaves no empty tail.
+        assert_eq!(splitlines("a\r\nb"), ["a", "b"]);
+        assert_eq!(splitlines("a\r\n"), ["a"]);
+        assert_eq!(splitlines("\r"), vec![""]);
+        assert_eq!(splitlines("a\u{2029}b\u{0b}c"), ["a", "b", "c"]);
+        // `repr`: the quote that avoids the most escapes, every control escaped.
+        assert_eq!(
+            classes.repr("say \"hi\" and 'bye'"),
+            "'say \"hi\" and \\'bye\\''"
+        );
+        assert_eq!(classes.repr("\\"), "'\\\\'");
+        assert_eq!(classes.list(&[]), "[]");
+        assert_eq!(
+            classes.list(&[String::from("a"), String::from("b")]),
+            "['a', 'b']"
+        );
+        assert_eq!(escape('\u{1f}'), "\\x1f");
+        assert_eq!(escape('\u{abcd}'), "\\uabcd");
+        assert_eq!(escape('\u{10ffff}'), "\\U0010ffff");
+        // Full case folding covers every ligature the anchor check names.
+        for (folded, ascii) in [
+            ("ﬀ", "ff"),
+            ("ﬁ", "fi"),
+            ("ﬂ", "fl"),
+            ("ﬃ", "ffi"),
+            ("ﬄ", "ffl"),
+            ("ﬅ", "st"),
+            ("ﬆ", "st"),
+            ("ẞ", "ss"),
+        ] {
+            assert!(
+                casefold_contains(folded, ascii),
+                "{folded} folds to {ascii}"
+            );
+        }
+        assert!(!casefold_contains("", "x"));
+        assert!(is_line_break('\n'));
+        assert!(!is_line_break('x'));
+        Ok(())
+    }
 }

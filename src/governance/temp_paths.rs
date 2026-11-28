@@ -22,6 +22,8 @@
 //! workspaces; POSIX `mkstemp(3)`; CWE-377 (insecure temporary file) and CWE-59 (link following).
 
 mod follow;
+#[cfg(all(test, unix))]
+mod sim_manifest;
 mod snapshot;
 mod syntax;
 mod uses;

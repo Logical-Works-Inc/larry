@@ -453,3 +453,145 @@ fn inline_modules(node: &AstNode<'_>) -> Vec<String> {
     names.reverse();
     names
 }
+
+#[cfg(test)]
+mod tests {
+    use lgwks_ast::{Language, ParseError, try_parse};
+
+    use super::{
+        cfg_test, crate_root, follow_names, is_test_code, line_of, literal_text, starts_temp,
+        verdicts,
+    };
+
+    /// The verdicts of one test source, read by the estate reader the rule uses.
+    fn probe(source: &str) -> Result<Vec<String>, ParseError> {
+        let tree = try_parse(source, Language::Rust)?;
+        Ok(verdicts("tests/probe.rs", source, &tree))
+    }
+
+    /// The Rust Reference on paths and literals: the temp roots, the crate roots, the test
+    /// gates, the line of a byte and each literal form are read exactly.
+    #[test]
+    fn sim_each_path_and_literal_form_reads_exactly() -> Result<(), ParseError> {
+        for temp in ["/tmp/x", "/var/tmp/y", "/tmp"] {
+            assert!(starts_temp(temp), "{temp}");
+        }
+        for other in ["/var/folders/x", "tmp/x", "/TMP/x", "//tmp", ""] {
+            assert!(!starts_temp(other), "{other}");
+        }
+        for root in [
+            "src/lib.rs",
+            "src/main.rs",
+            "src/a/mod.rs",
+            "tests/x.rs",
+            "tests/x",
+            "benches/b.rs",
+            "examples/e.rs",
+            "src/bin/tool.rs",
+        ] {
+            assert!(crate_root(root), "{root}");
+        }
+        for nested in ["src/a.rs", "src/tests/deep/x.rs", "bin.rs", ""] {
+            assert!(!crate_root(nested), "{nested}");
+        }
+        assert!(cfg_test("#[cfg(test)]"));
+        assert!(cfg_test("  #[cfg(all(test, unix))] "));
+        assert!(!cfg_test("#[cfg(unix)]"));
+        assert!(!cfg_test("#[test]"));
+
+        let plain = try_parse("fn f() {}\n", Language::Rust)?;
+        for test_code in [
+            "tests/a.rs",
+            "src/sim_x.rs",
+            "src/a_tests.rs",
+            "src/tests.rs",
+        ] {
+            assert!(is_test_code(test_code, &plain), "{test_code}");
+        }
+        assert!(!is_test_code("src/a.rs", &plain));
+        let gated = try_parse("#[cfg(test)]\nfn f() {}\n", Language::Rust)?;
+        assert!(is_test_code("src/a.rs", &gated));
+
+        assert_eq!(line_of("a\nb\nc", 0), 1);
+        assert_eq!(line_of("a\nb\nc", 2), 2);
+        assert_eq!(line_of("a\nb\nc", 5), 3);
+        assert_eq!(line_of("a\nb\nc", 100), 1);
+
+        for (spelled, content) in [
+            ("\"x\"", Some("x")),
+            ("b\"x\"", Some("x")),
+            ("c\"x\"", Some("x")),
+            ("br#\"x\"#", Some("x")),
+            ("cr\"x\"", Some("x")),
+            ("r##\"/tmp/\"x\"##", Some("/tmp/\"x")),
+            ("r#\"x\"", None),
+            ("r##\"\"#", None),
+            ("r\"", None),
+            ("r#", None),
+            ("\"open", None),
+            ("x", None),
+            ("b", None),
+        ] {
+            assert_eq!(literal_text(spelled).as_deref(), content, "{spelled:?}");
+        }
+        Ok(())
+    }
+
+    /// The Rust Reference on macros: a `TMPDIR` read is a temp source however it is spelled, in
+    /// a node or a token tree, and a read of anything else or a method named `var` is not.
+    #[test]
+    fn sim_only_a_read_of_the_temp_variable_is_a_temp_source() -> Result<(), ParseError> {
+        let leak = ["a process id names a temp directory outside the guard: tests/probe.rs:2"];
+        for source in [
+            "fn f() -> String {\n    let set = format!(\"{}\", std::env::var(\"TMPDIR\"));\n    format!(\"{set}{}\", std::process::id())\n}\n",
+            "fn f() -> String {\n    let dir = env!(\"TMPDIR\");\n    format!(\"{dir}{}\", std::process::id())\n}\n",
+        ] {
+            assert_eq!(probe(source)?, leak, "{source}");
+        }
+        for source in [
+            "fn f() -> String {\n    let set = std::env::var();\n    format!(\"{set:?}{}\", std::process::id())\n}\n",
+            "fn f() -> String {\n    let set = std::env::var(OTHER);\n    format!(\"{set:?}{}\", std::process::id())\n}\n",
+            "fn f() -> String {\n    let set = std::env::var(123);\n    format!(\"{set:?}{}\", std::process::id())\n}\n",
+            "fn f() -> String {\n    let set = std::env::var(\"HOME\");\n    format!(\"{set:?}{}\", std::process::id())\n}\n",
+            "fn f() -> String {\n    let set = Helper.var(\"TMPDIR\");\n    format!(\"{set:?}{}\", std::process::id())\n}\n",
+            "fn f() -> String {\n    let set = env!(\"HOME\");\n    format!(\"{set}{}\", std::process::id())\n}\n",
+            "fn f() {\n    foo!(a :: 1);\n    foo!(:: b);\n    foo!(1 :: b);\n}\n",
+        ] {
+            assert_eq!(probe(source)?.len(), 0, "{source}");
+        }
+        Ok(())
+    }
+
+    /// The Rust Reference on modules and `include!`: each `#[path]` carries the inline modules
+    /// around it, an `include!` carries none, and no other macro or attribute names a file.
+    #[test]
+    fn sim_only_a_path_attribute_or_an_include_names_a_module() -> Result<(), ParseError> {
+        let named = |source: &str| -> Result<Vec<(String, Vec<String>)>, ParseError> {
+            let tree = try_parse(source, Language::Rust)?;
+            Ok(follow_names(&tree)
+                .into_iter()
+                .map(|found| (found.name, found.inline))
+                .collect())
+        };
+        let found = named(
+            "mod outer {\n    mod inner {\n        #[path = \"a.rs\"]\n        mod m;\n    }\n}\nfn f() { include!(\"b.rs\"); }\n",
+        )?;
+        let inline = vec![String::from("outer"), String::from("inner")];
+        assert_eq!(
+            found,
+            [
+                (String::from("a.rs"), inline),
+                (String::from("b.rs"), Vec::new()),
+            ]
+        );
+        for none in [
+            "#[pathology = \"a.rs\"]\nmod m;\n",
+            "#[path]\nmod m;\n",
+            "fn f() { include_str!(\"a.txt\"); }\n",
+            "fn f() { helper::pid(); }\n",
+        ] {
+            assert_eq!(named(none)?.len(), 0, "{none}");
+        }
+        Ok(())
+    }
+}

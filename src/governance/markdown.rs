@@ -434,3 +434,119 @@ pub(crate) fn heading_ids(text: &str, patterns: &Patterns) -> BTreeSet<String> {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::sim_support::SimResult;
+    use super::*;
+
+    /// Frontmatter and fences give the Python checker's exact messages (CWE-20): a missing
+    /// envelope, key or value, a duplicate, an open bracket, a foreign line, a torn fence.
+    #[test]
+    fn sim_hostile_frontmatter_and_fences_get_exact_errors() -> SimResult {
+        let patterns = Patterns::new()?;
+        let errors = |text: &str| frontmatter_errors("a.md", text, &patterns);
+        let rest = "title: t\ndescription: d\nresource: r\ntags: []\ngenerated: g\n\
+                    verified: v\nstatus: s\nstale_after: n\nsources: []\n";
+        let around = |head: &str| format!("---\n{head}\n{rest}---\n");
+        assert_eq!(errors(&around("type: x")), Vec::<String>::new());
+        assert_eq!(
+            errors("no envelope"),
+            ["a.md: missing frontmatter envelope"]
+        );
+        for (head, told) in [
+            ("type: x\ntype: y", "duplicate frontmatter key"),
+            ("type: ", "empty frontmatter field type"),
+            ("type: [x", "unterminated frontmatter field type"),
+            ("type: {x", "unterminated frontmatter field type"),
+            (
+                "type: x\nNot A Field!",
+                "unsupported frontmatter line 'Not A Field!'",
+            ),
+        ] {
+            assert_eq!(errors(&around(head)), [format!("a.md: {told}")], "{head}");
+        }
+        assert_eq!(
+            errors("---\ntype: x\n---\n"),
+            [
+                "a.md: missing frontmatter keys ['description', 'generated', 'resource', 'sources', 'stale_after', 'status', 'tags', 'title', 'verified']"
+            ]
+        );
+        assert_eq!(frontmatter_group("no fences here"), None);
+        assert_eq!(frontmatter_group("---\nnever closed"), None);
+        for line in ["no colon here", ": novalue", "UPPER: x"] {
+            assert_eq!(frontmatter_field(line), None, "{line}");
+        }
+        assert_eq!(frontmatter_field("a_b:  v "), Some(("a_b", "v ")));
+
+        let torn = markdown_structure("```x`y\ncode\n", &patterns);
+        assert_eq!(
+            torn.errors,
+            ["malformed backtick fence", "unclosed code fence"]
+        );
+        let open = markdown_structure("```mermaid\nflow\n", &patterns);
+        assert_eq!(open.errors, ["unclosed code fence"]);
+        assert_eq!(open.languages(), ["mermaid"]);
+        let nested = markdown_structure("~~~~\n~~~\n```\n~~~~\nafter\n", &patterns);
+        assert_eq!(nested.errors, Vec::<String>::new());
+        assert_eq!(nested.visible_text(), "after");
+        let suffixed = markdown_structure("```text\n``` no\n# kept in\n", &patterns);
+        assert_eq!(suffixed.errors, ["unclosed code fence"]);
+        assert_eq!(suffixed.visible_text(), "");
+        Ok(())
+    }
+
+    /// URL splitting and escapes match CPython `urlsplit` and `unquote` (RFC 3986): hostile
+    /// schemes, bracketed literals and torn escapes; repeated headings take `-N`.
+    #[test]
+    fn sim_hostile_urls_and_escapes_split_as_python_does() -> SimResult {
+        let patterns = Patterns::new()?;
+        let split = urlsplit("https://host/path?q=1#frag", &patterns)?;
+        assert_eq!(split.scheme, "https");
+        assert_eq!(split.netloc, "host");
+        assert_eq!(split.fragment, "frag");
+        for (url, netloc) in [
+            ("http://[::1]/", "[::1]"),
+            ("http://[v1.fe]/", "[v1.fe]"),
+            ("http://example/[::1]/", "example"),
+        ] {
+            assert_eq!(urlsplit(url, &patterns)?.netloc, netloc, "{url}");
+        }
+        for (url, refusal) in [
+            ("http://[::1", "Invalid IPv6 URL"),
+            ("http://[v1.]/", "IPvFuture address is invalid"),
+            ("http://[1.2.3.4]/", "An IPv4 address cannot be in brackets"),
+            (
+                "http://[::zz]/",
+                "'::zz' does not appear to be an IPv4 or IPv6 address",
+            ),
+            (
+                "http://[x]/",
+                "'x' does not appear to be an IPv4 or IPv6 address",
+            ),
+        ] {
+            let told = urlsplit(url, &patterns)
+                .err()
+                .map(|cause| cause.to_string());
+            assert_eq!(told.as_deref(), Some(refusal), "{url}");
+        }
+        let (scheme, rest) = split_scheme("1bad: x");
+        assert_eq!(scheme, "");
+        assert_eq!(rest, "1bad: x");
+        let (scheme, _) = split_scheme("HTTPS://x");
+        assert_eq!(scheme, "https");
+        // Percent decoding: valid pairs decode, torn escapes stay literal.
+        assert_eq!(percent_decode("%41%zz%"), "A%zz%");
+        assert_eq!(percent_decode("%41"), "A");
+        assert_eq!(hex_pair(b"41"), Some(0x41));
+        assert_eq!(hex_pair(b"zz"), None);
+        assert_eq!(hex_pair(b"4"), None);
+        // Heading IDs dedupe repeats with `-N`.
+        let ids = heading_ids("# Hi\n# Hi\n```\n# Fenced\n```\n", &patterns);
+        assert_eq!(
+            ids,
+            BTreeSet::from([String::from("hi"), String::from("hi-1")])
+        );
+        Ok(())
+    }
+}

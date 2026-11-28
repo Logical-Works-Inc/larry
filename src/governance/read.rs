@@ -207,3 +207,64 @@ fn missing_or_unreadable(cause: io::Error) -> ReadFault {
         ReadFault::Unreadable(cause)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::sim_support::{Scratch, SimResult};
+    use super::*;
+
+    /// Requirement: the final-open and mid-walk faults name the kind the open
+    /// refused. Source: CWE-59, CWE-367. Adversarial: a link, a directory, a
+    /// file, a FIFO and a name that went away, each judged after the refusal.
+    #[test]
+    fn sim_open_faults_name_their_current_kind() -> SimResult {
+        let scratch = Scratch::new("reader-kinds")?;
+        let root = scratch.path();
+        std::fs::write(root.join("file.txt"), b"hi")?;
+        std::fs::create_dir_all(root.join("dir"))?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("file.txt"), root.join("link.txt"))?;
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("mkfifo")
+                .arg(root.join("fifo"))
+                .status()?;
+            assert!(status.success(), "mkfifo refused: {status}");
+        }
+        let directory = Dir::open(root)?;
+        let opened = || io::Error::other("open refused");
+        let last = |name| final_fault(&directory, name, opened());
+        assert_eq!(told(last("link.txt")), "symlink");
+        assert_eq!(told(last("dir")), "not regular, directory true");
+        assert_eq!(told(last("file.txt")), "unreadable: open refused");
+        #[cfg(unix)]
+        assert_eq!(told(last("fifo")), "not regular, directory false");
+        assert!(told(last("absent.txt")).starts_with("missing: "));
+
+        let walked = |name| opened_dir_fault(&directory, name, Path::new("a/b"), opened());
+        assert_eq!(told(walked("link.txt")), "symlink");
+        assert_eq!(told(walked("dir")), "unreadable: open refused");
+        assert_eq!(
+            told(walked("file.txt")),
+            "unreadable: a/b is not a directory"
+        );
+        assert!(told(walked("absent.txt")).starts_with("missing: "));
+
+        let gone = io::Error::new(io::ErrorKind::NotFound, "gone");
+        assert_eq!(told(missing_or_unreadable(gone)), "missing: gone");
+        let busy = io::Error::other("busy");
+        assert_eq!(told(missing_or_unreadable(busy)), "unreadable: busy");
+        Ok(())
+    }
+
+    /// One fault as one line, so a case asserts the variant and its cause together.
+    fn told(fault: ReadFault) -> String {
+        match fault {
+            ReadFault::Missing(cause) => format!("missing: {cause}"),
+            ReadFault::Symlink => String::from("symlink"),
+            ReadFault::NotRegular { directory } => format!("not regular, directory {directory}"),
+            ReadFault::TooLarge { bytes } => format!("too large: {bytes}"),
+            ReadFault::Unreadable(cause) => format!("unreadable: {cause}"),
+        }
+    }
+}
