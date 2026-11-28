@@ -114,6 +114,11 @@ fn an_unopenable_run_lock_never_refuses_the_next_run() -> TestResult {
             "{fault:?}: one typed line names the kept journal, got {:?}",
             stderr_of(&first)
         );
+        assert!(
+            kept.iter()
+                .all(|line| line.contains("run lock cannot be opened")),
+            "{fault:?}: the line says why, got {kept:?}"
+        );
         assert!(journal.exists(), "{fault:?}: it stays a journal");
         assert!(
             lgwks_std::process::process_group_exists(pid)?,
