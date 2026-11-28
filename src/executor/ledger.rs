@@ -84,11 +84,12 @@ impl Ledger {
         // file's version in order, so a shipped step never moves. Main's price
         // step claimed 8 first (larry#204) and its route-prompts step 9
         // (larry#205, #534); the tenant key step appends as 10
-        // (larry#211 part B). Reports and live groups keep their shape here;
+        // (larry#211 part B) and the residency step as 11 (larry#203).
+        // Reports and live groups keep their shape here;
         // their tenant columns land in part C.
         lgwks_deps::sqlite::migrate(
             &conn,
-            10,
+            11,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -100,6 +101,7 @@ impl Ledger {
                 routes::PRICE_SCHEMA,
                 routes::ROUTE_PROMPT_SCHEMA,
                 tenant::STEP_TEN,
+                routes::RESIDENCY_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;

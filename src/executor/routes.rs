@@ -4,8 +4,12 @@
 //! shows which route a task naming an id (or none) would use. The key is never
 //! an argument and never stored: a route names the `LARRY_KEY_<TAG>_*` variable
 //! that holds it, under the tag its own tenant's digest names, and the variable
-//! is read only when a task reaches the model (larry#328).
+//! is read only when a task reaches the model (larry#328). A briefed task's
+//! route is chosen by the sibling `route_select` module, which checks the
+//! tenant's stored residency policy after its choice exactly as `resolve_for`
+//! does here (larry#203).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
@@ -13,16 +17,12 @@ use std::path::Path;
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
-use super::task::Task;
-use super::{ExecError, Ledger, Settings, state_dir};
+use super::{ExecError, Ledger, state_dir};
 use crate::eval::PriceFault;
-use crate::model::{
-    Draft, Kind, Policy, Route, RouteError, Selection, Table, env_route, is_route_id, query_of,
-    resolve, select,
-};
-use crate::rerank::Scorer;
-#[cfg(feature = "rerank")]
-use crate::rerank::{Candidate, Deadline, RerankError};
+use crate::model::{Draft, Kind, Route, RouteError, Table, env_route, is_route_id, resolve};
+
+/// The most country codes one tenant may allow.
+const MAX_RESIDENCY_CODES: usize = 64;
 
 /// Why `larry route` did not finish.
 #[derive(Debug, Error)]
@@ -32,7 +32,7 @@ pub enum RouteCliError {
     /// this one message (larry#543): the derive renders tuple placeholders
     /// onto its extra arguments, so a `{USAGE}` tail would print twice.
     #[error(
-        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
+        "route: {0}; usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | residency <CC,...> | residency --clear | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]"
     )]
     Usage(&'static str),
     /// An argument is not UTF-8 text.
@@ -94,7 +94,7 @@ fn from_exec(error: ExecError) -> RouteCliError {
 
 /// The tenant the caller selected, as the text every route row is keyed by:
 /// `LARRY_TENANT` when it names one, else the store's default (larry#211).
-fn tenant_text(
+pub(super) fn tenant_text(
     ledger: &Ledger,
     state: &Path,
     read: &impl Fn(&str) -> Option<String>,
@@ -124,163 +124,13 @@ pub(super) fn resolve_for(
     } else {
         env_route(read).map_err(ExecError::ModelConfig)?
     };
-    resolve(&tenant, &table, named, environment).map_err(ExecError::Route)
-}
-
-/// Builds the shipped ranker once, or names why it cannot.
-#[cfg(feature = "rerank")]
-type MakeScorer = Box<dyn FnMut() -> Result<Box<dyn Scorer>, RouteError>>;
-
-/// A scorer that builds the shipped local ranker on its first scored
-/// candidate, never on construction: a tenant whose choice needs no ranking
-/// never fails for a missing model or home directory, and a missing engine
-/// fails only the ranking that needs it, exactly as if no engine had been
-/// built (larry#202).
-#[cfg(feature = "rerank")]
-struct LazyScorer {
-    /// Builds the engine; taken on first use.
-    make: Option<MakeScorer>,
-    /// The engine once built.
-    engine: Option<Box<dyn Scorer>>,
-}
-
-#[cfg(feature = "rerank")]
-impl LazyScorer {
-    /// A scorer that builds the shipped local ranker on first use.
-    fn local() -> Self {
-        Self {
-            make: Some(Box::new(|| {
-                let scorer: Box<dyn Scorer> =
-                    Box::new(crate::rerank::local_scorer().map_err(|cause| {
-                        RouteError::NoRanker {
-                            detail: format!(
-                                "{cause}; fetch the pinned model and retry, or name the route"
-                            ),
-                        }
-                    })?);
-                Ok(scorer)
-            })),
-            engine: None,
-        }
+    let route = resolve(&tenant, &table, named, environment).map_err(ExecError::Route)?;
+    if let Some(allowed) = ledger.residency(&tenant)?
+        && let Some(refusal) = route.residency_refusal(&allowed)
+    {
+        return Err(ExecError::Route(refusal));
     }
-}
-
-#[cfg(feature = "rerank")]
-impl Scorer for LazyScorer {
-    fn score(
-        &mut self,
-        query: &str,
-        rows: &[Candidate],
-        batch: usize,
-        deadline: Deadline,
-    ) -> Result<Vec<f64>, RerankError> {
-        match self.engine {
-            Some(ref mut engine) => engine.score(query, rows, batch, deadline),
-            None => {
-                let mut make = self.make.take().ok_or_else(|| {
-                    RerankError::Engine(String::from("the route ranker is unavailable"))
-                })?;
-                let engine = make().map_err(|cause| match cause {
-                    RouteError::NoRanker { detail } => RerankError::Engine(detail),
-                    _ => RerankError::Engine(cause.to_string()),
-                })?;
-                self.engine
-                    .insert(engine)
-                    .score(query, rows, batch, deadline)
-            }
-        }
-    }
-}
-
-/// The route a briefed task sends its model calls to: the named route when the
-/// task names one (resolved exactly as the configured resolver does), else the
-/// best-ranked eligible route. An explicit name always wins; without one the
-/// transport and key binding gates, then the residency rule and the budget
-/// filter before the shipped local ranker scores the survivors by meaning,
-/// and without the `rerank` feature the eligible default wins (larry#202).
-/// Nothing is sent to choose it.
-///
-/// # Errors
-///
-/// [`ExecError::Route`] for an unknown name, a malformed ranking knob, no
-/// eligible route or an unavailable ranker; [`ExecError::ModelConfig`] for an
-/// environment route that cannot be read.
-pub(super) fn select_for(
-    ledger: &Ledger,
-    state: &Path,
-    named: Option<&str>,
-    query: Option<&str>,
-    read: &impl Fn(&str) -> Option<String>,
-) -> Result<Selection, ExecError> {
-    let tenant = tenant_text(ledger, state, read)?;
-    let table = ledger.routes(&tenant)?;
-    let environment = if table.lookup(named).is_some() {
-        None
-    } else {
-        env_route(read).map_err(ExecError::ModelConfig)?
-    };
-    let policy = Policy::parse(read).map_err(ExecError::Route)?;
-    // The engine builds on its first scored candidate, never on construction:
-    // a tenant whose choice needs no ranking never fails for a missing model
-    // or home directory, and a missing engine fails only the ranking that
-    // needs it, exactly as if no engine had been built (larry#202).
-    #[cfg(feature = "rerank")]
-    let mut engine: Option<Box<dyn Scorer>> = if named.is_none() {
-        let scorer: Box<dyn Scorer> = Box::new(LazyScorer::local());
-        Some(scorer)
-    } else {
-        None
-    };
-    #[cfg(not(feature = "rerank"))]
-    let mut engine: Option<Box<dyn Scorer>> = None;
-    // The scorer borrows the engine only for the call below, so each arm
-    // ends the borrow before the choice returns. The query stays an option
-    // into `select`: a named task resolves before the ranker runs, and an
-    // unnamed one ranks only on the text `task_select` built from its brief.
-    let choice = match engine.as_mut() {
-        Some(held) => {
-            let scorer: &mut dyn Scorer = &mut **held;
-            select(
-                &tenant,
-                &table,
-                named,
-                environment,
-                query,
-                &policy,
-                Some(scorer),
-            )
-        }
-        None => select(&tenant, &table, named, environment, query, &policy, None),
-    };
-    choice.map_err(ExecError::Route)
-}
-
-/// The route a briefed task sends its model calls to: the named route when
-/// the task names one, else the best-ranked eligible route, with the
-/// residency and budget filters before the ranker and the choice sealed
-/// beside the route for the replay to answer from (larry#202).
-///
-/// # Errors
-///
-/// [`ExecError::Route`] for an unknown name, a malformed ranking knob, no
-/// eligible route or an unavailable ranker; [`ExecError::ModelConfig`] for an
-/// environment route that cannot be read.
-pub(crate) fn task_select(
-    settings: &Settings,
-    ledger: &Ledger,
-    task: &Task,
-) -> Result<Selection, ExecError> {
-    let query = match (task.route(), task.brief()) {
-        (None, Some(brief)) => Some(query_of(brief.goal(), brief.files(), task.acceptance())),
-        _ => None,
-    };
-    select_for(
-        ledger,
-        settings.state_dir(),
-        task.route(),
-        query.as_deref(),
-        &|name: &str| (settings.read)(name),
-    )
+    Ok(route)
 }
 
 /// The flags of `route add`, each still text.
@@ -348,6 +198,26 @@ fn required<'arg>(
     flag: &'static str,
 ) -> Result<&'arg str, RouteCliError> {
     value.ok_or(RouteCliError::Missing { flag })
+}
+
+/// Parses a tenant's comma-separated, canonical ISO country policy.
+fn residency_codes(text: &str) -> Result<Vec<String>, RouteCliError> {
+    let mut codes = BTreeSet::new();
+    for code in text.split(',').map(str::trim) {
+        if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return Err(RouteCliError::Route(RouteError::BadResidency));
+        }
+        if codes.len() >= MAX_RESIDENCY_CODES && !codes.contains(code) {
+            return Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
+                limit: MAX_RESIDENCY_CODES,
+            }));
+        }
+        codes.insert(code.to_owned());
+    }
+    if codes.is_empty() {
+        return Err(RouteCliError::Route(RouteError::BadResidency));
+    }
+    Ok(codes.into_iter().collect())
 }
 
 /// `text` as a number of type `Number`, or the flag's refusal.
@@ -535,6 +405,7 @@ fn list(
 ) -> Result<(), RouteCliError> {
     let (ledger, tenant) = open(read)?;
     let table = ledger.routes(&tenant).map_err(from_exec)?;
+    let policy = ledger.residency(&tenant).map_err(from_exec)?;
     if as_json {
         let routes: Vec<Value> = table
             .routes()
@@ -543,8 +414,11 @@ fn list(
             .collect();
         return say(
             out,
-            &json!({ "default": table.default_id(), "routes": routes }),
+            &json!({ "default": table.default_id(), "residency": policy, "routes": routes }),
         );
+    }
+    if let Some(codes) = policy.as_deref() {
+        say(out, &format_args!("residency\t{}", codes.join(",")))?;
     }
     for route in table.routes() {
         // A route that declares no residency prints a dash in its column.
@@ -569,6 +443,26 @@ fn list(
         )?;
     }
     Ok(())
+}
+
+/// `larry route residency <CC,...>` stores the tenant policy, or `--clear` removes it.
+fn residency(
+    read: &impl Fn(&str) -> Option<String>,
+    value: &str,
+    out: &mut impl Write,
+) -> Result<(), RouteCliError> {
+    let (ledger, tenant) = open(read)?;
+    match value {
+        "--clear" => {
+            ledger.clear_residency(&tenant).map_err(from_exec)?;
+            say(out, &json!({ "cleared": true, "residency": null }))
+        }
+        value => {
+            let codes = residency_codes(value)?;
+            ledger.set_residency(&tenant, &codes).map_err(from_exec)?;
+            say(out, &json!({ "residency": codes, "saved": true }))
+        }
+    }
 }
 
 /// `larry route remove <id>`: deletes the route; a removed default leaves none.
@@ -628,6 +522,7 @@ pub fn run(
         ["price", id, ref flags @ ..] => price(&read, id, flags, out),
         ["list"] => list(&read, false, out),
         ["list", "--json"] => list(&read, true, out),
+        ["residency", value] => residency(&read, value, out),
         ["remove", id] => remove(&read, id, out),
         ["default", id] => make_default(&read, id, out),
         ["resolve"] => show(&read, None, out),
@@ -744,6 +639,66 @@ mod tests {
         let text = String::from_utf8(out)?;
         assert!(text.contains("\"saved\":true"), "{text}");
         assert!(text.contains(&key_env), "the exact variable: {text}");
+        Ok(())
+    }
+
+    /// The tenant policy accepts 64 shaped country codes and refuses the next one typed.
+    #[test]
+    fn residency_policy_is_bounded_at_sixty_four_codes() {
+        let mut codes = Vec::new();
+        for first in b'A'..=b'C' {
+            for second in b'A'..=b'Z' {
+                codes.push(format!("{}{}", char::from(first), char::from(second)));
+            }
+        }
+        let text = codes.into_iter().take(65).collect::<Vec<_>>().join(",");
+        assert!(matches!(
+            super::residency_codes(&text),
+            Err(RouteCliError::Route(RouteError::ResidencyPolicyTooLarge {
+                limit: 64
+            }))
+        ));
+    }
+
+    /// The fat-finger fool at the country-code parser: lowercase, short, long
+    /// and empty codes are refused typed, and a trailing malformed code poisons
+    /// the whole policy. An `&&` for the `||` would admit `ca` and the empty
+    /// string.
+    #[test]
+    fn residency_codes_refuses_malformed_country_codes() -> Result<(), Box<dyn std::error::Error>> {
+        for bad in ["", "C", "CAA", "ca", "cA", "12", "C1", "CA,ca", "CA,,US"] {
+            assert!(
+                matches!(
+                    super::residency_codes(bad),
+                    Err(RouteCliError::Route(RouteError::BadResidency))
+                ),
+                "{bad:?} must be refused"
+            );
+        }
+        assert_eq!(
+            super::residency_codes("CA,US")?,
+            vec![String::from("CA"), String::from("US")]
+        );
+        Ok(())
+    }
+
+    /// Storing the tenant policy says `saved` and clearing it says `cleared`:
+    /// the exact words the operator scripts on. A flipped literal would print
+    /// `false` and break them.
+    #[test]
+    fn route_residency_store_and_clear_say_saved_and_cleared()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = crate::executor::sim_tree::scratch("larry-route-residency-words")?;
+        let dir = state.to_string_lossy().into_owned();
+        let read = move |name: &str| (name == "LARRY_STATE_DIR").then(|| dir.clone());
+        let mut stored = Vec::new();
+        super::residency(&read, "CA,US", &mut stored)?;
+        let text = String::from_utf8(stored)?;
+        assert!(text.contains("\"saved\":true"), "{text}");
+        let mut cleared = Vec::new();
+        super::residency(&read, "--clear", &mut cleared)?;
+        let text = String::from_utf8(cleared)?;
+        assert!(text.contains("\"cleared\":true"), "{text}");
         Ok(())
     }
 }
