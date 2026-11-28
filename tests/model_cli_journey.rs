@@ -211,6 +211,56 @@ fn an_empty_or_oversize_prompt_is_refused_before_sending() -> TestResult {
     })
 }
 
+/// `lgwks_std::http` takes a proxy from the environment, loopback included
+/// (larry#602): a plaintext call is refused before it reaches the proxy, and
+/// goes straight to the gateway once `NO_PROXY` names the host.
+#[test]
+fn a_proxy_variable_never_carries_a_loopback_call() -> TestResult {
+    let proxy = TcpListener::bind(("127.0.0.1", 0))?;
+    proxy.set_nonblocking(true)?;
+    let through = format!("http://{}", proxy.local_addr()?);
+    let untouched = |output: &Output| {
+        assert_eq!(
+            proxy.accept().map_err(|cause| cause.kind()).err(),
+            Some(io::ErrorKind::WouldBlock),
+            "nothing went to the proxy: {}",
+            stderr_of(output)
+        );
+    };
+    mock_model::run(Config::seeded(19), |handle| {
+        for name in [
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        ] {
+            let mut env = operator(handle.addr());
+            env.push(("LARRY_MODEL_ATTEMPTS", String::from("1")));
+            env.push(("LARRY_MODEL_TIMEOUT_MS", String::from("5000")));
+            env.push((name, through.clone()));
+            let refused = larry_model(&env, b"direct")?;
+            untouched(&refused);
+            assert!(!refused.status.success(), "{name}: refused");
+            assert!(
+                stderr_of(&refused).contains(&format!("{name} would send it to a proxy")),
+                "{name}: typed refusal: {}",
+                stderr_of(&refused)
+            );
+            assert_eq!(handle.served(), 0, "{name}: nothing was sent");
+        }
+        let mut env = operator(handle.addr());
+        env.push(("HTTP_PROXY", through.clone()));
+        env.push(("NO_PROXY", String::from("example.test,127.0.0.1")));
+        let direct = larry_model(&env, b"direct")?;
+        untouched(&direct);
+        assert!(direct.status.success(), "stderr {}", stderr_of(&direct));
+        assert_eq!(handle.served(), 1, "the gateway was reached itself");
+        Ok(())
+    })
+}
+
 #[test]
 fn a_bad_setting_or_a_dead_gateway_is_a_typed_diagnostic() -> TestResult {
     let closed = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?;
