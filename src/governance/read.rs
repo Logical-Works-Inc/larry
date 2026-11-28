@@ -4,8 +4,8 @@
 //! final component is opened no-follow and non-blocking through the held descriptor, so a link
 //! or FIFO swapped in between the check and the open is refused too. Source: CWE-59 (link
 //! following), CWE-367 (TOCTOU) and CWE-400 (uncontrolled resource consumption). The four
-//! readers of the governor and a session's file read (`executor::edit`, larry#606) call this
-//! one, so the rule has one home.
+//! readers of the governor, a session's file read (`executor::edit`, larry#606) and the read
+//! of a brief's files (`executor::author`, larry#617) call this one, so the rule has one home.
 
 use std::fs::File;
 use std::io::{self, Read};

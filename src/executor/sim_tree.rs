@@ -189,6 +189,44 @@ fn sim_tree_a_leftover_at_an_old_name_never_reaches_a_fresh_scratch() -> Result<
     Ok(())
 }
 
+/// A file that grows after a reader checked its length (CWE-367): it holds a few bytes when
+/// the reader looks and `end` once it has, past a read's 262,144-byte bound on even seeds.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::executor) struct Growth {
+    /// The length the reader's length check sees.
+    start: usize,
+    /// The length the read meets.
+    pub(in crate::executor) end: usize,
+    /// Whether `end` is past the bound.
+    pub(in crate::executor) past: bool,
+}
+
+impl Growth {
+    /// The growth `seed` draws.
+    pub(in crate::executor) fn seeded(seed: u64) -> Result<Growth, SimError> {
+        let mut rng = Seeded::from_seed(seed);
+        let start = rng.index(1024)?;
+        let past = seed.is_multiple_of(2);
+        let end = if past {
+            262_145_usize.saturating_add(rng.index(4096)?)
+        } else {
+            262_144_usize.saturating_sub(rng.index(4096)?)
+        };
+        Ok(Growth { start, end, past })
+    }
+
+    /// Writes `target` as the reader first sees it.
+    pub(in crate::executor) fn plant(self, target: &Path) -> io::Result<()> {
+        std::fs::write(target, "k".repeat(self.start))
+    }
+
+    /// Appends to `target` until it holds `end` bytes.
+    pub(in crate::executor) fn grow(self, target: &Path) -> io::Result<()> {
+        let mut file = std::fs::OpenOptions::new().append(true).open(target)?;
+        file.write_all("k".repeat(self.end.saturating_sub(self.start)).as_bytes())
+    }
+}
+
 /// The PATH the simulated executor runs under: the test process's own.
 pub(in crate::executor) fn path_env() -> Result<String, SimError> {
     Ok(std::env::var("PATH")?)
