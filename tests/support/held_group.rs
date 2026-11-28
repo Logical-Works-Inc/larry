@@ -6,12 +6,12 @@
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
-use std::process::Child;
 
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
 
 use crate::exec_cli::deadline::await_fifo_writer;
 use crate::exec_cli::{live_group_pid, make_fifo, spawn_exec, task_json};
+use crate::larry_guard::Larry;
 
 /// Starts `larry exec` on a task whose one acceptance command holds its process group open on
 /// a fifo under `scratch`, and returns the executor, that group's pid, and the fifo's write
@@ -25,7 +25,7 @@ pub(crate) fn spawn_held_command(
     state: &Path,
     origin: &Path,
     scratch: &Path,
-) -> Result<(Child, i32, File), Box<dyn Error>> {
+) -> Result<(Larry, i32, File), Box<dyn Error>> {
     let hold = scratch.join("hold");
     make_fifo(&hold)?;
     let acceptance = format!(r#"[["sh","-c","cat < {}"]]"#, hold.display());
