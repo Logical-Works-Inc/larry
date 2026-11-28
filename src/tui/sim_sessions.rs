@@ -9,7 +9,9 @@ use std::path::Path;
 use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::seeded::Seeded;
 
-use super::{MAX_RECEIPTS_SEEN, MAX_SESSIONS, MAX_STORED_BYTES, Owner, Snapshot, validate_name};
+use super::{
+    Held, MAX_RECEIPTS_SEEN, MAX_SESSIONS, MAX_STORED_BYTES, Owner, Snapshot, validate_name,
+};
 use crate::executor::{ExecError, Ledger, SessionStoreError, Settings, sim_tree};
 use crate::sim_error::SimError;
 use crate::tui::app::{App, Input, Key};
@@ -17,8 +19,21 @@ use crate::tui::cells::{Entry, Header};
 use crate::tui::session_store::{SessionStore, Transcript};
 use crate::tui::worker::{Event, Receipt};
 
+/// The session commands over the same rows (larry#603).
+#[path = "sim_resume.rs"]
+mod resume;
+
 /// What a test returns.
 type Outcome = Result<(), SimError>;
+
+/// The row `id` as a terminal holds it, last written at `stamp`.
+fn held(id: &str, stamp: i64) -> Held {
+    Held {
+        id: id.to_owned(),
+        name: String::from("demo"),
+        stamp,
+    }
+}
 
 /// How many bytes `kept` encodes to.
 fn bytes(kept: &Snapshot) -> Result<usize, SimError> {
@@ -140,7 +155,8 @@ fn sim_sessions_hold_the_snapshot_whole() -> Outcome {
         changed
             .entries
             .push(Entry::User(String::from("a later ask")));
-        super::save(&ledger, &owner(), &id, stamp.saturating_add(1), &changed)?;
+        let row = held(&id, stamp);
+        super::save(&ledger, &owner(), &row, stamp.saturating_add(1), &changed)?;
         assert_eq!(
             stored(&directory)?,
             [(stamp.saturating_add(1), changed)],
@@ -163,7 +179,8 @@ fn sim_session_names_and_missing_rows_are_typed() -> Outcome {
     assert_eq!(validate_name("  demo  ").ok().as_deref(), Some("demo"));
     let directory = sim_tree::scratch("tui-sessions-names")?;
     let ledger = Ledger::open(&directory)?;
-    let missing = super::save(&ledger, &owner(), "no-such-session", 0, &Snapshot::empty());
+    let row = held("no-such-session", 0);
+    let missing = super::save(&ledger, &owner(), &row, 0, &Snapshot::empty());
     assert!(
         matches!(
             missing,
@@ -191,10 +208,10 @@ fn sim_the_byte_bound_admits_its_size_and_refuses_one_past() -> Outcome {
     let (full, over) = (sized(pad), sized(pad.saturating_add(1)));
     assert_eq!(bytes(&full)?, MAX_STORED_BYTES);
     let id = super::create(&ledger, &owner(), "bound", 0, &full)?;
-    super::save(&ledger, &owner(), &id, 1, &full)?;
+    super::save(&ledger, &owner(), &held(&id, 0), 1, &full)?;
     for refused in [
         super::create(&ledger, &owner(), "past", 2, &over).map(drop),
-        super::save(&ledger, &owner(), &id, 3, &over),
+        super::save(&ledger, &owner(), &held(&id, 1), 3, &over).map(drop),
     ] {
         assert!(
             matches!(

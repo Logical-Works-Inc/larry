@@ -35,11 +35,13 @@ use super::worker::{Decision, Ended, Event};
 /// Most transcript entries kept; the oldest goes first.
 pub(crate) const MAX_ENTRIES: usize = 512;
 /// What `/help` prints.
-const HELP: [&str; 6] = [
+const HELP: [&str; 8] = [
     "Enter sends the task. Ctrl+J adds a new line. Enter while working queues the next turn (8).",
     "Larry asks before each command: y runs it, a runs it and stops asking, n declines.",
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
+    "/resume lists this folder's sessions; /resume 1 continues one. /new starts fresh.",
+    "/fork copies this session; /fork 1 copies a listed one. /rename <name> names it.",
     "/ps lists background commands with their last lines. /stop ends them.",
     "/quit leaves Larry; with background commands running it asks first.",
 ];
@@ -114,6 +116,38 @@ pub(crate) enum Effect {
     Interrupt,
     /// Leave: restore the terminal and exit 0.
     Quit,
+    /// Answer a session command against the stored sessions.
+    Session(SessionCommand),
+}
+
+/// A command over the stored sessions (larry#256). Only an idle frame sends one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionCommand {
+    /// Start a fresh session in this process.
+    New,
+    /// Continue the named saved session; list them when empty.
+    Resume(String),
+    /// Copy the named saved session, or this one when empty.
+    Fork(String),
+    /// Name this session.
+    Rename(String),
+}
+
+impl SessionCommand {
+    /// The session command `text` is, its first word naming it.
+    fn parse(text: &str) -> Option<Self> {
+        let (word, rest) = match text.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim().to_owned()),
+            None => (text, String::new()),
+        };
+        match word {
+            "/new" => Some(Self::New),
+            "/resume" => Some(Self::Resume(rest)),
+            "/fork" => Some(Self::Fork(rest)),
+            "/rename" => Some(Self::Rename(rest)),
+            _ => None,
+        }
+    }
 }
 
 /// Where the machine is.
@@ -143,6 +177,8 @@ pub(crate) struct App {
     pub(super) pending: Pending,
     /// Lines `/status` prints.
     status: Vec<String>,
+    /// The welcome box a new session opens with.
+    welcome: Header,
     /// When the running task started.
     started: Duration,
     /// The latest tick.
@@ -183,6 +219,7 @@ impl App {
     /// A fresh frame showing `header`, `/status` printing `status`.
     pub(crate) fn new(header: Header, status: Vec<String>, width: usize, height: usize) -> Self {
         Self {
+            welcome: header.clone(),
             transcript: Transcript::new(header),
             composer: Composer::default(),
             phase: Phase::Idle,
@@ -249,6 +286,28 @@ impl App {
     /// turn, so a kill -9 loses at most the turn in flight.
     pub(crate) fn snapshot(&self) -> Snapshot {
         self.transcript.snapshot(self.pane.snapshot())
+    }
+
+    /// What a session that has heard nothing holds: the welcome box alone.
+    pub(crate) fn fresh(&self) -> Snapshot {
+        Transcript::new(self.welcome.clone()).snapshot(Pane::new())
+    }
+
+    /// Continues the stored session `snapshot`: its transcript, pane and
+    /// receipts, from the newest row. Nothing of the session left behind
+    /// carries over, "stop asking" included.
+    pub(crate) fn show(&mut self, snapshot: Snapshot) {
+        let Snapshot {
+            entries,
+            pane,
+            receipts,
+        } = snapshot;
+        self.transcript.restore(entries, receipts);
+        self.pane = pane.resumed();
+        self.pending = Pending::new();
+        self.said = None;
+        self.scroll = 0;
+        self.always = false;
     }
 
     /// Adds `entry`, dropping the oldest past [`MAX_ENTRIES`].
@@ -420,8 +479,7 @@ impl App {
             Key::Interrupt | Key::EndOfInput if self.composer.is_empty() => {
                 return vec![Effect::Quit];
             }
-            Key::Enter if self.composer.selected().is_some() => return self.command(),
-            Key::Enter => return self.submit(),
+            Key::Enter => return self.enter(),
             Key::Char(character) => {
                 let mut buffer = [0_u8; 4];
                 self.composer.insert(character.encode_utf8(&mut buffer));
@@ -479,11 +537,37 @@ impl App {
         }
     }
 
+    /// Enter: a session command typed whole with its argument, else the popup's
+    /// selected command, else the text.
+    fn enter(&mut self) -> Vec<Effect> {
+        if let Some(command) = SessionCommand::parse(self.composer.text()) {
+            return self.session(command);
+        }
+        if self.composer.selected().is_some() {
+            return self.command();
+        }
+        self.submit()
+    }
+
+    /// Hands `command` to the driver. While a task runs the transcript is its
+    /// own, so the command waits in the box and is never queued to the model.
+    fn session(&mut self, command: SessionCommand) -> Vec<Effect> {
+        if self.phase != Phase::Idle {
+            self.hint = Some(String::from("Session commands wait until the task ends."));
+            return Vec::new();
+        }
+        self.composer.take();
+        vec![Effect::Session(command)]
+    }
+
     /// Enter on the popup's selected slash command.
     fn command(&mut self) -> Vec<Effect> {
         let Some(name) = self.composer.selected() else {
             return self.submit();
         };
+        if let Some(command) = SessionCommand::parse(name) {
+            return self.session(command);
+        }
         self.composer.take();
         match name {
             "/help" => self.push(Entry::Info(

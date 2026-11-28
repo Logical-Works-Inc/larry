@@ -407,6 +407,12 @@ impl Pane {
         kept
     }
 
+    /// A stored pane as a session shows it again: no command runs in it.
+    pub(crate) fn resumed(mut self) -> Self {
+        self.running = None;
+        self
+    }
+
     /// The one line a narrow screen keeps in the chat, when the task made a change.
     pub(crate) fn summary(&self) -> Option<String> {
         self.diff.as_ref().map(|diff| {
