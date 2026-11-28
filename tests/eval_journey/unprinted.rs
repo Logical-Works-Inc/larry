@@ -45,8 +45,9 @@ fn a_stopped_arm_whose_card_cannot_be_printed_keeps_both_causes() -> TestResult 
         stopped.contains("broken") && stopped.contains("out/0.txt"),
         "why the arm stopped: {stderr}"
     );
-    assert!(
-        !unprinted.trim().is_empty(),
+    assert_eq!(
+        unprinted.trim_end(),
+        "exec output unwritable: Broken pipe (os error 32)",
         "why the card was not printed: {stderr}"
     );
     assert_eq!(eval_entries(&state)?, 0, "no origin or lock stays");

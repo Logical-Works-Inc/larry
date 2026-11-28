@@ -41,7 +41,7 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 ## 3. Track 1: the runtime on lgwks_bot (#68, one row per PR)
 - [x] #74 clock: PR #159, determinism green both sides; replay p50 58.1/62.5 us, p99 154.3/108.9 us (256 seeds). #580 a past expiry is authorized only while its lag is under the skew bound (ADR 0137): PR #584, 644 contracts and runtime tests on toronto.
 - [x] #75 journal on RecordJournal, group-committed, a dead task recovered unrerun (ADR 0023): PR #172, 775 tests; `larry exec` p50 70.0/78.1 ms, p99 96.3/98.3 ms (32 runs, debug), peak RSS 12.5/13.2 MiB.
-- [x] #76 fence on broker (ADR 0024): PR #173, 780 tests; `larry exec` p50 75.1/75.4 ms, p99 79.8/80.9 ms, 13.2/13.1 MiB.
+- [x] #76 fence on broker (ADR 0024): PR #173, 780 tests; `larry exec` p50 75.1/75.4 ms, p99 79.8/80.9 ms, 13.2/13.1 MiB. #612 the reach handoff and its offline count are private methods, so a seeded sim withdraws authority between the mint and the handoff (ADR 0149): PR #629, 94 of 94 changed-binary tests on oracle.
 - [x] #77 gate on GrantSet and cap::Auth: PR #163, 729 tests; replay p50 49.9/49.7 us, p99 94.5/86.8 us (ADR 0018).
 - [x] #78 retry on lgwks_bot::retry, ahead of #75 to #77 (Director 2026-11-08): PR #160, 725 tests; replay p50 62.8/49.9 us, p99 125.4/94.5 us (256 seeds); a retry past the authority lease is refused (ADR 0017).
 - [ ] #79 projection on the ECS world. Proof: `sim_replay`, `sim_multitenant`.
