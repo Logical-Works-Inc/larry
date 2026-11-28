@@ -27,9 +27,10 @@ human study is NOT RUN; nothing here is a score.
 agent drives. Each `session/prompt` runs the task instruction as a terminal
 session in the task's working directory. Harbor's agent installs agents from the
 ACP Registry and passes settings with `--agent-env`, so a run sets
-`LARRY_POLICY=file.read,file.write,process.spawn,model.invoke,model.command`,
+`LARRY_POLICY=file.read,file.write,process.spawn,model.invoke,model.command,net.egress`,
 `LARRY_STATE_DIR`, `LARRY_MODEL_URL` and `LARRY_MODEL_KEY`. `model.command` is
-named only because Harbor's task container isolates the commands. A remote door
+named only because Harbor's task container isolates the commands, and
+`net.egress` because the session sends bytes to the gateway. A remote door
 needs `larry serve provision <root>` first: with no provisioned root row the
 session is refused deny-by-default. Local doors stay open until that first
 provision. Each prompt

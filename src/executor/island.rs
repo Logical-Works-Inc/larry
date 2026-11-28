@@ -26,10 +26,10 @@ use super::workspace::{Diff, Workspace, summary};
 
 /// What the policy refusal tells a person whose commands would run on the host.
 const HOST_REFUSED: &str =
-    "model commands are off: LARRY_POLICY must name model.command to run them on this host";
+    "model commands are off: LARRY_POLICY must name model.command and net.egress to run them here";
 
 /// What the policy refusal tells a person whose commands would run in a workspace copy.
-const POLICY_REFUSED: &str = "the policy does not allow a session: LARRY_POLICY must allow file.read, file.write, process.spawn and model.invoke";
+const POLICY_REFUSED: &str = "the policy does not allow a session: LARRY_POLICY must allow file.read, file.write, process.spawn, model.invoke and net.egress";
 
 /// Where a session's commands run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

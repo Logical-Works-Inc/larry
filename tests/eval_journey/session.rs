@@ -28,8 +28,8 @@ fn session_set(name: &str, acceptance: &str) -> String {
 
 /// Runs `set` against the mock, whose session first runs `command_reply` then
 /// reports done, and returns the run. The session works on the host exactly as
-/// `larry acp` runs it, so the arm grants `model.command` the way a Harbor task
-/// container's operator does.
+/// `larry acp` runs it, so the arm grants `model.command` and `net.egress` the way
+/// a Harbor task container's operator does.
 fn run_session_task(state: &TempDir, set: &str, command_reply: &str) -> TestResult<Ran> {
     let config = Config {
         contents: vec![command_reply.to_owned(), String::from(r#"{"done":"ok"}"#)],
@@ -39,7 +39,9 @@ fn run_session_task(state: &TempDir, set: &str, command_reply: &str) -> TestResu
         let mut env = operator(state, handle.addr(), &FLASH, "3");
         env.push((
             "LARRY_POLICY",
-            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
+            OsString::from(
+                "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
+            ),
         ));
         let ran = score_arm(&env, set.as_bytes())?;
         assert_eq!(handle.served(), 2, "the command reply and the done reply");

@@ -36,13 +36,11 @@ pub(crate) fn default_policy() -> BTreeSet<Scope> {
     DEFAULT_POLICY.iter().copied().collect()
 }
 
-/// The scopes a terminal command session needs (larry#93): command execution and
-/// model-command selection. A model brief adds network egress through
-/// `required_scopes`, so an ordinary confined session stays local by default.
+/// The scopes a terminal session needs on the host (larry#93): every executor
+/// capability. A session sends its instruction and observations to a model, so
+/// it needs network egress exactly as a briefed task does (larry#203).
 pub(crate) fn session_scopes() -> BTreeSet<Scope> {
-    let mut scopes: BTreeSet<Scope> = EXECUTOR_CAPABILITIES.iter().copied().collect();
-    scopes.remove(&Scope::NetworkEgress);
-    scopes
+    EXECUTOR_CAPABILITIES.iter().copied().collect()
 }
 
 /// The scopes a terminal session needs when Larry itself confines each command to a
@@ -52,4 +50,22 @@ pub(crate) fn isolated_scopes() -> BTreeSet<Scope> {
     let mut scopes = session_scopes();
     scopes.remove(&Scope::ModelCommand);
     scopes
+}
+
+#[cfg(test)]
+mod tests {
+    use larry_contracts::authority::Scope;
+
+    use super::{default_policy, isolated_scopes, session_scopes};
+
+    /// The confined terminal session reaches a model too: it needs egress, and the
+    /// default policy still admits it (larry#203, ASVS 4.0.3 §4.1.3).
+    #[test]
+    fn every_session_needs_egress_and_the_default_policy_admits_the_confined_one() {
+        for scopes in [session_scopes(), isolated_scopes()] {
+            assert!(scopes.contains(&Scope::NetworkEgress), "{scopes:?}");
+        }
+        assert!(isolated_scopes().is_subset(&default_policy()));
+        assert!(!session_scopes().is_subset(&default_policy()));
+    }
 }

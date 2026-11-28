@@ -33,10 +33,12 @@ of those codes before its model configuration or key is read. `route list`
 shows the policy.
 
 The executor advertises `NetworkEgress`, includes it in the default policy,
-and requires it for every briefed task: a policy that omits it is denied by
-the existing durable gate before the body runs. Terminal sessions run under
-the session scopes without it, and each of their model exchanges rides the
-admitted session the person drives.
+and requires it for every briefed task and every terminal session, host or
+confined: a policy that omits it is denied by the existing durable gate before
+the body runs. An operator whose `LARRY_POLICY` or tenant policy lists scopes
+adds `net.egress` to keep running sessions. Rejected: sessions riding on the
+person's approval of each command, because the instruction reaches the model
+before any command is asked.
 
 Every terminal prompt says `Working directory: .`. The one `process_env`
 snapshot gives the executor every exact value of `LARRY_MODEL_KEY`,
@@ -64,4 +66,6 @@ policy filters resolve, and
 `a_legacy_plaintext_route_lists_and_removes_but_resolution_refuses` proves a
 pre-rule row lists, removes, and never resolves.
 `a_terminal_command_redacts_route_key_and_workspace_path_in_model_requests`
-proves exact secrets never enter the conversation.
+proves exact secrets never enter the conversation, and
+`a_session_without_net_egress_is_refused_before_the_model` that a session
+without the scope sends nothing.

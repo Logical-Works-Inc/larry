@@ -35,7 +35,7 @@ expiry is never consent.
   - `larry mcp`: a stateless MCP 2026-07-28 server. Its `larry_submit_task` tool runs a typed task through the
     executor and reports success only when the sealed run is accepted (ADR 0008).
   - `larry acp`: an Agent Client Protocol agent, the way Harbor runs Terminal-Bench 2.0. Each prompt is a terminal
-    session, which runs only under `LARRY_POLICY` naming `model.command` (ADR 0035).
+    session, which runs only under `LARRY_POLICY` naming `model.command` and `net.egress` (ADR 0035, ADR 0117).
   - `larry exec`: runs one task document in a fresh clone. `acceptance` is a list of argv lists. First run:
     1. Set `LARRY_STATE_DIR` to a directory you own.
     2. Pipe a task to `larry exec > report.json`, where the task is

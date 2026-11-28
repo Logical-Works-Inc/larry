@@ -196,44 +196,8 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
     Ok(())
 }
 
-#[test]
-fn a_terminal_command_redacts_route_key_and_workspace_path_in_model_requests() -> TestResult {
-    let (state, work) = fixture()?;
-    let secret = "acp-route-secret";
-    let command = format!(r#"{{"command":"printf '{}'; pwd"}}"#, secret);
-    let replies = [command.as_str(), r#"{"done":"printed"}"#];
-    mock_model::run(scripted(61, &replies), |mock| -> TestResult {
-        let mut env = operator(state.path(), mock, Some(SESSION_POLICY));
-        for entry in env.iter_mut() {
-            if entry.0 == "LARRY_MODEL_KEY" {
-                entry.1 = OsString::from(secret);
-            }
-        }
-        let pairs: Vec<(&str, &OsStr)> = env
-            .iter()
-            .map(|pair| (pair.0, pair.1.as_os_str()))
-            .collect();
-        let mut acp = acp_agent::Agent::start(&pairs)?;
-        let session = acp.open(work.path())?;
-        let (_, reply) = acp.call(&prompt(2, &session, "print the route key"))?;
-        assert_eq!(*reply.at("/result/stopReason")?, "end_turn", "{reply}");
-        let workspace = work.path().to_string_lossy();
-        for body in mock.requests() {
-            let shown = String::from_utf8_lossy(&body);
-            assert!(
-                !shown.contains(secret),
-                "the route key reached the model: {shown}"
-            );
-            assert!(
-                !shown.contains(workspace.as_ref()),
-                "the absolute workspace reached the model: {shown}"
-            );
-        }
-        assert_eq!(mock.served(), 2, "the command and done replies both ran");
-        assert_eq!(acp.finish()?, Some(0), "clean ACP exit");
-        Ok(())
-    })
-}
+#[path = "support/acp_egress.rs"]
+mod egress;
 
 #[test]
 fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {

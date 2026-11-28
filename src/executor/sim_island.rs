@@ -535,6 +535,10 @@ fn sim_island_gate_scopes_follow_the_isolation() -> TestResult {
     let empty = settings(&state, Some(""))?;
     let full = settings(
         &state,
+        Some("file.read,file.write,process.spawn,model.invoke,model.command,net.egress"),
+    )?;
+    let no_egress = settings(
+        &state,
         Some("file.read,file.write,process.spawn,model.invoke,model.command"),
     )?;
     let confined = Isolation::Workspace(Platform::host());
@@ -553,6 +557,15 @@ fn sim_island_gate_scopes_follow_the_isolation() -> TestResult {
         Some(HOST_REFUSED)
     );
     assert_eq!(Isolation::Host.blocked(&full), None);
+    assert_eq!(
+        confined.blocked(&no_egress).as_deref(),
+        Some(POLICY_REFUSED),
+        "a session reaches a model, so it needs net.egress"
+    );
+    assert_eq!(
+        Isolation::Host.blocked(&no_egress).as_deref(),
+        Some(HOST_REFUSED)
+    );
     assert_eq!(Isolation::Host.name(), "host");
     assert_eq!(confined.name(), "workspace");
     Ok(())

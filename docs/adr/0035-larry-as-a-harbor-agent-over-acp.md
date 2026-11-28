@@ -46,8 +46,8 @@ verifier that writes `/logs/verifier/reward.txt`. Until now Larry's executor den
 ## Consequences
 
 - Harbor's `acp` agent installs an agent from the ACP Registry by its binary distribution and passes settings
-  with `--agent-env`: here `LARRY_POLICY` naming `model.command`, `LARRY_STATE_DIR` and the gateway settings
-  (docs/evaluation/README.md). No Python is involved. Listing Larry in the registry publishes it, so that waits
+  with `--agent-env`: here `LARRY_POLICY` naming `model.command` and `net.egress` (ADR 0117), `LARRY_STATE_DIR`
+  and the gateway settings (docs/evaluation/README.md). No Python is involved. Listing Larry in the registry publishes it, so that waits
   for the Director to name it (AGENTS.md: nothing is published without the Director).
 - `tests/acp_harbor_journey.rs` runs a Harbor-shaped task through the shipped binary and its verifier against
   the seeded mock model. It also covers refusal, the step bound, cancellation, kill -9 recovery and two tenants.
