@@ -27,7 +27,7 @@ use larry_guard::Larry;
 
 use std::error::Error;
 use std::io::{self, Write};
-use std::net::{Ipv6Addr, TcpListener};
+use std::net::{Ipv6Addr, TcpListener, TcpStream};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -209,6 +209,36 @@ fn an_empty_or_oversize_prompt_is_refused_before_sending() -> TestResult {
         assert_eq!(handle.served(), 0, "neither reached the gateway");
         Ok(())
     })
+}
+
+/// `0.0.0.0` reaches a listener on this machine and is not loopback (RFC 1122
+/// section 3.2.1.3), so a plaintext gateway there is refused before any byte
+/// leaves: the listener holds no connection from `larry model`.
+#[test]
+fn a_plaintext_gateway_off_loopback_is_refused_and_no_connection_is_made() -> TestResult {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let mut env = operator(std::net::SocketAddr::from(([0, 0, 0, 0], port)));
+    env.push(("LARRY_MODEL_ATTEMPTS", String::from("1")));
+    let output = larry_model(&env, b"hello")?;
+    assert!(!output.status.success(), "plaintext off loopback fails");
+    assert!(
+        stderr_of(&output).contains("requires https"),
+        "typed transport refusal: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        listener.accept().map_err(|cause| cause.kind()).err(),
+        Some(io::ErrorKind::WouldBlock),
+        "larry opened no connection"
+    );
+    // The same address does reach the listener, so the empty queue means
+    // something.
+    let _probe = TcpStream::connect(("0.0.0.0", port))?;
+    listener.set_nonblocking(false)?;
+    listener.accept()?;
+    Ok(())
 }
 
 /// `lgwks_std::http` takes a proxy from the environment, loopback included
