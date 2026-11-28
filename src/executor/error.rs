@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use larry_runtime::error::RuntimeError;
 use lgwks_macros::Error;
 
-use super::{AuthorFault, ConfineError, ReceiptError, SessionError, TaskError};
+use super::{AuthorFault, ConfineError, ReceiptError, SessionError, SessionStoreError, TaskError};
 use crate::model::{ModelError, RouteError};
 
 /// Why `larry exec` failed; each variant keeps its cause.
@@ -264,6 +264,10 @@ pub enum ExecError {
     /// A terminal session was refused before anything ran (larry#93).
     #[error("session: {0}")]
     Session(#[source] SessionError),
+    /// A TUI session row was refused: unknown id, bad name, full store or
+    /// damaged bytes, never a silent loss (larry#256).
+    #[error("tui session: {0}")]
+    TuiSession(#[from] SessionStoreError),
     /// A variable Larry reads holds bytes that are not UTF-8: it is refused,
     /// never read as unset (larry#239).
     #[error("exec {name} is not UTF-8; set it to UTF-8 text")]

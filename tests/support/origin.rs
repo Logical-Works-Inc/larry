@@ -76,6 +76,7 @@ fn git_command_over(
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t");
+    temp_dir::scratch_base::bound_git(&mut command, dir);
     command
 }
 

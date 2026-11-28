@@ -10,25 +10,17 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// Included as source, not loaded as a module file: the runtime's tests load this guard twice
+// (`admission/tests.rs`), and the rule keeps one file.
+pub(crate) mod scratch_base {
+    include!("scratch_base.rs");
+}
+use scratch_base::guard_base;
+
 /// A fresh directory under [`guard_base`], removed when dropped.
 pub(crate) struct TempDir {
     /// Where the directory lives.
     path: PathBuf,
-}
-
-/// The directory a guard is made in: the configured temp dir, except on Linux when it is a plain
-/// directory, which the confinement lists (larry#577). `/var/tmp` is then the shared scratch
-/// directory that stays on disk (FHS 3.0, 5.15). A temp dir that cannot be read is the caller's
-/// error.
-fn guard_base(configured: PathBuf) -> io::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let plain = cfg!(target_os = "linux")
-        && fs::metadata(&configured)?.permissions().mode() & 0o1002 != 0o1002;
-    Ok(if plain {
-        PathBuf::from("/var/tmp")
-    } else {
-        configured
-    })
 }
 
 /// The path the next guard in this process takes: the process and the count, no clock and no
@@ -156,6 +148,67 @@ fn only_a_plain_directory_sends_a_guard_to_the_shared_one() -> io::Result<()> {
     assert_eq!(
         missing.map_err(|cause| cause.kind()),
         Err(io::ErrorKind::NotFound)
+    );
+    Ok(())
+}
+
+/// A temp dir inside a git checkout makes every git call in a scratch climb to that checkout
+/// (larry#595, git(1) repository discovery), so a scratch is never made there, whether `.git` is a
+/// directory or the file a linked worktree holds, and whatever the mode.
+#[test]
+fn a_scratch_inside_a_checkout_is_left_for_the_shared_one() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let guard = TempDir::new()?;
+    for marker in ["directory", "file"] {
+        let checkout = guard.path().join(marker);
+        let configured = checkout.join("target").join("tmp");
+        fs::create_dir_all(&configured)?;
+        fs::set_permissions(&configured, fs::Permissions::from_mode(0o1777))?;
+        if marker == "directory" {
+            fs::create_dir(checkout.join(".git"))?;
+        } else {
+            fs::write(checkout.join(".git"), "gitdir: elsewhere\n")?;
+        }
+        assert_eq!(
+            guard_base(configured)?,
+            PathBuf::from("/var/tmp"),
+            "{marker}"
+        );
+    }
+    Ok(())
+}
+
+/// A test git call bounded to its directory never climbs into the repository above it
+/// (larry#595, git(1) `GIT_CEILING_DIRECTORIES`), and still finds a repository at the directory.
+#[test]
+fn a_bounded_git_never_sees_the_checkout_above_its_scratch() -> io::Result<()> {
+    let guard = TempDir::new()?;
+    let checkout = guard.path().join("checkout");
+    let scratch = checkout.join("scratch");
+    fs::create_dir_all(&scratch)?;
+    let run = |dir: &Path, args: &[&str]| {
+        let mut command = std::process::Command::new("git");
+        command
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        scratch_base::bound_git(&mut command, dir);
+        command.output()
+    };
+    assert!(run(&checkout, &["init", "--quiet"])?.status.success());
+    let found = run(&checkout, &["rev-parse", "--is-inside-work-tree"])?;
+    assert!(
+        found.status.success(),
+        "the directory's own repository is found"
+    );
+    let above = run(&scratch, &["rev-parse", "--show-toplevel"])?;
+    assert!(
+        !above.status.success(),
+        "git climbed out of its scratch to {}",
+        String::from_utf8_lossy(&above.stdout)
     );
     Ok(())
 }
