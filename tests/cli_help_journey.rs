@@ -14,15 +14,24 @@
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/deadline.rs"]
+mod deadline;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
+#[path = "support/ps.rs"]
+mod ps;
 #[path = "support/temp_dir.rs"]
 mod temp_dir;
 
 use std::error::Error;
-use std::process::Output;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Output, Stdio};
 
-use larry_cli::{spawn_larry_args, stderr_of};
+use deadline::await_event;
+use larry_cli::{spawn_larry_args, spawn_larry_on, stderr_of};
 use temp_dir::TempDir;
 
 /// What every journey returns.
@@ -368,6 +377,64 @@ fn route_add_errors_name_the_field_once() -> TestResult {
             "the refusal carries one `route` word: {stderr:?}"
         );
     }
+    Ok(())
+}
+
+/// Bare `larry` is the terminal frontend, so a standard input that is no terminal
+/// (a file, `/dev/null`, a pipe) is refused at once with one typed line, and
+/// nothing is painted. Source: POSIX `isatty(3)`; larry#573, where orphans spun on
+/// an input no person could answer.
+#[test]
+fn a_bare_larry_without_a_terminal_is_refused() -> TestResult {
+    let state = TempDir::new()?;
+    let script = state.path().join("keys");
+    std::fs::write(&script, "write hello.txt\r")?;
+    let inputs = [
+        ("a regular file", Stdio::from(File::open(&script)?)),
+        ("/dev/null", Stdio::null()),
+        ("a pipe", Stdio::piped()),
+    ];
+    for (what, input) in inputs {
+        let mut child = spawn_larry_on(&[], &[], input)?;
+        await_event(&format!("bare larry on {what} exits"), || {
+            Ok(child.try_wait()?)
+        })?;
+        let output = child.wait_with_output()?;
+        assert_eq!(output.status.code(), Some(1), "{what}: a refusal exits 1");
+        let stderr = stderr_of(&output);
+        assert_eq!(stderr.lines().count(), 1, "{what}: one line: {stderr:?}");
+        assert!(
+            stderr.contains("standard input is not a terminal"),
+            "{what}: the refusal names the cause: {stderr:?}"
+        );
+        assert!(output.stdout.is_empty(), "{what}: nothing is painted");
+    }
+    Ok(())
+}
+
+/// A journey that gives up mid-run drops its child guard: the server it was
+/// talking to is killed and reaped, so no `larry` outlives the test (larry#573;
+/// POSIX `kill(2)` and `wait(2)`).
+#[test]
+fn a_dropped_larry_guard_leaves_no_orphan() -> TestResult {
+    let mut child = spawn_larry_on(&["mcp"], &[], Stdio::piped())?;
+    let stdin = child.stdin.as_mut().ok_or("no stdin pipe")?;
+    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")?;
+    stdin.flush()?;
+    let stdout = child.stdout.take().ok_or("no stdout pipe")?;
+    let mut reply = String::new();
+    BufReader::new(stdout).read_line(&mut reply)?;
+    assert!(reply.contains("jsonrpc"), "the server answers: {reply:?}");
+    let pid = child.id().to_string();
+    assert!(
+        ps::sample(&pid).is_some(),
+        "larry {pid} runs before the drop"
+    );
+    drop(child);
+    assert!(
+        ps::sample(&pid).is_none(),
+        "larry {pid} is gone with its guard"
+    );
     Ok(())
 }
 

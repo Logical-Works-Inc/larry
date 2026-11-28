@@ -112,8 +112,8 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [x] #245 the PTY journeys on macOS in CI (ADR 0048): PR #254, `e2e/journey (macos-latest)` green in 2m21s; probe input p50 1.9 ms, p95 2.5 ms, p99 5.3 ms (20 samples), RSS 8,208 KiB.
 - [x] #244 the artifact pane shows the task's diff, output and receipt (ADR 0047): PR #253, 13 pane sims (256 hostile seeds), journey at 120x32 (the pane opens at 108 columns) shows the diff before the folder changes.
 - [x] #252 the pane streams a running command's output (ADR 0129): PR #529, 4 KiB callback chunks, 64-event shed count, 512-row pane ring; a PTY journey shows the first line before the FIFO releases the second. #552 the deadline and FIFO flakes wait on their events (ADR 0130): PR #571, ceiling 200/200 in 364.4 s and pane 200/200 in 177.2 s on toronto.
-- [x] #262 queue a message while a task runs, /ps and /stop for background commands (ADR 0128): queue part PR #562, 5 sims and 1 PTY journey green on Toronto, queue bound 8; PR #547, 20 sims and 2 PTY journeys green on Toronto, 16 jobs with 5-line tails.
-- [x] #586 part 1 of #277, anchored edits with a content-hash precondition (ADR 0136): a session reads a file and its BLAKE3 digest after a yes: PR #590, 164 session and journey tests green on toronto, 51 mutants.
+- [x] #262 queue a message while a task runs, /ps and /stop for background commands (ADR 0128): queue part PR #562, 5 sims and 1 PTY journey green on Toronto, queue bound 8; PR #547, 20 sims and 2 PTY journeys green on Toronto, 16 jobs with 5-line tails. #573 bare `larry` ends with its terminal and every test child is guarded (ADR 0139): PR #593, 78 tests green on toronto; on the old driver the closed-terminal journey left its orphan past 30 s.
+- [x] #586 part 1 of #277, anchored edits with a content-hash precondition (ADR 0136): a session reads a file and its BLAKE3 digest after a yes: PR #597, 164 session and journey tests green on toronto, 51 mutants.
 - [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
 - iOS and Android: #115 in section 4, after #90 and #247.
 ## Holds and open design

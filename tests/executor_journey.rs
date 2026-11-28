@@ -30,6 +30,8 @@ mod exec_cli;
 mod held_group;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 #[path = "support/tree_digest.rs"]
