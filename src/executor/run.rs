@@ -709,10 +709,10 @@ fn spawn_failure(argv0: &str, source: io::Error) -> ExecError {
 /// The leader is killed itself, and first: until `setsid` has made its group, `killpg` finds
 /// nothing and reads as gone, so the wait below would last as long as the command (larry#442,
 /// larry#590). A dead leader forks no more, and its unreaped pid keeps the group id its own.
+/// A leader that refused the kill is never waited on, for the same reason.
 fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> ExecError {
     let killed = child.kill();
     let settled = settle_group(clock, pgid);
-    let waited = child.wait();
     if let Err(fault) = killed {
         return ExecError::cleanup(
             error,
@@ -720,6 +720,7 @@ fn abandon(clock: &Clock, child: &mut Child, pgid: i32, error: ExecError) -> Exe
             ExecError::Reap(fault),
         );
     }
+    let waited = child.wait();
     if let Err(fault) = settled {
         return ExecError::cleanup(error, "the group could not be settled", fault);
     }

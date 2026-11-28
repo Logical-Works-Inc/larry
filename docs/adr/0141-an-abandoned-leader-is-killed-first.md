@@ -24,8 +24,8 @@ as settled. The wait then lasted as long as the command, with no timeout and no 
 
 The drop kills the leader itself first, then settles the group, then reaps. A dead
 leader forks no more, and its unreaped pid cannot be reused, so the group signal
-that follows still names this command's group and no other. A kill that fails is
-reported with the first refusal.
+that follows still names this command's group and no other. A leader that refused the
+kill is never waited on; that failure is reported with the first refusal.
 
 ## Rejected
 
@@ -42,7 +42,7 @@ Reverse this if the group is created before `spawn` returns on every host.
 ## Proof
 
 `sim_an_abandoned_child_dies_before_its_group_exists` drops a child that leads no
-group. Before the change it waited 30 s for the child to exit by itself.
+group. Before the change it waited 30.0 s for the child to exit by itself and failed.
 `sim_a_group_the_ledger_cannot_record_is_killed` refuses the ledger write and finds
 the group gone.
 
