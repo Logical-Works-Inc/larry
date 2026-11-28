@@ -93,6 +93,50 @@ members = ["\\"]
     Ok(())
 }
 
+/// larry#611, TOML 1.0.0 "Comment": a hash starts a comment to the end of its line except inside
+/// a string. A quote inside such a comment opens no string, so every declared member is still
+/// read and its leak refused (a dropped member passes the gate, CWE-693), a quoted word in a
+/// comment names no member, and a hash inside a member's own quotes stays part of its name.
+#[test]
+fn sim_a_comment_in_the_members_array_never_hides_a_member() -> SimResult {
+    const COMMENTS: [&str; 5] = [
+        "# it's the first",
+        "# was \"crates/gone\" once",
+        "# 'crates/gone'",
+        "# an unclosed \"",
+        "# ] and [ and \\",
+    ];
+    const MEMBERS: [&str; 3] = ["crates/one", "crates/two", "crates/h#sh"];
+    for seed in 0..16_u64 {
+        let mut rng = Seeded::from_seed(seed);
+        let mut manifest = String::from("[workspace]\nmembers = [\n");
+        for member in MEMBERS {
+            let comment = *COMMENTS
+                .get(rng.index(COMMENTS.len())?)
+                .ok_or("a comment")?;
+            let line = format!("  {comment}\n  \"{member}\", {comment}\n");
+            manifest.push_str(&line);
+        }
+        manifest.push_str("]\n");
+        let tree = Scratch::new("temp-members-quoted-comment")?;
+        named(&tree, "Cargo.toml", &manifest)?;
+        let mut refused = Vec::new();
+        for member in MEMBERS {
+            add_package(&tree, member)?;
+            let leak = format!("{member}/tests/leak.rs");
+            named(&tree, &leak, LEAK)?;
+            refused.push(refusal(&leak, 2));
+        }
+        refused.sort();
+        assert_all(
+            &tree,
+            &refused,
+            &format!("seed {seed}: every member is read past its comments: {manifest}"),
+        )?;
+    }
+    Ok(())
+}
+
 /// larry#311: the rule reads the member list from the root manifest, so a pid temp path under a
 /// member crate is refused, in the crate's `tests` or its in-crate `sim_` module, and a directory
 /// the manifest does not name is never read.

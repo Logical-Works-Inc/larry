@@ -16,6 +16,7 @@ mod ask;
 mod buffer;
 mod cells;
 mod composer;
+mod export;
 mod jobs;
 mod layout;
 mod paint;
@@ -48,6 +49,8 @@ use crate::executor::{ExecError, Isolation, Settings, process_env};
 use app::{App, Effect, Input, Key};
 use buffer::{Frame, render};
 use cells::Header;
+#[cfg(test)]
+pub(crate) use export::ExportError;
 use session_store::SessionStore;
 use stop::{Stop, Watch};
 use worker::{Ended, Event, Worker};
@@ -386,6 +389,7 @@ fn drive(
                     }
                 }
                 Effect::Session(command) => store.command(app, command),
+                Effect::Export(target) => store.export(app, &target),
             }
         }
         if turn {

@@ -5,10 +5,10 @@ description: "Each terminal session is a row in executor.db, held after every tu
 resource: /docs/adr/0133-tui-sessions-persist.md
 tags: [larry, adr, tui, executor, ledger]
 generated: {by: claude-code, at: 2026-11-27}
-verified: {by: claude-code, method: lgwks-box cargo nextest run --locked, 2026-11-27}
+verified: {by: claude-code, method: lgwks-box cargo nextest run --locked, 2026-11-28}
 status: accepted
 stale_after: 2027-05-27
-sources: [larry#256, larry#578, INVARIANTS.md, tests/e2e_journey/sessions.rs]
+sources: [larry#256, larry#578, larry#609, INVARIANTS.md, tests/e2e_journey/sessions.rs]
 ---
 
 ## Context
@@ -69,12 +69,50 @@ driver (PR #567: no tenant key, a named fork wrote the frame on screen over the
 copy, and a running task could swap its transcript). Reversed if two terminals on
 one row must merge.
 
+## Writing it out (larry#609)
+
+`/export [file]` writes the frame on screen as Markdown inside the folder
+Larry runs in, `<session name>.md` with no file named: who and where, each entry,
+every kept receipt digest. Every person, model and command text sits in a fence
+longer than any backtick run it holds (CommonMark 0.31 section 4.5), with control
+and invisible characters shown as markers. The file is at most 4 MiB: the oldest
+entries are left out first and counted in it. It is made through held directory
+descriptors (`lgwks_std::fs::capability::Dir`), mode 0600, never over an existing
+name, never through a link, never into `.git` or outside the folder (CWE-22,
+CWE-59). It needs no row, so a refused database changes nothing. It waits while a
+task runs.
+
+The name holds the whole file or nothing. The bytes go to a new part file
+`.larry-export-<UUIDv7>.part` beside the target, are synced, and take the name by
+`linkat`, which never replaces (POSIX `link(2)`); the part file is then removed
+and the folder synced. A failed or killed write leaves nothing under the name, so
+the next `/export` succeeds. Each export first sweeps its target's folder: a
+regular file with a part name that no running export holds locked is removed, from
+the first 65,536 entries. A name of that shape is refused as a target. A part
+file another terminal sweeps before its lock is made again, at most 3 tries. A
+file system with no hard links refuses the export and writes nothing.
+
+`/recap` answers in the frame, a task running or not: counts, the newest 5 tasks,
+the answer to the newest one and the receipts. It calls no model and compacts
+nothing.
+
+Rejected: PR #567's export (written beside the folder, following links,
+overwriting, model text as raw Markdown, no bound); `replace_file` (its rename
+replaces, and it resolves paths through links); `std::fs::hard_link` (it resolves
+the folders again, so a link swapped in after the walk is followed); one fixed
+part name (two terminals would publish each other's bytes); and a model-written
+recap (a paid call that can fail, ADR 0044). Reversed if a folder with no hard
+links must take an export, or a recap must say what no receipt holds.
+
 ## Consequences
 
 A kill -9 loses at most the turn in flight, and a fresh terminal continues the
-session. A listing reads the tenant's rows, at most 10,000. `/export` and
-`/recap` are still open in larry#256.
-Proof: `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
+session. A listing reads the tenant's rows, at most 10,000.
+Proof: `tui_journey_export_writes_the_session_and_recap_sums_it` (shipped debug
+binary, oracle, 3 runs of 20: `/export` p50 72 to 84 ms, p99 86 to 101 ms, RSS
+11,612 KiB; the writer before this one p50 70 to 75 ms, p99 95 to 102 ms),
+`tui_journey_a_kill_mid_export_leaves_no_part_file_and_the_next_export_succeeds`,
+`src/tui/sim_export.rs`, `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
 `tui_journey_a_full_session_store_lists_and_reports_latency_and_rss` (shipped
 debug binary, 10,000 rows, 20 samples on the Oracle ARM64 box: p50 44.6 ms, p99
 49.7 ms, RSS 14,544 KiB), `tui_journey_a_killed_terminal_keeps_its_session_row`,

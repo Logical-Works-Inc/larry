@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use super::route_transport::{authority_of, is_loopback};
+use super::route_transport::{authority_of, is_loopback, is_private_destination};
 
 #[path = "route_table.rs"]
 mod table;
@@ -77,6 +77,11 @@ pub enum RouteError {
     /// The route uses plaintext for a host that is not loopback.
     InsecureTransport {
         /// The host that would receive the request.
+        host: String,
+    },
+    /// A remote door was given a stored route that points inside this host's network.
+    PrivateDestination {
+        /// The host the route names.
         host: String,
     },
     /// The route is outside the tenant's stored residency policy.
@@ -193,6 +198,7 @@ impl RouteError {
             | Self::BadDescribe
             | Self::BadPrice { .. } => true,
             Self::InsecureTransport { .. }
+            | Self::PrivateDestination { .. }
             | Self::NoSuchId { .. }
             | Self::NoRoute
             | Self::NoEligibleRoute
@@ -217,6 +223,10 @@ impl fmt::Display for RouteError {
             Self::InsecureTransport { ref host } => {
                 write!(out, "route host {host} requires https unless it is loopback")
             }
+            Self::PrivateDestination { ref host } => write!(
+                out,
+                "route host {host} is a private or local destination, which a remote caller may not use"
+            ),
             Self::ResidencyNotAllowed {
                 ref route,
                 ref residency,
@@ -620,6 +630,15 @@ impl Route {
     pub(crate) fn transport_refusal(&self) -> Option<RouteError> {
         (self.base_url.starts_with("http://") && !is_loopback(&self.host)).then(|| {
             RouteError::InsecureTransport {
+                host: self.host.clone(),
+            }
+        })
+    }
+    /// The refusal a remote door gives this route when it points inside the host's own
+    /// network (larry#627). The `env` route is the operator's own and is never refused.
+    pub(crate) fn destination_refusal(&self) -> Option<RouteError> {
+        (self.id != ENV_ROUTE && is_private_destination(&self.host)).then(|| {
+            RouteError::PrivateDestination {
                 host: self.host.clone(),
             }
         })
