@@ -417,6 +417,17 @@ fn sim_a_patch_needs_the_digest_of_every_file_it_changes() -> TestResult {
             "edit path link/new.txt escapes the snapshot",
         ),
         (add("folder"), &[], "edit path folder is not a regular file"),
+        // A hook the patch planted would run at the person's next commit.
+        (
+            add(".git/hooks/pre-commit"),
+            &[],
+            "edit path .git/hooks/pre-commit escapes the snapshot",
+        ),
+        (
+            "*** Update File: a.txt\n*** Move to: .GIT/config\n".to_owned(),
+            &seen[..],
+            "edit path .GIT/config escapes the snapshot",
+        ),
         (
             format!("{change}*** Delete File: absent.txt\n"),
             &[("a.txt", "alpha\n"), ("absent.txt", "")][..],

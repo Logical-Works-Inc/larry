@@ -73,32 +73,32 @@ impl RunLock {
     /// run with this id already holds it (a keyed retry while the first still runs).
     pub(super) fn take(state: &Path, task_id: &str) -> Result<Option<Self>, ExecError> {
         let path = journal_path(state, task_id).with_extension(LOCK_EXT);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(ExecError::Journals)?;
-        Self::held(file, path)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        let file = open_lock(&mut options, &path).map_err(ExecError::Journals)?;
+        Self::held(file, path).map_err(ExecError::Journals)
     }
 
-    /// Another run's lock, never created: `Ok(None)` when that run is live, `Err` for a fault,
-    /// and a held guard (or `Some(None)` when the run made no lock file) when it is not.
-    fn probe(journal: &Path) -> Result<Option<Option<Self>>, ExecError> {
+    /// Looks at another run's lock, never creating it. A lock that cannot be opened or tried
+    /// is an error, which proves nothing about the run (larry#591).
+    fn probe(journal: &Path) -> std::io::Result<Probe> {
         let path = journal.with_extension(LOCK_EXT);
-        match std::fs::OpenOptions::new().write(true).open(&path) {
-            Ok(file) => Ok(Self::held(file, path)?.map(Some)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(None)),
-            Err(error) => Err(ExecError::Journals(error)),
+        match open_lock(std::fs::OpenOptions::new().write(true), &path) {
+            Ok(file) => Ok(match Self::held(file, path)? {
+                Some(guard) => Probe::Free(guard),
+                None => Probe::Live,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Probe::NoLock),
+            Err(error) => Err(error),
         }
     }
 
     /// `file` locked without waiting, or `None` when another process holds it.
-    fn held(file: std::fs::File, path: PathBuf) -> Result<Option<Self>, ExecError> {
+    fn held(file: std::fs::File, path: PathBuf) -> std::io::Result<Option<Self>> {
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { file, path })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(ExecError::Journals(error)),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
         }
     }
 
@@ -115,14 +115,36 @@ impl RunLock {
     }
 }
 
-/// Whether a live run still holds `task_id`'s run lock: its recorded process groups are its own
-/// and no start-up reap may signal them (larry#456).
-///
-/// # Errors
-///
-/// [`ExecError::Journals`] when the lock cannot be probed.
-pub(super) fn run_held(state: &Path, task_id: &str) -> Result<bool, ExecError> {
-    Ok(RunLock::probe(&journal_path(state, task_id))?.is_none())
+/// What a look at another run's lock found.
+enum Probe {
+    /// A live process holds it, so the run is live.
+    Live,
+    /// The run made no lock file.
+    NoLock,
+    /// It was free; this guard holds it now.
+    Free(RunLock),
+}
+
+/// Opens a lock file without waiting. A FIFO left at a lock's path would hold the start until
+/// a reader came, so it is an open error like a directory or a closed mode (larry#591).
+fn open_lock(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let nonblock = rustix::fs::OFlags::NONBLOCK.bits();
+        options.custom_flags(i32::try_from(nonblock).map_err(std::io::Error::other)?);
+    }
+    options.open(path)
+}
+
+/// Whether `task_id`'s run may still be live, so no start-up reap may signal its recorded
+/// process groups (larry#456). Only a lock that is free, or was never made, says the run is
+/// gone: one that cannot be opened proves nothing (larry#591), and [`recover`] reports it.
+pub(super) fn run_held(state: &Path, task_id: &str) -> bool {
+    !matches!(
+        RunLock::probe(&journal_path(state, task_id)),
+        Ok(Probe::NoLock | Probe::Free(_))
+    )
 }
 
 /// Whether another executor still holds `task_id`'s journal, so its evidence is
@@ -161,10 +183,12 @@ fn live_between(
     let path = journal_path(state, task_id);
     // The run's own lock first: probing its journal while it starts would take that lock from
     // it (larry#456). The guard is held across the journal probe and then dropped, never removed.
-    let probed = RunLock::probe(&path)?;
+    let probed = RunLock::probe(&path).map_err(ExecError::Journals)?;
     between()?;
-    let Some(_guard) = probed else {
-        return Ok(true);
+    let _guard = match probed {
+        Probe::Live => return Ok(true),
+        Probe::NoLock => None,
+        Probe::Free(guard) => Some(guard),
     };
     // The journal's existence only under the guard: a run removes its journal before it releases
     // its lock, so a journal gone now stays gone, and the open below never makes an empty one in
@@ -278,14 +302,24 @@ fn recover_one(path: &Path, policy: &BTreeSet<Scope>) -> Result<(), RuntimeError
     Ok(())
 }
 
-/// One journal the recovery left as `<task>.journal`: recovering it failed for a reason
-/// other than its bytes, so the next start tries again (larry#394).
+/// Why one journal was left in place for the next start.
+#[derive(Debug, lgwks_macros::Error)]
+pub(super) enum KeptCause {
+    /// Recovering it failed for a reason other than its bytes (larry#394).
+    #[error("{0}")]
+    Journal(#[source] RuntimeError),
+    /// Its run lock cannot be opened or tried, so nothing says its run is gone (larry#591).
+    #[error("run lock cannot be opened: {0}")]
+    RunLock(#[source] std::io::Error),
+}
+
+/// One journal the recovery left as `<task>.journal`, so the next start tries again.
 #[derive(Debug)]
 pub(super) struct KeptJournal {
     /// The journal left in place.
     pub(super) path: PathBuf,
     /// Why it could not be recovered now.
-    pub(super) cause: RuntimeError,
+    pub(super) cause: KeptCause,
 }
 
 impl KeptJournal {
@@ -312,6 +346,15 @@ pub(super) struct Recovery {
     pub(super) kept: Vec<KeptJournal>,
 }
 
+impl Recovery {
+    /// Leaves `path` a journal and reports why, once.
+    fn keep(&mut self, path: PathBuf, cause: KeptCause) {
+        let kept = KeptJournal { path, cause };
+        kept.report();
+        self.kept.push(kept);
+    }
+}
+
 /// Recovers every task journal a killed executor left under `state`, at most
 /// [`MAX_RECOVERED`] in name order.
 ///
@@ -319,10 +362,10 @@ pub(super) struct Recovery {
 /// it is live. A recovered journal is kept as `<task>.recovered`; one whose
 /// bytes the store or the replay refuses ([`RuntimeError::refuses_the_record`]) is
 /// kept as `<task>.refused`, so a damaged file is evidence, never a reason every
-/// later task fails. Any other fault (the device, a lock probe, the clock, a setting,
-/// a capacity) leaves the file a journal and is returned as one typed fault, so the
-/// next start recovers it and a keyed retry still opens it rather than running the
-/// body again (larry#394).
+/// later task fails. Any other fault (the device, a lock probe, an unopenable run
+/// lock, the clock, a setting, a capacity) leaves the file a journal and is returned
+/// as one typed fault, so the next start recovers it and a keyed retry still opens
+/// it rather than running the body again (larry#394, larry#591).
 ///
 /// # Errors
 ///
@@ -346,8 +389,15 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery
     for path in paths {
         // A live run holds its lock for its whole life; one that finished removed its journal
         // before its lock, so a journal gone once the lock is held settled on its own (larry#456).
-        let Some(guard) = RunLock::probe(&path)? else {
-            continue;
+        // A lock that cannot be opened keeps its journal and the sweep goes on (larry#591).
+        let guard = match RunLock::probe(&path) {
+            Ok(Probe::Live) => continue,
+            Ok(Probe::NoLock) => None,
+            Ok(Probe::Free(guard)) => Some(guard),
+            Err(fault) => {
+                recovery.keep(path, KeptCause::RunLock(fault));
+                continue;
+            }
         };
         if !path.try_exists().map_err(ExecError::Journals)? {
             continue;
@@ -357,9 +407,7 @@ pub(super) fn recover(state: &Path, policy: &BTreeSet<Scope>) -> Result<Recovery
             Err(RuntimeError::Durable(JournalError::Locked { .. })) => continue,
             Err(refusal) if refusal.refuses_the_record() => REFUSED_EXT,
             Err(cause) => {
-                let kept = KeptJournal { path, cause };
-                kept.report();
-                recovery.kept.push(kept);
+                recovery.keep(path, KeptCause::Journal(cause));
                 continue;
             }
         };

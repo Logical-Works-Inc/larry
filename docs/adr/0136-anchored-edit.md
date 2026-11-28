@@ -8,7 +8,7 @@ generated: {by: claude-code, at: 2026-11-27}
 verified: {by: claude-code, method: the tests under Proof run on a build box, 2026-11-28}
 status: accepted
 stale_after: 2027-05-27
-sources: [larry#277, larry#586, larry#606, INVARIANTS.md, src/executor/edit.rs, src/executor/session_turn.rs]
+sources: [larry#277, larry#586, larry#606, larry#624, INVARIANTS.md, src/executor/edit.rs, src/executor/patch.rs, src/executor/session_turn.rs]
 ---
 
 # ADR 0136: anchored file edits with a content-hash precondition
@@ -50,7 +50,22 @@ A read is sealed in `changes` with its path, digest and length, an edit with bot
 digests, and either with its refusal. Neither stores the file or enters
 `results`, so a session's verdict still rests on its commands alone.
 
-The Codex patch shape is a later part. It is not in the binary yet.
+Part 3 (larry#624) adds the reply `{"patch": {"text", "expect_digests"}}`, the
+Codex `apply_patch` shape: Add, Delete and Update File, Move to, `@@` hunks and
+End of File, read by a line parser. It names at most 16 files. Each file it
+changes or removes is opened, locked, read and digest-checked as an edit is, and
+every change is planned before the first write. A write that fails puts the
+written files back and names any it could not. The record holds a receipt per
+file, never the patch.
+
+A kill between two writes leaves the files already written: each file is whole,
+the set may not be. A terminal session writes in its copy, so the person's folder
+is untouched until they accept the review.
+
+Rejected for the patch: digests inside the patch headers, which breaks the shape
+the model already writes. Rejected: applying file by file as it parses, which
+leaves half a patch on a bad later hunk. Rejected: `git apply`, which takes a
+different format and no read digest.
 
 ## Consequences
 
@@ -94,3 +109,9 @@ Rejected: a digest check with no lock, which two edits can both pass.
 - `sim_an_approved_edit_records_both_digests`.
 - `an_edit_reply_parses_and_a_malformed_one_is_refused`.
 - `tui_journey_approved_edit_lands_with_its_receipt`, the shipped binary on a PTY.
+- `sim_a_patch_applied_then_reverted_gives_the_original_bytes`, 256 seeds.
+- `sim_a_corrupted_patch_is_refused_typed_and_writes_nothing`, 1,024 seeds.
+- `sim_a_patch_needs_the_digest_of_every_file_it_changes`.
+- `sim_a_patch_failing_at_any_write_puts_every_file_back`.
+- `sim_patches_at_once_on_one_digest_apply_one`.
+- `tui_journey_approved_patch_lands_every_file_with_its_receipt`, on a PTY.

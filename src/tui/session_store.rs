@@ -2,15 +2,16 @@
 //! transcript the frame shows ([`Transcript`], bounded and snapshot as JSON)
 //! and the driver-owned [`SessionStore`] that holds it in the state database's
 //! `tui_sessions` table after every turn and answers `/resume`, `/new`, `/fork`
-//! and `/rename`. The frame (`tui::app`) stays I/O-free. A kill -9 loses at
-//! most the turn in flight; a refused store leaves one notice and the frame
-//! runs unsaved.
+//! and `/rename`, and `/export` for the folder it runs in. The frame
+//! (`tui::app`) stays I/O-free. A kill -9 loses at most the turn in flight; a
+//! refused store leaves one notice and the frame runs unsaved.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::app::{App, SessionCommand};
 use super::cells::{Entry, Header};
+use super::export::export;
 use super::pane::Pane;
 use super::sessions::{self, Held, Owner, Snapshot};
 use super::style::Style;
@@ -106,6 +107,8 @@ pub(crate) struct SessionStore {
     store: Store,
     /// Whose row it is: the tenant, the folder it is listed under, the model.
     owner: Owner,
+    /// The folder `/export` writes inside, as the path the process runs in.
+    folder: PathBuf,
     /// The row the frame is held in, none until one is adopted.
     current: Option<Held>,
     /// Whether the refused save already left its one notice.
@@ -139,6 +142,7 @@ impl SessionStore {
                 folder: cwd.to_string_lossy().into_owned(),
                 model: model.to_owned(),
             },
+            folder: cwd.to_path_buf(),
             current: None,
             warned: false,
             started: 0,
@@ -213,6 +217,27 @@ impl SessionStore {
     /// has done its part, and a refusal leaves the frame and its row as they were.
     pub(crate) fn command(&mut self, app: &mut App, command: SessionCommand) {
         let said = match self.answer(app, command) {
+            Ok(lines) => Entry::Info(lines),
+            Err(cause) => Entry::Notice(Style::BAD, cause.to_string()),
+        };
+        app.transcript().push(said);
+    }
+
+    /// Writes the session on screen to `target` of the folder and says where,
+    /// or why nothing was written. It needs no row, so a refused store changes
+    /// nothing here.
+    pub(crate) fn export(&self, app: &mut App, target: &str) {
+        let name = match self.current {
+            Some(ref held) => held.name.as_str(),
+            None => "session",
+        };
+        let said = match export(
+            &self.folder,
+            target,
+            name,
+            &self.owner.model,
+            &app.snapshot(),
+        ) {
             Ok(lines) => Entry::Info(lines),
             Err(cause) => Entry::Notice(Style::BAD, cause.to_string()),
         };
