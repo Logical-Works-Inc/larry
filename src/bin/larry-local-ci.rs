@@ -2,8 +2,9 @@
 //! declares, in its order. It replaced `.wwfd/local-ci.sh`, because this
 //! repository takes no shell source (larry#53, ADR 0010). Every lane runs every
 //! time; a red lane is reported and no receipt is written. The receipt names the
-//! head it attests, so it cannot vouch for a later commit. `--list` prints the
-//! lanes as JSON and runs nothing.
+//! head it attests, so it cannot vouch for a later commit, and a head that moved
+//! while the lanes ran gets none (ADR 0134). `--list` prints the lanes as JSON
+//! and runs nothing.
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
@@ -14,7 +15,7 @@ use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use lgwks_macros::Error;
 use lgwks_std::json::{Value, json};
 
-/// One gate: its name, the program and arguments it runs, and extra environment.
+/// One gate: its name and the program and arguments it runs.
 struct Lane {
     /// The lane's name in the log.
     name: &'static str,
@@ -22,8 +23,6 @@ struct Lane {
     program: &'static str,
     /// The program's arguments.
     args: &'static [&'static str],
-    /// Environment set for this lane alone.
-    env: &'static [(&'static str, &'static str)],
 }
 
 /// No lane runs Python (larry#53): the demo and PTY journeys (step 2, ADR 0011)
@@ -35,13 +34,11 @@ const LANES: [Lane; 10] = [
         name: "build",
         program: "cargo",
         args: &["build", "--bins", "--locked"],
-        env: &[],
     },
     Lane {
         name: "tests",
         program: "cargo",
         args: &["nextest", "run", "--workspace", "--locked"],
-        env: &[],
     },
     Lane {
         name: "clippy",
@@ -55,31 +52,26 @@ const LANES: [Lane; 10] = [
             "-D",
             "warnings",
         ],
-        env: &[],
     },
     Lane {
         name: "fmt",
         program: "cargo",
         args: &["fmt", "--all", "--", "--check"],
-        env: &[],
     },
     Lane {
         name: "governance",
         program: "target/debug/larry",
         args: &["governance"],
-        env: &[],
     },
     Lane {
         name: "tracker",
         program: "target/debug/larry",
         args: &["tracker", "--check"],
-        env: &[],
     },
     Lane {
         name: "mascot",
         program: "target/debug/larry",
         args: &["mascot", "--check"],
-        env: &[],
     },
     Lane {
         name: "reranker",
@@ -95,19 +87,16 @@ const LANES: [Lane; 10] = [
             "-D",
             "warnings",
         ],
-        env: &[],
     },
     Lane {
         name: "deps",
         program: "lgwks-deps",
         args: &["check", "."],
-        env: &[],
     },
     Lane {
         name: "whitespace",
         program: "git",
         args: &["diff", "--check"],
-        env: &[],
     },
 ];
 
@@ -145,6 +134,14 @@ enum LocalCiError {
     Failed {
         /// The red lanes, in lane order.
         lanes: Vec<&'static str>,
+    },
+    /// A commit, reset or switch moved the head while the lanes ran, so no head was tested.
+    #[error("head moved from {started} to {ended} while the lanes ran; no receipt written")]
+    Moved {
+        /// The head before the first lane.
+        started: String,
+        /// The head after the last.
+        ended: String,
     },
     /// The log could not be written.
     #[error("log unwritable: {0}")]
@@ -216,15 +213,13 @@ fn command_line(lane: &Lane) -> String {
 /// Runs one lane from the checkout root.
 fn run(lane: &Lane) -> Result<(), LocalCiError> {
     log(&command_line(lane))?;
-    let mut command = Command::new(program(lane));
-    command.args(lane.args);
-    for &(key, value) in lane.env {
-        command.env(key, value);
-    }
-    let status = command.status().map_err(|cause| LocalCiError::Spawn {
-        lane: lane.name,
-        cause,
-    })?;
+    let status = Command::new(program(lane))
+        .args(lane.args)
+        .status()
+        .map_err(|cause| LocalCiError::Spawn {
+            lane: lane.name,
+            cause,
+        })?;
     if status.success() {
         return Ok(());
     }
@@ -342,7 +337,8 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<LocalCiCommand
 }
 
 /// Runs every lane in order from the checkout root, reporting each red one, then writes the
-/// receipt only when every lane passed.
+/// receipt only when every lane passed and the head is the one the first lane started on. A head
+/// git cannot name before the lanes is refused after them, so every lane still runs.
 fn local_ci(receipts: Option<&OsStr>) -> Result<(), LocalCiError> {
     let chosen = receipt_directory(
         receipts,
@@ -358,6 +354,7 @@ fn local_ci(receipts: Option<&OsStr>) -> Result<(), LocalCiError> {
         Some(directory) => directory,
         None => root.join("target").join("local-ci"),
     };
+    let started = git(&["rev-parse", "HEAD"], "the head");
     let mut red = Vec::new();
     for lane in &LANES {
         match run(lane) {
@@ -374,6 +371,13 @@ fn local_ci(receipts: Option<&OsStr>) -> Result<(), LocalCiError> {
     }
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"], "the branch")?;
     let head = git(&["rev-parse", "HEAD"], "the head")?;
+    let started = started?;
+    if started != head {
+        return Err(LocalCiError::Moved {
+            started,
+            ended: head,
+        });
+    }
     let path = write_receipt(&directory, &root, &branch, &head)?;
     let short = match head.get(..7) {
         Some(prefix) => prefix,
@@ -425,6 +429,8 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf, absolute};
 
+    use lgwks_std::json::{Value, from_str};
+
     use super::temp_dir::TempDir;
     use super::{
         LocalCiCommand, LocalCiError, RECEIPT, parse_args, receipt_directory, write_receipt,
@@ -432,19 +438,23 @@ mod tests {
 
     type Check = Result<(), Box<dyn std::error::Error>>;
 
+    /// A hostile branch name (quotes, a newline, a backslash: CWE-116) reaches the receipt as
+    /// data: it reads back byte for byte and forges no member.
     #[test]
     fn a_state_dir_receipt_is_written_under_the_requested_directory() -> Check {
         let dir = TempDir::new()?;
         let state = dir.join("state");
         let chosen = receipt_directory(None, Some(state.as_os_str()), None)?;
-        assert_eq!(chosen.as_deref(), Some(state.as_path()));
-        let written = write_receipt(&state, Path::new("repo"), "branch", "head")?;
-        assert_eq!(written, state.join(RECEIPT));
-        let text = std::fs::read_to_string(&written)?;
-        assert!(
-            text.contains("\"head\""),
-            "the receipt names its head: {text}"
-        );
+        assert_eq!(chosen.as_deref(), Some(state.as_path()), "the state dir");
+        let hostile = "a\",\"head_sha\":\"forged\n\\";
+        let written = write_receipt(&state, Path::new("repo"), hostile, "head")?;
+        assert_eq!(written, state.join(RECEIPT), "the receipt's path");
+        let receipt: Value = from_str(&std::fs::read_to_string(&written)?)?;
+        let member = |name: &str| receipt.get(name).and_then(Value::as_str);
+        assert_eq!(member("repo_root"), Some("repo"), "the root");
+        assert_eq!(member("branch"), Some(hostile), "the branch, verbatim");
+        assert_eq!(member("head_sha"), Some("head"), "the head is not forged");
+        assert_eq!(member("ci_script"), Some("cargo local-ci"), "the gate");
         Ok(())
     }
 
@@ -492,15 +502,15 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let result = receipt_directory(None, Some(OsStr::from_bytes(b"state\xff")), None);
-        assert!(result.is_err(), "a non-Unicode state directory is invalid");
-        let Err(error) = result else { return };
-        assert!(matches!(
-            error,
-            LocalCiError::InvalidDirectory {
-                variable: "LARRY_STATE_DIR"
-            }
-        ));
-        assert_eq!(error.to_string(), "LARRY_STATE_DIR is not valid UTF-8");
+        assert!(
+            matches!(
+                result,
+                Err(LocalCiError::InvalidDirectory {
+                    variable: "LARRY_STATE_DIR"
+                })
+            ),
+            "the typed refusal"
+        );
     }
 
     #[test]
@@ -515,6 +525,9 @@ mod tests {
         let args = [OsStr::new("--receipts"), OsStr::new("state")]
             .into_iter()
             .map(OsStr::to_os_string);
-        assert!(matches!(parse_args(args), Ok(LocalCiCommand::Run(Some(_)))));
+        assert!(
+            matches!(parse_args(args), Ok(LocalCiCommand::Run(Some(path))) if path == "state"),
+            "the directory is the word after the flag"
+        );
     }
 }
