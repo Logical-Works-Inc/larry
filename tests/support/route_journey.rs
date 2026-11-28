@@ -8,7 +8,7 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+use std::process::{Command, Output};
 
 #[path = "json_at.rs"]
 pub(crate) mod json_at;
@@ -24,6 +24,7 @@ pub(crate) mod route_key;
 pub(crate) mod sealed_report;
 
 use crate::coverage::forward;
+use crate::larry_guard::Larry;
 use larry_cli::{spawn_larry_args, stderr_of};
 use lgwks_std::json::json;
 use mock_model::Handle;
@@ -168,7 +169,7 @@ pub(crate) fn start_with_key(
     key: &OsStr,
     task: &str,
     extra: &[(&str, &OsStr)],
-) -> Result<Child, Box<dyn Error>> {
+) -> Result<Larry, Box<dyn Error>> {
     let mut env: Vec<(&str, &OsStr)> = vec![
         ("LARRY_STATE_DIR", state.as_os_str()),
         ("LARRY_POLICY", OsStr::new(POLICY)),

@@ -14,6 +14,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use crate::coverage::forward;
+use crate::larry_guard::Larry;
 
 /// The variables an operator exports to put an executor behind `larry mcp`:
 /// the state directory, the gateway, a key, no backoff wait, plus `extra`.
@@ -92,10 +93,12 @@ fn run_larry(subcommand: &str, env: &[(&str, &OsStr)], input: &[u8]) -> TestResu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     forward(&mut command);
-    let mut child = command.spawn()?;
-    let mut stdin = child.stdin.take().ok_or("child stdin was not piped")?;
-    stdin.write_all(input)?;
-    drop(stdin);
+    let mut child = Larry::spawn(&mut command)?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("child stdin was not piped")?
+        .write_all(input)?;
     Ok(child.wait_with_output()?)
 }
 

@@ -13,6 +13,8 @@ mod coverage;
 mod json_at;
 use json_at::At;
 
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 
 use lgwks_std::json::{self, Value, json};

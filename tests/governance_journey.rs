@@ -23,7 +23,10 @@ mod temp_dir;
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 
+use larry_guard::Larry;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -363,7 +366,7 @@ fn a_killed_tracker_write_leaves_the_render_whole() -> TestResult {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         coverage::forward(&mut tracker);
-        let mut child = tracker.spawn()?;
+        let mut child = Larry::spawn(&mut tracker)?;
         let deadline = Instant::now()
             .checked_add(WRITE_PATIENCE)
             .ok_or("the write deadline overflowed")?;
@@ -490,7 +493,7 @@ fn peak_rss_kib(root: &Path) -> Result<Option<u64>, Box<dyn Error>> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     coverage::forward(&mut check);
-    let mut child = check.spawn()?;
+    let mut child = Larry::spawn(&mut check)?;
     let pid = child.id().to_string();
     let sampled = sample_until_exit(
         &clock,

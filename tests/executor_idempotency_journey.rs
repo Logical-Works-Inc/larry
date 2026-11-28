@@ -22,6 +22,8 @@ use json_at::At;
 
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 
 use std::error::Error;
 use std::fs;

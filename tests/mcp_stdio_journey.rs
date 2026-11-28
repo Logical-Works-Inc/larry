@@ -21,6 +21,8 @@ mod accepted;
 mod confine;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 #[path = "support/mcp_task.rs"]
 mod mcp_task;

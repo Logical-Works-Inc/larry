@@ -7,6 +7,8 @@
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 #[path = "support/serve_cli.rs"]
 mod serve_cli;
 

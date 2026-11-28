@@ -18,6 +18,8 @@ use json_at::At;
 
 #[path = "mcp_support/eras.rs"]
 mod eras;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 mod mcp_support;
 #[path = "mcp_support/schema.rs"]
 mod schema;

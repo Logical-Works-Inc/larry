@@ -9,11 +9,13 @@
 use std::error::Error;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Child, Command, Output};
+use std::process::{Command, Output};
 use std::time::Duration;
 
 use lgwks_deps::storefront::rusqlite::{Connection, OpenFlags};
 use lgwks_std::json::Value;
+
+use crate::larry_guard::Larry;
 
 /// What every test here returns.
 pub(crate) type TestResult = Result<(), Box<dyn Error>>;
@@ -55,7 +57,7 @@ pub(crate) fn spawn_exec(
     state: Option<&Path>,
     timeout_ms: Option<u64>,
     task: &str,
-) -> Result<Child, Box<dyn Error>> {
+) -> Result<Larry, Box<dyn Error>> {
     let timeout = timeout_ms.map(|ms| ms.to_string());
     let mut env: Vec<(&str, &OsStr)> = Vec::new();
     if let Some(dir) = state {
