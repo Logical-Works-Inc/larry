@@ -109,7 +109,8 @@ links must take an export, or a recap must say what no receipt holds.
 A kill -9 loses at most the turn in flight, and a fresh terminal continues the
 session. A listing reads the tenant's rows, at most 10,000.
 Proof: `tui_journey_export_writes_the_session_and_recap_sums_it` (shipped debug
-binary, oracle, 20 samples: `/export` p50 111.8 ms, p99 140.8 ms, RSS 10,900 KiB),
+binary, oracle, 3 runs of 20: `/export` p50 72 to 84 ms, p99 86 to 101 ms, RSS
+11,612 KiB; the writer before this one p50 70 to 75 ms, p99 95 to 102 ms),
 `tui_journey_a_kill_mid_export_leaves_no_part_file_and_the_next_export_succeeds`,
 `src/tui/sim_export.rs`, `tui_journey_a_killed_terminal_resumes_its_session_and_forks_it`,
 `tui_journey_a_full_session_store_lists_and_reports_latency_and_rss` (shipped

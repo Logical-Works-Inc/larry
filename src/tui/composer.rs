@@ -62,10 +62,11 @@ impl Composer {
         self.selected = 0;
     }
 
-    /// Inserts `text` at the cursor, sanitized, newlines kept; returns false
-    /// when it was cut to keep the bound.
+    /// Inserts `text` at the cursor, sanitized; returns false when it was cut
+    /// to keep the bound. A terminal sends a pasted newline as CR, so CR LF and
+    /// a lone CR are one LF before the sanitizer drops the rest (larry#605).
     pub(crate) fn insert(&mut self, text: &str) -> bool {
-        let clean = sanitize(text, true);
+        let clean = sanitize(&text.replace("\r\n", "\n").replace('\r', "\n"), true);
         let room = MAX_INSTRUCTION_BYTES.saturating_sub(self.text.len());
         let mut end = clean.len().min(room);
         while !clean.is_char_boundary(end) {
