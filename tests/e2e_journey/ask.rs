@@ -1,6 +1,7 @@
 //! A command taller than the terminal is not approved unread (larry#521), through the shipped
 //! binary: `y` and `a` at once run nothing and say why, `PgDn` brings the rest on screen, and
-//! only then does `y` run it. Source: CWE-451 (UI misrepresentation of critical information).
+//! only then does `y` run it (ADR 0152, PR #633). Source: CWE-451 (UI misrepresentation of
+//! critical information).
 
 use super::journey::{ASK, ask, frame_in, scripted};
 use super::pty::Journey;
