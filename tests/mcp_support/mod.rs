@@ -10,7 +10,9 @@ mod larry_child;
 use lgwks_std::json::{self, Value};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Stdio};
+use std::process::{ChildStdin, ChildStdout, ExitStatus, Stdio};
+
+use crate::larry_guard::Larry;
 
 /// A fallible test step; failures propagate instead of panicking.
 pub(crate) type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -21,8 +23,9 @@ pub(crate) use rng::Rng;
 
 /// One running `larry mcp` process and its two pipes.
 pub(crate) struct Session {
-    /// The server process.
-    child: Child,
+    /// The server process, killed and reaped when the session drops, so a failing test
+    /// never leaves a running server behind.
+    child: Larry,
     /// Write end of the server's stdin; `None` once closed.
     stdin: Option<ChildStdin>,
     /// Buffered read end of the server's stdout.
@@ -111,25 +114,5 @@ impl Session {
     pub(crate) fn finish(mut self) -> TestResult<ExitStatus> {
         self.close_stdin();
         Ok(self.child.wait()?)
-    }
-}
-
-impl Drop for Session {
-    /// A session abandoned by a failing test never leaves a running server behind.
-    /// A server that would not stop fails the test that owned it, unless that test is already
-    /// failing.
-    fn drop(&mut self) {
-        let stopped = match self.child.try_wait() {
-            Ok(Some(_status)) => Ok(()),
-            Ok(None) => self
-                .child
-                .kill()
-                .and_then(|()| self.child.wait().map(|_status| ())),
-            Err(cause) => Err(cause),
-        };
-        assert!(
-            std::thread::panicking() || stopped.is_ok(),
-            "the abandoned server would not stop: {stopped:?}"
-        );
     }
 }

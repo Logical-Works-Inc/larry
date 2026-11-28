@@ -17,6 +17,8 @@
 
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 
 #[path = "support/route_journey.rs"]
 mod route_journey;

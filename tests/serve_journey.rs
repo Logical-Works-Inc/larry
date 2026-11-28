@@ -21,6 +21,8 @@ mod serve_cli;
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -29,6 +31,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use larry_guard::Larry;
 use lgwks_std::json::{self, Value};
 use serve_cli::{
     Serving, exchange, fill_key_store, fresh_state_dir, get, issue_key, probe_body, revoke,
@@ -538,7 +541,7 @@ fn a_reload_whose_log_line_fails_keeps_serving_and_reports_on_stderr() -> TestRe
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     coverage::forward(&mut serve);
-    let mut child = serve.spawn()?;
+    let mut child = Larry::spawn(&mut serve)?;
     let stdout = child.stdout.take().ok_or("stdout was not piped")?;
     let mut serving = String::new();
     {

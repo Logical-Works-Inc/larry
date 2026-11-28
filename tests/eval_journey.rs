@@ -31,6 +31,8 @@ mod mock_model;
 
 #[path = "support/eval_arm.rs"]
 mod eval_arm;
+#[path = "support/larry_guard.rs"]
+mod larry_guard;
 use eval_arm::{Arm, CLAUDE, FLASH, Ran, TestResult};
 use eval_arm::{charged_prompt_tokens, eval_entries, number, operator, origins_left, report};
 use eval_arm::{rss_tool, score_arm, spawn_arm, task, timeless};
