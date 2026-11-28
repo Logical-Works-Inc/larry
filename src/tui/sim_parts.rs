@@ -14,6 +14,9 @@ use super::paint::{compact, hints};
 use super::style::{Style, text_width};
 use super::worker::{Decision, Event};
 
+#[path = "sim_ask.rs"]
+mod asking;
+
 /// Seeds each simulation runs.
 const SEEDS: u64 = 256;
 

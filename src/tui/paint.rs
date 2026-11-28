@@ -9,14 +9,15 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use super::app::Phase;
-use super::ask::{fit, marked, offer};
+use super::ask::{Reading, command_rows, lay, marked, offer};
 use super::buffer::{Buffer, Frame};
 use super::cells::Entry;
 use super::composer::Composer;
 use super::layout::split;
 use super::pane::Pane;
 use super::pending::{Pending, first_line};
-use super::style::{Line, Span, Style, ellipsize, sanitize_line, sanitize_shown, text_width, wrap};
+use super::style::{Line, Span, Style, ellipsize, sanitize_line, text_width};
+use super::worker::Decision;
 
 /// The spinner's frames, one per 100 ms.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -51,6 +52,8 @@ pub(crate) struct View<'frame> {
     pub frames: &'frame Cell<u64>,
     /// The frame that painted the question now asked, `None` until one carries it.
     pub painted: &'frame Cell<Option<u64>>,
+    /// What of the command asked about has been on screen; the paint writes it.
+    pub reading: &'frame Cell<Reading>,
 }
 
 /// `elapsed` the way Codex's status row shows it: `12s`, `1m 05s`, `1h 02m`.
@@ -157,81 +160,90 @@ impl View<'_> {
         ])
     }
 
-    /// The bottom block (status, popup or question, composer, footer), the cursor's column and
-    /// row in it, and the leading rows a crop must keep (the question's title and first row).
-    fn bottom(&self, width: usize) -> (Vec<Line>, Option<(usize, usize)>, usize) {
+    /// The footer row: the one-line hint, else the keys that fit.
+    fn foot(&self, keys: &[&str], width: usize) -> Line {
+        match *self.hint {
+            Some(ref hint) => vec![Span::new(ellipsize(hint, width), Style::WARN)],
+            None if self.scroll > 0 => {
+                let mut items = vec!["↓ pgdn newer"];
+                items.extend_from_slice(keys);
+                hints(&items, width)
+            }
+            None => hints(keys, width),
+        }
+    }
+
+    /// The question in at most `height` rows; [`lay`] decides what a short screen keeps.
+    fn question(
+        &self,
+        command: Option<&str>,
+        choice: Decision,
+        (width, height): (usize, usize),
+    ) -> Vec<Line> {
+        let (title, answers, keys) = offer(command.is_some());
+        let body = match command {
+            Some(command) => command_rows(command, width),
+            None => Vec::new(),
+        };
+        let answers = answers
+            .iter()
+            .map(|&(decision, label)| {
+                let (mark, style) = marked(decision == choice);
+                Span::new(format!("{mark} {label}  "), style)
+            })
+            .collect();
+        lay(
+            self.reading,
+            vec![Span::new(title, Style::WARN.bold())],
+            body,
+            answers,
+            self.foot(keys, width),
+            (width, height),
+        )
+    }
+
+    /// The bottom block (status, popup or question, composer, footer) and the cursor's column
+    /// and row in it.
+    fn bottom(&self, width: usize, height: usize) -> (Vec<Line>, Option<(usize, usize)>) {
+        // A question takes the block alone: its title and command outrank the status row and
+        // the diff's one line (larry#325).
+        if let &Phase::Asking(ref command, choice) = self.phase {
+            return (
+                self.question(command.as_deref(), choice, (width, height)),
+                None,
+            );
+        }
         let mut rows: Vec<Line> = Vec::new();
         if let Some(status) = self.status_row() {
             rows.push(status);
         }
-        // A screen too narrow for the pane keeps the change as one line (larry#244); while a
-        // question is open its title and first command row outrank that line (larry#325).
-        if !matches!(self.phase, Phase::Asking(..))
-            && split(self.width, self.height).artifact.is_none()
+        // A screen too narrow for the pane keeps the change as one line (larry#244).
+        if split(self.width, self.height).artifact.is_none()
             && let Some(summary) = self.pane.summary()
         {
             rows.push(vec![Span::new(ellipsize(&summary, width), Style::MUTED)]);
         }
-        let mut cursor = None;
-        let mut keep = 0_usize;
-        let footer: &[&str] = if let &Phase::Asking(ref command, choice) = self.phase {
-            let (title, answers, keys) = offer(command.is_some());
-            rows.push(vec![Span::new(title, Style::WARN.bold())]);
-            let body = rows.len();
-            let lead = vec![Span::new("$ ", Style::MUTED)];
-            let rest = vec![Span::new("  ", Style::PLAIN)];
-            for text in command.iter().map(|command| sanitize_shown(command)) {
-                for line in text.split_terminator('\n') {
-                    rows.extend(wrap(&[Span::new(line, Style::PLAIN)], width, &lead, &rest));
-                }
+        if let Some(popup) = self.composer.popup() {
+            for (index, (name, about)) in popup.into_iter().enumerate() {
+                let (mark, style) = marked(index == self.composer.selected_row());
+                rows.push(vec![
+                    Span::new(format!("{mark} {name}  "), style),
+                    Span::new(about, Style::MUTED),
+                ]);
             }
-            keep = if rows.len() > body {
-                body.saturating_add(1)
-            } else {
-                body
-            };
-            rows.push(
-                answers
-                    .iter()
-                    .map(|&(decision, label)| {
-                        let (mark, style) = marked(decision == choice);
-                        Span::new(format!("{mark} {label}  "), style)
-                    })
-                    .collect(),
-            );
-            keys
+        }
+        rows.push(vec![Span::new("─".repeat(width), Style::MUTED)]);
+        rows.extend(self.pending.queue_lines(width));
+        let (lines, (column, row)) = self.composer.render(width, "Ask Larry to do something");
+        let cursor = Some((column, rows.len().saturating_add(row)));
+        rows.extend(lines);
+        let keys: &[&str] = if matches!(self.phase, &Phase::Idle) {
+            &["enter send", "/ commands", "ctrl+j newline", "ctrl+c quit"]
         } else {
-            if let Some(popup) = self.composer.popup() {
-                for (index, (name, about)) in popup.into_iter().enumerate() {
-                    let (mark, style) = marked(index == self.composer.selected_row());
-                    rows.push(vec![
-                        Span::new(format!("{mark} {name}  "), style),
-                        Span::new(about, Style::MUTED),
-                    ]);
-                }
-            }
-            rows.push(vec![Span::new("─".repeat(width), Style::MUTED)]);
-            rows.extend(self.pending.queue_lines(width));
-            let (lines, (column, row)) = self.composer.render(width, "Ask Larry to do something");
-            cursor = Some((column, rows.len().saturating_add(row)));
-            rows.extend(lines);
-            if matches!(self.phase, &Phase::Idle) {
-                &["enter send", "/ commands", "ctrl+j newline", "ctrl+c quit"]
-            } else {
-                &["enter queues", "esc interrupt", "pgup/pgdn scroll"]
-            }
+            &["enter queues", "esc interrupt", "pgup/pgdn scroll"]
         };
-        let foot = match *self.hint {
-            Some(ref hint) => vec![Span::new(ellipsize(hint, width), Style::WARN)],
-            None if self.scroll > 0 => {
-                let mut items = vec!["↓ pgdn newer"];
-                items.extend_from_slice(footer);
-                hints(&items, width)
-            }
-            None => hints(footer, width),
-        };
-        rows.push(foot);
-        (rows, cursor, keep)
+        rows.push(self.foot(keys, width));
+        (rows, cursor)
     }
 
     /// The frame for the current state.
@@ -246,8 +258,7 @@ impl View<'_> {
         let left = chat.x.saturating_add(1);
         let right = chat.right().saturating_sub(1).max(left.saturating_add(1));
         let width = right.saturating_sub(left);
-        let (bottom, cursor, keep) = self.bottom(width);
-        let bottom = fit(bottom, keep, chat.height);
+        let (bottom, cursor) = self.bottom(width, chat.height);
         let bottom_rows = bottom.len().min(chat.height);
         let area = chat.height.saturating_sub(bottom_rows);
         let rows = self.transcript_rows();
