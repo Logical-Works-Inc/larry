@@ -139,7 +139,7 @@ impl Captured {
 }
 
 /// What one acceptance command did, as the report records it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub(crate) struct CommandResult {
     /// The argv that ran.
@@ -209,6 +209,13 @@ impl CommandResult {
         let out_cut = clip(&mut self.stdout, bytes);
         let err_cut = clip(&mut self.stderr, bytes);
         self.truncated = self.truncated || out_cut || err_cut;
+        self
+    }
+
+    /// This result with each kept stream passed through `rewrite` (larry#589).
+    pub(crate) fn rewritten(mut self, rewrite: impl Fn(&str) -> String) -> CommandResult {
+        self.stdout = rewrite(&self.stdout);
+        self.stderr = rewrite(&self.stderr);
         self
     }
 

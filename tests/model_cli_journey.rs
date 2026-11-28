@@ -211,6 +211,27 @@ fn an_empty_or_oversize_prompt_is_refused_before_sending() -> TestResult {
     })
 }
 
+/// A prompt leaves the machine, so a `LARRY_POLICY` without `net.egress` refuses
+/// it before the key is read or a byte is sent (OWASP ASVS 4.0.3 §4.1.3,
+/// larry#589).
+#[test]
+fn a_policy_without_net_egress_sends_nothing() -> TestResult {
+    mock_model::run(Config::seeded(23), |handle| {
+        let mut env = operator(handle.addr());
+        env.push(("LARRY_POLICY", String::from("model.invoke")));
+        let output = larry_model(&env, b"hello")?;
+        assert!(!output.status.success(), "refused");
+        assert!(
+            stderr_of(&output).contains("gate: policy_refuses: net.egress"),
+            "the refusal names the scope: {}",
+            stderr_of(&output)
+        );
+        assert!(output.stdout.is_empty(), "nothing is printed as a reply");
+        assert_eq!(handle.served(), 0, "nothing reached the gateway");
+        Ok(())
+    })
+}
+
 /// `0.0.0.0` reaches a listener on this machine and is not loopback (RFC 1122
 /// section 3.2.1.3), so a plaintext gateway there is refused before any byte
 /// leaves: the listener holds no connection from `larry model`.
