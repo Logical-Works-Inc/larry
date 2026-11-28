@@ -3,7 +3,7 @@
 //! repository takes no shell source (larry#53, ADR 0010). Every lane runs every
 //! time; a red lane is reported and no receipt is written. The receipt names the
 //! head it attests, so it cannot vouch for a later commit, and a head that moved
-//! while the lanes ran gets none (ADR 0134). `--list` prints the lanes as JSON
+//! while the lanes ran gets none (ADR 0138). `--list` prints the lanes as JSON
 //! and runs nothing.
 use std::ffi::{OsStr, OsString};
 use std::fs;

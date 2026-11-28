@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0134: local CI writes no receipt when the head moved during the lanes"
+title: "ADR 0138: local CI writes no receipt when the head moved during the lanes"
 description: "The head is read before the first lane and again after the last; a difference is refused."
-resource: /docs/adr/0134-local-ci-head-held.md
+resource: /docs/adr/0138-local-ci-head-held.md
 tags: [larry, adr, local-ci, receipt]
 generated: {by: claude-code, at: 2026-11-27}
 verified: {by: claude-code, method: lgwks-box cargo nextest run, cargo mutants and llvm-cov on toronto, 2026-11-27}
