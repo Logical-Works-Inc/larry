@@ -20,6 +20,9 @@ mod session;
 #[path = "eval_journey/priced.rs"]
 mod priced;
 
+#[path = "eval_journey/usage.rs"]
+mod usage;
+
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
