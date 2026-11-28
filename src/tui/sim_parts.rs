@@ -6,10 +6,11 @@
 
 use std::time::Duration;
 
-use super::app::{App, Input, Key, MAX_ENTRIES, compact, hints};
+use super::app::{App, Input, Key, MAX_ENTRIES};
 use super::buffer::Buffer;
 use super::cells::{Entry, Header, OUTPUT_TAIL, split_observation};
 use super::composer::Composer;
+use super::paint::{compact, hints};
 use super::style::{Style, text_width};
 use super::worker::{Decision, Event};
 

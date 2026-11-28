@@ -18,6 +18,7 @@ mod cells;
 mod composer;
 mod jobs;
 mod layout;
+mod paint;
 mod pane;
 mod pending;
 #[cfg(test)]
