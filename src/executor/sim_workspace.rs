@@ -616,3 +616,104 @@ fn sim_a_linux_mode_reset_opens_only_a_directory_and_never_a_link() -> TestResul
     }
     Ok(())
 }
+
+/// The fault a scripted diff reader ends with.
+const BROKE: &str = "the stream broke";
+
+/// A reader that hands over `sound` reads of `inner`, then fails.
+struct Failing<R> {
+    /// The stream behind the fault.
+    inner: R,
+    /// Reads still to answer before the fault.
+    sound: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for Failing<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let Some(left) = self.sound.checked_sub(1) else {
+            return Err(std::io::Error::other(BROKE));
+        };
+        self.sound = left;
+        self.inner.read(buffer)
+    }
+}
+
+/// Whether the process table still holds `pid`, running or exited and unwaited.
+fn listed(pid: u32) -> std::io::Result<bool> {
+    let status = std::process::Command::new("ps")
+        .args(["-o", "pid=", "-p"])
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    Ok(status.success())
+}
+
+/// The workspace fault `answer` carries; any other answer is named, so the assertion that
+/// compares it says what came back.
+fn workspace_cause<T>(answer: Result<T, ExecError>) -> String {
+    match answer {
+        Err(ExecError::Workspace(cause)) => cause.to_string(),
+        Err(other) => format!("not a workspace fault: {other}"),
+        Ok(_) => "the fault was accepted".to_owned(),
+    }
+}
+
+/// larry#620 (CWE-404, CWE-772): the diff stream fails after a seeded number of reads while
+/// its child still writes. The answer is the stream's own fault and the child is gone from the
+/// process table, never an exited child nobody waits for (POSIX `wait(2)`).
+#[test]
+fn sim_a_failed_diff_stream_leaves_no_child_behind() -> TestResult {
+    let mut rng = Seeded::from_seed(SEEDS[0]);
+    for _ in 0..8 {
+        let sound = rng.below(4)?;
+        let (stdout, writer) = std::io::pipe()?;
+        // `yes` writes until its pipe breaks, as a git with more diff to send would.
+        let child = std::process::Command::new("yes").stdout(writer).spawn()?;
+        let pid = child.id();
+        let stream = Failing {
+            inner: stdout,
+            sound,
+        };
+        let cause = workspace_cause(super::supervise(child, stream, std::io::empty()));
+        assert_eq!(cause, BROKE, "after {sound} reads");
+        assert!(
+            !listed(pid)?,
+            "after {sound} reads the child was left behind"
+        );
+    }
+    Ok(())
+}
+
+/// larry#620: a diff whose streams ended whole is never signalled. `cat` is still running when
+/// they end (it reads a stdin that only the wait closes), so it ends on its own status.
+#[test]
+fn sim_a_sound_diff_stream_never_signals_its_child() -> TestResult {
+    let child = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    let pid = child.id();
+    let diff = super::supervise(child, std::io::empty(), std::io::empty());
+    assert_eq!(
+        diff.map(|diff| diff.bytes)
+            .map_err(|cause| cause.to_string()),
+        Ok(0)
+    );
+    assert!(!listed(pid)?, "the child was left behind");
+    Ok(())
+}
+
+/// larry#620: the stderr reader fails. The fault is typed and the child is still waited.
+#[test]
+fn sim_a_failed_diff_stderr_is_typed_and_leaves_no_child_behind() -> TestResult {
+    let child = std::process::Command::new("true").spawn()?;
+    let pid = child.id();
+    let errors = Failing {
+        inner: std::io::empty(),
+        sound: 0,
+    };
+    let cause = workspace_cause(super::supervise(child, std::io::empty(), errors));
+    assert_eq!(cause, BROKE);
+    assert!(!listed(pid)?, "the child was left behind");
+    Ok(())
+}
