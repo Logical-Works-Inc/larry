@@ -5,6 +5,7 @@ mod author;
 mod ceiling;
 mod compact;
 mod confine;
+mod edit;
 mod error;
 pub(super) mod fence_control;
 mod gate;
@@ -19,6 +20,7 @@ pub mod routes;
 mod run;
 mod seal;
 mod session;
+mod session_turn;
 #[cfg(test)]
 mod sim_env;
 #[cfg(test)]
