@@ -385,6 +385,7 @@ fn drive(
                         running.interrupt();
                     }
                 }
+                Effect::Session(command) => store.command(app, command),
             }
         }
         if turn {

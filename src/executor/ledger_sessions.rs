@@ -2,10 +2,11 @@
 //! terminal session in `tui_sessions`, holding its tenant, id, name, folder,
 //! model, update stamp and the transcript snapshot as JSON. The ledger owns the
 //! SQL and the row shape; `crate::tui::sessions` owns the snapshot shape and the
-//! name rule. Every write names the exact tenant and row it touches, and
-//! creating past a tenant's bound writes no row.
+//! name rule. Every read and write names the exact tenant, creating past a
+//! tenant's bound writes no row, and a write names the stamp its holder last
+//! wrote, so a row two terminals hold keeps one writer.
 
-use lgwks_deps::storefront::rusqlite;
+use lgwks_deps::storefront::rusqlite::{self, OptionalExtension};
 use lgwks_macros::Error;
 
 use super::ExecError;
@@ -29,10 +30,31 @@ pub enum SessionStoreError {
         id: String,
     },
     /// `name` is blank, past 64 characters or holds a control character.
-    #[error("bad tui session name {name}")]
+    #[error("bad tui session name {name}: use 1 to 64 characters on one line")]
     BadName {
         /// The refused text.
         name: String,
+    },
+    /// `target` names more than one saved session.
+    #[error("{target} names more than one tui session; use its number or id")]
+    Ambiguous {
+        /// What the person typed.
+        target: String,
+    },
+    /// The row was written since this terminal last wrote it.
+    #[error("tui session {id} was written by another terminal; /fork keeps what is shown here")]
+    Moved {
+        /// The row another terminal holds.
+        id: String,
+    },
+    /// The stored bytes of `id` are not a session.
+    #[error("tui session {id} is damaged")]
+    Damaged {
+        /// The row that does not read back.
+        id: String,
+        /// The JSON refusal.
+        #[source]
+        cause: lgwks_std::json::Error,
     },
     /// The tenant already holds its `bound` of sessions.
     #[error("the tui session store is full at {bound} sessions")]
@@ -108,20 +130,81 @@ impl super::Ledger {
         Ok(written > 0)
     }
 
-    /// Holds `transcript` in `tenant`'s session `id`; `false` when it holds none.
+    /// Holds `transcript` in `tenant`'s session `id`, when its stamp is still
+    /// `held`, and returns the new stamp: `now`, or one past `held` when the
+    /// clock did not move past it. `None` writes nothing: the row is gone or
+    /// another terminal wrote it.
     pub(crate) fn session_save(
         &self,
         tenant: &str,
         id: &str,
-        updated: i64,
+        held: i64,
+        now: i64,
         transcript: &str,
+    ) -> Result<Option<i64>, ExecError> {
+        self.conn
+            .query_row(
+                "UPDATE tui_sessions SET updated = MAX(?4, updated + 1), transcript = ?5 \
+                 WHERE tenant = ?1 AND id = ?2 AND updated = ?3 RETURNING updated",
+                rusqlite::params![tenant, id, held, now, transcript],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(ExecError::Sql)
+    }
+
+    /// The stamp, name and snapshot JSON of `tenant`'s session `id`.
+    pub(crate) fn session_load(
+        &self,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Option<(i64, String, String)>, ExecError> {
+        self.conn
+            .query_row(
+                "SELECT updated, name, transcript FROM tui_sessions \
+                 WHERE tenant = ?1 AND id = ?2",
+                [tenant, id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(ExecError::Sql)
+    }
+
+    /// The id and name of every session `tenant` holds for `folder`, newest
+    /// first; the tenant's row bound bounds it.
+    pub(crate) fn session_list(
+        &self,
+        tenant: &str,
+        folder: &str,
+    ) -> Result<Vec<(String, String)>, ExecError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, name FROM tui_sessions WHERE tenant = ?1 AND folder = ?2 \
+                 ORDER BY updated DESC, id DESC",
+            )
+            .map_err(ExecError::Sql)?;
+        let rows = statement
+            .query_map([tenant, folder], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(ExecError::Sql)?;
+        rows.collect::<Result<_, _>>().map_err(ExecError::Sql)
+    }
+
+    /// Names `tenant`'s session `id` when its stamp is still `held`; the stamp
+    /// stays, so its holder keeps writing. `false` writes nothing.
+    pub(crate) fn session_rename(
+        &self,
+        tenant: &str,
+        id: &str,
+        held: i64,
+        name: &str,
     ) -> Result<bool, ExecError> {
         let changed = self
             .conn
             .execute(
-                "UPDATE tui_sessions SET updated = ?3, transcript = ?4 \
-                 WHERE tenant = ?1 AND id = ?2",
-                rusqlite::params![tenant, id, updated, transcript],
+                "UPDATE tui_sessions SET name = ?4 \
+                 WHERE tenant = ?1 AND id = ?2 AND updated = ?3",
+                rusqlite::params![tenant, id, held, name],
             )
             .map_err(ExecError::Sql)?;
         Ok(changed > 0)
@@ -189,11 +272,15 @@ mod tests {
         assert_eq!(held, 3, "the refused creates wrote nothing");
         let first = (String::from("one"), 1, String::from("{}"));
         assert_eq!(stored(&ledger, "t", "a")?, first);
-        assert!(
-            !ledger.session_save("u", "b", 6, "{}")?,
+        assert_eq!(
+            ledger.session_save("u", "b", 2, 6, "{}")?,
+            None,
             "another tenant's row is not there to write"
         );
-        assert!(ledger.session_save("t", "a", 6, r#"{"kept":true}"#)?);
+        assert_eq!(
+            ledger.session_save("t", "a", 1, 6, r#"{"kept":true}"#)?,
+            Some(6)
+        );
         assert_eq!(
             stored(&ledger, "t", "a")?,
             (String::from("one"), 6, String::from(r#"{"kept":true}"#))
@@ -203,6 +290,43 @@ mod tests {
             (String::from("{}"), 5),
             "a save touches its row alone"
         );
+        Ok(())
+    }
+
+    /// One writer a row: a stamp another write moved refuses the save and the
+    /// rename, a clock that stood still still moves the stamp, a load and a list
+    /// reach one tenant's folder alone, newest first.
+    #[test]
+    fn sessions_keep_one_writer_and_list_one_tenant_folder() -> Result<(), SimError> {
+        let directory = crate::executor::sim_tree::scratch("larry-tui-sessions-writer")?;
+        let ledger = Ledger::open(&directory)?;
+        assert!(ledger.session_create(&row("t", "a", 5))?);
+        assert!(ledger.session_create(&row("t", "b", 7))?);
+        assert!(ledger.session_create(&row("u", "c", 9))?);
+        assert_eq!(ledger.session_save("t", "a", 5, 5, "{}")?, Some(6));
+        assert_eq!(ledger.session_save("t", "a", 5, 90, "[]")?, None);
+        assert!(!ledger.session_rename("t", "a", 5, "late")?);
+        assert!(!ledger.session_rename("u", "a", 6, "theirs")?);
+        assert_eq!(
+            ledger.session_load("t", "a")?,
+            Some((6, String::from("one"), String::from("{}"))),
+            "the refused writes changed nothing"
+        );
+        assert!(ledger.session_rename("t", "a", 6, "two")?);
+        assert_eq!(
+            ledger.session_load("t", "a")?,
+            Some((6, String::from("two"), String::from("{}"))),
+            "a rename keeps the stamp"
+        );
+        assert_eq!(ledger.session_load("u", "a")?, None);
+        assert_eq!(
+            ledger.session_list("t", "/work")?,
+            [
+                (String::from("b"), String::from("one")),
+                (String::from("a"), String::from("two"))
+            ]
+        );
+        assert_eq!(ledger.session_list("t", "/elsewhere")?, []);
         Ok(())
     }
 
