@@ -17,8 +17,8 @@ use lgwks_std::seeded::Seeded;
 use super::super::ExecError;
 use super::super::gate::{finish, policy, task_settings};
 use super::{
-    JOURNALS_DIR, RunLock, journal_live, journal_path, live_between, recover, recovered_evidence,
-    run_held,
+    JOURNALS_DIR, KeptCause, RunLock, journal_live, journal_path, live_between, recover,
+    recovered_evidence, run_held,
 };
 
 /// What every simulation here returns.
@@ -85,15 +85,12 @@ fn sim_a_held_run_lock_is_live_before_its_journal_is_locked() -> TestResult {
     let starting = format!("018f0000-0000-7000-8000-{:012x}", seeded.below(1 << 40)?);
     // Sorted after the starting run, so a sweep that stopped at the skip never reaches it.
     let dead = "ffff0000-0000-7000-8000-000000000002";
-    assert!(!run_held(&state, &starting)?, "no lock file is no live run");
+    assert!(!run_held(&state, &starting), "no lock file is no live run");
     let lock = RunLock::take(&state, &starting)?.ok_or("the first take holds the lock")?;
     // The journal exists and is unlocked, as it is between a run's create and its lock.
     drop(Journal::open(&journal_path(&state, &starting), capacity)?);
     drop(Journal::open(&journal_path(&state, dead), capacity)?);
-    assert!(
-        run_held(&state, &starting)?,
-        "a held run lock is a live run"
-    );
+    assert!(run_held(&state, &starting), "a held run lock is a live run");
     assert!(
         journal_live(&state, &scopes, &starting)?,
         "the workspace sweep reads a held run lock as live"
@@ -110,9 +107,75 @@ fn sim_a_held_run_lock_is_live_before_its_journal_is_locked() -> TestResult {
     );
     lock.release()?;
     assert!(
-        !run_held(&state, &starting)?,
+        !run_held(&state, &starting),
         "a released run lock is not live"
     );
+    Ok(())
+}
+
+/// The saboteur at the run lock (larry#591): for every seed one dead run's lock is a directory,
+/// another's has its mode cleared, another's is a FIFO, and one is free. Each unopenable lock
+/// reads as held and keeps its journal with a typed lock cause, a retry of that run is refused,
+/// the free one is recovered, and clearing the faults recovers the rest. The oracle is the
+/// fault each lock was given, never the code's own answer.
+#[cfg(unix)]
+#[test]
+fn sim_an_unopenable_run_lock_reads_as_held_and_keeps_its_journal() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (scopes, capacity) = settings()?;
+    for seed in SEEDS {
+        let state = scratch_directory()?;
+        std::fs::create_dir_all(state.join(JOURNALS_DIR))?;
+        let mut seeded = Seeded::from_seed(seed);
+        let tag = seeded.below(1 << 40)?;
+        let ids = ["directory", "closed", "fifo", "free"].map(|kind| format!("{kind}-{tag}"));
+        let [ref directory, ref closed, ref fifo, ref free] = ids;
+        let lock_of = |id: &str| journal_path(&state, id).with_extension("lock");
+        for id in &ids {
+            drop(Journal::open(&journal_path(&state, id), capacity)?);
+        }
+        std::fs::create_dir(lock_of(directory))?;
+        std::fs::write(lock_of(closed), b"")?;
+        std::fs::set_permissions(lock_of(closed), std::fs::Permissions::from_mode(0o000))?;
+        let made = std::process::Command::new("mkfifo")
+            .arg(lock_of(fifo))
+            .status()?;
+        assert!(made.success(), "seed {seed:#x}: the fifo is made");
+
+        for id in [directory, closed, fifo] {
+            assert!(run_held(&state, id), "seed {seed:#x}: {id} reads as held");
+            assert!(
+                matches!(RunLock::take(&state, id), Err(ExecError::Journals(_))),
+                "seed {seed:#x}: a retry of {id} is refused typed, never run beside it"
+            );
+        }
+        assert!(
+            !run_held(&state, free),
+            "seed {seed:#x}: no lock is not held"
+        );
+        let first = recover(&state, &scopes)?;
+        assert_eq!(first.set_aside, 1, "seed {seed:#x}: only the free run");
+        let mut kept: Vec<_> = first
+            .kept
+            .iter()
+            .filter(|kept| matches!(kept.cause, KeptCause::RunLock(_)))
+            .map(|kept| kept.path.clone())
+            .collect();
+        kept.sort();
+        let mut spoiled: Vec<_> = [closed, directory, fifo]
+            .map(|id| journal_path(&state, id))
+            .to_vec();
+        spoiled.sort();
+        assert_eq!(kept, spoiled, "seed {seed:#x}: each is kept for its lock");
+
+        std::fs::remove_dir(lock_of(directory))?;
+        std::fs::set_permissions(lock_of(closed), std::fs::Permissions::from_mode(0o600))?;
+        std::fs::remove_file(lock_of(fifo))?;
+        let second = recover(&state, &scopes)?;
+        assert_eq!(second.set_aside, 3, "seed {seed:#x}: the cleared locks");
+        assert!(second.kept.is_empty(), "seed {seed:#x}: nothing stays");
+    }
     Ok(())
 }
 
@@ -299,10 +362,10 @@ fn sim_each_recovery_fault_class_keeps_or_sets_aside_its_journal() -> TestResult
             "seed {seed}: only the faulted journal is kept"
         );
         assert!(
-            first
-                .kept
-                .iter()
-                .all(|kept| !kept.cause.refuses_the_record()),
+            first.kept.iter().all(|kept| matches!(
+                kept.cause,
+                KeptCause::Journal(ref cause) if !cause.refuses_the_record()
+            )),
             "seed {seed}: a kept journal's cause never refuses its bytes"
         );
         assert!(faulted_path.exists(), "seed {seed}: it stays a journal");
