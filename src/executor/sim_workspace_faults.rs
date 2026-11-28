@@ -11,6 +11,8 @@ use lgwks_std::seeded::Seeded;
 
 use super::super::super::ExecError;
 use super::super::super::sim_tree::{Scratch, path_env, scratch};
+#[cfg(unix)]
+use super::super::mode::reset_with;
 use super::super::{
     DiffSink, STRANDED, STREAM_CHUNK, Workspace, hold_origin, origin_lock_path, pump, seed_origin,
     sweep, sweep_origins,
@@ -329,6 +331,88 @@ fn sim_a_lock_that_cannot_be_removed_is_one_typed_fault() -> TestResult {
     assert_eq!(named, [stuck.as_path()], "only the stuck lock is a fault");
     assert!(stuck.is_dir(), "the stuck entry is kept");
     assert!(!stale.exists(), "the stale lock beside it is removed");
+    Ok(())
+}
+
+/// A reset root with no parent or no name is refused by name, a file or a link root is left
+/// as it is, a missing root is nothing to do, and a name the file system cannot stat is that
+/// refusal, never a silent skip (CWE-59, CWE-754, larry#366).
+#[cfg(unix)]
+#[test]
+fn sim_a_root_the_reset_cannot_name_or_stat_is_typed() -> TestResult {
+    let state = state_directory()?;
+    let mut nothing = |_: &Path| Ok(());
+    for (root, why) in [
+        (PathBuf::from("/"), "/ has no parent directory".to_owned()),
+        (
+            state.join("x").join(".."),
+            format!(
+                "{} does not end in a UTF-8 name",
+                state.join("x").join("..").display()
+            ),
+        ),
+    ] {
+        match reset_with(&root, &mut nothing) {
+            Err(cause) => assert_eq!(
+                (cause.kind(), cause.to_string()),
+                (ErrorKind::InvalidInput, why)
+            ),
+            Ok(links) => return Err(format!("{} was reset: {links:?}", root.display()).into()),
+        }
+    }
+    let file = state.join("file");
+    std::fs::write(&file, b"x")?;
+    assert!(reset_with(&file, &mut nothing)?.is_empty(), "a file root");
+    assert!(
+        reset_with(&state.join("gone"), &mut nothing)?.is_empty(),
+        "a missing root"
+    );
+    let link = state.join("link");
+    std::os::unix::fs::symlink(&file, &link)?;
+    let kept = reset_with(&link, &mut nothing)?;
+    let entries: Vec<&Path> = kept.iter().map(|link| link.entry()).collect();
+    assert_eq!(entries, [link.as_path()], "a link root is kept and named");
+    let long = state.join("n".repeat(300));
+    match reset_with(&long, &mut nothing) {
+        Err(cause) => assert_eq!(cause.kind(), ErrorKind::InvalidFilename),
+        Ok(links) => return Err(format!("an unstatable root: {links:?}").into()),
+    }
+    Ok(())
+}
+
+/// A directory swapped for a file between its check and its reset is a typed refusal, never a
+/// mode change reported as done; a name that is not UTF-8 is left alone (CWE-367, larry#366).
+#[cfg(unix)]
+#[test]
+fn sim_a_directory_swapped_for_a_file_before_its_reset_is_refused() -> TestResult {
+    for seed in SEEDS {
+        let state = state_directory()?;
+        let workspace = state.join("run");
+        let sealed = workspace.join(format!("sealed-{seed:x}"));
+        std::fs::create_dir_all(&sealed)?;
+        let swapped = reset_with(&workspace, &mut |at| {
+            if at == sealed.as_path() {
+                std::fs::remove_dir(&sealed)?;
+                std::fs::write(&sealed, b"now a file")?;
+            }
+            Ok(())
+        });
+        match swapped {
+            Err(cause) => assert_eq!(cause.kind(), ErrorKind::NotADirectory, "seed {seed:#x}"),
+            Ok(links) => return Err(format!("seed {seed:#x}: reset a file: {links:?}").into()),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let state = state_directory()?;
+        let workspace = state.join("run");
+        let odd = workspace.join(std::ffi::OsStr::from_bytes(b"d-\xff"));
+        std::fs::create_dir_all(&odd)?;
+        let links = reset_with(&workspace, &mut |_| Ok(()))?;
+        assert!(links.is_empty(), "a foreign name is no link");
+        assert!(odd.is_dir(), "a foreign name is left where it is");
+    }
     Ok(())
 }
 
