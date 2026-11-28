@@ -15,7 +15,7 @@ pub(crate) const HISTORY: usize = 64;
 pub(crate) const MAX_ROWS: usize = 6;
 
 /// One slash command: its name and what it does.
-pub(crate) const COMMANDS: [(&str, &str); 10] = [
+pub(crate) const COMMANDS: [(&str, &str); 12] = [
     ("/help", "keys and commands"),
     ("/status", "model, policy and folder"),
     ("/clear", "clear the chat"),
@@ -23,6 +23,8 @@ pub(crate) const COMMANDS: [(&str, &str); 10] = [
     ("/new", "start a fresh session"),
     ("/fork", "copy a session into a new one"),
     ("/rename", "name this session"),
+    ("/export", "write this session as Markdown"),
+    ("/recap", "sum up this session"),
     ("/ps", "list background commands"),
     ("/stop", "end background commands"),
     ("/quit", "leave Larry"),
@@ -60,10 +62,11 @@ impl Composer {
         self.selected = 0;
     }
 
-    /// Inserts `text` at the cursor, sanitized, newlines kept; returns false
-    /// when it was cut to keep the bound.
+    /// Inserts `text` at the cursor, sanitized; returns false when it was cut
+    /// to keep the bound. A terminal sends a pasted newline as CR, so CR LF and
+    /// a lone CR are one LF before the sanitizer drops the rest (larry#605).
     pub(crate) fn insert(&mut self, text: &str) -> bool {
-        let clean = sanitize(text, true);
+        let clean = sanitize(&text.replace("\r\n", "\n").replace('\r', "\n"), true);
         let room = MAX_INSTRUCTION_BYTES.saturating_sub(self.text.len());
         let mut end = clean.len().min(room);
         while !clean.is_char_boundary(end) {
