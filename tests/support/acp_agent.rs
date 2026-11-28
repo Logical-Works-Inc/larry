@@ -9,12 +9,13 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 use lgwks_std::json::{self, Value, json};
 
 use crate::json_at::At;
 use crate::larry_child;
+use crate::larry_guard::Larry;
 
 use crate::coverage::forward;
 
@@ -23,8 +24,8 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 /// One `larry acp` process: its protocol pipes and its log.
 pub(crate) struct Agent {
-    /// The process.
-    child: Child,
+    /// The process, killed and reaped when the agent drops.
+    child: Larry,
     /// The state ledger the ACP process reads.
     state: PathBuf,
     /// The policy to persist before opening each work root; empty means deny-all.
@@ -161,25 +162,6 @@ impl Agent {
     pub(crate) fn finish(mut self) -> TestResult<Option<i32>> {
         self.stdin = None;
         Ok(self.child.wait()?.code())
-    }
-}
-
-impl Drop for Agent {
-    /// A journey that already ended its agent leaves nothing to kill. A child that cannot be
-    /// reaped fails the test, unless it is already failing.
-    fn drop(&mut self) {
-        let reaped = match self.child.try_wait() {
-            Ok(Some(_status)) => Ok(()),
-            Ok(None) => self
-                .child
-                .kill()
-                .and_then(|()| self.child.wait().map(|_status| ())),
-            Err(cause) => Err(cause),
-        };
-        assert!(
-            reaped.is_ok() || std::thread::panicking(),
-            "the larry acp child is killed and reaped: {reaped:?}"
-        );
     }
 }
 
