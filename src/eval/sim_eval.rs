@@ -20,6 +20,9 @@ use crate::sim_error::SimError;
 /// What every test returns.
 type TestResult = Result<(), Box<dyn Error>>;
 
+#[path = "sim_faults.rs"]
+mod faults;
+
 /// Seeds the cheap simulations run.
 const SEEDS: u64 = 2048;
 
@@ -604,8 +607,14 @@ fn a_partial_origin_removes_itself_when_creation_fails() -> TestResult {
         write: Vec::new(),
         acceptance: Vec::new(),
     };
-    let refused = Origin::create(&settings, 0, &task);
-    assert!(refused.is_err(), "a file cannot be written under a file");
+    match Origin::create(&settings, 0, &task) {
+        Err(super::EvalError::Origin { id, cause }) => {
+            assert_eq!(id, "partial", "the refusal names its task");
+            assert_eq!(cause.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+        Err(other) => return Err(other.into()),
+        Ok(_) => return Err("a file cannot be written under a file".into()),
+    }
     let eval = state.join("eval");
     assert!(
         std::fs::read_dir(&eval)?.next().is_none(),

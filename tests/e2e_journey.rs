@@ -10,6 +10,8 @@
 mod coverage;
 #[path = "support/http_wire.rs"]
 mod http_wire;
+#[path = "e2e_journey/input.rs"]
+mod input;
 #[path = "support/journey.rs"]
 mod journey;
 #[path = "support/mock_model.rs"]

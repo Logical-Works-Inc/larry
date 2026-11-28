@@ -436,6 +436,21 @@ impl<'scope> Pty<'scope> {
         Ok(())
     }
 
+    /// Reads until `holds` accepts the screen, within the patience: for a change that paints
+    /// no text of its own, such as a repaint at a new width. `what` names it on failure.
+    pub(crate) fn wait_until(&mut self, what: &str, holds: impl Fn(&str) -> bool) -> Journey {
+        let deadline = Instant::now()
+            .checked_add(deadline::PATIENCE)
+            .ok_or("deadline overflows")?;
+        while !holds(&self.screen.text()) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || !self.take(left)? {
+                return Err(format!("never {what}; screen={:?}", self.screen.text()).into());
+            }
+        }
+        Ok(())
+    }
+
     /// The visible text of the screen right now, its rows joined by newlines.
     pub(crate) fn screen_text(&self) -> String {
         self.screen.text()
