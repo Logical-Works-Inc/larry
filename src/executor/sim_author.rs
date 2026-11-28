@@ -21,6 +21,10 @@ use crate::executor::{ExecError, TaskError};
 use crate::model::{Draft, Kind, Message, ModelClient, ModelError, Role, Route, sim_config};
 use crate::sim_error::SimError;
 
+/// The simulations of a brief's source read (larry#617).
+#[path = "sim_author_source.rs"]
+mod source;
+
 /// What every test returns.
 type TestResult = Result<(), Box<dyn Error>>;
 

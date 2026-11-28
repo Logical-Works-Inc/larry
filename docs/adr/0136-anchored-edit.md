@@ -34,6 +34,9 @@ tree carries, that names a regular UTF-8 file of at most 262,144 bytes. Each oth
 case is its own typed refusal, and the model is shown it. The open and the bound
 are the `larry governance` reader's: it stops one byte past the bound, so a file
 that grows after its length was checked is still refused (CWE-367).
+The model step of a brief reads each of the brief's files through the same
+reader and the same bound (larry#617). It had checked the length and then read
+the whole file.
 
 Part 2 (larry#606) adds the reply `{"edit": {"path", "old", "new",
 "expect_digest"}}`, approved like a command. A digest that no longer matches is
@@ -94,3 +97,5 @@ Rejected: a digest check with no lock, which two edits can both pass.
 - `sim_an_approved_edit_records_both_digests`.
 - `an_edit_reply_parses_and_a_malformed_one_is_refused`.
 - `tui_journey_approved_edit_lands_with_its_receipt`, the shipped binary on a PTY.
+- `sim_a_source_grown_after_the_stat_is_refused_too_large`, 64 seeds, for the brief.
+- `sim_each_unreadable_source_gets_its_exact_fault`.
