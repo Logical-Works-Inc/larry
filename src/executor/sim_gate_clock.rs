@@ -17,6 +17,10 @@ use lgwks_std::seeded::{DrawError, Seeded};
 
 use super::{default_policy, lease_start, task_settings, with_expiry};
 
+/// Fault injection at the gate: the fence action, denials and the task owner (larry#575).
+#[path = "sim_gate_faults.rs"]
+mod faults;
+
 /// What every test here returns.
 type TestResult = Result<(), ExpirySimError>;
 
