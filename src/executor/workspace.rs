@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{File, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ExecError;
@@ -194,49 +194,13 @@ impl Workspace {
             OsStr::new("--no-ext-diff"),
             OsStr::new(base),
         ]);
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(spawn_error)?;
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            return Err(match reap(&mut child) {
-                Ok(()) => diff_failed("the diff pipes were not opened"),
-                Err(cause) => diff_failed(&format!(
-                    "the diff pipes were not opened, and the child was not reaped: {cause}"
-                )),
-            });
-        };
-        let (sunk, errors, killed) = std::thread::scope(|scope| {
-            let errors = scope.spawn(move || read_capped(stderr));
-            let sunk = pump(stdout);
-            let killed = if sunk.is_err() { child.kill() } else { Ok(()) };
-            (sunk, errors.join(), killed)
-        });
-        let sink = match sunk {
-            Ok(sink) => sink,
-            Err(cause) => {
-                return Err(match killed {
-                    Ok(()) => cause,
-                    Err(kill) => diff_failed(&format!(
-                        "{cause}; the diff child could not be killed: {kill}"
-                    )),
-                });
-            }
-        };
-        let detail = match errors {
-            Ok(Ok(kept)) => String::from_utf8_lossy(&kept).trim().to_owned(),
-            Ok(Err(source)) => return Err(ExecError::Workspace(source)),
-            Err(payload) => {
-                let text = format!(
-                    "the diff stderr reader panicked: {}",
-                    crate::panic_text(payload.as_ref())
-                );
-                return Err(ExecError::Workspace(io::Error::other(text)));
-            }
-        };
-        let status = child.wait().map_err(spawn_error)?;
-        if !status.success() {
-            return Err(diff_failed(&detail));
-        }
-        Ok(sink.finish())
+        let (stdout, stdout_end) = io::pipe().map_err(ExecError::Workspace)?;
+        let (stderr, stderr_end) = io::pipe().map_err(ExecError::Workspace)?;
+        command.stdout(stdout_end).stderr(stderr_end);
+        let child = command.spawn().map_err(spawn_error)?;
+        // The command holds the pipes' write ends: while it lives, neither stream ends.
+        drop(command);
+        supervise(child, stdout, stderr)
     }
 
     /// Runs git against this workspace's own git directory and work tree, named explicitly,
@@ -459,11 +423,45 @@ fn pump(mut stdout: impl Read) -> Result<DiffSink, ExecError> {
     }
 }
 
-/// Kills a child that cannot be used and waits for it, so no process is left behind.
-fn reap(child: &mut std::process::Child) -> io::Result<()> {
-    child.kill()?;
-    child.wait()?;
-    Ok(())
+/// Reads a started diff to its end and waits for it on every path, so no child is left behind
+/// whatever failed (larry#620, CWE-404). A diff stream that failed ends git at once; one that
+/// ended whole is never signalled.
+fn supervise(
+    mut child: Child,
+    stdout: impl Read,
+    stderr: impl Read + Send,
+) -> Result<Diff, ExecError> {
+    let (sunk, errors, ended) = std::thread::scope(|scope| {
+        let errors = scope.spawn(move || read_capped(stderr));
+        let sunk = pump(stdout);
+        let ended = if sunk.is_err() { child.kill() } else { Ok(()) };
+        (sunk, errors.join(), ended)
+    });
+    let status = child.wait().map_err(spawn_error);
+    let sink = match (sunk, ended) {
+        (Ok(sink), _) => sink,
+        (Err(cause), Ok(())) => return Err(cause),
+        (Err(cause), Err(kill)) => {
+            return Err(diff_failed(&format!(
+                "{cause}; the diff child could not be killed: {kill}"
+            )));
+        }
+    };
+    let kept = match errors {
+        Ok(kept) => kept.map_err(ExecError::Workspace)?,
+        Err(payload) => {
+            let text = format!(
+                "the diff stderr reader panicked: {}",
+                crate::panic_text(payload.as_ref())
+            );
+            return Err(ExecError::Workspace(io::Error::other(text)));
+        }
+    };
+    if status?.success() {
+        Ok(sink.finish())
+    } else {
+        Err(diff_failed(String::from_utf8_lossy(&kept).trim()))
+    }
 }
 
 /// Keeps the first `STDERR_LIMIT` bytes of a pipe and drains the rest, so git never blocks on it.

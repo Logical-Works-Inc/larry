@@ -13,8 +13,6 @@ sources: [larry#598, larry#217, INVARIANTS.md, src/executor/run.rs, src/executor
 
 ## Context
 
-Number 0145: main holds 0143 and an open pull request holds 0144.
-
 On Linux a command runs as `setsid <argv>`. A program that is not on the PATH let
 `setsid` start and then exit 127. `larry eval` read that exit as the verifier's
 judgement and scored the task rejected. macOS has no `setsid`, so there the same
@@ -39,7 +37,8 @@ Read exit 127 and the `setsid` message after the run. The command itself can exi
 ## Consequences
 
 The lookup costs one `stat` per PATH entry. `command_for` with the lookup took
-p50 3.3 us and p99 5.0 us (4,000 samples, 10 PATH entries, Linux build box).
+p50 9.7 us, p95 10.2 us and p99 17.7 us (4,000 samples, 10 PATH entries with the
+program in the last, dev profile, Linux ARM64 build box).
 
 Two cases are not covered and still end as the wrapper's exit code: a script
 whose `#!` interpreter is missing, and a file with an execute bit that this user
