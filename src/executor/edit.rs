@@ -6,10 +6,11 @@
 //! replacement, so two edits that saw one digest cannot both land, and the
 //! replacement is whole or absent and keeps the mode. A refusal writes nothing.
 //! The path is a writable repo-relative path through no symlink; the open and
-//! the byte bound are the governance reader's (`crate::governance::read`).
+//! the byte bound are the governance reader's (`crate::governance::read`). A
+//! patch (`super::patch`, larry#624) holds each of its files through [`held`].
 
 use std::ffi::OsStr;
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File, Permissions, TryLockError};
 use std::io;
 use std::path::Path;
 
@@ -21,7 +22,7 @@ use crate::governance::read::{ReadFault, open_regular, read_open};
 
 /// Longest file a read or an edit takes or leaves, in bytes: the brief's
 /// per-file bound, so neither carries more than a prompt would.
-const MAX_FILE_BYTES: u64 = 262_144;
+pub(super) const MAX_FILE_BYTES: u64 = 262_144;
 
 /// Most candidate lines an ambiguous refusal names: enough to pick a longer
 /// anchor, however often the text repeats.
@@ -100,6 +101,49 @@ pub(crate) enum EditError {
         #[source]
         cause: io::Error,
     },
+    /// The patch is not in the Codex shape.
+    #[error("patch line {line}: {detail}")]
+    PatchSyntax {
+        /// The 1-based patch line.
+        line: usize,
+        /// What is wrong there.
+        detail: &'static str,
+    },
+    /// A patch hunk or one of its anchors sits nowhere.
+    #[error("patch hunk at line {line} matches nothing in {path}")]
+    PatchMismatch {
+        /// The file the hunk is for.
+        path: String,
+        /// The 1-based patch line the hunk starts at.
+        line: usize,
+    },
+    /// A patch changes a file without naming the digest it saw.
+    #[error("patch changes {path} but expect_digests names no digest for it")]
+    NoDigest {
+        /// The file without a digest.
+        path: String,
+    },
+    /// A patch names the digest of a file it does not change.
+    #[error("patch names a digest for {path}, which it does not change")]
+    UnusedDigest {
+        /// The file the patch does not change.
+        path: String,
+    },
+    /// A patch creates a file that is already there.
+    #[error("patch creates {path}, which already exists")]
+    Exists {
+        /// The existing path.
+        path: String,
+    },
+    /// A patch write failed and a file could not be put back.
+    #[error("patch failed and could not put back {left:?}: {cause}")]
+    PartlyApplied {
+        /// The files and directories still changed.
+        left: Vec<String>,
+        /// The write that failed.
+        #[source]
+        cause: Box<EditError>,
+    },
 }
 
 /// One file as a session read shows it.
@@ -136,7 +180,7 @@ pub(crate) struct EditReceipt {
 
 /// A moment of a read or an edit at which a simulation acts; production does nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Window {
+pub(super) enum Window {
     /// The edit has the file open and does not hold it yet.
     Opened,
     /// The file's length passed the bound and its bytes are not read yet.
@@ -146,15 +190,15 @@ enum Window {
 }
 
 /// What acts at each [`Window`].
-type Seam<'a> = dyn FnMut(Window) -> io::Result<()> + 'a;
+pub(super) type Seam<'a> = dyn FnMut(Window) -> io::Result<()> + 'a;
 
 /// The BLAKE3 hex of `text`.
-fn digest_of(text: &str) -> String {
+pub(super) fn digest_of(text: &str) -> String {
     lgwks_std::hash::blake3(text.as_bytes()).to_hex()
 }
 
 /// The filesystem failure `cause` on `path`.
-fn io_fault(path: &str, cause: io::Error) -> EditError {
+pub(super) fn io_fault(path: &str, cause: io::Error) -> EditError {
     EditError::Io {
         path: path.to_owned(),
         cause,
@@ -179,7 +223,7 @@ fn read_file_with(root: &Path, path: &str, seam: &mut Seam<'_>) -> Result<FileVi
 /// The file `path` names inside the snapshot `root`, opened with the directory
 /// that holds it: writable, beneath the root, through no symlink the tree
 /// carries (CWE-59) and a regular file.
-fn open(root: &Path, path: &str) -> Result<(Dir, File), EditError> {
+pub(super) fn open(root: &Path, path: &str) -> Result<(Dir, File), EditError> {
     if !is_writable_path(path) {
         return Err(EditError::PathOutside {
             path: path.to_owned(),
@@ -224,19 +268,8 @@ fn apply_edit_with(
     seam: &mut Seam<'_>,
 ) -> Result<EditReceipt, EditError> {
     let path = edit.path.as_str();
-    let target = root.join(path);
     // `file` holds the lock until this returns, after the replacement.
-    let (directory, file) = open(root, path)?;
-    seam(Window::Opened).map_err(|cause| io_fault(path, cause))?;
-    hold(&file, &target, path)?;
-    let content = text_of(&file, path, seam)?;
-    let before_digest = digest_of(&content);
-    if before_digest != edit.expect_digest {
-        return Err(EditError::StaleDigest {
-            path: path.to_owned(),
-            found: before_digest,
-        });
-    }
+    let (directory, file, content) = held(root, path, &edit.expect_digest, seam)?;
     let changed = anchored(&content, &edit.old, &edit.new)
         .map_err(|candidates| EditError::Ambiguous {
             path: path.to_owned(),
@@ -254,11 +287,35 @@ fn apply_edit_with(
         });
     }
     seam(Window::Decided).map_err(|cause| io_fault(path, cause))?;
-    replace(&directory, &file, &target, &changed).map_err(|cause| io_fault(path, cause))?;
+    let mode = file.metadata().map_err(|cause| io_fault(path, cause))?;
+    replace(&directory, mode.permissions(), &root.join(path), &changed)
+        .map_err(|cause| io_fault(path, cause))?;
     Ok(EditReceipt {
-        before_digest,
+        before_digest: edit.expect_digest.clone(),
         after_digest: digest_of(&changed),
     })
+}
+
+/// The file `path` opened, held and read, refused unless its digest is
+/// `expect`: the file is held until the returned handle drops.
+pub(super) fn held(
+    root: &Path,
+    path: &str,
+    expect: &str,
+    seam: &mut Seam<'_>,
+) -> Result<(Dir, File, String), EditError> {
+    let (directory, file) = open(root, path)?;
+    seam(Window::Opened).map_err(|cause| io_fault(path, cause))?;
+    hold(&file, &root.join(path), path)?;
+    let content = text_of(&file, path, seam)?;
+    let found = digest_of(&content);
+    if found != expect {
+        return Err(EditError::StaleDigest {
+            path: path.to_owned(),
+            found,
+        });
+    }
+    Ok((directory, file, content))
 }
 
 /// Holds the open `file` until it is dropped, refused when another edit holds it
@@ -293,23 +350,31 @@ fn still_named(_file: &File, _target: &Path) -> io::Result<bool> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
-/// Replaces `target`, the open `file`, whole with `text`, keeping its mode: a
-/// reader, or a kill, sees the old file or the new one and never a part, and a
-/// hard link of the old file is left as it was. The temporary file is made in
-/// the held `directory`, so a directory swapped for a link meanwhile receives
-/// nothing.
-fn replace(directory: &Dir, file: &File, target: &Path, text: &str) -> io::Result<()> {
-    let mode = file.metadata()?.permissions();
+/// Replaces `target` whole with `text` under `mode`: a reader, or a kill, sees
+/// the old file or the new one and never a part, and a hard link of the old file
+/// is left as it was. The temporary file is made in the held `directory`, so a
+/// directory swapped for a link meanwhile receives nothing. The new file is
+/// held from before it is named until the returned handle drops.
+pub(super) fn replace(
+    directory: &Dir,
+    mode: Permissions,
+    target: &Path,
+    text: &str,
+) -> io::Result<Option<File>> {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name().and_then(OsStr::to_str))
     else {
         return Err(io::Error::from(io::ErrorKind::InvalidFilename));
     };
+    let mut kept = None;
     crate::replace_created(parent, name, text.as_bytes(), |temporary| {
         let made = directory.create_new(temporary)?;
         made.set_permissions(mode)?;
+        made.lock()?;
+        kept = Some(made.try_clone()?);
         Ok(made)
     })
-    .map_err(|(_, cause)| cause)
+    .map_err(|(_, cause)| cause)?;
+    Ok(kept)
 }
 
 /// `content` with the one place `old` sits replaced by `new`: `Ok(None)` when it
@@ -390,7 +455,7 @@ fn ends<'line>(lines: &[&'line str]) -> [Option<&'line str>; 2] {
 
 /// The 0-based rows where a window of `span` (at least one) rows satisfies
 /// `holds`, in file order, at most [`MAX_CANDIDATES`].
-fn places(rows: &[&str], span: usize, holds: impl Fn(&[&str]) -> bool) -> Vec<usize> {
+pub(super) fn places(rows: &[&str], span: usize, holds: impl Fn(&[&str]) -> bool) -> Vec<usize> {
     rows.windows(span)
         .enumerate()
         .filter(|&(_, window)| holds(window))

@@ -351,6 +351,56 @@ fn sim_an_approved_edit_records_both_digests() -> TestResult<()> {
     Ok(())
 }
 
+/// An approved patch lands every file and is recorded with a receipt for each;
+/// one whose digest is stale is refused with its record, and a declined one
+/// never runs.
+#[test]
+fn sim_an_approved_patch_records_a_receipt_per_file() -> TestResult<()> {
+    let digest = |text: &str| lgwks_std::hash::blake3(text.as_bytes()).to_hex();
+    let (before, after, added) = (digest("alpha\n"), digest("beta\n"), digest("new\n"));
+    let patch = lgwks_std::json::json!({"patch": {
+        "text": "*** Begin Patch\n*** Update File: a.txt\n@@\n-alpha\n+beta\n*** Add File: b.txt\n+new\n*** End Patch\n",
+        "expect_digests": {"a.txt": before.as_str()},
+    }})
+    .to_string();
+    let replies = vec![
+        patch.clone(),
+        patch.clone(),
+        patch,
+        Reply::from("{\"done\":\"patched\"}"),
+    ];
+    let approvals = vec![Approval::Run, Approval::Run, Approval::Decline];
+    let (steps, observer, served) = drive("sim-turn-patch", replies, approvals, |work| {
+        std::fs::write(work.join("a.txt"), "alpha\n")?;
+        Ok(())
+    })?;
+    assert_eq!(served, 4, "a patch, a stale one, a decline, the summary");
+    assert_eq!(observer.passed, vec![true, false], "each patch ends once");
+    assert_eq!(
+        observer.observations.first(),
+        Some(&format!(
+            "patched\na.txt {before} -> {after}\nb.txt none -> {added}"
+        )),
+        "the model is shown the digest its next change names"
+    );
+    assert_eq!((steps.tally.edits, steps.tally.declined), (2, 1));
+    assert!(steps.tally.results.is_empty(), "a patch is not a command");
+    assert_eq!(
+        steps.tally.changes,
+        vec![
+            lgwks_std::json::json!({"step": 0, "kind": "patch", "files": [
+                {"path": "a.txt", "before_digest": before, "after_digest": after},
+                {"path": "b.txt", "before_digest": null, "after_digest": added},
+            ]}),
+            lgwks_std::json::json!({
+                "step": 1, "kind": "patch",
+                "refusal": format!("edit file a.txt changed since it was read: its digest is {after}"),
+            }),
+        ]
+    );
+    Ok(())
+}
+
 /// An approved read records the file's digest, which the model is shown; a read
 /// of a path outside the tree is a typed refusal, and a declined read runs not
 /// at all. A long file is cut for the model but digested whole.

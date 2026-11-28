@@ -13,6 +13,7 @@ mod identity;
 mod island;
 mod keys;
 mod ledger;
+mod patch;
 mod prepared;
 mod receipt;
 mod recovery;
