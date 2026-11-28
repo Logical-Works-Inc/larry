@@ -5,6 +5,7 @@ mod author;
 mod ceiling;
 mod compact;
 mod confine;
+mod edit;
 mod error;
 pub(super) mod fence_control;
 mod gate;
@@ -20,6 +21,7 @@ pub mod routes;
 mod run;
 mod seal;
 mod session;
+mod session_turn;
 #[cfg(test)]
 mod sim_env;
 #[cfg(test)]
@@ -38,6 +40,8 @@ pub(crate) use author::is_writable_path;
 use larry_contracts::authority::Scope;
 use larry_contracts::ids::TenantId;
 pub(crate) use ledger::Ledger;
+pub(crate) use ledger::sessions::NewSession;
+pub use ledger::sessions::SessionStoreError;
 pub(crate) use run::{Place, RunHooks, StreamCallback, run_command};
 use seal::{SealedRun, seal_run};
 use workspace::{Workspace, sweep};

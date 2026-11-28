@@ -8,12 +8,14 @@
 
 use std::error::Error;
 use std::mem::ManuallyDrop;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{Copied, Limits, MAX_DEPTH, MAX_FILES, summary};
+use lgwks_std::seeded::Seeded;
+
+use super::{Copied, Limits, MAX_BYTES, MAX_DEPTH, MAX_FILES, copy_entries, summary};
 use crate::executor::sim_tree::{
-    Shape, files_beneath, origin, path_env, scratch, settings, tree_digest,
+    Shape, bound_git, files_beneath, origin, path_env, scratch, settings, tree_digest,
 };
 use crate::executor::workspace::{DiffSink, Workspace, sweep};
 use crate::executor::{AuthorFault, ExecError};
@@ -127,6 +129,132 @@ fn sim_snapshot_refuses_a_symlink_shadowing_a_tracked_directory() -> TestResult 
         !state.join("ws").join("shadowed").exists(),
         "a refused copy was left behind"
     );
+    Ok(())
+}
+
+/// A link the folder's ignore rules hide stands where git still tracks files: git lists the
+/// tracked paths beneath it and never the link, so a copy that followed it would pull files
+/// from outside the folder into the workspace a model reads. The copy refuses typed at every
+/// depth the link sits at, no workspace is left, and the folder and the outside stay
+/// byte-identical (CWE-59, ADR 0046: a symlink is never followed).
+#[cfg(unix)]
+#[test]
+fn sim_snapshot_never_reads_through_a_linked_directory_of_the_folder() -> TestResult {
+    let path = path_env()?;
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let names = ["data", "inner", "leaf"];
+        let depth = usize::try_from(rng.below(3)?)?.saturating_add(1);
+        let linked_at = usize::try_from(rng.below(u64::try_from(depth)?)?)?;
+        let nested: PathBuf = names.iter().take(depth).collect();
+        let link: PathBuf = names.iter().take(linked_at.saturating_add(1)).collect();
+        let (root, state, outside) = (
+            scratch("linked-origin")?,
+            scratch("linked-state")?,
+            scratch("linked-outside")?,
+        );
+        let settings = settings(&state, None)?;
+        let tracked = nested.join("inside.txt");
+        std::fs::create_dir_all(root.join(&nested))?;
+        std::fs::write(root.join(&tracked), "tracked\n")?;
+        settings.seed_origin(&root)?;
+        // The same relative path outside the folder holds bytes the copy must never read.
+        let secret = outside.join(tracked.strip_prefix(&link)?);
+        std::fs::create_dir_all(secret.parent().ok_or("a parent")?)?;
+        std::fs::write(&secret, "bytes outside the folder\n")?;
+        std::fs::remove_dir_all(root.join(&link))?;
+        symlink(&outside.to_string_lossy(), &root.join(&link))?;
+        std::fs::write(root.join(".gitignore"), format!("{}\n", link.display()))?;
+        let (before, beyond) = (tree_digest(&root, false)?, tree_digest(&outside, false)?);
+        match Workspace::snapshot(&state, &root, "linked", &path) {
+            Err(ExecError::Author {
+                path: refused,
+                fault: AuthorFault::Symlink,
+            }) => assert_eq!(Path::new(&refused), nested, "seed {seed}: the linked path"),
+            Err(other) => return Err(format!("seed {seed}: expected the refusal, {other}").into()),
+            Ok((workspace, copied)) => {
+                return Err(format!(
+                    "seed {seed}: copied {copied:?} through the link: {:?}",
+                    files_beneath(workspace.path())?
+                )
+                .into());
+            }
+        }
+        assert!(
+            !state.join("ws").join("linked").exists(),
+            "seed {seed}: a refused copy was left behind"
+        );
+        assert_eq!(
+            tree_digest(&root, false)?,
+            before,
+            "seed {seed}: the folder"
+        );
+        assert_eq!(
+            tree_digest(&outside, false)?,
+            beyond,
+            "seed {seed}: outside"
+        );
+    }
+    Ok(())
+}
+
+/// A person replaced a tracked directory with a file: git still lists the files that were
+/// beneath it, and none of them is on disk. Each is a missing entry, so the copy is what is
+/// there, whether the new file is listed or ignored (ADR 0046: the copy is the working state).
+#[test]
+fn sim_snapshot_copies_a_folder_whose_tracked_directory_became_a_file() -> TestResult {
+    let path = path_env()?;
+    for seed in 0..SEEDS {
+        let mut rng = Seeded::from_seed(seed);
+        let ignored = rng.below(2)? == 1;
+        let (root, state) = (scratch("swap-origin")?, scratch("swap-state")?);
+        let settings = settings(&state, None)?;
+        std::fs::create_dir_all(root.join("d/deep"))?;
+        std::fs::write(root.join("d/one.txt"), "one\n")?;
+        std::fs::write(root.join("d/deep/two.txt"), "two\n")?;
+        std::fs::write(root.join("keep.txt"), "keep\n")?;
+        settings.seed_origin(&root)?;
+        std::fs::remove_dir_all(root.join("d"))?;
+        let now = format!("now a file {seed}\n");
+        std::fs::write(root.join("d"), &now)?;
+        let mut want = vec![String::from("keep.txt")];
+        let mut bytes = u64::try_from("keep\n".len())?;
+        if ignored {
+            std::fs::write(root.join(".gitignore"), "/d\n")?;
+            want.push(String::from(".gitignore"));
+            bytes = bytes.saturating_add(u64::try_from("/d\n".len())?);
+        } else {
+            want.push(String::from("d"));
+            bytes = bytes.saturating_add(u64::try_from(now.len())?);
+        }
+        want.sort();
+        let before = tree_digest(&root, false)?;
+        let (workspace, copied) = Workspace::snapshot(&state, &root, "swapped", &path)?;
+        assert_eq!(files_beneath(workspace.path())?, want, "seed {seed}");
+        let files = want.len();
+        assert_eq!(copied, Copied { files, bytes }, "seed {seed}");
+        assert_eq!(tree_digest(&root, false)?, before, "seed {seed}: read only");
+    }
+    Ok(())
+}
+
+/// Only a missing entry is skipped: a listed name the file system cannot even stat is that
+/// refusal, never a copy that silently leaves it out (`stat(2)` `ENAMETOOLONG`, CWE-703).
+#[test]
+fn sim_a_name_that_cannot_be_stated_is_refused_not_skipped() -> TestResult {
+    let (root, into) = (scratch("long-from")?, scratch("long-into")?);
+    let long = PathBuf::from("n".repeat(300));
+    let limits = Limits {
+        files: MAX_FILES,
+        bytes: MAX_BYTES,
+        depth: MAX_DEPTH,
+    };
+    match copy_entries(&root, &into, &[long], limits) {
+        Err(ExecError::Workspace(cause)) => {
+            assert_eq!(cause.kind(), std::io::ErrorKind::InvalidFilename);
+        }
+        other => return Err(format!("expected the name refusal, got {other:?}").into()),
+    }
     Ok(())
 }
 
@@ -294,14 +422,15 @@ fn sim_snapshot_folder_config_cannot_run_a_program() -> TestResult {
     let mut text = std::fs::read_to_string(&config)?;
     text = format!("{text}[core]\n\tfsmonitor = {}\n", script.display());
     std::fs::write(&config, text)?;
-    let control = Command::new("git")
+    let mut control = Command::new("git");
+    control
         .args(["status", "--porcelain"])
         .current_dir(&made.dir)
         .env_clear()
         .env("PATH", &path)
-        .env("HOME", state.as_os_str())
-        .status()?;
-    assert!(control.success());
+        .env("HOME", state.as_os_str());
+    bound_git(&mut control, &made.dir);
+    assert!(control.status()?.success());
     assert!(
         marker.exists(),
         "control: git runs the monitor the folder names"

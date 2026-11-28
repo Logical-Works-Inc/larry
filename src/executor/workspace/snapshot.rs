@@ -22,6 +22,7 @@ use std::process::Stdio;
 use lgwks_macros::Error;
 
 use super::{Diff, ExecError, Git, Workspace, flag, spawn_error};
+use crate::executor::AuthorFault;
 use crate::executor::author::checked_target;
 use crate::executor::run::clip;
 
@@ -351,17 +352,38 @@ fn copy_entries(
                 format!("a listed path leaves the folder: {}", relative.display()),
             )));
         }
-        // `stays_beneath` is lexical only: an untracked symlink copied before a tracked
-        // file beneath its old directory name would make the write follow the link out
-        // (larry#335, CWE-59). Refuse any write beneath a symlink the copy already made.
-        checked_target(tree, relative)?;
+        // A directory above a listed path may be a link the ignore rules hide, so git lists
+        // the tracked path and never the link: reading it would copy bytes from outside the
+        // folder (CWE-59). Any other refusal of this walk is for the stat below to judge.
+        if let Some(parent) = relative.parent()
+            && let Err(
+                refused @ ExecError::Author {
+                    fault: AuthorFault::Symlink,
+                    ..
+                },
+            ) = checked_target(origin, parent)
+        {
+            return Err(refused);
+        }
         let from = origin.join(relative);
         let to = tree.join(relative);
         let meta = match std::fs::symlink_metadata(&from) {
             Ok(meta) => meta,
-            Err(cause) if cause.kind() == io::ErrorKind::NotFound => continue,
+            // Not on disk: a file the person deleted, or one whose directory is now a file.
+            Err(cause)
+                if matches!(
+                    cause.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
             Err(cause) => return Err(ExecError::Workspace(cause)),
         };
+        // `stays_beneath` is lexical only: an untracked symlink copied before a tracked
+        // file beneath its old directory name would make the write follow the link out
+        // (larry#335, CWE-59). Refuse any write beneath a symlink the copy already made.
+        checked_target(tree, relative)?;
         let kind = meta.file_type();
         if !copies_as_entry(kind) {
             continue;

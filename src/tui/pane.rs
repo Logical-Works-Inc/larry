@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use super::buffer::{Buffer, Rect};
 use super::style::{Line, Span, Style, ellipsize, sanitize};
 use super::worker::Receipt;
+use lgwks_std::json::{Deserialize, Serialize};
 
 /// Most output rows kept; the oldest goes first and is counted.
 pub(crate) const OUTPUT_ROWS: usize = 512;
@@ -30,7 +31,8 @@ pub(crate) const ROW_CHARS: usize = 512;
 const CHROME: usize = 3;
 
 /// One tab of the pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) enum Tab {
     /// The commands' output.
     Output,
@@ -94,7 +96,8 @@ fn name_of(rest: &str) -> &str {
 }
 
 /// The change as rows: a total, the file list, a blank, then the hunks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 struct DiffView {
     /// Every row, in paint order.
     rows: Vec<Row>,
@@ -191,8 +194,10 @@ impl DiffView {
     }
 }
 
-/// The artifact pane's whole state.
-#[derive(Debug, Clone)]
+/// The artifact pane's whole state. The live line in flight and the scroll
+/// positions are never stored: a resumed pane reads whole, from its newest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) struct Pane {
     /// The tab shown.
     tab: Tab,
@@ -203,22 +208,29 @@ pub(crate) struct Pane {
     /// The command running now, as one row of text.
     running: Option<String>,
     /// The current live-output line, bounded before it is painted.
+    #[serde(skip)]
     stream_line: String,
     /// Whether this command produced a live stream event.
+    #[serde(skip)]
     stream_seen: bool,
     /// Live-output chunks dropped at the worker event bound.
+    #[serde(skip)]
     stream_dropped_chunks: usize,
     /// Whether the current command header is already in the output ring.
+    #[serde(skip)]
     header_pushed: bool,
     /// The change, once the session offers it.
     diff: Option<DiffView>,
     /// The sealed report's receipt, once the session ends.
     receipt: Option<Receipt>,
     /// Output rows scrolled back from the newest.
+    #[serde(skip)]
     back: usize,
     /// Diff rows scrolled down from the top.
+    #[serde(skip)]
     diff_top: usize,
     /// Receipt rows scrolled down from the top.
+    #[serde(skip)]
     receipt_top: usize,
 }
 
@@ -378,6 +390,27 @@ impl Pane {
     /// Tab: the next tab.
     pub(crate) fn next_tab(&mut self) {
         self.tab = self.tab.next();
+    }
+
+    /// The pane as stored (larry#256): the shown tab, every kept output row,
+    /// the change and the receipt, without the live line in flight or the
+    /// scroll positions.
+    pub(crate) fn snapshot(&self) -> Pane {
+        let mut kept = self.clone();
+        kept.stream_line.clear();
+        kept.stream_seen = false;
+        kept.stream_dropped_chunks = 0;
+        kept.header_pushed = false;
+        kept.back = 0;
+        kept.diff_top = 0;
+        kept.receipt_top = 0;
+        kept
+    }
+
+    /// A stored pane as a session shows it again: no command runs in it.
+    pub(crate) fn resumed(mut self) -> Self {
+        self.running = None;
+        self
     }
 
     /// The one line a narrow screen keeps in the chat, when the task made a change.
