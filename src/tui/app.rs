@@ -23,6 +23,7 @@ use super::ask::answer;
 use super::buffer::Frame;
 use super::cells::{Entry, Header, split_observation};
 use super::composer::Composer;
+use super::export::recap;
 use super::layout::split;
 use super::paint;
 use super::pane::Pane;
@@ -35,13 +36,14 @@ use super::worker::{Decision, Ended, Event};
 /// Most transcript entries kept; the oldest goes first.
 pub(crate) const MAX_ENTRIES: usize = 512;
 /// What `/help` prints.
-const HELP: [&str; 8] = [
+const HELP: [&str; 9] = [
     "Enter sends the task. Ctrl+J adds a new line. Enter while working queues the next turn (8).",
     "Larry asks before each command: y runs it, a runs it and stops asking, n declines.",
     "Esc stops a task. PgUp and PgDn scroll. Ctrl+C on an empty box quits.",
     "/status shows the model, policy and folder. /clear clears the chat.",
     "/resume lists this folder's sessions; /resume 1 continues one. /new starts fresh.",
     "/fork copies this session; /fork 1 copies a listed one. /rename <name> names it.",
+    "/export [file] writes this session as Markdown here. /recap sums it up.",
     "/ps lists background commands with their last lines. /stop ends them.",
     "/quit leaves Larry; with background commands running it asks first.",
 ];
@@ -118,6 +120,8 @@ pub(crate) enum Effect {
     Quit,
     /// Answer a session command against the stored sessions.
     Session(SessionCommand),
+    /// Write the session to this file of the folder, the default name when empty.
+    Export(String),
 }
 
 /// A command over the stored sessions (larry#256). Only an idle frame sends one.
@@ -133,21 +137,20 @@ pub(crate) enum SessionCommand {
     Rename(String),
 }
 
-impl SessionCommand {
-    /// The session command `text` is, its first word naming it.
-    fn parse(text: &str) -> Option<Self> {
-        let (word, rest) = match text.split_once(char::is_whitespace) {
-            Some((word, rest)) => (word, rest.trim().to_owned()),
-            None => (text, String::new()),
-        };
-        match word {
-            "/new" => Some(Self::New),
-            "/resume" => Some(Self::Resume(rest)),
-            "/fork" => Some(Self::Fork(rest)),
-            "/rename" => Some(Self::Rename(rest)),
-            _ => None,
-        }
-    }
+/// The command only the driver can answer that `text` is, its first word naming it.
+fn driven(text: &str) -> Option<Effect> {
+    let (word, rest) = match text.split_once(char::is_whitespace) {
+        Some((word, rest)) => (word, rest.trim().to_owned()),
+        None => (text, String::new()),
+    };
+    Some(match word {
+        "/new" => Effect::Session(SessionCommand::New),
+        "/resume" => Effect::Session(SessionCommand::Resume(rest)),
+        "/fork" => Effect::Session(SessionCommand::Fork(rest)),
+        "/rename" => Effect::Session(SessionCommand::Rename(rest)),
+        "/export" => Effect::Export(rest),
+        _ => return None,
+    })
 }
 
 /// Where the machine is.
@@ -537,11 +540,11 @@ impl App {
         }
     }
 
-    /// Enter: a session command typed whole with its argument, else the popup's
+    /// Enter: a driver command typed whole with its argument, else the popup's
     /// selected command, else the text.
     fn enter(&mut self) -> Vec<Effect> {
-        if let Some(command) = SessionCommand::parse(self.composer.text()) {
-            return self.session(command);
+        if let Some(effect) = driven(self.composer.text()) {
+            return self.when_idle(effect);
         }
         if self.composer.selected().is_some() {
             return self.command();
@@ -549,15 +552,15 @@ impl App {
         self.submit()
     }
 
-    /// Hands `command` to the driver. While a task runs the transcript is its
+    /// Hands `effect` to the driver. While a task runs the transcript is its
     /// own, so the command waits in the box and is never queued to the model.
-    fn session(&mut self, command: SessionCommand) -> Vec<Effect> {
+    fn when_idle(&mut self, effect: Effect) -> Vec<Effect> {
         if self.phase != Phase::Idle {
             self.hint = Some(String::from("Session commands wait until the task ends."));
             return Vec::new();
         }
         self.composer.take();
-        vec![Effect::Session(command)]
+        vec![effect]
     }
 
     /// Enter on the popup's selected slash command.
@@ -565,8 +568,8 @@ impl App {
         let Some(name) = self.composer.selected() else {
             return self.submit();
         };
-        if let Some(command) = SessionCommand::parse(name) {
-            return self.session(command);
+        if let Some(effect) = driven(name) {
+            return self.when_idle(effect);
         }
         self.composer.take();
         match name {
@@ -579,6 +582,7 @@ impl App {
                 self.scroll = 0;
             }
             "/ps" => self.push(Entry::Info(self.pending.ps_rows())),
+            "/recap" => self.push(Entry::Info(recap(&self.snapshot()))),
             "/stop" => return self.stop(),
             _ => return self.quit_or_leave(),
         }
