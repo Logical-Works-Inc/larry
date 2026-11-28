@@ -12,7 +12,6 @@ sources: [/docs/product/README.md, larry#114, larry#125, /docs/adr/0002-ship-che
 ---
 
 # Ship checklist
-
 ## How a session ships the next item
 1. Take the first issue the work graph #423 lists as ready (`is:open label:leaf -label:claimed -is:blocked`, `P0` first), and add `claimed`. Its line here, when it has one, ships in the same PR. A newer Director order beats this order; record it in #423.
 2. Read the issue, then work it as AGENTS.md says: research, plan, build in the run path, the Gates, a PR whose body says `Closes #N`, merge on green.
@@ -114,6 +113,7 @@ Order set by the readiness sweep, 2026-11-14 (larry#200).
 - [x] #244 the artifact pane shows the task's diff, output and receipt (ADR 0047): PR #253, 13 pane sims (256 hostile seeds), journey at 120x32 (the pane opens at 108 columns) shows the diff before the folder changes.
 - [x] #252 the pane streams a running command's output (ADR 0129): PR #529, 4 KiB callback chunks, 64-event shed count, 512-row pane ring; a PTY journey shows the first line before the FIFO releases the second. #552 the deadline and FIFO flakes wait on their events (ADR 0130): PR #571, ceiling 200/200 in 364.4 s and pane 200/200 in 177.2 s on toronto.
 - [x] #262 queue a message while a task runs, /ps and /stop for background commands (ADR 0128): queue part PR #562, 5 sims and 1 PTY journey green on Toronto, queue bound 8; PR #547, 20 sims and 2 PTY journeys green on Toronto, 16 jobs with 5-line tails.
+- [ ] #256 sessions that persist, with `/resume`, `/fork`, `/rename`, `/new`, `/export` and `/recap` (ADR 0133). Proof: kill -9, then resume, through the shipped binary. Part 0, the paint split: PR #582. Part 1 (#578), the row the driver holds: a PTY journey kills -9 and reads the row back.
 - [ ] #247 Mac app over the same app state. Proof: approve, decline, Esc, kill -9 through the shipped app, with p50/p95/p99 and peak RSS.
 - iOS and Android: #115 in section 4, after #90 and #247.
 ## Holds and open design

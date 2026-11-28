@@ -85,10 +85,11 @@ impl Ledger {
         // step claimed 8 first (larry#204) and its route-prompts step 9
         // (larry#205, #534); the tenant key step appends as 10
         // (larry#211 part B). Reports and live groups keep their shape here;
-        // their tenant columns land in part C.
+        // their tenant columns land in part C. The TUI session table appends
+        // as 11 (larry#256).
         lgwks_deps::sqlite::migrate(
             &conn,
-            10,
+            11,
             &[
                 SCHEMA,
                 KEY_SCHEMA,
@@ -100,6 +101,7 @@ impl Ledger {
                 routes::PRICE_SCHEMA,
                 routes::ROUTE_PROMPT_SCHEMA,
                 tenant::STEP_TEN,
+                sessions::SESSIONS_SCHEMA,
             ],
         )
         .map_err(ExecError::Ledger)?;
@@ -364,6 +366,10 @@ impl Ledger {
         Ok(())
     }
 }
+
+/// The TUI session rows, kept apart from the process rows.
+#[path = "ledger_sessions.rs"]
+pub(crate) mod sessions;
 
 /// The route table's reads and writes (larry#201), a child module so the
 /// connection stays private to the ledger.

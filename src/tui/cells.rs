@@ -5,6 +5,7 @@
 //! it becomes a span.
 
 use super::style::{Line, Span, Style, ellipsize, sanitize, text_width, wrap};
+use lgwks_std::json::{Deserialize, Serialize};
 
 /// Output lines a finished command shows under it; the rest is counted.
 pub(crate) const OUTPUT_TAIL: usize = 5;
@@ -15,7 +16,8 @@ pub(crate) const OUTPUT_TAIL: usize = 5;
 pub(crate) const MAX_TAIL_CHARS: usize = 512;
 
 /// One transcript entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) enum Entry {
     /// The welcome box: version, model and directory.
     Header(Header),
@@ -46,7 +48,8 @@ pub(crate) enum Entry {
 }
 
 /// What the welcome box shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 pub(crate) struct Header {
     /// Larry's version.
     pub(crate) version: String,

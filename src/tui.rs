@@ -21,6 +21,8 @@ mod layout;
 mod paint;
 mod pane;
 mod pending;
+mod session_store;
+mod sessions;
 #[cfg(test)]
 mod sim_parts;
 #[cfg(test)]
@@ -45,6 +47,7 @@ use crate::executor::{ExecError, Isolation, Settings, process_env};
 use app::{App, Effect, Input, Key};
 use buffer::{Frame, render};
 use cells::Header;
+use session_store::SessionStore;
 use worker::{Ended, Event, Worker};
 
 /// How long the loop waits for a key while a session runs: the spinner's step.
@@ -291,8 +294,14 @@ pub fn run() -> Result<(), TuiError> {
         Err(cause) => (Err(cause), None),
     };
     let (welcome, status) = header(&settings, &cwd, home.as_deref());
+    let model = match welcome.model {
+        Ok(ref name) => name.clone(),
+        Err(ref why) => format!("none ({why})"),
+    };
     let (width, height) = terminal::size().map_err(TuiError::Terminal)?;
     let mut app = App::new(welcome, status, usize::from(width), usize::from(height));
+    let mut store = SessionStore::open(&settings, &cwd, &model);
+    store.adopt(&mut app);
     let signals = Signals::register().map_err(TuiError::Signal)?;
     // Declared before the terminal, so an unwind restores the screen before the worker's
     // drop reaps the session.
@@ -310,6 +319,7 @@ pub fn run() -> Result<(), TuiError> {
             &mut worker,
             &settings,
             &cwd,
+            &mut store,
             &stopped,
         );
         done.cancel();
@@ -334,6 +344,7 @@ fn drive(
     worker: &mut Option<Worker>,
     settings: &Result<Settings, ExecError>,
     cwd: &Path,
+    store: &mut SessionStore,
     stopped: &AtomicBool,
 ) -> Result<(), TuiError> {
     let clock = Instant::now();
@@ -352,6 +363,9 @@ fn drive(
         shown = Some(frame);
         let wait = if app.busy() { BUSY_WAIT } else { IDLE_WAIT };
         let mut effects = Vec::new();
+        // Only a key, a paste, a resize or a session event is a turn; a tick
+        // changes nothing the session row holds.
+        let mut turn = false;
         if event::poll(wait).map_err(TuiError::Terminal)? {
             let input = match event::read().map_err(TuiError::Terminal)? {
                 TermEvent::Key(pressed) => key(pressed).map(Input::Key),
@@ -363,6 +377,7 @@ fn drive(
             };
             if let Some(input) = input {
                 effects.extend(app.handle(input));
+                turn = true;
             }
         }
         for _ in 0..EVENTS_PER_TURN {
@@ -371,15 +386,21 @@ fn drive(
             };
             let last = matches!(event, Event::Ended(_));
             effects.extend(app.handle(Input::Worker(event)));
+            turn = true;
             if last {
                 // The session ended: reap its thread now.
                 *worker = None;
             }
         }
         effects.extend(app.handle(Input::Tick(clock.elapsed())));
+        let mut quit = false;
         for effect in effects {
             match effect {
-                Effect::Quit => return Ok(()),
+                // The turn that quits is still saved below, then the loop ends.
+                Effect::Quit => {
+                    quit = true;
+                    break;
+                }
                 Effect::Start(instruction) => {
                     *worker = start(app, settings, instruction, cwd);
                 }
@@ -394,6 +415,12 @@ fn drive(
                     }
                 }
             }
+        }
+        if turn {
+            store.save_app(app);
+        }
+        if quit {
+            return Ok(());
         }
     }
 }
