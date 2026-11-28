@@ -1,20 +1,25 @@
 //! The terminal session's memory and its row (larry#256, ADR 0133): the
 //! transcript the frame shows ([`Transcript`], bounded and snapshot as JSON)
 //! and the driver-owned [`SessionStore`] that holds it in the state database's
-//! `tui_sessions` table after every turn. The frame (`tui::app`) stays I/O-free.
-//! A kill -9 loses at most the turn in flight; a refused store leaves one
-//! notice and the frame runs unsaved.
+//! `tui_sessions` table after every turn and answers `/resume`, `/new`, `/fork`
+//! and `/rename`. The frame (`tui::app`) stays I/O-free. A kill -9 loses at
+//! most the turn in flight; a refused store leaves one notice and the frame
+//! runs unsaved.
 
 use std::collections::VecDeque;
 use std::path::Path;
 
-use super::app::App;
+use super::app::{App, SessionCommand};
 use super::cells::{Entry, Header};
 use super::pane::Pane;
-use super::sessions::{self, Owner, Snapshot};
+use super::sessions::{self, Held, Owner, Snapshot};
 use super::style::Style;
 use super::worker::Receipt;
 use crate::executor::{ExecError, Ledger, Settings};
+
+/// Most sessions one `/resume` listing shows; the rest is counted, so a listing
+/// never fills the transcript.
+pub(crate) const LISTED: usize = 20;
 
 /// The frame's transcript: the entries oldest-first and every receipt digest
 /// seen, oldest-first and bounded. The driver snapshots it after every turn.
@@ -69,6 +74,12 @@ impl Transcript {
         }
     }
 
+    /// Holds a stored session's `entries` and `receipts`.
+    pub(crate) fn restore(&mut self, entries: Vec<Entry>, receipts: Vec<Receipt>) {
+        self.entries = entries.into();
+        self.receipts = receipts.into();
+    }
+
     /// Remembers `receipt`'s digest, oldest-first and bounded, so the row
     /// names every digest even though the pane shows only the newest.
     pub(crate) fn note_receipt(&mut self, receipt: &Receipt) {
@@ -95,10 +106,14 @@ pub(crate) struct SessionStore {
     store: Store,
     /// Whose row it is: the tenant, the folder it is listed under, the model.
     owner: Owner,
-    /// The row the frame is held in, empty until one is adopted.
-    current: String,
+    /// The row the frame is held in, none until one is adopted.
+    current: Option<Held>,
     /// Whether the refused save already left its one notice.
     warned: bool,
+    /// Sessions this process started, naming the next `Session N`.
+    started: u32,
+    /// The last `/resume` listing as (id, name), the numbers the person read.
+    listed: Vec<(String, String)>,
 }
 
 impl SessionStore {
@@ -124,8 +139,10 @@ impl SessionStore {
                 folder: cwd.to_string_lossy().into_owned(),
                 model: model.to_owned(),
             },
-            current: String::new(),
+            current: None,
             warned: false,
+            started: 0,
+            listed: Vec::new(),
         }
     }
 
@@ -150,17 +167,14 @@ impl SessionStore {
             Store::Refused(ref cause) => return unsaved(app, Style::WARN, cause),
             Store::Unset => return,
         };
-        match sessions::create(
-            ledger,
-            &self.owner,
-            "Session 1",
-            Self::now_ms(),
-            &app.snapshot(),
-        ) {
-            Ok(id) => self.current = id,
-            // No `warned` latch here: a failed adopt leaves `current` empty,
-            // so every later save returns before consulting it; this notice
-            // is the one refusal the failure leaves.
+        match add(ledger, &self.owner, "Session 1", app.snapshot()) {
+            Ok(held) => {
+                self.started = 1;
+                self.current = Some(held);
+            }
+            // No `warned` latch here: a failed adopt leaves no row, so every
+            // later save returns before consulting it; this notice is the one
+            // refusal the failure leaves.
             Err(cause) => unsaved(app, Style::BAD, &cause),
         }
     }
@@ -170,30 +184,175 @@ impl SessionStore {
     /// without its oldest entries. One refusal leaves one notice; the frame
     /// keeps running unsaved rather than nagging.
     pub(crate) fn save_app(&mut self, app: &mut App) {
-        if self.current.is_empty() || self.warned {
+        if self.warned {
             return;
         }
         let Store::Ready(ref ledger) = self.store else {
             return;
         };
-        let held = app
+        let Some(held) = self.current.as_mut() else {
+            return;
+        };
+        let saved = app
             .snapshot()
             .fitted()
             .map_err(ExecError::TuiSession)
             .and_then(|snapshot| {
-                sessions::save(
-                    ledger,
-                    &self.owner,
-                    &self.current,
-                    Self::now_ms(),
-                    &snapshot,
-                )
+                sessions::save(ledger, &self.owner, held, Self::now_ms(), &snapshot)
             });
-        if let Err(cause) = held {
-            self.warned = true;
-            unsaved(app, Style::BAD, &cause);
+        match saved {
+            Ok(stamp) => held.stamp = stamp,
+            Err(cause) => {
+                self.warned = true;
+                unsaved(app, Style::BAD, &cause);
+            }
         }
     }
+
+    /// Answers one session command: the frame switches rows only once the store
+    /// has done its part, and a refusal leaves the frame and its row as they were.
+    pub(crate) fn command(&mut self, app: &mut App, command: SessionCommand) {
+        let said = match self.answer(app, command) {
+            Ok(lines) => Entry::Info(lines),
+            Err(cause) => Entry::Notice(Style::BAD, cause.to_string()),
+        };
+        app.transcript().push(said);
+    }
+
+    /// Does what `command` asks and returns the lines that say so.
+    fn answer(&mut self, app: &mut App, command: SessionCommand) -> Result<Vec<String>, ExecError> {
+        let ledger = match self.store {
+            Store::Ready(ref ledger) => ledger,
+            Store::Refused(ref cause) => {
+                return Ok(vec![format!("sessions are not saved: {cause}")]);
+            }
+            Store::Unset => {
+                return Ok(vec![String::from(
+                    "sessions are off until the settings are fixed; see /status.",
+                )]);
+            }
+        };
+        match command {
+            SessionCommand::New => {
+                let number = self.started.saturating_add(1);
+                let name = format!("Session {number}");
+                let snapshot = app.fresh();
+                let held = add(ledger, &self.owner, &name, snapshot.clone())?;
+                self.started = number;
+                self.hold(app, held, snapshot);
+                Ok(vec![format!("started {name}.")])
+            }
+            SessionCommand::Resume(target) if target.is_empty() => {
+                self.listed = others(ledger, &self.owner, self.current.as_ref())?;
+                Ok(listing(&self.listed))
+            }
+            SessionCommand::Resume(target) => {
+                let (held, snapshot) = self.named(ledger, &target)?;
+                let line = format!("resumed {}.", held.name);
+                self.hold(app, held, snapshot);
+                Ok(vec![line])
+            }
+            SessionCommand::Fork(target) => {
+                let (base, snapshot) = if target.is_empty() {
+                    let base = match self.current {
+                        Some(ref held) => held.name.clone(),
+                        None => String::from("Session"),
+                    };
+                    (base, app.snapshot())
+                } else {
+                    let (held, snapshot) = self.named(ledger, &target)?;
+                    (held.name, snapshot)
+                };
+                let name: String = format!("{base} fork")
+                    .chars()
+                    .take(sessions::MAX_NAME_CHARS)
+                    .collect();
+                let held = add(ledger, &self.owner, &name, snapshot.clone())?;
+                self.hold(app, held, snapshot);
+                Ok(vec![format!("forked {base} as {name}.")])
+            }
+            SessionCommand::Rename(name) => {
+                let Some(held) = self.current.as_mut() else {
+                    return Ok(vec![String::from(
+                        "this session is not saved; /new starts a saved one.",
+                    )]);
+                };
+                held.name = sessions::rename(ledger, &self.owner, held, &name)?;
+                Ok(vec![format!("renamed to {}.", held.name)])
+            }
+        }
+    }
+
+    /// The saved session `target` names: a number of the last listing, else a
+    /// name or the start of an id among this folder's other sessions.
+    fn named(&self, ledger: &Ledger, target: &str) -> Result<(Held, Snapshot), ExecError> {
+        let rows = others(ledger, &self.owner, self.current.as_ref())?;
+        let shown = if self.listed.is_empty() {
+            &rows
+        } else {
+            &self.listed
+        };
+        // A target that is no number of the listing is a name or an id.
+        let numbered = shown
+            .iter()
+            .zip(1_usize..)
+            .find(|&(_, number)| number.to_string() == target);
+        let id = match numbered {
+            Some((row, _)) => row.0.clone(),
+            None => sessions::find(&rows, target).map_err(ExecError::TuiSession)?,
+        };
+        sessions::load(ledger, &self.owner, &id)
+    }
+
+    /// Shows `snapshot` and holds the frame in `held` from this turn on.
+    fn hold(&mut self, app: &mut App, held: Held, snapshot: Snapshot) {
+        app.show(snapshot);
+        self.current = Some(held);
+        self.warned = false;
+    }
+}
+
+/// Adds a row named `name` holding as much of `snapshot` as a row takes, and
+/// returns it held.
+fn add(ledger: &Ledger, owner: &Owner, name: &str, snapshot: Snapshot) -> Result<Held, ExecError> {
+    let stamp = SessionStore::now_ms();
+    let fitted = snapshot.fitted().map_err(ExecError::TuiSession)?;
+    let id = sessions::create(ledger, owner, name, stamp, &fitted)?;
+    Ok(Held {
+        id,
+        name: name.to_owned(),
+        stamp,
+    })
+}
+
+/// The folder's saved sessions as (id, name), newest first, without the one
+/// this terminal holds.
+fn others(
+    ledger: &Ledger,
+    owner: &Owner,
+    current: Option<&Held>,
+) -> Result<Vec<(String, String)>, ExecError> {
+    let mut rows = ledger.session_list(&owner.tenant, &owner.folder)?;
+    rows.retain(|row| current.is_none_or(|held| held.id != row.0));
+    Ok(rows)
+}
+
+/// The `/resume` listing of `rows`: the newest [`LISTED`] by number, the rest counted.
+fn listing(rows: &[(String, String)]) -> Vec<String> {
+    let mut lines: Vec<String> = rows
+        .iter()
+        .take(LISTED)
+        .enumerate()
+        .map(|(at, row)| format!("{}. {} ({})", at.saturating_add(1), row.1, row.0))
+        .collect();
+    if lines.is_empty() {
+        lines.push(String::from("no other saved session for this folder."));
+    }
+    let more = rows.len().saturating_sub(LISTED);
+    if more > 0 {
+        lines.push(format!("{more} older; /resume <name or id> reaches them."));
+    }
+    lines
 }
 
 /// Tells the person their session is not being saved, and why.

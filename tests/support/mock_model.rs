@@ -38,7 +38,7 @@ use crate::http_wire::{Refusal, Request, read_request, render};
 #[path = "mock_replies.rs"]
 mod replies;
 
-use replies::{completion, with_choice, without_usage};
+use replies::{completion, with_cache_usage, with_choice, without_usage};
 
 /// Socket read and write bound for every connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -120,6 +120,10 @@ pub(crate) struct Config {
     /// OpenAI-compatible proxies answer (larry#204): the client must settle
     /// the call at its reservation, never at zero.
     pub(crate) omit_usage: bool,
+    /// When set, every reply's `usage` says this many prompt tokens were read
+    /// from the cache and this many written to it (larry#230), the chat shape's
+    /// `prompt_tokens_details`.
+    pub(crate) cache_usage: Option<(u64, u64)>,
     /// When set, a request must carry exactly one `User-Agent` header with this
     /// value or it is refused with a 400 (larry#230).
     pub(crate) user_agent: Option<String>,
@@ -136,6 +140,7 @@ impl Config {
             fault_per_mille: 0,
             contents: Vec::new(),
             omit_usage: false,
+            cache_usage: None,
             user_agent: None,
         }
     }
@@ -351,6 +356,8 @@ impl State {
         let good = completion(&request.path, model, request, &mut rng, scripted)?;
         let good = if self.config.omit_usage {
             without_usage(&good)?
+        } else if let Some((cached, written)) = self.config.cache_usage {
+            with_cache_usage(&good, cached, written)?
         } else {
             good
         };

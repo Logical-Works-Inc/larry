@@ -3,9 +3,10 @@
 //! (`executor.db`, never a stray file), holding its name, folder, model and the
 //! whole transcript plus every receipt digest seen.
 //!
-//! The store layer ([`create`], [`save`]) is a thin typed shell over the
-//! ledger's `tui_sessions` table: the ledger owns the SQL, this module owns the
-//! snapshot shape and the name rule. A snapshot is the live frame's own types
+//! The store layer ([`create`], [`save`], [`load`], [`rename`]) is a thin typed
+//! shell over the ledger's `tui_sessions` table: the ledger owns the SQL, this
+//! module owns the snapshot shape, the name rule and how a typed target names a
+//! row ([`find`]). A snapshot is the live frame's own types
 //! ([`Entry`], [`Pane`], [`Receipt`]) as JSON through `lgwks_std::json`, at
 //! most [`MAX_STORED_BYTES`], so one transcript can never fill the store; at
 //! most [`MAX_SESSIONS`] rows exist. One home holds the transcript shape: no
@@ -137,13 +138,7 @@ pub(crate) fn create(
 ) -> Result<String, ExecError> {
     let kept = validate_name(name).map_err(ExecError::TuiSession)?;
     let id = mint_id()?;
-    let transcript = snapshot.to_json().map_err(ExecError::TuiSession)?;
-    if transcript.len() > MAX_STORED_BYTES {
-        return Err(ExecError::TuiSession(SessionStoreError::TooLarge {
-            id,
-            bytes: transcript.len(),
-        }));
-    }
+    let transcript = bounded(&id, snapshot)?;
     let created = ledger.session_create(&crate::executor::NewSession {
         tenant: &owner.tenant,
         id: &id,
@@ -162,19 +157,8 @@ pub(crate) fn create(
     Ok(id)
 }
 
-/// Holds `snapshot` in `owner`'s session `id`.
-///
-/// # Errors
-///
-/// [`SessionStoreError::NoSuchSession`] naming the id, [`SessionStoreError::TooLarge`]
-/// past [`MAX_STORED_BYTES`].
-pub(crate) fn save(
-    ledger: &Ledger,
-    owner: &Owner,
-    id: &str,
-    updated: i64,
-    snapshot: &Snapshot,
-) -> Result<(), ExecError> {
+/// `snapshot` as the JSON of row `id`, refused past [`MAX_STORED_BYTES`].
+fn bounded(id: &str, snapshot: &Snapshot) -> Result<String, ExecError> {
     let transcript = snapshot.to_json().map_err(ExecError::TuiSession)?;
     if transcript.len() > MAX_STORED_BYTES {
         return Err(ExecError::TuiSession(SessionStoreError::TooLarge {
@@ -182,13 +166,127 @@ pub(crate) fn save(
             bytes: transcript.len(),
         }));
     }
-    let changed = ledger.session_save(&owner.tenant, id, updated, &transcript)?;
-    if !changed {
-        return Err(ExecError::TuiSession(SessionStoreError::NoSuchSession {
-            id: id.to_owned(),
-        }));
+    Ok(transcript)
+}
+
+/// The row this terminal holds: its id, its name and the stamp it last wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Held {
+    /// The row's id.
+    pub(crate) id: String,
+    /// The row's name.
+    pub(crate) name: String,
+    /// The stamp a write must still find on the row.
+    pub(crate) stamp: i64,
+}
+
+/// Why a write that changed nothing did: the row is gone, or another terminal
+/// wrote it.
+fn lost(ledger: &Ledger, owner: &Owner, id: &str) -> ExecError {
+    let id = id.to_owned();
+    match ledger.session_load(&owner.tenant, &id) {
+        Ok(Some(_)) => ExecError::TuiSession(SessionStoreError::Moved { id }),
+        Ok(None) => ExecError::TuiSession(SessionStoreError::NoSuchSession { id }),
+        Err(cause) => cause,
     }
-    Ok(())
+}
+
+/// Holds `snapshot` in `owner`'s row `held` and returns its new stamp.
+///
+/// # Errors
+///
+/// [`SessionStoreError::NoSuchSession`] naming the id, [`SessionStoreError::Moved`]
+/// when another terminal wrote the row, [`SessionStoreError::TooLarge`] past
+/// [`MAX_STORED_BYTES`].
+pub(crate) fn save(
+    ledger: &Ledger,
+    owner: &Owner,
+    held: &Held,
+    now: i64,
+    snapshot: &Snapshot,
+) -> Result<i64, ExecError> {
+    let transcript = bounded(&held.id, snapshot)?;
+    match ledger.session_save(&owner.tenant, &held.id, held.stamp, now, &transcript)? {
+        Some(stamp) => Ok(stamp),
+        None => Err(lost(ledger, owner, &held.id)),
+    }
+}
+
+/// `owner`'s row `id`, as a row to hold and the frame it stored.
+///
+/// # Errors
+///
+/// [`SessionStoreError::NoSuchSession`] naming the id, [`SessionStoreError::Damaged`]
+/// when its bytes are not a snapshot.
+pub(crate) fn load(
+    ledger: &Ledger,
+    owner: &Owner,
+    id: &str,
+) -> Result<(Held, Snapshot), ExecError> {
+    let id = id.to_owned();
+    let Some((stamp, name, transcript)) = ledger.session_load(&owner.tenant, &id)? else {
+        return Err(ExecError::TuiSession(SessionStoreError::NoSuchSession {
+            id,
+        }));
+    };
+    match json::from_slice(transcript.as_bytes()) {
+        Ok(snapshot) => Ok((Held { id, name, stamp }, snapshot)),
+        Err(cause) => Err(ExecError::TuiSession(SessionStoreError::Damaged {
+            id,
+            cause,
+        })),
+    }
+}
+
+/// Names `owner`'s row `held` and returns the name as kept.
+///
+/// # Errors
+///
+/// [`SessionStoreError::BadName`] for a refused name, [`SessionStoreError::NoSuchSession`]
+/// or [`SessionStoreError::Moved`] when the row is no longer this terminal's.
+pub(crate) fn rename(
+    ledger: &Ledger,
+    owner: &Owner,
+    held: &Held,
+    name: &str,
+) -> Result<String, ExecError> {
+    let kept = validate_name(name).map_err(ExecError::TuiSession)?;
+    if ledger.session_rename(&owner.tenant, &held.id, held.stamp, &kept)? {
+        Ok(kept)
+    } else {
+        Err(lost(ledger, owner, &held.id))
+    }
+}
+
+/// The id of the one row of `rows` (id, name) that `target` names: its exact
+/// name, else the start of its id.
+///
+/// # Errors
+///
+/// [`SessionStoreError::NoSuchSession`] when none is named,
+/// [`SessionStoreError::Ambiguous`] when more than one is.
+pub(crate) fn find(rows: &[(String, String)], target: &str) -> Result<String, SessionStoreError> {
+    let mut named: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.1 == target)
+        .map(|row| &row.0)
+        .collect();
+    if named.is_empty() {
+        named = rows
+            .iter()
+            .filter(|row| row.0.starts_with(target))
+            .map(|row| &row.0)
+            .collect();
+    }
+    match *named.as_slice() {
+        [id] => Ok(id.clone()),
+        [] => Err(SessionStoreError::NoSuchSession {
+            id: target.to_owned(),
+        }),
+        _ => Err(SessionStoreError::Ambiguous {
+            target: target.to_owned(),
+        }),
+    }
 }
 
 #[cfg(test)]
