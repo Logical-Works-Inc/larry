@@ -7,19 +7,23 @@
 use std::time::{Duration, SystemTime};
 
 use larry_contracts::authority::{BudgetUnit, Scope};
+use larry_contracts::binding::BindingError;
 use larry_contracts::command::{Command, CommandContent, CommandKind};
-use larry_contracts::effect::{EffectOutcome, ReconciliationStrategy};
+use larry_contracts::effect::{EffectIntent, EffectOutcome, ReconciliationStrategy};
 use larry_contracts::ids::{CommandId, OperationId, RunId, TenantId};
+use lgwks_bot::kernel::broker::Authority;
+use lgwks_bot::kernel::cap::Cap;
 
 use super::{
     Ack, Outcome, Rt, START_SECS, clock, command, ids, memory, seeded_submit, settings, work_body,
 };
 use crate::MAX_READY_WORK;
 use crate::error::RuntimeError;
+use crate::fence::{FenceRefusal, effect_key};
 use crate::journal::Journal;
 use crate::owner::fixture::ScriptedOwner;
 use crate::projection::FoldProjection;
-use crate::runtime::{Runtime, restore};
+use crate::runtime::{Runtime, TickItem, TickReport, restore};
 
 // Source: Cell 05 (one global bound beside the tenant shares) and CWE-400.
 // The global bound fires only when no tenant is past its share: 257 tenants
@@ -378,6 +382,187 @@ fn sim_lost_acknowledgement_at_the_reach_fails_the_tick() -> Outcome {
             runtime.owner().dispatched().is_empty(),
             "seed {seed}: the owner is never reached past a refused sync"
         );
+    }
+    Ok(())
+}
+
+/// A runtime holding one seeded effect it has sent once and still counts as open, and the
+/// warrant the runtime would mint for that effect's second attempt.
+fn minted_after_one_send(
+    seed: u64,
+) -> Result<(Rt, EffectIntent, Authority), Box<dyn std::error::Error>> {
+    let operation = OperationId::from_bytes(ids(3, seed));
+    let body = work_body(
+        RunId::from_bytes(ids(1, seed)),
+        TenantId::from_bytes(ids(2, seed)),
+        operation,
+    );
+    let mut runtime = memory(ScriptedOwner::new())?;
+    runtime.submit(command(
+        CommandId::from_bytes(ids(4, seed)),
+        CommandKind::Submit,
+        &body,
+    )?)?;
+    runtime.tick()?;
+    assert_eq!(
+        runtime.owner().dispatched(),
+        [operation],
+        "seed {seed}: sent"
+    );
+    let intent = runtime.live.get(&operation).ok_or("a live effect")?.intent;
+    let warrant = runtime.fence.authorize(effect_key(&intent, 2)?, &intent)?;
+    Ok((runtime, intent, warrant))
+}
+
+/// Withdraws the minted authority one of the two ways the fence can, and names the refusal.
+fn withdraw(
+    runtime: &mut Rt,
+    intent: &EffectIntent,
+    by_name: bool,
+) -> Result<FenceRefusal, Box<dyn std::error::Error>> {
+    if by_name {
+        assert!(runtime.fence.revoke(intent.operation)?, "first withdrawal");
+        return Ok(FenceRefusal::Revoked {
+            operation: intent.operation,
+        });
+    }
+    let current = runtime.fence.advance_epoch()?;
+    Ok(FenceRefusal::StaleEpoch {
+        admitted: intent.admission_epoch,
+        current,
+    })
+}
+
+// Source: CWE-367 (the check and the use are two moments), larry#76 and the INVARIANTS fence
+// rule "re-checks it with revalidate immediately before the owner". The runtime holds the fence
+// exclusively through one reach, so no public call can land between the mint and the handoff:
+// each seed runs the real mint, withdraws, then runs the real handoff. A withdrawal stops it with
+// the owner not called, no attempt and no offline unit spent, and the refusal reported fenced.
+// The same handoff with no withdrawal reaches the owner once and counts one unit.
+#[test]
+fn sim_a_withdrawal_after_the_mint_refuses_the_handoff_and_counts_nothing() -> Outcome {
+    for seed in 0..32_u64 {
+        for withdrawn in [None, Some(true), Some(false)] {
+            let case = format!("seed {seed} {withdrawn:?}");
+            let (mut runtime, intent, warrant) = minted_after_one_send(seed)?;
+            let expected = match withdrawn {
+                Some(by_name) => Some(withdraw(&mut runtime, &intent, by_name)?),
+                None => None,
+            };
+            let spent = runtime.fence.offline_spent()?;
+            let live = runtime.live.get(&intent.operation).ok_or("live")?;
+            let sends = live.dispatches;
+            let auth = live
+                .proof
+                .checked_auth()
+                .map_err(|reason| format!("{case}: the lease holds: {reason:?}"))?;
+            let mut report = TickReport::default();
+            let key = effect_key(&intent, 2)?;
+            let at = epoch_plus(0)?;
+            let outcome = runtime.hand_off(intent, key, &warrant, auth, at, &mut report)?;
+            let reached = u8::from(expected.is_none());
+            assert_eq!(outcome.is_some(), expected.is_none(), "{case}: outcome");
+            assert_eq!(
+                runtime.owner().dispatched().len(),
+                usize::from(reached.saturating_add(1)),
+                "{case}: the owner is called only with live authority"
+            );
+            let live = runtime.live.get(&intent.operation).ok_or("live")?;
+            assert_eq!(
+                live.dispatches.saturating_sub(sends),
+                reached,
+                "{case}: a refused handoff spends no attempt"
+            );
+            assert_eq!(
+                runtime.fence.offline_spent()?,
+                spent.saturating_add(u32::from(reached)),
+                "{case}: a refused handoff counts nothing"
+            );
+            let fenced: Vec<_> = expected
+                .into_iter()
+                .map(|refusal| (intent.operation, refusal))
+                .collect();
+            assert_eq!(report.fenced(), fenced, "{case}: fenced");
+            assert!(report.refused().is_empty(), "{case}: nothing refused");
+        }
+    }
+    Ok(())
+}
+
+// Source: CWE-613 (authority that outlives its withdrawal) and the INVARIANTS retry rule "a
+// spend refusal after the owner ran is the tick refusal Unspent, never fenced". The reach
+// happened, so a count the fence refuses names the effect and the fence's own cause, and counts
+// nothing.
+#[test]
+fn sim_a_count_refused_after_the_reach_is_unspent_and_never_fenced() -> Outcome {
+    for seed in 0..32_u64 {
+        let (mut runtime, intent, warrant) = minted_after_one_send(seed)?;
+        let refusal = withdraw(&mut runtime, &intent, seed & 1 == 0)?;
+        let spent = runtime.fence.offline_spent()?;
+        let mut report = TickReport::default();
+        runtime.count_reach(&intent, &warrant, &mut report);
+        let &[
+            (
+                ref item,
+                RuntimeError::Unspent {
+                    ref operation,
+                    refusal: ref cause,
+                },
+            ),
+        ] = report.refused()
+        else {
+            return Err(format!("seed {seed}: {:?}", report.refused()).into());
+        };
+        assert_eq!(*item, TickItem::Effect(intent.operation), "seed {seed}");
+        assert_eq!(*operation, intent.operation, "seed {seed}");
+        assert_eq!(*cause, refusal, "seed {seed}: the fence's own cause");
+        assert!(report.fenced().is_empty(), "seed {seed}: never fenced");
+        assert_eq!(runtime.fence.offline_spent()?, spent, "seed {seed}");
+    }
+    Ok(())
+}
+
+// Source: CWE-285 (an effect that needs more than the proof covers), E65 and larry#197 ("a typed
+// owner refusal ... spends none"). The owner refuses the handoff before any effect, so the live
+// witness is what it was before the call: the same attempt count and the same dispatched key. No
+// offline unit is counted and the refusal is the caller's typed error, never a fenced reach.
+#[test]
+fn sim_an_owner_refusal_at_the_handoff_restores_the_witness_and_counts_nothing() -> Outcome {
+    for seed in 0..32_u64 {
+        let (mut runtime, intent, warrant) = minted_after_one_send(seed)?;
+        let spent = runtime.fence.offline_spent()?;
+        let live = runtime.live.get(&intent.operation).ok_or("live")?;
+        let before = (live.dispatches, live.dispatched, live.sent);
+        let (auth, mut required) = live
+            .proof
+            .checked_auth()
+            .map_err(|reason| format!("seed {seed}: the lease holds: {reason:?}"))?;
+        required.push(Cap::new(format!("larry.missing.{seed}")));
+        let mut report = TickReport::default();
+        let key = effect_key(&intent, 2)?;
+        let at = epoch_plus(0)?;
+        let refused = runtime.hand_off(intent, key, &warrant, (auth, required), at, &mut report);
+        assert!(
+            matches!(
+                refused,
+                Err(RuntimeError::Binding(BindingError::NoCoveringGrant))
+            ),
+            "seed {seed}: the owner's typed refusal: {refused:?}"
+        );
+        let live = runtime.live.get(&intent.operation).ok_or("live")?;
+        assert_eq!(
+            (live.dispatches, live.dispatched, live.sent),
+            before,
+            "seed {seed}: the witness is restored"
+        );
+        assert_eq!(
+            runtime.owner().dispatched(),
+            [intent.operation],
+            "seed {seed}: only the first send reached the owner"
+        );
+        assert_eq!(runtime.fence.offline_spent()?, spent, "seed {seed}");
+        assert!(report.fenced().is_empty(), "seed {seed}: never fenced");
+        assert!(report.refused().is_empty(), "seed {seed}: never unspent");
     }
     Ok(())
 }

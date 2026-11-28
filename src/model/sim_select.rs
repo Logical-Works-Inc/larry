@@ -11,9 +11,14 @@
 //! filters before the engine runs, the eligible default wins with no ranker,
 //! and an empty table or a refused host never reaches the engine.
 
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+
 use super::{Budget, Method, Policy, Residency, Selection, select};
+use crate::governance::sim_support::Scratch;
 use crate::model::route::{Draft, ENV_ROUTE, Kind, Route, RouteError, Table};
-use crate::rerank::{Candidate, Deadline, RerankError, Scorer};
+use crate::rerank::{Candidate, Deadline, Request, RerankError, Scorer, run};
 
 /// Failures propagate instead of panicking.
 pub(super) type Check<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -118,6 +123,107 @@ pub(super) fn stored(id: &str, residency: Option<&str>, describe: &str) -> Check
         prompt: None,
         describe,
     })?)
+}
+
+/// Three candidates, as a ranking run reads them.
+const ROWS: &str = "{\"id\":\"a\",\"text\":\"alpha\"}\n{\"id\":\"b\",\"text\":\"beta\"}\n{\"id\":\"c\",\"text\":\"gamma\"}\n";
+
+/// The command line of one ranking of `query` whose receipt is `name`, with `extra` flags.
+fn ranking(query: &str, name: &str, extra: &[&str]) -> Check<Request> {
+    let receipt = format!("tools/receipts/{name}");
+    let flags = [
+        "--phase",
+        "pre-exec",
+        "--query",
+        query,
+        "--receipt",
+        &receipt,
+        "--top-k",
+        "1",
+    ];
+    Ok(Request::parse(
+        flags.iter().chain(extra).map(OsString::from),
+    )?)
+}
+
+/// An engine that returns fewer scores than candidates is refused naming both counts and ranks
+/// nothing, whether the rows came from the stream or a file; the full answer beside it writes the
+/// one receipt, and an empty query never reaches the engine. Source: CWE-20 (the engine's answer
+/// is input too) and larry#202.
+#[test]
+fn sim_a_ranker_run_with_too_few_scores_writes_no_receipt() -> Check {
+    let root = Scratch::new("rerank-short")?;
+    let mut full = Stub::scored(vec![0.1, 0.9, 0.5]);
+    let line = run(
+        &ranking("a task", "full.json", &[])?,
+        ROWS.as_bytes(),
+        root.path(),
+        &mut full,
+    )?;
+    assert!(
+        line.contains("\"results\":[{\"id\":\"b\",\"score\":0.9}]"),
+        "the control ranks the best row: {line}"
+    );
+    let rows = root.path().join("rows.jsonl");
+    fs::write(&rows, ROWS)?;
+    let rows = rows.to_str().ok_or("a UTF-8 scratch path")?;
+    for given in 0..3 {
+        let from_file = ["--candidates", rows];
+        for (input, extra) in [(ROWS, &[][..]), ("not json", &from_file[..])] {
+            let mut short = Stub::scored(vec![0.5; given]);
+            let named = ranking("a task", "short.json", extra)?;
+            let outcome = run(&named, input.as_bytes(), root.path(), &mut short);
+            let expected = format!("{given} scores for 3 candidates");
+            assert!(
+                matches!(outcome, Err(RerankError::Engine(ref detail)) if *detail == expected),
+                "{given} scores, {extra:?}: {outcome:?}"
+            );
+            assert_eq!(short.calls, 1, "the answer is judged after one asking");
+        }
+    }
+    let mut unused = Stub::scored(vec![0.5; 3]);
+    let unnamed = ranking("", "empty.json", &[])?;
+    let outcome = run(&unnamed, ROWS.as_bytes(), root.path(), &mut unused);
+    assert!(matches!(outcome, Err(RerankError::Query)), "{outcome:?}");
+    assert_eq!(unused.calls, 0, "no query, no engine");
+    assert_eq!(
+        fs::read_dir(root.path().join("tools/receipts"))?.count(),
+        1,
+        "only the full answer left a receipt"
+    );
+    Ok(())
+}
+
+/// A receipt name that is legal itself but too long for its temporary sibling fails the write: the
+/// refusal keeps the file system's cause and leaves nothing behind. Source: POSIX `ENAMETOOLONG`
+/// (CWE-754, an unchecked write failure).
+#[test]
+fn a_ranker_receipt_whose_temporary_cannot_be_created_keeps_the_cause() -> Check {
+    let root = Scratch::new("rerank-long")?;
+    let name = format!("{}.json", "r".repeat(245));
+    let mut stub = Stub::scored(vec![0.5; 3]);
+    let named = ranking("a task", &name, &[])?;
+    let Err(error) = run(&named, ROWS.as_bytes(), root.path(), &mut stub) else {
+        return Err("the write was admitted".into());
+    };
+    assert!(
+        matches!(error, RerankError::Io(ref cause) if cause.kind() == io::ErrorKind::InvalidFilename),
+        "{error:?}"
+    );
+    let source = std::error::Error::source(&error).ok_or("the cause is kept")?;
+    assert_eq!(source.to_string(), error.to_string(), "the same cause");
+    assert_eq!(fs::read_dir(root.path().join("tools/receipts"))?.count(), 0);
+    Ok(())
+}
+
+/// A ranking limit of no seconds is already spent and the refusal names it; an hour is not.
+/// Source: CWE-400 (an engine run with no bound) and larry#202.
+#[test]
+fn a_ranker_deadline_of_no_seconds_is_spent_naming_its_limit() {
+    let spent = Deadline::limit(0).check();
+    assert!(matches!(spent, Err(RerankError::Timeout(0))), "{spent:?}");
+    let open = Deadline::limit(3600).check();
+    assert!(open.is_ok(), "{open:?}");
 }
 
 /// An explicit route always wins: a named route outside the tenant rule still

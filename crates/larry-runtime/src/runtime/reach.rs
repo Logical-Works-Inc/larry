@@ -7,6 +7,9 @@ use std::time::SystemTime;
 use larry_contracts::effect::{EffectIntent, EffectOutcome};
 use larry_contracts::ids::RunId;
 use larry_contracts::replay::DenialReason;
+use lgwks_bot::kernel::broker::Authority;
+use lgwks_bot::kernel::cap::{Auth, Cap};
+use lgwks_bot::kernel::effect::EffectKey;
 
 use super::{OwnerReach, Runtime, TickItem, TickReport};
 use crate::error::RuntimeError;
@@ -106,59 +109,7 @@ where
                 // intent among them, is on disk before the owner can act on
                 // it. A file that refuses means the owner is never called.
                 self.journal.sync()?;
-                // The handoff (larry#76): the broker re-checks the warrant
-                // right before the owner, so a withdrawal since the mint holds.
-                if let Err(refusal) = self.fence.revalidate(&warrant, &intent) {
-                    report.fenced.push((intent.operation, refusal));
-                    return Ok(None);
-                }
-                let previous = self.live.get(&intent.operation).cloned();
-                if let Some(live) = self.live.get_mut(&intent.operation) {
-                    live.dispatches = live.dispatches.saturating_add(1);
-                    live.dispatched = Some(key);
-                    // The reach below is about to happen, so this effect may
-                    // now have reached its owner. This is the only place the
-                    // flag is set for a live effect, and it is set before the
-                    // call rather than after: a call that panicked or was lost
-                    // still may have happened, and the answer to a later status
-                    // query about it is therefore evidence.
-                    live.sent = true;
-                }
-                let (auth, required) = auth;
-                let outcome = if intent.binding().is_some() {
-                    self.owner.dispatch_bound(&intent, &auth, &required, at)
-                } else {
-                    self.owner.dispatch(&intent, &auth, &required, at)
-                };
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        // Typed owner refusal guarantees no attempted effect.
-                        // Restore the witness, including a previous successful reach.
-                        if let Some(previous) = previous {
-                            self.live.insert(intent.operation, previous);
-                        }
-                        return Err(error.into());
-                    }
-                };
-                // The reach happened without the authority source, so it
-                // spends one unit of offline authority; a typed owner refusal
-                // returned above and spent none (E65). Nothing can move the
-                // fence between the handoff and here, as this call holds the
-                // runtime exclusively, so a refusal would be a broker defect:
-                // it is reported apart from the fenced reaches, which never
-                // happened, and the outcome of the reach that did happen is still
-                // recorded (larry#197).
-                if let Err(refusal) = self.fence.spend(&warrant, &intent) {
-                    report.refused.push((
-                        TickItem::Effect(intent.operation),
-                        RuntimeError::Unspent {
-                            operation: intent.operation,
-                            refusal,
-                        },
-                    ));
-                }
-                Some(outcome)
+                self.hand_off(intent, key, &warrant, auth, at, report)?
             }
             OwnerReach::Observe => {
                 self.journal.sync()?;
@@ -168,5 +119,80 @@ where
                 Some(self.owner.reconcile(&intent, at))
             }
         })
+    }
+
+    /// Hands a warranted effect to its owner: the second half of a mutating
+    /// reach, after the mint, the proof and the group commit.
+    ///
+    /// The handoff (larry#76): the broker re-checks the warrant right before
+    /// the owner, so a withdrawal since the mint holds. `None` means it
+    /// refused, the owner was never called and nothing was counted.
+    pub(super) fn hand_off(
+        &mut self,
+        intent: EffectIntent,
+        key: EffectKey,
+        warrant: &Authority,
+        (auth, required): (Auth, Vec<Cap>),
+        at: SystemTime,
+        report: &mut TickReport,
+    ) -> Result<Option<EffectOutcome>, RuntimeError> {
+        if let Err(refusal) = self.fence.revalidate(warrant, &intent) {
+            report.fenced.push((intent.operation, refusal));
+            return Ok(None);
+        }
+        let previous = self.live.get(&intent.operation).cloned();
+        if let Some(live) = self.live.get_mut(&intent.operation) {
+            live.dispatches = live.dispatches.saturating_add(1);
+            live.dispatched = Some(key);
+            // The reach below is about to happen, so this effect may now have
+            // reached its owner. This is the only place the flag is set for a
+            // live effect, and it is set before the call rather than after: a
+            // call that panicked or was lost still may have happened, and the
+            // answer to a later status query about it is therefore evidence.
+            live.sent = true;
+        }
+        let outcome = if intent.binding().is_some() {
+            self.owner.dispatch_bound(&intent, &auth, &required, at)
+        } else {
+            self.owner.dispatch(&intent, &auth, &required, at)
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Typed owner refusal guarantees no attempted effect.
+                // Restore the witness, including a previous successful reach.
+                if let Some(previous) = previous {
+                    self.live.insert(intent.operation, previous);
+                }
+                return Err(error.into());
+            }
+        };
+        self.count_reach(&intent, warrant, report);
+        Ok(Some(outcome))
+    }
+
+    /// Counts one reach that happened without the authority source.
+    ///
+    /// It spends one unit of offline authority; a typed owner refusal returns
+    /// before this and spends none (E65). Nothing can move the fence between
+    /// the handoff and here, as one call holds the runtime exclusively, so a
+    /// refusal would be a broker defect: it is reported apart from the fenced
+    /// reaches, which never happened, and the outcome of the reach that did
+    /// happen is still recorded (larry#197).
+    pub(super) fn count_reach(
+        &mut self,
+        intent: &EffectIntent,
+        warrant: &Authority,
+        report: &mut TickReport,
+    ) {
+        if let Err(refusal) = self.fence.spend(warrant, intent) {
+            report.refused.push((
+                TickItem::Effect(intent.operation),
+                RuntimeError::Unspent {
+                    operation: intent.operation,
+                    refusal,
+                },
+            ));
+        }
     }
 }

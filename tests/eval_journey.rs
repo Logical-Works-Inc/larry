@@ -23,6 +23,9 @@ mod priced;
 #[path = "eval_journey/usage.rs"]
 mod usage;
 
+#[path = "eval_journey/unprinted.rs"]
+mod unprinted;
+
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
