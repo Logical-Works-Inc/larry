@@ -13,6 +13,7 @@ use std::sync::Arc;
 use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 
+use crate::governance::read::{ReadFault, open_regular, read_open};
 use crate::model::{
     Completion, Kind, Message, ModelClient, ModelError, Role, Route, Selection, structured_content,
 };
@@ -182,7 +183,7 @@ pub(crate) fn author(
     let mut sources: Vec<Source<'_>> = Vec::with_capacity(brief.files.len());
     for path in &brief.files {
         let target = checked_target(tree, path)?;
-        let before = current_content(&target, path)?;
+        let before = current_content(tree, path)?;
         sources.push(Source {
             path: path.as_str(),
             target,
@@ -361,23 +362,35 @@ pub(crate) fn checked_target<P: AsRef<Path>>(tree: &Path, path: P) -> Result<Pat
     Ok(target)
 }
 
-/// The file's current text, `None` when it does not exist yet.
-fn current_content(target: &Path, path: &str) -> Result<Option<String>, ExecError> {
-    let meta = match fs::metadata(target) {
-        Ok(meta) => meta,
-        Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(cause) => return Err(refused(path, AuthorFault::Io(cause))),
+/// The current text of the file `path` under `tree`, `None` when it does not exist yet.
+fn current_content(tree: &Path, path: &str) -> Result<Option<String>, ExecError> {
+    current_content_with(|| Ok(()), tree, path)
+}
+
+/// [`current_content`] with the window between its length check and its read, for a
+/// simulation. The open and the bound are the governance reader's (`crate::governance::read`):
+/// through no link, a regular file, read no further than one byte past the bound, so a file
+/// that grows after its length was checked is still refused (CWE-367, larry#617).
+fn current_content_with(
+    after_stat: impl FnOnce() -> io::Result<()>,
+    tree: &Path,
+    path: &str,
+) -> Result<Option<String>, ExecError> {
+    let read = open_regular(tree, Path::new(path), |_| Ok(()))
+        .and_then(|(_, file)| read_open(&file, MAX_SOURCE_BYTES, after_stat));
+    let fault = match read {
+        Ok(bytes) => {
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|cause| refused(path, AuthorFault::NotText(cause.utf8_error())));
+        }
+        Err(ReadFault::Missing(_)) => return Ok(None),
+        Err(ReadFault::Symlink) => AuthorFault::Symlink,
+        Err(ReadFault::NotRegular { .. }) => AuthorFault::NotAFile,
+        Err(ReadFault::TooLarge { bytes }) => AuthorFault::TooLarge { len: bytes },
+        Err(ReadFault::Unreadable(cause)) => AuthorFault::Io(cause),
     };
-    if !meta.is_file() {
-        return Err(refused(path, AuthorFault::NotAFile));
-    }
-    if meta.len() > MAX_SOURCE_BYTES {
-        return Err(refused(path, AuthorFault::TooLarge { len: meta.len() }));
-    }
-    let bytes = fs::read(target).map_err(|cause| refused(path, AuthorFault::Io(cause)))?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|cause| refused(path, AuthorFault::NotText(cause.utf8_error())))
+    Err(refused(path, fault))
 }
 
 /// The user turn: the goal, the path and the current content.

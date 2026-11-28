@@ -34,6 +34,9 @@ tree carries, that names a regular UTF-8 file of at most 262,144 bytes. Each oth
 case is its own typed refusal, and the model is shown it. The open and the bound
 are the `larry governance` reader's: it stops one byte past the bound, so a file
 that grows after its length was checked is still refused (CWE-367).
+The model step of a brief reads each of the brief's files through the same
+reader and the same bound (larry#617). It had checked the length and then read
+the whole file.
 
 Part 2 (larry#606) adds the reply `{"edit": {"path", "old", "new",
 "expect_digest"}}`, approved like a command. A digest that no longer matches is
@@ -90,8 +93,7 @@ Rejected: a digest check with no lock, which two edits can both pass.
 ## Proof
 
 - `sim_a_read_shows_the_file_and_its_digest_for_every_seed`, 512 seeds.
-- `sim_a_path_outside_the_snapshot_is_refused`.
-- `sim_a_link_in_the_tree_is_refused`.
+- `sim_a_path_outside_the_snapshot_is_refused`, `sim_a_link_in_the_tree_is_refused`.
 - `sim_each_read_bound_admits_its_limit_and_refuses_past_it`.
 - `sim_an_approved_read_shows_the_digest`.
 - `a_read_reply_parses_and_a_mistyped_one_is_refused`.
@@ -100,11 +102,9 @@ Rejected: a digest check with no lock, which two edits can both pass.
 - `sim_an_edit_applied_then_reverted_gives_the_original_bytes`, 512 seeds.
 - `sim_a_stale_digest_is_refused_and_the_file_is_unchanged`, 512 seeds.
 - `sim_each_anchor_level_replaces_its_one_place`.
-- `sim_an_anchor_that_matches_nothing_is_refused`.
-- `sim_an_ambiguous_anchor_is_refused_naming_its_lines`.
+- `sim_an_anchor_that_matches_nothing_is_refused`, `sim_an_ambiguous_anchor_is_refused_naming_its_lines`.
 - `sim_an_edit_keeps_the_mode_and_replaces_the_file_whole`.
-- `sim_two_edits_that_saw_one_digest_never_both_land`.
-- `sim_a_hundred_edits_at_once_on_one_digest_apply_one`.
+- `sim_two_edits_that_saw_one_digest_never_both_land`, `sim_a_hundred_edits_at_once_on_one_digest_apply_one`.
 - `sim_a_directory_swapped_for_a_link_before_the_replace_writes_nothing`.
 - `sim_an_approved_edit_records_both_digests`.
 - `an_edit_reply_parses_and_a_malformed_one_is_refused`.
@@ -116,3 +116,5 @@ Rejected: a digest check with no lock, which two edits can both pass.
 - `sim_patches_at_once_on_one_digest_apply_one`.
 - `sim_a_patch_after_a_masked_read_keeps_the_key`: the stars match nothing (ADR 0151).
 - `tui_journey_approved_patch_lands_every_file_with_its_receipt`, on a PTY.
+- `sim_a_source_grown_after_the_stat_is_refused_too_large`, 64 seeds, for the brief.
+- `sim_each_unreadable_source_gets_its_exact_fault`.
