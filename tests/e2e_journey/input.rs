@@ -43,6 +43,48 @@ fn tui_journey_a_pasted_block_waits_in_the_composer() -> Journey {
     Ok(())
 }
 
+/// multi-line paste (xterm bracketed paste mode 2004, larry#605): a terminal sends a pasted
+/// newline as CR, a Windows clipboard CR LF, a Unix one LF. Each is one line break on the
+/// composer and in the task the model gets, and nothing is sent before Enter. Catches the
+/// lines of a pasted task joined into one, or a task sent other than as the person saw it.
+#[test]
+fn tui_journey_a_pasted_task_keeps_its_lines() -> Journey {
+    let ran = frame(scripted(81, &[r#"{"done":"read-9c"}"#]), |pty, mock, _| {
+        pty.wait_for(READY)?;
+        pty.send("\x1b[200~one-9c\rtwo-9c\r\nthree-9c\nfour-9c\x1b[201~")?;
+        pty.wait_for("four-9c")?;
+        let screen = pty.screen_text();
+        let rows: Vec<&str> = screen.lines().collect();
+        let first = rows
+            .iter()
+            .position(|row| row.contains("one-9c"))
+            .ok_or("no composer row")?;
+        for (below, line) in ["one-9c", "two-9c", "three-9c", "four-9c"]
+            .iter()
+            .enumerate()
+        {
+            let row = rows.get(first.saturating_add(below)).ok_or("a row")?;
+            let others = row.matches("-9c").count();
+            assert!(
+                row.contains(line) && others == 1,
+                "{line} has the row {below} below the first to itself: {screen}"
+            );
+        }
+        assert_eq!(mock.served(), 0, "a pasted line break submits nothing");
+        pty.send("\r")?;
+        pty.wait_for("read-9c")?;
+        let sent = mock.requests();
+        let body = sent.first().ok_or("no request")?;
+        assert!(
+            String::from_utf8_lossy(body).contains(r"one-9c\ntwo-9c\nthree-9c\nfour-9c"),
+            "the model gets the lines the person saw"
+        );
+        Ok(())
+    })?;
+    assert!(ran.status.success(), "exits 0: {}", ran.status);
+    Ok(())
+}
+
 /// noisy-terminal: focus in, focus out and an SGR mouse press and release arrive before the
 /// person types. The composer holds only what was typed. Catches a report typed into the task.
 #[test]

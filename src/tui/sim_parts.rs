@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::app::{App, Input, Key, MAX_ENTRIES};
+use super::app::{App, Effect, Input, Key, MAX_ENTRIES};
 use super::buffer::Buffer;
 use super::cells::{Entry, Header, OUTPUT_TAIL, split_observation};
 use super::composer::Composer;
@@ -192,6 +192,59 @@ fn sim_composer_edits_match_the_readline_model() {
             assert_eq!(composer.text(), expected, "seed {seed} step {step} op {op}");
             assert_eq!(composer.is_empty(), expected.is_empty());
         }
+    }
+}
+
+/// The line endings a paste carries for one line break: xterm's bracketed paste (mode 2004)
+/// sends CR, a Windows clipboard CR LF, a Unix one LF.
+const BREAKS: [&str; 3] = ["\r", "\r\n", "\n"];
+
+/// The pasted lines: what is pasted, and what the person must get (CWE-150: no control byte).
+const PASTED: [(&str, &str); 7] = [
+    ("alpha", "alpha"),
+    ("é表", "é表"),
+    ("a\x1bb", "ab"),
+    ("c\x07\x00d", "cd"),
+    ("e\u{9b}\x7ff", "ef"),
+    ("g\th", "g    h"),
+    ("i\x0bj\x0ck", "ijk"),
+];
+
+/// The paste from another terminal: for every seed each line break, alone or in a run, is one
+/// newline in the composer and in the task Enter sends, and no other control byte survives
+/// (larry#605). A CR then an LF is the one CR LF break. Catches the lines of a pasted task
+/// joined, doubled, or sent to the model other than as the person saw them.
+#[test]
+fn sim_paste_keeps_every_line_break_as_one_newline() {
+    for seed in 0..SEEDS {
+        let mut draw = Draw(seed);
+        let mut pasted = String::from("head");
+        let mut kept = String::from("head");
+        for _line in 0..=draw.pick(12) {
+            let mut after_cr = false;
+            for _break in 0..=draw.pick(2) {
+                let ending = draw.word(&BREAKS);
+                pasted.push_str(ending);
+                if !(after_cr && ending == "\n") {
+                    kept.push('\n');
+                }
+                after_cr = ending == "\r";
+            }
+            let (sent, seen) = PASTED.get(draw.pick(PASTED.len())).copied().unzip();
+            pasted.extend(sent);
+            kept.extend(seen);
+        }
+        let mut composer = Composer::default();
+        assert!(composer.insert(&pasted), "seed {seed}: nothing is cut");
+        assert_eq!(composer.text(), kept, "seed {seed}: {pasted:?}");
+        let mut app = App::new(header(), Vec::new(), 100, 40);
+        let submitted = app.handle(Input::Paste(pasted.clone()));
+        assert!(submitted.is_empty(), "seed {seed}: a paste submits nothing");
+        assert_eq!(
+            app.handle(Input::Key(Key::Enter)),
+            vec![Effect::Start(kept)],
+            "seed {seed}: {pasted:?}"
+        );
     }
 }
 
