@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0148: the reach handoff and its offline count are private methods"
+title: "ADR 0149: the reach handoff and its offline count are private methods"
 description: "A split of reach_owner lets a sim withdraw authority between the real mint and the real handoff."
-resource: /docs/adr/0148-seams-for-the-reach-handoff.md
+resource: /docs/adr/0149-seams-for-the-reach-handoff.md
 tags: [larry, adr, runtime, fence, tests]
 generated: {by: claude-code, at: 2026-11-28}
 verified: {by: claude-code, method: lgwks-box cargo nextest run, 2026-11-28}
@@ -13,7 +13,7 @@ sources: [larry#612, larry#76, larry#197, ADR 0024, INVARIANTS.md]
 
 ## Status
 
-Accepted.
+Accepted. Number 0149: `main` took 0148 (larry#620) while this change was open.
 
 ## Context
 
