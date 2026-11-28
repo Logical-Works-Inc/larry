@@ -8,7 +8,7 @@ generated: {by: claude-code, at: 2026-11-28}
 verified: {by: claude-code, method: lgwks-box cargo nextest run, 2026-11-28}
 status: accepted
 stale_after: 2027-05-28
-sources: [larry#602, larry#203, logicalworks-crates#1169, CWE-319, INVARIANTS.md]
+sources: [larry#602, larry#615, larry#203, logicalworks-crates#1169, CWE-319, INVARIANTS.md]
 ---
 
 ## Status
@@ -39,6 +39,12 @@ An operator with a proxy variable and a local sidecar has to name the sidecar in
 `NO_PROXY`. The refusal says so. Suffix and prefix patterns that ureq honours are
 not honoured here, so Larry refuses more than ureq would proxy and never less. A
 non-UTF-8 proxy variable refuses the door, as every other setting does.
+
+Name an IPv6 host with its brackets. ureq 3.5.1 matches the list against the
+host as the URL writes it, so `::1` does not name `[::1]`. Measured through the
+binary (larry#615): an https route to `[::1]` with `NO_PROXY=::1` goes to the
+proxy, and with `NO_PROXY=[::1]` it does not. Larry refuses the plaintext call
+on the first list and the refusal names `[::1]`.
 
 Rejected: a hand written HTTP client for loopback calls. It is a second client
 beside `lgwks_std`. When logicalworks-crates#1169 lands a proxy setting, the

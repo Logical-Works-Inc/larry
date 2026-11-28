@@ -114,4 +114,5 @@ Rejected: a digest check with no lock, which two edits can both pass.
 - `sim_a_patch_needs_the_digest_of_every_file_it_changes`.
 - `sim_a_patch_failing_at_any_write_puts_every_file_back`.
 - `sim_patches_at_once_on_one_digest_apply_one`.
+- `sim_a_patch_after_a_masked_read_keeps_the_key`: the stars match nothing (ADR 0151).
 - `tui_journey_approved_patch_lands_every_file_with_its_receipt`, on a PTY.

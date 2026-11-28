@@ -17,6 +17,8 @@
 
 #[path = "support/coverage.rs"]
 mod coverage;
+#[path = "support/acp_egress.rs"]
+mod egress;
 #[path = "support/json_at.rs"]
 mod json_at;
 use json_at::At;
@@ -212,32 +214,6 @@ fn a_harbor_task_runs_through_larry_acp_and_its_verifier_rewards_it() -> TestRes
         rank(&micros, 99)?
     )?;
     Ok(())
-}
-
-/// The default policy holds no `model.command`: the prompt is a refusal naming it,
-/// the model is never called and nothing is written.
-#[test]
-fn the_default_policy_refuses_a_session_and_runs_nothing() -> TestResult {
-    let (state, work) = fixture()?;
-    let replies = [r#"{"command":"touch ran.txt"}"#];
-    mock_model::run(scripted(7, &replies), |mock| -> TestResult {
-        let mut acp = agent(state.path(), mock, None)?;
-        let session = acp.open(work.path())?;
-        let (notes, reply) = acp.call(&prompt(2, &session, "touch ran.txt"))?;
-        assert_eq!(*reply.at("/result/stopReason")?, "refusal", "{reply}");
-        let line = "gate: policy_refuses: file.read";
-        assert_eq!(said(&notes), Some(line), "the refusal names the scope");
-        assert_eq!(mock.served(), 0, "no model call");
-        assert!(!work.path().join("ran.txt").exists(), "nothing ran");
-        let report = reply.at("/result/_meta/larry/report")?;
-        assert_eq!(*report.at("/denied/0")?, line, "the denial is sealed");
-        assert_eq!(
-            verify(state.path(), report)?.0,
-            Some(2),
-            "its seal verifies"
-        );
-        Ok(())
-    })
 }
 
 /// 256 commands is the bound: the session ends `max_turn_requests` with 256

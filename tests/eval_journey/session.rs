@@ -40,7 +40,9 @@ fn run_session_task(state: &TempDir, set: &str, command_reply: &str) -> TestResu
         let mut env = operator(state, handle.addr(), &FLASH, "3");
         env.push((
             "LARRY_POLICY",
-            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
+            OsString::from(
+                "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
+            ),
         ));
         let ran = score_arm(&env, set.as_bytes())?;
         assert_eq!(handle.served(), 2, "the command reply and the done reply");
@@ -88,7 +90,9 @@ fn check_stopped_without_sh(set: &str, id: &str, reply: &str) -> TestResult {
         let mut env = operator(&state, handle.addr(), &FLASH, "1");
         env.push((
             "LARRY_POLICY",
-            OsString::from("file.read,file.write,process.spawn,model.invoke,model.command"),
+            OsString::from(
+                "file.read,file.write,process.spawn,model.invoke,model.command,net.egress",
+            ),
         ));
         env.push(("PATH", tools.as_os_str().to_owned()));
         score_arm(&env, set.as_bytes())

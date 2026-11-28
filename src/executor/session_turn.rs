@@ -17,6 +17,7 @@ use super::Settings;
 use super::compact::{Answer, Conversation};
 use super::edit::{Edit, EditError, FileView, apply_edit, read_file};
 use super::patch::{FileReceipt, Patch, apply_patch};
+use super::redact::Redactor;
 use super::run::{CommandResult, Place, RunHooks, clip, run_command};
 use super::session::reply::{Reply, parse_reply};
 use super::session::{Approval, MAX_REPLY_BYTES, OBSERVED_BYTES, Observer, Stop};
@@ -98,8 +99,9 @@ pub(super) struct Turn<'a> {
     pub(super) task_id: &'a str,
     /// Where every step happens: the directory itself, or its confined copy.
     pub(super) place: Place<'a>,
-    /// The directory the model is told it works in.
-    pub(super) shown: String,
+    /// What is kept from the model: every observation passes through it before
+    /// it is cut or sent (larry#589).
+    pub(super) redactor: Redactor,
     /// The system turn: the route's template when it names one, then the standing instruction.
     pub(super) system: String,
     /// Who hears the session's progress.
@@ -175,10 +177,11 @@ fn receipt_line(receipt: &FileReceipt) -> String {
 }
 
 /// What the model is shown for a file it read: the digest of the whole file,
-/// then the file, cut like a command's output when it is long.
-fn render_view(view: FileView) -> String {
+/// then the file, redacted whole and then cut like a command's output when it is
+/// long. The digest and length are the file's own, so an edit can name them.
+fn render_view(view: &FileView, redactor: &Redactor) -> String {
     let head = format!("digest {} ({} bytes)", view.digest, view.text.len());
-    let mut text = view.text;
+    let mut text = redactor.observed(&view.text);
     if clip(&mut text, OBSERVED_BYTES) {
         format!("{head}, only the first {OBSERVED_BYTES} bytes shown\n{text}")
     } else {
@@ -190,7 +193,10 @@ impl Turn<'_> {
     /// Asks, runs and observes until a stop, and returns it with each step's
     /// record, what compaction did and what each completion cost.
     pub(super) fn run(&mut self, instruction: &str) -> Result<Steps, ExecError> {
-        let task = format!("Working directory: {}\n\nTask:\n{instruction}", self.shown);
+        // The model works in `.`, wherever that is on this host, and the person's
+        // words reach it with their keys masked (larry#589).
+        let asked = self.redactor.masked(instruction);
+        let task = format!("Working directory: .\n\nTask:\n{asked}");
         let mut conversation = Conversation::new(&self.system, task, self.client.request_bound());
         let mut tally = Tally::default();
         let mut usage = Vec::new();
@@ -331,12 +337,19 @@ impl Turn<'_> {
             RunHooks::new(&|| self.observer.cancelled(), stream.as_ref()),
         );
         self.observer.stream_dropped();
-        let result = result?.clipped(OBSERVED_BYTES);
+        let result = result?;
+        // The model's view is redacted from the whole capture and cut after, so
+        // a cut never leaves the head of a key; the report keeps the real bytes.
+        let shown = result
+            .clone()
+            .rewritten(|stream| self.redactor.observed(stream))
+            .clipped(OBSERVED_BYTES);
+        let result = result.clipped(OBSERVED_BYTES);
         let answer = Answer::Observed {
             step,
             command,
-            status: status(&result),
-            output: Some(streams(&result)),
+            status: status(&shown),
+            output: Some(streams(&shown)),
         };
         let passed = result.exit_code() == Some(0) && !result.timed_out() && !result.interrupted();
         self.observer.finished(step, &answer.text(), passed);
@@ -364,7 +377,7 @@ impl Turn<'_> {
                 "digest": view.digest.as_str(),
                 "bytes": view.text.len(),
             });
-            (record, "read", render_view(view))
+            (record, "read", render_view(&view, &self.redactor))
         });
         let refused = json!({"step": step, "kind": "read", "path": path});
         self.close(tally, step, command, outcome, refused)
@@ -441,7 +454,8 @@ impl Turn<'_> {
                 if let Some(record) = refused.as_object_mut() {
                     record.insert(String::from("refusal"), json!(refusal.as_str()));
                 }
-                (refused, "refused", refusal)
+                // A refusal can name a path of this host; the report keeps it.
+                (refused, "refused", self.redactor.observed(&refusal))
             }
         };
         tally.changes.push(record);

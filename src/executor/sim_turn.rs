@@ -238,7 +238,7 @@ fn drive(
         ledger: &ledger,
         task_id: "sim-turn",
         place: Place::Open(&work),
-        shown: String::from("."),
+        redactor: settings.redactor(&ledger)?,
         system: String::from(super::SYSTEM),
         observer: &mut observer,
     };
@@ -397,6 +397,62 @@ fn sim_an_approved_patch_records_a_receipt_per_file() -> TestResult<()> {
                 "refusal": format!("edit file a.txt changed since it was read: its digest is {after}"),
             }),
         ]
+    );
+    Ok(())
+}
+
+/// A model that read a key masked cannot write the mask back: a patch whose
+/// context carries the stars matches nothing and writes nothing, and one that
+/// changes another line keeps the key's own bytes. No step shows the model the
+/// key (ADR 0151, CWE-200). The stub's `LARRY_MODEL_KEY` is `sim-turn`.
+#[test]
+fn sim_a_patch_after_a_masked_read_keeps_the_key() -> TestResult<()> {
+    let digest = |text: &str| lgwks_std::hash::blake3(text.as_bytes()).to_hex();
+    let before = "key = sim-turn\nalpha\n";
+    let after = "key = sim-turn\nbeta\n";
+    let patch = |hunk: &str| {
+        lgwks_std::json::json!({"patch": {
+            "text": format!("*** Begin Patch\n*** Update File: a.txt\n@@\n{hunk}*** End Patch\n"),
+            "expect_digests": {"a.txt": digest(before)},
+        }})
+        .to_string()
+    };
+    let replies = vec![
+        Reply::from("{\"read\":\"a.txt\"}"),
+        patch(" key = ********\n-alpha\n+beta\n"),
+        patch("-alpha\n+beta\n"),
+        Reply::from("{\"read\":\"a.txt\"}"),
+        Reply::from("{\"done\":\"patched\"}"),
+    ];
+    let approvals = vec![Approval::Run; 4];
+    let (steps, observer, served) = drive("sim-turn-masked", replies, approvals, |work| {
+        std::fs::write(work.join("a.txt"), before)?;
+        Ok(())
+    })?;
+    assert_eq!(served, 5, "a read, two patches, a read, then the summary");
+    assert_eq!(observer.passed, vec![true, false, true, true]);
+    let shown = observer.observations.join("\n");
+    assert!(shown.contains("key = ********"), "the read is masked");
+    assert!(
+        !shown.contains("sim-turn"),
+        "no step shows the key: {shown}"
+    );
+    let record = |at: usize, member: &str| {
+        steps
+            .tally
+            .changes
+            .get(at)
+            .and_then(|record| record.get(member))
+            .and_then(lgwks_std::json::Value::as_str)
+    };
+    assert_eq!(
+        record(1, "refusal"),
+        Some("patch hunk at line 3 matches nothing in a.txt")
+    );
+    assert_eq!(
+        record(3, "digest"),
+        Some(digest(after).as_str()),
+        "the file holds the change and the key's own bytes"
     );
     Ok(())
 }
