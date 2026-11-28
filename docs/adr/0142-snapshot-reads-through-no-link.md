@@ -1,8 +1,8 @@
 ---
 type: ADR
-title: "ADR 0140: a workspace snapshot reads through no link in the folder"
+title: "ADR 0142: a workspace snapshot reads through no link in the folder"
 description: "The copy refuses a link above a listed path in the source folder and skips a path whose directory became a file."
-resource: /docs/adr/0140-snapshot-reads-through-no-link.md
+resource: /docs/adr/0142-snapshot-reads-through-no-link.md
 tags: [larry, adr, executor, snapshot, security]
 generated: {by: claude-code, at: 2026-11-27}
 verified: {by: claude-code, method: lgwks-box cargo nextest run, 2026-11-27}
@@ -13,7 +13,7 @@ sources: [larry#592, larry#335, ADR 0046, ADR 0070, INVARIANTS.md]
 
 ## Status
 
-Accepted.
+Accepted. Number 0142: `main` took 0140 (larry#595) while this change was open.
 
 ## Context
 
