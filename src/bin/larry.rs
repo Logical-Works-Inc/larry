@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use larry_demo::executor::routes::{RouteCliError, run as route_run};
 use larry_demo::executor::{
-    ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, execute, process_env,
-    rotate_receipt_key, state_public_key, trusted_key, verify, verify_state_report,
+    ExecError, MAX_REPORT_BYTES, Report, Settings, Task, Verdict, admit_egress, execute,
+    process_env, rotate_receipt_key, state_public_key, trusted_key, verify, verify_state_report,
 };
 use larry_demo::model::{Completion, Message, ModelClient, ModelConfig, ModelError, Role};
 use lgwks_macros::Error;
@@ -96,7 +96,7 @@ const EXECUTOR_ENV: &str = "LARRY_STATE_DIR, LARRY_TENANT, LARRY_POLICY, LARRY_E
 
 /// The variables `larry model` reads: one gateway, one key, the retry knobs, the
 /// tenant budgets and the price overrides a route without a table is priced from.
-const MODEL_ENV: &str = "LARRY_MODEL_URL, LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY, LARRY_MODEL_TIMEOUT_MS, LARRY_MODEL_ATTEMPTS, LARRY_MODEL_BACKOFF_MS, LARRY_MODEL_DEADLINE_MS, LARRY_MODEL_TOKEN_BUDGET, LARRY_MODEL_MICRO_DOLLAR_BUDGET, LARRY_MODEL_PRICE_IN_MICROS, LARRY_MODEL_PRICE_OUT_MICROS";
+const MODEL_ENV: &str = "LARRY_POLICY, LARRY_MODEL_URL,LARRY_MODEL, LARRY_MODEL_KEY, LARRY_MODEL_TEMPERATURE, LARRY_MODEL_RESIDENCY, LARRY_MODEL_TIMEOUT_MS, LARRY_MODEL_ATTEMPTS, LARRY_MODEL_BACKOFF_MS, LARRY_MODEL_DEADLINE_MS, LARRY_MODEL_TOKEN_BUDGET, LARRY_MODEL_MICRO_DOLLAR_BUDGET, LARRY_MODEL_PRICE_IN_MICROS, LARRY_MODEL_PRICE_OUT_MICROS";
 
 /// The phrase a command that reads no variable of its own prints.
 const NO_ENV: &str = "none";
@@ -251,7 +251,8 @@ enum ModelCheck {
     /// The prompt on standard input was empty.
     #[error("model: the prompt on stdin is empty")]
     EmptyPrompt,
-    /// A variable Larry reads is not UTF-8.
+    /// A variable Larry reads is not UTF-8, or the policy keeps the prompt on
+    /// this host (`net.egress`, larry#589).
     #[error("model: {0}")]
     Env(#[source] ExecError),
     /// A `LARRY_MODEL_*` setting is missing or unusable.
@@ -282,8 +283,10 @@ fn model_once() -> Result<(), ModelCheck> {
     if prompt.is_empty() {
         return Err(ModelCheck::EmptyPrompt);
     }
-    let config = ModelConfig::from_env(process_env().map_err(ModelCheck::Env)?)
-        .map_err(ModelCheck::Config)?;
+    let env = process_env().map_err(ModelCheck::Env)?;
+    // Before the key is read: a refused prompt never leaves this host.
+    admit_egress(&env).map_err(ModelCheck::Env)?;
+    let config = ModelConfig::from_env(env).map_err(ModelCheck::Config)?;
     let clock = larry_runtime::live_clock().map_err(ModelCheck::Clock)?;
     let client = ModelClient::new(config, clock, pause);
     let completion: Completion = client

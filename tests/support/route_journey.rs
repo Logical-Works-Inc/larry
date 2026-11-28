@@ -34,7 +34,7 @@ use origin::TempDir;
 pub(crate) type TestResult = Result<(), Box<dyn Error>>;
 
 /// The scopes a briefed task needs, so no journey depends on the default policy.
-pub(crate) const POLICY: &str = "file.read,file.write,process.spawn,model.invoke";
+pub(crate) const POLICY: &str = "file.read,file.write,process.spawn,model.invoke,net.egress";
 
 /// Runs `larry route <args>` with only PATH, the state directory and `env` set.
 pub(crate) fn larry_route(

@@ -36,8 +36,8 @@ verifier that writes `/logs/verifier/reward.txt`. Until now Larry's executor den
   stops at 48 commands, at three refused replies in a row, at a gateway refusal, or at a cancel checked before
   each model call and each command.
 - A session is one displayed `WorkProposal` through the executor gate (ADR 0019). It needs every executor scope,
-  plus the new `model.command`, which `DEFAULT_POLICY` never holds. An operator names it in `LARRY_POLICY` only
-  where something outside Larry isolates the commands, such as Harbor's task container. A briefed task's model
+  and `net.egress` (ADR 0151), plus the new `model.command`, which `DEFAULT_POLICY` never holds. An operator names
+  it in `LARRY_POLICY` only where something outside Larry isolates the commands, such as Harbor's task container. A briefed task's model
   still never runs a command, and Nova (logicalworks-crates#846) remains the in-Larry sandbox.
 - The sealed report records each command as the model saw it (the first 4 KiB of each stream). It carries no
   diff, so `larry verify` checks its seal and reports it unaccepted (exit 2). The reward is the task verifier's,
@@ -46,7 +46,7 @@ verifier that writes `/logs/verifier/reward.txt`. Until now Larry's executor den
 ## Consequences
 
 - Harbor's `acp` agent installs an agent from the ACP Registry by its binary distribution and passes settings
-  with `--agent-env`: here `LARRY_POLICY` naming `model.command`, `LARRY_STATE_DIR` and the gateway settings
+  with `--agent-env`: here `LARRY_POLICY` naming `model.command` and `net.egress`, `LARRY_STATE_DIR` and the gateway settings
   (docs/evaluation/README.md). No Python is involved. Listing Larry in the registry publishes it, so that waits
   for the Director to name it (AGENTS.md: nothing is published without the Director).
 - `tests/acp_harbor_journey.rs` runs a Harbor-shaped task through the shipped binary and its verifier against

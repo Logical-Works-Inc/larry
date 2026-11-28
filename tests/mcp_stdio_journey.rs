@@ -30,6 +30,10 @@ mod mcp_task;
 mod mock_model;
 #[path = "support/origin.rs"]
 mod origin;
+#[path = "mcp_stdio_journey/private_route.rs"]
+mod private_route;
+#[path = "support/route_key.rs"]
+mod route_key;
 #[path = "support/tree_digest.rs"]
 mod tree_digest;
 

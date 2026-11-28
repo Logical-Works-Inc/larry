@@ -535,9 +535,19 @@ fn sim_island_gate_scopes_follow_the_isolation() -> TestResult {
     let empty = settings(&state, Some(""))?;
     let full = settings(
         &state,
+        Some("file.read,file.write,process.spawn,model.invoke,model.command,net.egress"),
+    )?;
+    // A policy that holds everything a session needs but the way out (larry#589).
+    let offline = settings(
+        &state,
         Some("file.read,file.write,process.spawn,model.invoke,model.command"),
     )?;
     let confined = Isolation::Workspace(Platform::host());
+    assert_eq!(confined.blocked(&offline).as_deref(), Some(POLICY_REFUSED));
+    assert_eq!(
+        Isolation::Host.blocked(&offline).as_deref(),
+        Some(HOST_REFUSED)
+    );
     let mut want = gate::session_scopes();
     assert!(want.remove(&larry_contracts::authority::Scope::ModelCommand));
     assert_eq!(confined.required(), want);

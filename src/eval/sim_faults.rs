@@ -172,9 +172,44 @@ fn key_store_is_a_directory(cause: &ExecError) -> bool {
     matches!(cause, ExecError::KeyStore(why) if why.kind() == io::ErrorKind::IsADirectory)
 }
 
+/// broken-machine (larry#598): on a PATH with no `sh` the verifier never runs, so the scorer
+/// returns the typed spawn refusal naming the task, on Linux under `setsid` as on macOS; a
+/// verifier that ran and whose own inner tool is missing still rejects.
+#[test]
+fn sim_eval_a_verifier_missing_from_path_is_never_a_rejection() -> TestResult {
+    let host = std::env::var("PATH")?;
+    let state = crate::executor::sim_tree::scratch("larry-eval-missing-verifier")?;
+    let empty = state.join("no-tools");
+    let work = state.join("work");
+    fs::create_dir_all(&empty)?;
+    fs::create_dir_all(&work)?;
+    let origin = unowned(&state, work)?;
+    let mut wanted = task("no-verifier");
+
+    let lacking = settings(&state, &empty.to_string_lossy(), &[])?;
+    let (named, cause) = exec_failure(session_acceptance_passed(&origin, &lacking, &wanted))?;
+    assert_eq!(named, "no-verifier", "the refusal names its task");
+    assert!(
+        matches!(
+            cause,
+            ExecError::Spawn { ref argv0, ref source }
+                if argv0 == "sh" && source.kind() == io::ErrorKind::NotFound
+        ),
+        "and the program the host lacks: {cause}"
+    );
+
+    wanted.acceptance = vec![String::from("larry-no-such-inner-tool")];
+    let configured = settings(&state, &host, &[])?;
+    assert!(
+        !session_acceptance_passed(&origin, &configured, &wanted)?,
+        "a verifier that ran and failed is a rejection"
+    );
+    Ok(())
+}
+
 /// broken-machine (larry#217): a session verifier whose origin is gone, so `sh` cannot start
 /// in it, or whose ledger cannot open, is an infrastructure failure naming the task, never a
-/// rejected session. The PATH that lacks `sh` is larry#598.
+/// rejected session.
 #[test]
 fn sim_eval_a_verifier_the_host_cannot_run_is_never_a_rejection() -> TestResult {
     let host = std::env::var("PATH")?;
