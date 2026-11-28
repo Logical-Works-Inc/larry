@@ -17,6 +17,10 @@ use lgwks_std::seeded::Seeded;
 
 use super::{DRAIN_GRACE, Drained, drain};
 
+/// Fault injection through the run's other seams (larry#575).
+#[path = "sim_run_faults.rs"]
+mod faults;
+
 /// What every test here returns.
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
