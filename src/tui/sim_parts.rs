@@ -220,6 +220,13 @@ fn sim_paste_keeps_every_line_break_as_one_newline() {
         let mut composer = Composer::default();
         composer.insert(&format!("a{ending}b"));
         assert_eq!(composer.text(), "a\nb", "{ending:?}");
+        let mut app = App::new(header(), Vec::new(), 100, 40);
+        app.handle(Input::Paste(format!("a{ending}b")));
+        assert_eq!(
+            app.handle(Input::Key(Key::Enter)),
+            vec![Effect::Start(String::from("a\nb"))],
+            "{ending:?}"
+        );
     }
     for seed in 0..SEEDS {
         let mut draw = Draw(seed);
