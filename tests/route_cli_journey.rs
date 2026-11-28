@@ -17,176 +17,31 @@
 
 #[path = "support/http_wire.rs"]
 mod http_wire;
-#[path = "support/json_at.rs"]
-mod json_at;
-#[path = "support/larry_cli.rs"]
-mod larry_cli;
-#[path = "support/mock_model.rs"]
-mod mock_model;
-#[path = "support/origin.rs"]
-mod origin;
-#[path = "support/route_key.rs"]
-mod route_key;
-#[path = "support/sealed_report.rs"]
-mod sealed_report;
+
+#[path = "support/route_journey.rs"]
+mod route_journey;
+#[path = "support/route_tenant.rs"]
+mod route_tenant;
+
+#[path = "support/coverage.rs"]
+mod coverage;
 
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::process::{Child, Output};
+use std::process::Output;
 
-use json_at::At;
-use larry_cli::stderr_of;
 use lgwks_deps::storefront::rusqlite::Connection;
 use lgwks_std::json::{self, Value, json};
-use mock_model::{Config, Fault, Handle};
-use origin::{TempDir, commit_all, fixture};
-use sealed_report::{denial_lines, flag_of, report_of};
-
-#[path = "support/route_journey.rs"]
-mod route_journey;
-use route_journey::{NewRoute, TestResult, exec_with_key, larry_route, start_with_key};
-
-/// One tenant: a state directory, an origin repository, a gateway and a key.
-struct Tenant<'tenant> {
-    /// The tenant's state directory.
-    state: &'tenant TempDir,
-    /// The origin repository its tasks clone.
-    origin: &'tenant TempDir,
-    /// The gateway its route points at.
-    mock: &'tenant Handle,
-    /// The model its route names.
-    model: &'static str,
-    /// The residency its route declares.
-    residency: &'static str,
-    /// The suffix of the key variable its route names, under its own tenant tag.
-    suffix: &'static str,
-    /// The key itself, which only the exec child's environment holds.
-    key: &'static str,
-}
-
-impl<'tenant> Tenant<'tenant> {
-    /// A Canadian tenant on `model-a` with the key `secret-a` in its `_A` variable.
-    fn standard(state: &'tenant TempDir, origin: &'tenant TempDir, mock: &'tenant Handle) -> Self {
-        Tenant {
-            state,
-            origin,
-            mock,
-            model: "model-a",
-            residency: "CA",
-            suffix: "A",
-            key: "secret-a",
-        }
-    }
-
-    /// Stores the route `id` pointing at this tenant's gateway, as the default.
-    fn add_route(&self, id: &str) -> TestResult {
-        let url = format!("http://{}/v1", route_journey::host_of(self.mock));
-        let key_env = route_key::key_env(self.state.path(), self.suffix)?;
-        route_journey::add_route(
-            self.state,
-            &NewRoute {
-                url: &url,
-                id,
-                model: self.model,
-                key_env: &key_env,
-                residency: self.residency,
-                kind: None,
-                temperature: None,
-            },
-        )
-    }
-
-    /// Runs `larry exec` on `task` with the tenant's key in the child's environment.
-    fn exec(&self, task: &str) -> Result<Output, Box<dyn Error>> {
-        self.exec_with(task, &[])
-    }
-
-    /// Runs `larry exec` on `task` with the extra variables `extra` as well.
-    fn exec_with(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Output, Box<dyn Error>> {
-        let variable = route_key::key_env(self.state.path(), self.suffix)?;
-        exec_with_key(
-            self.state.path(),
-            &variable,
-            OsStr::new(self.key),
-            task,
-            extra,
-        )
-    }
-
-    /// Starts `larry exec` on `task` with the extra variables `extra` as well, unwaited.
-    fn start(&self, task: &str, extra: &[(&str, &OsStr)]) -> Result<Child, Box<dyn Error>> {
-        let variable = route_key::key_env(self.state.path(), self.suffix)?;
-        start_with_key(
-            self.state.path(),
-            &variable,
-            OsStr::new(self.key),
-            task,
-            extra,
-        )
-    }
-
-    /// A briefed task over this tenant's origin, naming `route` and `key` when given.
-    fn briefed(&self, route: Option<&str>, key: Option<&str>) -> Result<String, Box<dyn Error>> {
-        route_journey::briefed_task(self.origin, route, key)
-    }
-
-    /// What a report must say about the route this tenant's task ran under.
-    fn sealed_route(&self, id: &str) -> Value {
-        json!({
-            "id": id,
-            "kind": "openai-chat",
-            "model": self.model,
-            "host": route_journey::host_of(self.mock),
-            "residency": self.residency,
-        })
-    }
-
-    /// Asserts the gateway saw this tenant's model and key, and only those.
-    fn assert_gateway_saw_only_this_tenant(&self) -> TestResult {
-        let bodies = self.mock.requests();
-        assert!(!bodies.is_empty(), "the gateway served the briefed task");
-        for body in &bodies {
-            let sent: Value = json::from_slice(body)?;
-            assert_eq!(
-                sent.at("/model")?.as_str(),
-                Some(self.model),
-                "every request carries the route's model"
-            );
-        }
-        let expected = Some(format!("Bearer {}", self.key));
-        for header in self.mock.authorizations() {
-            assert_eq!(
-                header, expected,
-                "only this tenant's key reached its gateway"
-            );
-        }
-        Ok(())
-    }
-
-    /// Asserts the exec `output` is an accepted report whose authored record
-    /// names this tenant's route `id`, and that no key or key variable is in it.
-    fn assert_sealed_under(&self, output: &Output, id: &str) -> TestResult {
-        let report = report_of(output)?;
-        assert!(flag_of(&report, "accepted")?, "{}", stderr_of(output));
-        assert!(denial_lines(&report)?.is_empty(), "no denial was sealed");
-        assert_eq!(
-            *report.at("/authored/0/route")?,
-            self.sealed_route(id),
-            "the receipt names this tenant's route, host and residency"
-        );
-        let printed = String::from_utf8_lossy(&output.stdout);
-        let variable = route_key::key_env(self.state.path(), self.suffix)?;
-        for secret in [self.key, variable.as_str()] {
-            assert!(
-                !printed.contains(secret),
-                "{secret} must not appear in a report"
-            );
-        }
-        self.assert_gateway_saw_only_this_tenant()
-    }
-}
+use route_journey::json_at::At;
+use route_journey::larry_cli::stderr_of;
+use route_journey::mock_model::{Config, Fault, run};
+use route_journey::origin::{TempDir, commit_all, fixture};
+use route_journey::route_key::key_env;
+use route_journey::sealed_report::{flag_of, report_of};
+use route_journey::{TestResult, host_of, larry_route};
+use route_tenant::Tenant;
 
 /// Two tenants who both call their route `main` run at once. Each report's
 /// authored record names the route id, its own model, its own gateway's host and
@@ -196,8 +51,8 @@ impl<'tenant> Tenant<'tenant> {
 fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult {
     let (state_a, origin_a) = fixture()?;
     let (state_b, origin_b) = fixture()?;
-    mock_model::run(Config::seeded(1), |mock_a| {
-        mock_model::run(Config::seeded(2), |mock_b| -> TestResult {
+    run(Config::seeded(1), |mock_a| {
+        run(Config::seeded(2), |mock_b| -> TestResult {
             let one = Tenant::standard(&state_a, &origin_a, mock_a);
             let two = Tenant {
                 model: "model-b",
@@ -225,8 +80,8 @@ fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult
             one.assert_sealed_under(&out_one, "main")?;
             two.assert_sealed_under(&out_two, "main")?;
             assert_ne!(
-                route_journey::host_of(mock_a),
-                route_journey::host_of(mock_b),
+                host_of(mock_a),
+                host_of(mock_b),
                 "the two tenants reached two different gateways"
             );
             Ok(())
@@ -240,7 +95,7 @@ fn two_tenants_at_once_each_receipt_names_its_own_route_and_host() -> TestResult
 #[test]
 fn an_unknown_route_is_refused_and_the_mock_counts_zero_requests() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(3), |mock| -> TestResult {
+    run(Config::seeded(3), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
         tenant.add_route("main")?;
         let output = tenant.exec(&tenant.briefed(Some("typo"), None)?)?;
@@ -262,7 +117,7 @@ fn an_unknown_route_is_refused_and_the_mock_counts_zero_requests() -> TestResult
 #[test]
 fn no_route_refuses_a_brief_task_and_runs_a_task_without_one() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(4), |mock| -> TestResult {
+    run(Config::seeded(4), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
         let refused = tenant.exec(&tenant.briefed(None, None)?)?;
         assert!(
@@ -306,7 +161,7 @@ fn holds(haystack: &[u8], needle: &[u8]) -> bool {
 fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
     let state = TempDir::new()?;
     let secret = OsStr::new("topsecret-key-bytes");
-    let key_env = route_key::key_env(state.path(), "ROUTE")?;
+    let key_env = key_env(state.path(), "ROUTE")?;
     let added = larry_route(
         state.path(),
         &[(&key_env, secret)],
@@ -404,7 +259,7 @@ fn route_add_list_remove_round_trips_and_no_key_bytes_appear() -> TestResult {
 #[test]
 fn a_keyed_retry_after_restart_seals_the_same_route() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(5), |mock| -> TestResult {
+    run(Config::seeded(5), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
         tenant.add_route("main")?;
         let task = tenant.briefed(None, Some("retry-me"))?;
@@ -438,7 +293,7 @@ fn a_route_runs_from_a_clean_directory() -> TestResult {
         "LARRY_MODEL_URL=http://127.0.0.1:1/v1\nLARRY_MODEL=decoy\nLARRY_MODEL_KEY=decoy\n",
     )?;
     commit_all(origin.path(), "decoy route files")?;
-    mock_model::run(Config::seeded(6), |mock| -> TestResult {
+    run(Config::seeded(6), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
         tenant.add_route("main")?;
         let output = tenant.exec(&tenant.briefed(None, None)?)?;
@@ -451,7 +306,7 @@ fn a_route_runs_from_a_clean_directory() -> TestResult {
 #[test]
 fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(7), |mock| -> TestResult {
+    run(Config::seeded(7), |mock| -> TestResult {
         let tenant = Tenant {
             suffix: "UNSET",
             key: "",
@@ -464,7 +319,7 @@ fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
             "an unset key variable fails the task"
         );
         assert!(
-            stderr_of(&output).contains(&route_key::key_env(state.path(), "UNSET")?),
+            stderr_of(&output).contains(&key_env(state.path(), "UNSET")?),
             "the refusal names the variable: {}",
             stderr_of(&output)
         );
@@ -484,9 +339,9 @@ fn a_route_whose_key_variable_is_unset_is_refused_naming_it() -> TestResult {
 #[test]
 fn a_stored_route_cannot_name_a_variable_outside_its_namespace() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(9), |mock| -> TestResult {
+    run(Config::seeded(9), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
-        let url = format!("http://{}/v1", route_journey::host_of(mock));
+        let url = format!("http://{}/v1", host_of(mock));
         let secret = OsStr::new("operator-secret-bytes");
         for variable in ["LARRY_MODEL_KEY", "GH_TOKEN", "LARRY_KEY_"] {
             let refused = larry_route(
@@ -555,10 +410,10 @@ fn a_stored_route_cannot_name_a_variable_outside_its_namespace() -> TestResult {
 fn a_route_cannot_name_another_tenants_key_variable() -> TestResult {
     let (state_a, origin_a) = fixture()?;
     let state_b = TempDir::new()?;
-    mock_model::run(Config::seeded(10), |mock| -> TestResult {
+    run(Config::seeded(10), |mock| -> TestResult {
         let tenant = Tenant::standard(&state_a, &origin_a, mock);
-        let theirs = route_key::key_env(state_b.path(), "A")?;
-        let url = format!("http://{}/v1", route_journey::host_of(mock));
+        let theirs = key_env(state_b.path(), "A")?;
+        let url = format!("http://{}/v1", host_of(mock));
         let mut args = vec!["add", "steal", "--url", url.as_str()];
         args.extend(["--model", "model-a", "--key-env", theirs.as_str()]);
         args.extend(["--residency", "CA", "--default"]);
@@ -595,7 +450,7 @@ fn set_key_env(state: &Path, name: &str) -> Result<(), Box<dyn Error>> {
 #[test]
 fn a_route_stored_before_the_binding_is_refused_at_resolve() -> TestResult {
     let (state, origin) = fixture()?;
-    mock_model::run(Config::seeded(11), |mock| -> TestResult {
+    run(Config::seeded(11), |mock| -> TestResult {
         let tenant = Tenant::standard(&state, &origin, mock);
         tenant.add_route("main")?;
         set_key_env(state.path(), "LARRY_KEY_LEGACY")?;
@@ -625,7 +480,7 @@ fn under_fault(fault: Fault, extra: &[(&str, &OsStr)]) -> Result<(Output, u64), 
         script: vec![Some(fault)],
         ..Config::seeded(8)
     };
-    mock_model::run(config, |mock| {
+    run(config, |mock| {
         let tenant = Tenant::standard(&state, &origin, mock);
         tenant.add_route("main")?;
         let output = tenant.exec_with(&tenant.briefed(None, None)?, extra)?;
@@ -681,7 +536,7 @@ fn a_route_keeps_the_model_settings_and_refuses_each_gateway_fault_once() -> Tes
 
 /// One seeded run over the stored route `main`, and the gateway's trace hash.
 fn traced(state: &TempDir, origin: &TempDir, seed: u64) -> Result<String, Box<dyn Error>> {
-    mock_model::run(Config::seeded(seed), |mock| {
+    run(Config::seeded(seed), |mock| {
         let tenant = Tenant::standard(state, origin, mock);
         tenant.add_route("main")?;
         tenant.assert_sealed_under(&tenant.exec(&tenant.briefed(None, None)?)?, "main")?;

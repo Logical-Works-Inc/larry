@@ -19,6 +19,9 @@ mod http_wire;
 #[path = "support/mock_model.rs"]
 mod mock_model;
 
+#[path = "support/coverage.rs"]
+mod coverage;
+
 use std::error::Error;
 use std::io::{self, Write};
 use std::net::TcpListener;
@@ -36,14 +39,16 @@ const SAMPLES: u64 = 32;
 
 /// Run `larry model` with only `env` set and `prompt` on stdin.
 fn larry_model(env: &[(&str, String)], prompt: &[u8]) -> Result<Output, Box<dyn Error>> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
         .arg("model")
         .env_clear()
         .envs(env.iter().map(|entry| (entry.0, entry.1.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    coverage::forward(&mut command);
+    let mut child = command.spawn()?;
     let mut stdin = child.stdin.take().ok_or("child stdin was not piped")?;
     stdin.write_all(prompt)?;
     drop(stdin);

@@ -59,7 +59,7 @@ impl Request {
     }
 }
 
-/// A blocking OpenAI-compatible chat-completions client.
+/// A blocking completion client for the route's provider kind.
 ///
 /// Built per task from the route the task resolved to (larry#201). It holds no
 /// connection; each attempt opens its own exchange through `lgwks_std::http`.
@@ -567,6 +567,7 @@ mod tests {
             temperature: None,
             request_bytes: None,
             residency: None,
+            prompt: None,
             describe: "a keyed route the wait simulation drives",
         })
         .map_err(ModelError::BadRoute)?;

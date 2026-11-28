@@ -30,8 +30,8 @@ const SEEDS: u64 = 64;
 /// The seeds the prompt-prefix simulations run (larry#230).
 const CACHE_SEEDS: u64 = 256;
 
-/// A route the prompt-prefix simulations share: an OpenAI chat route, so the
-/// system line is the standing instruction and the partition.
+/// A route the prompt-prefix simulations share: an OpenAI chat route with no
+/// template, so the system line is the standing instruction and the partition.
 fn openai_route() -> Result<Route, crate::model::RouteError> {
     Route::new(&Draft {
         id: "sim",
@@ -42,6 +42,7 @@ fn openai_route() -> Result<Route, crate::model::RouteError> {
         temperature: None,
         request_bytes: None,
         residency: None,
+        prompt: None,
         describe: "a route the simulation never sends on",
     })
 }

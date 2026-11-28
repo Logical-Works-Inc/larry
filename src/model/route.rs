@@ -53,6 +53,8 @@ const MIN_REQUEST_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize = 16_777_216;
 /// Highest sampling temperature a route may name.
 const MAX_TEMPERATURE: f64 = 2.0;
+/// Longest prompt template, in bytes.
+const MAX_PROMPT_BYTES: usize = 8192;
 /// The first route price-table revision.
 pub(crate) const DEFAULT_PRICE_VERSION: u32 = 1;
 /// Highest price a route table may carry, in micro-dollars per million tokens:
@@ -96,6 +98,8 @@ pub enum RouteError {
     BadTemperature,
     /// The kind is not one the client speaks.
     BadKind,
+    /// The prompt template is over 8 KiB or holds a control byte but a newline.
+    BadPrompt,
     /// The residency is not two uppercase ASCII letters (ISO 3166-1 alpha-2).
     BadResidency,
     /// The request byte bound is outside 1024 bytes to 16 MiB.
@@ -129,6 +133,23 @@ pub enum RouteError {
         /// The field check the row fails, when it is one of the route checks.
         cause: Option<Box<RouteError>>,
     },
+    /// `LARRY_RESIDENCY` is not comma-separated ISO 3166-1 alpha-2 country
+    /// codes: the tenant rule cannot be read, so no route is ranked under it.
+    BadResidencyRule,
+    /// No stored route survives the tenant's residency and budget filters, and
+    /// the environment route is absent or filtered too.
+    NoEligibleRoute,
+    /// The ranking deadline is not a whole number of seconds from 1 to 3600.
+    BadRankSeconds,
+    /// The ranker cannot choose a route: no engine is built, the model is not
+    /// cached, a run passed its deadline or a score broke the contract. The
+    /// detail says why, so the operator knows whether to fetch the model,
+    /// retry or name the route.
+    NoRanker {
+        /// Why the ranker is unavailable: the engine's message for its own
+        /// failure, or what the selection measured for a broken contract.
+        detail: String,
+    },
 }
 
 impl RouteError {
@@ -148,13 +169,18 @@ impl RouteError {
             | Self::KeyEnvNotThisTenants { .. }
             | Self::BadTemperature
             | Self::BadKind
+            | Self::BadPrompt
             | Self::BadResidency
+            | Self::BadResidencyRule
+            | Self::BadRankSeconds
             | Self::BadRequestBytes
             | Self::BadDescribe
             | Self::BadPrice { .. } => true,
             Self::InsecureTransport { .. }
             | Self::NoSuchId { .. }
             | Self::NoRoute
+            | Self::NoEligibleRoute
+            | Self::NoRanker { .. }
             | Self::TableFull { .. }
             | Self::Damaged { .. } => false,
         }
@@ -195,6 +221,9 @@ impl fmt::Display for RouteError {
             Self::BadKind => out.write_str(
                 "route kind must be one of openai-chat, anthropic-messages, openai-responses",
             ),
+            Self::BadPrompt => out.write_str(
+                "route prompt must be at most 8192 bytes with no control byte but a newline",
+            ),
             Self::BadResidency => out.write_str(
                 "route residency must be two uppercase letters, an ISO 3166-1 alpha-2 country code",
             ),
@@ -217,6 +246,19 @@ impl fmt::Display for RouteError {
                 "the tenant already holds the most routes it may ({limit})"
             ),
             Self::Damaged { ref id, .. } => write!(out, "the stored route {id} fails validation"),
+            Self::BadResidencyRule => out.write_str(
+                "route residency rule (LARRY_RESIDENCY) must be comma-separated ISO 3166-1 alpha-2 country codes, or unset",
+            ),
+            Self::NoEligibleRoute => out.write_str(
+                "no stored route is eligible under the tenant's residency and budget rules",
+            ),
+            Self::BadRankSeconds => out.write_str(
+                "route rank seconds (LARRY_ROUTE_RANK_SECONDS) must be 1 to 3600",
+            ),
+            Self::NoRanker { ref detail } => write!(
+                out,
+                "no route ranker is available to choose a route: {detail}"
+            ),
         }
     }
 }
@@ -308,6 +350,8 @@ pub(crate) struct Draft<'draft> {
     pub(crate) request_bytes: Option<usize>,
     /// The country where the provider processes the data, when declared.
     pub(crate) residency: Option<&'draft str>,
+    /// The prompt template prepended to the system turn, when the route names one.
+    pub(crate) prompt: Option<&'draft str>,
     /// What the route is good for, in the tenant's words.
     pub(crate) describe: &'draft str,
 }
@@ -333,6 +377,8 @@ pub(crate) struct Route {
     request_bytes: usize,
     /// The country where the provider processes the data, when declared.
     residency: Option<String>,
+    /// The prompt template prepended to the system turn, when the route names one.
+    prompt: Option<String>,
     /// What the route is good for.
     describe: String,
     /// The versioned price table revision for this route.
@@ -378,14 +424,24 @@ fn is_model_id(text: &str) -> bool {
         && text.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-/// Whether `text` is an ISO 3166-1 alpha-2 shaped code: two uppercase ASCII letters.
-fn is_residency(text: &str) -> bool {
+/// Whether `text` is an ISO 3166-1 alpha-2 shaped code: two uppercase ASCII
+/// letters. The selection filter reuses the route field's own shape, so a
+/// knob no route could declare is refused before any ranking (larry#202).
+pub(crate) fn is_residency(text: &str) -> bool {
     text.len() == 2 && text.bytes().all(|byte| byte.is_ascii_uppercase())
 }
 
 /// Whether `text` is a description: at most 1 KiB, no control byte but a newline.
 fn is_describe(text: &str) -> bool {
     text.len() <= MAX_DESCRIBE_BYTES
+        && text
+            .chars()
+            .all(|character| character == '\n' || !character.is_control())
+}
+
+/// Whether `text` is a prompt template: at most 8 KiB, no control byte but a newline.
+fn is_prompt(text: &str) -> bool {
+    text.len() <= MAX_PROMPT_BYTES
         && text
             .chars()
             .all(|character| character == '\n' || !character.is_control())
@@ -485,6 +541,11 @@ impl Route {
         if !is_describe(draft.describe) {
             return Err(RouteError::BadDescribe);
         }
+        if let Some(prompt) = draft.prompt
+            && !is_prompt(prompt)
+        {
+            return Err(RouteError::BadPrompt);
+        }
         Ok(Route {
             id: draft.id.to_owned(),
             kind: draft.kind,
@@ -495,6 +556,7 @@ impl Route {
             temperature: draft.temperature,
             request_bytes,
             residency: draft.residency.map(str::to_owned),
+            prompt: draft.prompt.map(str::to_owned),
             describe: draft.describe.to_owned(),
             price_version: DEFAULT_PRICE_VERSION,
             price_input: 0,
@@ -572,7 +634,6 @@ pub(crate) fn resolve(
         Some(refusal) => Err(refusal),
     }
 }
-
 /// Unit tests of the field checks at their boundaries and of the resolver order.
 /// They live in `route_tests.rs`: verification beside the mechanism, one file
 /// per job, as the seeded simulations live in `sim_route.rs`.

@@ -14,10 +14,11 @@ use lgwks_macros::Error;
 use lgwks_std::json::{Map, Value, json};
 
 use crate::model::{
-    Completion, Kind, Message, ModelClient, ModelError, Role, Route, structured_content,
+    Completion, Kind, Message, ModelClient, ModelError, Role, Route, Selection, structured_content,
 };
 
-use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex, identity};
+use super::routes::task_select;
+use super::{ExecError, Ledger, Settings, Task, TaskError, backoff, digest_hex};
 
 /// Longest goal, in bytes.
 const MAX_GOAL_BYTES: usize = 8192;
@@ -46,6 +47,16 @@ pub(crate) struct Brief {
 }
 
 impl Brief {
+    /// The goal, as the planner wrote it.
+    pub(crate) fn goal(&self) -> &str {
+        &self.goal
+    }
+
+    /// The repo-relative paths the model may write, in order.
+    pub(crate) fn files(&self) -> &[String] {
+        &self.files
+    }
+
     /// Reads `goal` and `files` from a task document: both or neither.
     pub(crate) fn parse(object: &Map) -> Result<Option<Brief>, TaskError> {
         let (goal, files) = match (object.get("goal"), object.get("files")) {
@@ -148,10 +159,11 @@ struct Source<'brief> {
 ///
 /// Every file is read before any is written, so all the brief's prompts show the
 /// files as they were, and each prompt of the brief begins with the same bytes
-/// (larry#230): the kind's instruction, then the tenant's partition, then the
-/// shared context. A provider's prefix cache reads the context once and every
-/// later file's prompt hits it. `partition` names the tenant, so no two tenants
-/// share a prefix. The snapshot holds at most 64 files of 256 KiB; past
+/// (larry#230): the route's template when it names one, then the kind's
+/// instruction, then the tenant's partition, then the shared context. A provider's
+/// prefix cache reads the context once and every later file's prompt hits it.
+/// `partition` names the tenant, so no two tenants share a prefix. The snapshot
+/// holds at most 64 files of 256 KiB; past
 /// [`MAX_CONTEXT_BYTES`] of context, or when any request carrying it would pass
 /// the route's request bound, each prompt carries only its own file.
 pub(crate) fn author(
@@ -222,17 +234,20 @@ pub(crate) fn author(
     Ok(authored)
 }
 
-/// The system turn: the standing instruction for the kind, then the tenant's
-/// partition, so two tenants' prompts differ from the first byte after the
-/// instruction and a provider's prefix cache never serves one tenant's context
-/// to another.
+/// The system turn: the route's template when it names one, then the standing
+/// instruction for the kind, then the tenant's partition, so two tenants'
+/// prompts differ from the first byte after the instruction and a provider's
+/// prefix cache never serves one tenant's context to another.
 fn system_line(route: &Route, partition: &str) -> String {
     let instruction = if route.kind().structured() {
         SYSTEM_STRUCTURED
     } else {
         SYSTEM
     };
-    format!("{instruction}\nCache partition: {partition}")
+    match route.prompt() {
+        Some(template) => format!("{template}\n{instruction}\nCache partition: {partition}"),
+        None => format!("{instruction}\nCache partition: {partition}"),
+    }
 }
 
 /// The context every prompt of one brief begins with: the brief's files as they
@@ -401,10 +416,13 @@ pub(super) fn unfenced(reply: &str) -> &str {
 }
 
 /// What a task with a brief needs before anything is cloned: the route its model
-/// calls go to and a client built from it.
+/// calls go to, how it was chosen for the sealed record, and a client built
+/// from it.
 pub(super) struct ModelStep<'task> {
     /// The route the task resolved to; the sealed report records it.
     pub(super) route: Route,
+    /// How the route was chosen; the sealed report records it beside the route.
+    pub(super) selection: Selection,
     /// The brief the model writes files for.
     pub(super) brief: &'task Brief,
     /// The client over `route`, holding the key read for this task alone.
@@ -426,13 +444,14 @@ pub(super) fn model_step<'task>(
         }
         return Ok(None);
     };
-    let route = settings.route(ledger, task.route())?;
+    let selection = task_select(settings, ledger, task)?;
+    let route = selection.route().clone();
     // The one timeline the retry budget reads, built the way the gate builds its own (larry#436).
     let clock = larry_runtime::live_clock().map_err(ExecError::Gate)?;
     // The client shares the executor's tenant-route limiter, so the budgets
-    // bind every brief task (larry#204): the tenant is the state directory's,
-    // the route the one this task resolved to.
-    let tenant = digest_hex(identity::tenant_of(&settings.state_dir).as_bytes());
+    // bind every brief task (larry#204): the tenant is the task's selected
+    // tenant, the route the one this task resolved to.
+    let tenant = digest_hex(settings.tenant_text().as_bytes());
     let client = ModelClient::with_limiter(
         settings.model_config(&route)?,
         clock,
@@ -443,6 +462,7 @@ pub(super) fn model_step<'task>(
     );
     Ok(Some(ModelStep {
         route,
+        selection,
         brief,
         client,
     }))

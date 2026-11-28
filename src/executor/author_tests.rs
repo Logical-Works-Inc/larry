@@ -5,7 +5,7 @@
 use std::error::Error;
 use std::fs;
 
-use super::super::{Ledger, Settings, digest_hex, identity};
+use super::super::{Ledger, Settings, digest_hex};
 use super::model_step;
 use super::sim::scratch;
 use super::{AuthorFault, checked_target, file_text};
@@ -102,7 +102,7 @@ fn a_brief_task_is_refused_once_its_tenant_spends_its_budget() -> TestResult {
         ),
         "the dead gateway answers Transport while the budget is whole"
     );
-    let tenant = digest_hex(identity::tenant_of(&state_dir).as_bytes());
+    let tenant = digest_hex(settings.tenant_text().as_bytes());
     settings.limiter.record(&tenant, "env", 0, 0, 1, 0)?;
     assert!(
         matches!(

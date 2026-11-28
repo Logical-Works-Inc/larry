@@ -22,6 +22,8 @@ use lgwks_std::json::{self, Value};
 mod temp_dir;
 pub(crate) use temp_dir::TempDir;
 
+use crate::coverage::forward;
+
 /// How long one exchange may take before the host is called broken: a bound on
 /// a hung host, never the pace of a working one. A serving line and every later
 /// line share it.
@@ -38,15 +40,24 @@ pub(crate) fn fresh_state_dir() -> std::io::Result<TempDir> {
     TempDir::new()
 }
 
-/// `larry serve key <tenant>` against `state`: the key it printed once.
-pub(crate) fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Error>> {
-    let output = Command::new(env!("CARGO_BIN_EXE_larry"))
-        .args(["serve", "key", tenant])
+/// `larry serve <verb> <tenant>` against `state`, cleared except PATH and the
+/// coverage profile: the one builder `issue_key` and `revoke` share, so the two
+/// verbs never drift apart.
+fn serve_command(verb: &str, tenant: &str, state: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+    command
+        .args(["serve", verb, tenant])
         .env_clear()
         .env("LARRY_STATE_DIR", state)
         .current_dir(std::env::temp_dir())
-        .stdin(Stdio::null())
-        .output()?;
+        .stdin(Stdio::null());
+    forward(&mut command);
+    command
+}
+
+/// `larry serve key <tenant>` against `state`: the key it printed once.
+pub(crate) fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Error>> {
+    let output = serve_command("key", tenant, state).output()?;
     if !output.status.success() {
         return Err(format!(
             "serve key {tenant:?}: {}, {}",
@@ -67,13 +78,7 @@ pub(crate) fn issue_key(state: &Path, tenant: &str) -> Result<String, Box<dyn Er
 /// `larry serve revoke <tenant>` against `state`: the child's whole output, so
 /// a test reads its status and its refusal text.
 pub(crate) fn revoke(state: &Path, tenant: &str) -> Result<Output, Box<dyn Error>> {
-    Ok(Command::new(env!("CARGO_BIN_EXE_larry"))
-        .args(["serve", "revoke", tenant])
-        .env_clear()
-        .env("LARRY_STATE_DIR", state)
-        .current_dir(std::env::temp_dir())
-        .stdin(Stdio::null())
-        .output()?)
+    Ok(serve_command("revoke", tenant, state).output()?)
 }
 
 /// Inserts `count` tenant key rows straight into the store `issue_key` created in
@@ -209,7 +214,8 @@ impl Serving {
     /// directory, and read its serving line within [`EXCHANGE_TIMEOUT`]: a host
     /// that never prints fails typed instead of hanging the test (larry#269).
     pub(crate) fn start(env: &[(&str, &str)]) -> Result<Self, Box<dyn Error>> {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_larry"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_larry"));
+        command
             .arg("serve")
             .env_clear()
             .env("PATH", std::env::var("PATH")?)
@@ -217,8 +223,9 @@ impl Serving {
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        forward(&mut command);
+        let mut child = command.spawn()?;
         let stdout = child
             .stdout
             .take()

@@ -12,6 +12,8 @@
 //! names the argv-array form with an example; `route add` errors carry one
 //! `route` word. The MCP door's own form is proved in `tests/mcp_stdio_journey.rs`.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/larry_cli.rs"]
 mod larry_cli;
 #[path = "support/temp_dir.rs"]
@@ -203,7 +205,7 @@ fn route_usage_ends_with_one_newline() -> TestResult {
 
     /// The synopsis every route usage refusal ends with, as
     /// `executor::routes` prints it.
-    const SYNOPSIS: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
+    const SYNOPSIS: &str = "usage: larry route add <id> --url <url> --model <model> --key-env <LARRY_KEY_NAME> --residency <CC> [--kind <openai-chat|anthropic-messages|openai-responses>] [--temperature <t>] [--request-bytes <n>] [--prompt <template>] [--describe <text>] [--default] | price <id> --in <dollars> --out <dollars> | list [--json] | remove <id> | default <id> | resolve [<id>]";
     /// The refusal for arguments no row of the help table describes.
     const UNKNOWN: &str = "larry: unknown arguments; run `larry help` for every subcommand and its LARRY_* variables\n";
     /// The shared `governance`/`tracker` usage refusal for `--bogus`.

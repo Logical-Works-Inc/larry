@@ -12,6 +12,8 @@
 //! directory (tenant) is untrusted; the key survives a kill -9 of the executor;
 //! and an offline verifier needs only the printed public key.
 
+#[path = "support/coverage.rs"]
+mod coverage;
 #[path = "support/exec_cli.rs"]
 mod exec_cli;
 
@@ -27,7 +29,7 @@ use std::time::Instant;
 use exec_cli::{
     TempDir, TestResult, assert_refused, denial_lines, fixture, flag_of, live_group_pid, make_fifo,
     millis, number_of, percentile, report_of, result_at, run_exec, spawn_exec, spawn_larry_args,
-    task_json, text_of,
+    stderr_of, task_json, text_of,
 };
 use lgwks_std::json::{self, Value};
 
@@ -334,7 +336,7 @@ fn a_receipt_from_another_state_dir_is_untrusted() -> TestResult {
     let second_state = TempDir::new()?;
     let second_state_text = second_state.path().to_string_lossy().into_owned();
     larry_demo::executor::provision_tenant(
-        move |_| Some(second_state_text.clone()),
+        |name| (name == "LARRY_STATE_DIR").then(|| second_state_text.clone()),
         "file.read,file.write,process.spawn,model.invoke,model.command",
         &[origin.path()],
     )?;
@@ -439,7 +441,26 @@ fn an_offline_verifier_trusts_only_the_printed_key() -> TestResult {
         Some(0),
         "the printed key alone verifies the receipt"
     );
-    let other = key_of(stranger.path())?;
+    let other = {
+        // The stranger mints its key by rotation: `larry key` never mints.
+        let rotated = spawn_larry_args(
+            &["key", "rotate"],
+            &[("LARRY_STATE_DIR", stranger.path().as_os_str())],
+            b"",
+        )?
+        .wait_with_output()?;
+        assert!(
+            rotated.status.success(),
+            "rotate mints: {}",
+            stderr_of(&rotated)
+        );
+        let printed: Value = json::from_slice(&rotated.stdout)?;
+        printed
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or("rotate prints the new key")?
+            .to_owned()
+    };
     assert_refused(
         &run_verify(&[("LARRY_RECEIPT_KEY", OsStr::new(&other))], &output.stdout)?,
         "untrusted",

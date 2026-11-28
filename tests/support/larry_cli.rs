@@ -13,6 +13,8 @@ use std::process::{Child, Command, Output, Stdio};
 mod stdin_feed;
 use stdin_feed::feed_stdin;
 
+use crate::coverage::forward;
+
 /// Starts `larry` with `args`, only PATH and `env` set, writes `input` to its
 /// stdin and closes it. The one-shot children of the executor and CLI journeys
 /// are built here; `larry_child` builds the long-running protocol children
@@ -27,7 +29,9 @@ pub(crate) fn spawn_larry_args(
         .args(args)
         .env_clear()
         .env("PATH", std::env::var("PATH")?)
-        .envs(env.iter().copied())
+        .envs(env.iter().copied());
+    forward(&mut command);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
